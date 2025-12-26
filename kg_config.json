@@ -1,0 +1,17 @@
+{
+  "base_packs": [
+    "Universal_Base_Pack.json",
+    "Civil_Basic_Pack.json",
+    "Transport_Infra_Pack.json",
+    "Energy_Industrial_Pack.json",
+    "Risk_Specialist_Pack.json",
+    "Special_Medical_Pack.json"
+  ],
+  "domain_map": "SuperKG-DOMAIN-MAP.json",
+  "region_upgrade_rules": {
+    "anhui_hefei_general": "ZhiFei-KG-Upgrade-Rules-7.1-Anhui-Hefei.json",
+    "anhui_hefei_qingtian_fullscore": "ZhiFei-KG-Upgrade-Rules-7.1-Anhui-QingTian-AI-FULLSCORE-PLUS.json"
+  },
+  "project_profile_rules": "ZhiFei-Auto-Project-Profile-Rules-V1.1.json",
+  "precheck_guard_rules": "ZhiFei-KG-PreCheck-Guard-FULLSCORE-PLUS-PROFILE.json"
+}

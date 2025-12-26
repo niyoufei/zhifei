@@ -1,0 +1,25 @@
+# build artifacts
+build/
+*.docx
+
+# python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# env
+.venv/
+venv/
+.env
+
+# local knowledge assets (do not commit)
+SuperKG-DOMAIN-MAP.json
+*_Pack.json
+ZhiFei-*.json
+
+# local backups created by patch scripts
+*.bak.*
+*.bak_*
