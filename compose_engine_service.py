@@ -276,7 +276,7 @@ def build_sections_from_kg(
     else:
         sections.append({
             "title": "SuperKG 工序样例（自动抽取）",
-            "content": "未能从 selected_packs 中解析到 work_items（pack schema 可能不含 work_items 字段）。该章节为占位。",
+            "content": "未能从 selected_packs 中解析到 work_items（pack schema 可能不含 work_items 字段）。未能从 selected_packs 中解析到 work_items（pack schema 可能不含 work_items 字段）。已通过“SuperKG 工序样例（检索证据）”章节提供检索证据与追溯信息。",
         })
 
     # Sections for each outline item (retrieve-based MVP)
