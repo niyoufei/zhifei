@@ -29,13 +29,5 @@
       "manifest": "kg_packs/kgpack-20251227_104512/manifest.json"
     }
   },
-  "active_pack": "kgpack-20251227_104512",
-  "_active_pack_prev": "default",
-  "active_pack_history": [
-    {
-      "from": "default",
-      "to": "kgpack-20251227_104512",
-      "at": "2025-12-27T10:46:03"
-    }
-  ]
+  "active_pack": "kgpack-20251227_104512"
 }

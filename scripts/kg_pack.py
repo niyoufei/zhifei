@@ -29,12 +29,38 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT_DIR / "kg_config.json"
 PACKS_DIR = ROOT_DIR / "kg_packs"
 
+STATE_PATH = ROOT_DIR / ".kg_pack_state.json"
+
 SKIP_KEYS = {
     "packs",
     "active_pack",
     "_active_pack_prev",
     "active_pack_history",
 }
+
+def _load_state() -> Dict[str, Any]:
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _write_state(st: Dict[str, Any]) -> None:
+    STATE_PATH.write_text(json.dumps(st, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+def _record_transition(prev_pack: str, to_pack: str) -> None:
+    st = _load_state()
+    st["active_pack_prev"] = prev_pack
+    hist = st.get("history")
+    if not isinstance(hist, list):
+        hist = []
+    hist.append({"from": prev_pack, "to": to_pack, "at": _now_iso()})
+    st["history"] = hist[-20:]
+    st["updated_at"] = _now_iso()
+    _write_state(st)
+
 
 def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -67,7 +93,7 @@ def _write_cfg(cfg: Dict[str, Any], *, backup: bool = True) -> Optional[Path]:
     if backup:
         bak_path = ROOT_DIR / f"kg_config.json.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         bak_path.write_text(raw, encoding="utf-8")
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return bak_path
 
 def _pack_cfg(cfg: Dict[str, Any], pack_id: str) -> Dict[str, Any]:
@@ -367,12 +393,8 @@ def cmd_activate(args: argparse.Namespace) -> int:
         raise SystemExit("[ERROR] activate blocked: validation failed")
 
     prev = cfg.get("active_pack", "default")
-    cfg["_active_pack_prev"] = prev
-    hist = cfg.get("active_pack_history")
     if not isinstance(hist, list):
         hist = []
-    hist.append({"from": prev, "to": pack_id, "at": _now_iso()})
-    cfg["active_pack_history"] = hist[-20:]
     cfg["active_pack"] = pack_id
 
     bak = _write_cfg(cfg, backup=True)
@@ -390,6 +412,7 @@ def cmd_activate(args: argparse.Namespace) -> int:
             return 2
         print("[OK] smoke passed")
 
+    _record_transition(prev, pack_id)
     return 0
 
 
@@ -545,7 +568,14 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     cfg = _load_cfg()
     to_pack = args.to_pack
     if not to_pack:
-        prev = cfg.get("_active_pack_prev")
+        prev = None
+        try:
+            st = _load_state()
+            prev = st.get("active_pack_prev")
+        except Exception:
+            prev = None
+        if not prev:
+            prev = cfg.get("_active_pack_prev")
         if not prev:
             raise SystemExit("[ERROR] no _active_pack_prev in kg_config.json; specify --to <pack_id>")
         to_pack = prev

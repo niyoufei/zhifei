@@ -23,3 +23,6 @@ ZhiFei-*.json
 # local backups created by patch scripts
 *.bak.*
 *.bak_*
+
+# local runtime state (do not commit)
+.kg_pack_state.json
