@@ -83,3 +83,16 @@
 - 命令：
   `DRY_RUN=1 ./scripts/kg_release.sh "desc"`
 
+### 9) 质量 Soft Gate（可配置阈值，仅告警不失败）
+
+当前实现：在 smoke 末尾读取 `build/audit_report.json` 的 `quality_metrics_soft`，若不达标则打印 `[WARN]`，不终止 smoke。
+
+环境变量（用于不同项目/阶段调整阈值）：
+- `QUALITY_GATE_ENABLED`：默认 `1`；设为 `0/false/no` 可禁用该告警
+- `QUALITY_RETRIEVE_MIN`：默认 `1`
+- `QUALITY_SECTIONS_MIN`：默认 `3`
+- `QUALITY_NONEMPTY_RATIO_MIN`：默认 `0.90`
+
+示例（演练告警但不失败）：
+- `QUALITY_RETRIEVE_MIN=999 ./scripts/run_smoke.sh`
+
