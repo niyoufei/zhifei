@@ -212,65 +212,96 @@ def debug_project_profile_rules():
 @app.get("/debug/kg_pack")
 def debug_kg_pack():
     """
-    Return active KG pack metadata for traceability.
-    Prefer build/kg_context.json if present; otherwise derive from kg_config.json + manifest.
+    Return KG pack metadata from two perspectives:
+    - current_config_pack: derived from kg_config.json + manifest hash (authoritative runtime intent)
+    - last_build_pack: read from build/kg_context.json (what the last build actually used)
+    - stale: True if they disagree (or if last_build exists but current_config cannot be derived)
     """
     import json
     import hashlib
     from pathlib import Path
 
     root_dir = Path(__file__).resolve().parent.parent  # backend/
-    # 1) prefer build/kg_context.json
-    kc = root_dir / "build" / "kg_context.json"
-    if kc.exists():
-        try:
-            data = json.loads(kc.read_text(encoding="utf-8"))
-            kp = data.get("kg_pack")
-            if kp is not None:
-                return {"source": "build/kg_context.json", "kg_pack": kp}
-        except Exception as e:
-            return {"source": "build/kg_context.json", "error": str(e)}
 
-    # 2) fallback: derive from kg_config.json + manifest
-    cfg_path = root_dir / "kg_config.json"
-    if not cfg_path.exists():
-        return {"error": "kg_config.json not found", "root_dir": str(root_dir)}
-
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    active = cfg.get("active_pack") if isinstance(cfg, dict) else None
-    packs = cfg.get("packs") if isinstance(cfg, dict) else None
-    pcfg = packs.get(active, {}) if isinstance(packs, dict) and active else {}
-
-    base_dir = pcfg.get("base_dir") or pcfg.get("base_path") or pcfg.get("root") or "."
-    pack_version = pcfg.get("pack_version") or pcfg.get("version") or active
-    manifest_rel = pcfg.get("manifest") or f"{base_dir}/manifest.json"
-    manifest_path = (root_dir / manifest_rel).resolve()
-
-    manifest_exists = bool(manifest_path.exists())
-    manifest_sha256 = None
-    if manifest_exists:
+    def _sha256_file(fp: Path) -> str:
         h = hashlib.sha256()
-        with manifest_path.open("rb") as f:
+        with fp.open("rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 h.update(chunk)
-        manifest_sha256 = h.hexdigest()
+        return h.hexdigest()
 
-    kg_pack = {
-        "active_pack": active,
-        "pack_version": pack_version,
-        "base_dir": base_dir,
-        "base_dir_abs": str((root_dir / base_dir).resolve()) if base_dir else str(root_dir.resolve()),
-        "manifest": str(manifest_rel),
-        "manifest_exists": manifest_exists,
-        "manifest_sha256": manifest_sha256,
-        "schema_version": pcfg.get("schema_version") if isinstance(pcfg, dict) else None,
-        "created_at": pcfg.get("created_at") if isinstance(pcfg, dict) else None,
+    errors = {}
+    sources = {}
+
+    # 1) current_config_pack (kg_config.json + manifest)
+    current_config_pack = None
+    cfg_path = root_dir / "kg_config.json"
+    if not cfg_path.exists():
+        errors["kg_config.json"] = "not found"
+    else:
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            active = cfg.get("active_pack") if isinstance(cfg, dict) else None
+            packs = cfg.get("packs") if isinstance(cfg, dict) else None
+            pcfg = packs.get(active, {}) if isinstance(packs, dict) and active else {}
+
+            base_dir = pcfg.get("base_dir") or pcfg.get("base_path") or pcfg.get("root") or "."
+            pack_version = pcfg.get("pack_version") or pcfg.get("version") or active
+            manifest_rel = pcfg.get("manifest") or f"{base_dir}/manifest.json"
+            manifest_path = (root_dir / manifest_rel).resolve()
+
+            manifest_exists = bool(manifest_path.exists())
+            manifest_sha256 = _sha256_file(manifest_path) if manifest_exists else None
+
+            current_config_pack = {
+                "active_pack": active,
+                "pack_version": pack_version,
+                "base_dir": base_dir,
+                "base_dir_abs": str((root_dir / base_dir).resolve()) if base_dir else str(root_dir.resolve()),
+                "manifest": str(manifest_rel),
+                "manifest_exists": manifest_exists,
+                "manifest_sha256": manifest_sha256,
+                "schema_version": pcfg.get("schema_version") if isinstance(pcfg, dict) else None,
+                "created_at": pcfg.get("created_at") if isinstance(pcfg, dict) else None,
+            }
+            sources["current_config_pack"] = "kg_config.json+manifest"
+        except Exception as e:
+            errors["current_config_pack"] = str(e)
+
+    # 2) last_build_pack (build/kg_context.json)
+    last_build_pack = None
+    kc_path = root_dir / "build" / "kg_context.json"
+    if kc_path.exists():
+        try:
+            data = json.loads(kc_path.read_text(encoding="utf-8"))
+            last_build_pack = data.get("kg_pack")
+            sources["last_build_pack"] = "build/kg_context.json"
+        except Exception as e:
+            errors["last_build_pack"] = str(e)
+
+    # 3) stale determination
+    stale = False
+    if last_build_pack is None:
+        stale = False
+    elif current_config_pack is None:
+        stale = True
+    else:
+        try:
+            stale = (
+                current_config_pack.get("active_pack") != last_build_pack.get("active_pack")
+                or current_config_pack.get("manifest_sha256") != last_build_pack.get("manifest_sha256")
+            )
+        except Exception:
+            stale = True
+
+    return {
+        "sources": sources,
+        "stale": stale,
+        "current_config_pack": current_config_pack,
+        "last_build_pack": last_build_pack,
+        "errors": errors,
     }
-    return {"source": "kg_config.json+manifest", "kg_pack": kg_pack}
 
-# ============================
-# Audit & Replay (traceability)
-# ============================
 
 @app.get("/audit")
 def audit():
