@@ -6,6 +6,7 @@ Audit & Replay (traceability)
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, Tuple
@@ -14,6 +15,12 @@ import hashlib
 
 import kg_loader
 
+
+
+# ---- Quality Gate Mode (warn|fail) ----
+QUALITY_GATE_MODE = os.getenv('QUALITY_GATE_MODE', 'warn').lower()
+mode = QUALITY_GATE_MODE
+# --------------------------------------
 
 BACKEND_DIR = Path(__file__).resolve().parent
 BUILD_DIR = BACKEND_DIR / "build"
