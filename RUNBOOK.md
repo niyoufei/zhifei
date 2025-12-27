@@ -76,3 +76,10 @@
   - 评测报告：`build/kg_pack_eval.json`
   - 当前激活包：`python3 scripts/kg_pack.py status` 或 `GET /debug/kg_pack`
 
+#### DRY_RUN（只评测不激活，自动清理）
+
+用于在本机做发布前演练：只执行 `pack → validate → eval`，不会激活新包；并在结束后自动恢复 `kg_config.json`、清理临时 pack 目录与本次新增的 `kg_config.json.bak.*`，避免污染工作区。
+
+- 命令：
+  `DRY_RUN=1 ./scripts/kg_release.sh "desc"`
+
