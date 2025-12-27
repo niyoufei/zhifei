@@ -184,32 +184,55 @@ def main():
         _must_have_kg_pack(_fp)
     print("[OK] kg_pack hard gate passed")
     
-    # SOFT GATE: quality_metrics_soft (warn only)
-    try:
-        import json as _json
-        from pathlib import Path as _Path
-        _p = _Path("build/audit_report.json")
-        if _p.exists():
-            _d = _json.loads(_p.read_text(encoding="utf-8"))
-            _checks = _d.get("checks", []) if isinstance(_d, dict) else []
-            _qm = None
-            for _c in _checks:
-                if isinstance(_c, dict) and _c.get("check") == "quality_metrics_soft":
-                    _qm = _c.get("value") if isinstance(_c.get("value"), dict) else None
+    # SOFT GATE: quality_metrics_soft (warn only; env-configurable)
+# Env:
+#   QUALITY_GATE_ENABLED=1|0
+#   QUALITY_RETRIEVE_MIN=1
+#   QUALITY_SECTIONS_MIN=3
+#   QUALITY_NONEMPTY_RATIO_MIN=0.90
+try:
+    import os, json
+    from pathlib import Path
+
+    enabled = os.getenv("QUALITY_GATE_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+    if not enabled:
+        print("[OK] quality soft gate disabled by env")
+    else:
+        thr_retrieve = int(os.getenv("QUALITY_RETRIEVE_MIN", "1"))
+        thr_sections = int(os.getenv("QUALITY_SECTIONS_MIN", "3"))
+        thr_ratio = float(os.getenv("QUALITY_NONEMPTY_RATIO_MIN", "0.90"))
+
+        p = Path("build/audit_report.json")
+        if not p.exists():
+            print("[WARN] build/audit_report.json not found; skip quality soft gate")
+        else:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            checks = d.get("checks", []) if isinstance(d, dict) else []
+            qm = None
+            for c in checks:
+                if isinstance(c, dict) and c.get("check") == "quality_metrics_soft":
+                    qm = c.get("value") if isinstance(c.get("value"), dict) else None
                     break
-            if _qm and isinstance(_qm.get("ok"), dict):
-                _ok = _qm["ok"]
-                _bad = [k for k,v in _ok.items() if v is False]
-                if _bad:
-                    print("[WARN] quality soft gate not met:", _bad, "details:", _qm)
+            if not qm:
+                print("[WARN] quality_metrics_soft missing or malformed in build/audit_report.json")
+            else:
+                rr = qm.get("retrieve_results_count", 0)
+                sc = qm.get("compose_sections_count", 0)
+                ratio = qm.get("compose_nonempty_ratio", None)
+                bad = []
+                if rr < thr_retrieve:
+                    bad.append("retrieve_results_ok")
+                if sc < thr_sections:
+                    bad.append("compose_sections_ok")
+                if (ratio is not None) and (ratio < thr_ratio):
+                    bad.append("compose_nonempty_ok")
+                if bad:
+                    print("[WARN] quality soft gate not met:", bad, "env_thr=", {"retrieve": thr_retrieve, "sections": thr_sections, "ratio": thr_ratio}, "qm=", qm)
                 else:
                     print("[OK] quality soft gate passed")
-            else:
-                print("[WARN] quality_metrics_soft missing or malformed in build/audit_report.json")
-        else:
-            print("[WARN] build/audit_report.json not found; skip quality soft gate")
-    except Exception as _e:
-        print("[WARN] quality soft gate error:", repr(_e))
+except Exception as _e:
+    print("[WARN] quality soft gate error:", repr(_e))
+
 
     print("\n[SUCCESS] smoke_e2e_v2 passed: openapi(/retrieve) + /compose + artifacts + /audit + /export")
 
