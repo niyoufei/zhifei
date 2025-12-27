@@ -279,15 +279,38 @@ def build_sections_from_kg(
             "content": "未能从 selected_packs 中解析到 work_items（pack schema 可能不含 work_items 字段）。该章节为占位。",
         })
 
-    # Placeholder sections for each outline item
+    # Sections for each outline item (retrieve-based MVP)
+    try:
+        from retrieve_service import retrieve as _kg_retrieve_local
+    except Exception:
+        _kg_retrieve_local = None
+
     for i, t in enumerate(outline, 1):
         title = str(t).strip() or f"章节{i}"
-        content = (
-            "本章节为占位输出，用于验证 Compose Engine 已接入 KG Context / 项目画像 / 区域升级 / PreCheck Guard 的闭环链路。\n"
-            f"- domain_key：{domain_key}\n"
-            f"- matched_cn_name：{matched_cn_name}\n"
-            "下一步：接入 /retrieve + LLM 组稿，把检索证据与可追溯索引写入章节内容。"
-        )
-        sections.append({"title": title, "content": content})
+        q = " ".join([str(topic or ""), str(domain_key or ""), title, "质量控制", "安全风险", "控制措施", "验收标准", "资源配置"]).strip()
+        retr = None
+        if _kg_retrieve_local is not None:
+            try:
+                retr = _kg_retrieve_local(q, top_k=4)
+            except Exception:
+                retr = None
+        _lines = []
+        _lines.append(f"检索查询：{q}")
+        if isinstance(retr, dict) and isinstance(retr.get('results'), list) and retr['results']:
+            _lines.append(f"命中条目数：{len(retr['results'])}（展示前 4 条）")
+            _lines.append("")
+            for idx, r in enumerate(retr['results'][:4], 1):
+                _lines.append(f"{idx}) {r.get('title')}（{r.get('source')}）score={r.get('score')} sha256={r.get('sha256')}")
+                _lines.append(f"   path：{r.get('path')}")
+                txt = (r.get('text') or '').strip()
+                if len(txt) > 900:
+                    txt = txt[:900] + '…'
+                _lines.append('   摘要：')
+                _lines.append(txt)
+                _lines.append('')
+            _lines.append('备注：以上为检索证据摘要（MVP）。后续可接入 LLM 进行更自然的技术标语言组稿，并继续引用证据锚点。')
+        else:
+            _lines.append('未检索到证据：请补充更具体的 topic/outline 关键词，或完善 BasePack 内容。')
+        sections.append({'title': title, 'content': '\n'.join(_lines).strip()})
 
     return sections

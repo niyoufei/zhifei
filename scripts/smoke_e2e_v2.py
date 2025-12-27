@@ -100,6 +100,10 @@ def main():
     }
     st, body, hdr = http_post_json("/compose", payload, timeout=120)
     txt = body.decode("utf-8", errors="replace")
+    # hard-fail if placeholder text still exists
+    if ("本章节为占位输出" in txt) or ("下一步：接入 /retrieve + LLM" in txt):
+        fail("compose still contains placeholder text")
+
     if st != 200:
         fail(f"/compose http status={st}, body_head={txt[:400]!r}")
 
