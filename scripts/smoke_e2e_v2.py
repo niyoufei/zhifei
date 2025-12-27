@@ -163,6 +163,27 @@ def main():
     out.write_bytes(body3)
     ok(f"/export saved: {out} size={out.stat().st_size} bytes")
 
+    # HARD GATE: require kg_pack in artifacts
+    import json as _json
+    from pathlib import Path as _Path
+    def _must_have_kg_pack(_fp: str) -> None:
+        _p = _Path(_fp)
+        if not _p.exists():
+            raise SystemExit(f"[FAIL] missing artifact: {_fp}")
+        _d = _json.loads(_p.read_text(encoding="utf-8"))
+        _kp = _d.get("kg_pack")
+        if not isinstance(_kp, dict):
+            raise SystemExit(f"[FAIL] {_fp} missing 'kg_pack' (dict required)")
+        if not _kp.get("active_pack"):
+            raise SystemExit(f"[FAIL] {_fp} kg_pack.active_pack missing")
+        if _kp.get("manifest_exists") is not True:
+            raise SystemExit(f"[FAIL] {_fp} kg_pack.manifest_exists must be true")
+        if not _kp.get("manifest_sha256"):
+            raise SystemExit(f"[FAIL] {_fp} kg_pack.manifest_sha256 missing")
+    for _fp in ("build/kg_context.json","build/retrieve.json","build/compose.json"):
+        _must_have_kg_pack(_fp)
+    print("[OK] kg_pack hard gate passed")
+    
     print("\n[SUCCESS] smoke_e2e_v2 passed: openapi(/retrieve) + /compose + artifacts + /audit + /export")
 
 if __name__ == "__main__":
