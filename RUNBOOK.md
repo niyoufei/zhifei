@@ -61,3 +61,18 @@
   `build/kg_pack_eval.json`
   包含 baseline/candidate 的关键指标与 diff（如检索结果数、selected_packs、compose 章节数、kg_pack.manifest_sha256 等）。
 
+### 8) 一键发布 KG（kg_release.sh）
+
+目标：把 KG 升级发布流程收敛为一条命令：打包 → 校验 → 评测 → 激活（带 smoke），失败即停止，输出评测报告。
+
+- 一键命令：
+  `./scripts/kg_release.sh "release description"`
+
+- 指定 pack_id（可选）：
+  `PACK_ID=kgpack-YYYYMMDD_HHMMSS ./scripts/kg_release.sh "desc"`
+
+- 产物：
+  - 新包目录：`kg_packs/<pack_id>/`
+  - 评测报告：`build/kg_pack_eval.json`
+  - 当前激活包：`python3 scripts/kg_pack.py status` 或 `GET /debug/kg_pack`
+
