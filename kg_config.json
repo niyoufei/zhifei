@@ -13,5 +13,29 @@
     "anhui_hefei_qingtian_fullscore": "ZhiFei-KG-Upgrade-Rules-7.1-Anhui-QingTian-AI-FULLSCORE-PLUS.json"
   },
   "project_profile_rules": "ZhiFei-Auto-Project-Profile-Rules-V1.1.json",
-  "precheck_guard_rules": "ZhiFei-KG-PreCheck-Guard-FULLSCORE-PLUS-PROFILE.json"
+  "precheck_guard_rules": "ZhiFei-KG-PreCheck-Guard-FULLSCORE-PLUS-PROFILE.json",
+  "packs": {
+    "default": {
+      "base_dir": ".",
+      "pack_version": "v0-root-layout",
+      "schema_version": 1,
+      "created_at": "2025-12-27T10:35:27"
+    },
+    "kgpack-20251227_104512": {
+      "base_dir": "kg_packs/kgpack-20251227_104512",
+      "pack_version": "kgpack-20251227_104512",
+      "schema_version": 1,
+      "created_at": "2025-12-27T10:45:12",
+      "manifest": "kg_packs/kgpack-20251227_104512/manifest.json"
+    }
+  },
+  "active_pack": "kgpack-20251227_104512",
+  "_active_pack_prev": "default",
+  "active_pack_history": [
+    {
+      "from": "default",
+      "to": "kgpack-20251227_104512",
+      "at": "2025-12-27T10:46:03"
+    }
+  ]
 }

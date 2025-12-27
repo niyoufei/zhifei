@@ -181,6 +181,16 @@ def _load_selected_pack_paths() -> Tuple[List[Path], Dict[str, Any]]:
             paths2 = [p for p in paths if p.exists()]
             if paths2:
                 info["source"] = "build/kg_context.json"
+                # inject kg_pack (from build/kg_context.json) for traceability
+                try:
+                    import json as _json
+                    _kgp = None
+                    _p = BUILD_DIR / "kg_context.json"
+                    if _p.exists():
+                        _kgp = _json.loads(_p.read_text(encoding="utf-8")).get("kg_pack")
+                    info["kg_pack"] = _kgp
+                except Exception as _e:
+                    info["kg_pack"] = {"error": str(_e)}
                 info["details"] = {"selected_packs.count": len(paths2)}
                 return paths2, info
 
@@ -253,6 +263,52 @@ def retrieve(query: str, top_k: int = 10) -> Dict[str, Any]:
         "errors": errors,
     }
     out = BUILD_DIR / "retrieve.json"
+    # inject kg_pack (top-level retrieve.json) for traceability
+    try:
+        import json as _json
+        import hashlib as _hashlib
+        from pathlib import Path as _Path
+        _root = _Path(__file__).resolve().parent
+        _kgp = None
+        # 1) prefer build/kg_context.json (already contains kg_pack)
+        _kc = _root / "build" / "kg_context.json"
+        if _kc.exists():
+            _kgp = _json.loads(_kc.read_text(encoding="utf-8")).get("kg_pack")
+        # 2) fallback: compute from kg_config.json + manifest
+        if not _kgp:
+            _cfgp = _root / "kg_config.json"
+            if _cfgp.exists():
+                _cfg = _json.loads(_cfgp.read_text(encoding="utf-8"))
+                _active = _cfg.get("active_pack") if isinstance(_cfg, dict) else None
+                _packs = _cfg.get("packs") if isinstance(_cfg, dict) else None
+                _pcfg = _packs.get(_active, {}) if isinstance(_packs, dict) and _active else {}
+                _base_dir = _pcfg.get("base_dir") or _pcfg.get("base_path") or _pcfg.get("root") or "."
+                _pack_version = _pcfg.get("pack_version") or _pcfg.get("version") or _active
+                _manifest_rel = _pcfg.get("manifest") or f"{_base_dir}/manifest.json"
+                _mp = (_root / _manifest_rel).resolve()
+                _m_exists = bool(_mp.exists())
+                _m_sha = None
+                if _m_exists:
+                    h = _hashlib.sha256()
+                    with _mp.open("rb") as f:
+                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                            h.update(chunk)
+                    _m_sha = h.hexdigest()
+                _kgp = {
+                    "active_pack": _active,
+                    "pack_version": _pack_version,
+                    "base_dir": _base_dir,
+                    "manifest": str(_manifest_rel),
+                    "manifest_exists": _m_exists,
+                    "manifest_sha256": _m_sha,
+                    "schema_version": _pcfg.get("schema_version") if isinstance(_pcfg, dict) else None,
+                    "created_at": _pcfg.get("created_at") if isinstance(_pcfg, dict) else None,
+                }
+        if isinstance(trace, dict) and "kg_pack" not in trace:
+            trace["kg_pack"] = _kgp
+    except Exception:
+        pass
+
     out.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return {

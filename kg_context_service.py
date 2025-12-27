@@ -353,8 +353,43 @@ def build_kg_context(payload: Dict[str, Any], project_profile: Optional[Dict[str
             }
         )
 
+    # --- KG Pack metadata (traceability) ---
+    try:
+        active_pack = cfg.get("active_pack") if isinstance(cfg, dict) else None
+        packs_cfg = cfg.get("packs") if isinstance(cfg, dict) else None
+        pcfg = packs_cfg.get(active_pack, {}) if isinstance(packs_cfg, dict) and active_pack else {}
+        pack_version = pcfg.get("pack_version") or pcfg.get("version") or active_pack
+        base_dir = pcfg.get("base_dir") or pcfg.get("base_path") or pcfg.get("root") or "."
+        manifest_rel = pcfg.get("manifest")
+        root_dir = Path(__file__).parent
+        manifest_path = (
+            (root_dir / manifest_rel).resolve()
+            if isinstance(manifest_rel, str) and manifest_rel.strip()
+            else (root_dir / base_dir / "manifest.json").resolve()
+        )
+        manifest_exists = bool(manifest_path.exists())
+        manifest_sha256 = _sha256_file(manifest_path) if manifest_exists else None
+        try:
+            manifest_rel_out = str(manifest_path.relative_to(root_dir))
+        except Exception:
+            manifest_rel_out = str(manifest_path)
+        kg_pack = {
+            "active_pack": active_pack,
+            "pack_version": pack_version,
+            "base_dir": base_dir,
+            "base_dir_abs": str((root_dir / base_dir).resolve()) if base_dir else str(root_dir.resolve()),
+            "manifest": (manifest_rel.strip() if isinstance(manifest_rel, str) and manifest_rel.strip() else manifest_rel_out),
+            "manifest_exists": manifest_exists,
+            "manifest_sha256": manifest_sha256,
+            "schema_version": pcfg.get("schema_version"),
+            "created_at": pcfg.get("created_at"),
+        }
+    except Exception as e:
+        kg_pack = {"error": str(e)}
+
     report: Dict[str, Any] = {
         "generated_at": _now_iso(),
+        "kg_pack": kg_pack,
         "input_sha256": input_sha256,
         "topic": topic,
         "project_type_cn": project_type_cn,

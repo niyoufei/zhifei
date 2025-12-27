@@ -32,9 +32,18 @@ class ProjectProfileEngine:
         不依赖任何外部输入，纯查看。
         """
         meta = self.rules.get("meta", {})
-        strategy = self.rules.get("strategy", {})
+        strategy_obj = self.rules.get("strategy")
+        if isinstance(strategy_obj, dict) and strategy_obj:
+            strategy_keys = sorted(list(strategy_obj.keys()))
+            strategy_source = "rules.strategy"
+        else:
+            # fallback for rule files without "strategy" section
+            strategy_keys = sorted([k for k in self.rules.keys() if k != "meta"])
+            strategy_source = "top_level_keys_fallback"
         return {
             "rule_path": str(self.rule_path),
             "meta": meta,
-            "strategy_keys": list(strategy.keys())
+            "strategy_keys": strategy_keys,
+            "strategy_source": strategy_source,
+            "rule_top_keys": sorted(list(self.rules.keys())),
         }

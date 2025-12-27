@@ -156,6 +156,7 @@ def compose(req: ComposeRequest):
         "outline": req.outline,
         "sections": result["sections"],
         "style": DocStyle().dict(),
+        "kg_pack": (locals().get("kg_context") or {}).get("kg_pack"),
         "saved_at": compose_json_path
     }, open(compose_json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
@@ -171,6 +172,7 @@ def compose(req: ComposeRequest):
         "outline": req.outline,
         "sections": result["sections"],
         "style": DocStyle().dict(),
+        "kg_pack": (locals().get("kg_context") or {}).get("kg_pack"),
         "saved_at": compose_json_path
     }
 
@@ -206,6 +208,66 @@ def debug_project_profile_rules():
     from project_profile_engine import ProjectProfileEngine
     engine = ProjectProfileEngine()
     return engine.debug_summary()
+
+@app.get("/debug/kg_pack")
+def debug_kg_pack():
+    """
+    Return active KG pack metadata for traceability.
+    Prefer build/kg_context.json if present; otherwise derive from kg_config.json + manifest.
+    """
+    import json
+    import hashlib
+    from pathlib import Path
+
+    root_dir = Path(__file__).resolve().parent.parent  # backend/
+    # 1) prefer build/kg_context.json
+    kc = root_dir / "build" / "kg_context.json"
+    if kc.exists():
+        try:
+            data = json.loads(kc.read_text(encoding="utf-8"))
+            kp = data.get("kg_pack")
+            if kp is not None:
+                return {"source": "build/kg_context.json", "kg_pack": kp}
+        except Exception as e:
+            return {"source": "build/kg_context.json", "error": str(e)}
+
+    # 2) fallback: derive from kg_config.json + manifest
+    cfg_path = root_dir / "kg_config.json"
+    if not cfg_path.exists():
+        return {"error": "kg_config.json not found", "root_dir": str(root_dir)}
+
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    active = cfg.get("active_pack") if isinstance(cfg, dict) else None
+    packs = cfg.get("packs") if isinstance(cfg, dict) else None
+    pcfg = packs.get(active, {}) if isinstance(packs, dict) and active else {}
+
+    base_dir = pcfg.get("base_dir") or pcfg.get("base_path") or pcfg.get("root") or "."
+    pack_version = pcfg.get("pack_version") or pcfg.get("version") or active
+    manifest_rel = pcfg.get("manifest") or f"{base_dir}/manifest.json"
+    manifest_path = (root_dir / manifest_rel).resolve()
+
+    manifest_exists = bool(manifest_path.exists())
+    manifest_sha256 = None
+    if manifest_exists:
+        h = hashlib.sha256()
+        with manifest_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        manifest_sha256 = h.hexdigest()
+
+    kg_pack = {
+        "active_pack": active,
+        "pack_version": pack_version,
+        "base_dir": base_dir,
+        "base_dir_abs": str((root_dir / base_dir).resolve()) if base_dir else str(root_dir.resolve()),
+        "manifest": str(manifest_rel),
+        "manifest_exists": manifest_exists,
+        "manifest_sha256": manifest_sha256,
+        "schema_version": pcfg.get("schema_version") if isinstance(pcfg, dict) else None,
+        "created_at": pcfg.get("created_at") if isinstance(pcfg, dict) else None,
+    }
+    return {"source": "kg_config.json+manifest", "kg_pack": kg_pack}
+
 # ============================
 # Audit & Replay (traceability)
 # ============================
