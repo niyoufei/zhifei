@@ -393,8 +393,6 @@ def cmd_activate(args: argparse.Namespace) -> int:
         raise SystemExit("[ERROR] activate blocked: validation failed")
 
     prev = cfg.get("active_pack", "default")
-    if not isinstance(hist, list):
-        hist = []
     cfg["active_pack"] = pack_id
 
     bak = _write_cfg(cfg, backup=True)
