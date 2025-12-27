@@ -392,6 +392,155 @@ def cmd_activate(args: argparse.Namespace) -> int:
 
     return 0
 
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    """
+    Evaluate a pack upgrade with a reproducible report:
+      1) Run smoke on current active_pack (baseline) and collect metrics from build/*
+      2) Activate candidate pack with --smoke (auto-rollback on failure)
+      3) Collect metrics again and print diff; write build/kg_pack_eval.json
+      4) Default: rollback to baseline (use --keep to keep candidate active)
+    """
+    cfg = _load_cfg()
+    baseline_pack = cfg.get("active_pack") or "default"
+    candidate_pack = args.pack_id
+
+    def _run_smoke(label: str) -> None:
+        print(f"[EVAL] running smoke ({label}) ...")
+        r = subprocess.run(["./scripts/run_smoke.sh"], cwd=str(ROOT_DIR))
+        if r.returncode != 0:
+            raise SystemExit(f"[ERROR] smoke failed on {label}")
+
+    def _read_json(fp: Path):
+        if not fp.exists():
+            return None
+        try:
+            return json.loads(fp.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _extract_metrics() -> Dict[str, Any]:
+        build_dir = ROOT_DIR / "build"
+        m: Dict[str, Any] = {"files": {}}
+
+        kc = _read_json(build_dir / "kg_context.json") or {}
+        kp = kc.get("kg_pack") if isinstance(kc, dict) else None
+        m["kg_pack"] = kp
+        m["kg_active_pack"] = (kp or {}).get("active_pack") if isinstance(kp, dict) else None
+        m["kg_manifest_sha256"] = (kp or {}).get("manifest_sha256") if isinstance(kp, dict) else None
+        m["domain_key"] = ((kc.get("domain_resolution") or {}) if isinstance(kc, dict) else {}).get("domain_key")
+        sp = kc.get("selected_packs") if isinstance(kc, dict) else None
+        if isinstance(sp, list):
+            m["selected_packs_count"] = len(sp)
+            m["selected_packs_names"] = [x.get("name") for x in sp if isinstance(x, dict) and x.get("name")]
+        else:
+            m["selected_packs_count"] = None
+            m["selected_packs_names"] = []
+
+        rj = _read_json(build_dir / "retrieve.json") or {}
+        res = rj.get("results") if isinstance(rj, dict) else None
+        if isinstance(res, list):
+            m["retrieve_results_count"] = len(res)
+            m["retrieve_sources"] = sorted({x.get("source") for x in res if isinstance(x, dict) and x.get("source")})
+        else:
+            m["retrieve_results_count"] = None
+            m["retrieve_sources"] = []
+
+        cj = _read_json(build_dir / "compose.json") or {}
+        secs = cj.get("sections") if isinstance(cj, dict) else None
+        if isinstance(secs, list):
+            m["compose_sections_count"] = len(secs)
+            m["compose_first_titles"] = [x.get("title") for x in secs[:8] if isinstance(x, dict) and x.get("title")]
+        else:
+            m["compose_sections_count"] = cj.get("sections_count") if isinstance(cj, dict) else None
+            m["compose_first_titles"] = []
+
+        aj = _read_json(build_dir / "audit_report.json") or _read_json(build_dir / "audit.json") or {}
+        if isinstance(aj, dict):
+            m["audit_replayable"] = aj.get("replayable") if "replayable" in aj else (aj.get("audit") or {}).get("replayable")
+            m["audit_missing_count"] = aj.get("missing_count") if "missing_count" in aj else (aj.get("audit") or {}).get("missing_count")
+
+        for fn in ("kg_context.json", "retrieve.json", "compose.json", "audit_report.json", "compose_exported_with_trace.docx"):
+            fp = build_dir / fn
+            if fp.exists():
+                m["files"][fn] = {"size_bytes": fp.stat().st_size}
+        return m
+
+    def _diff(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+        keys = [
+            "kg_active_pack",
+            "kg_manifest_sha256",
+            "domain_key",
+            "selected_packs_count",
+            "selected_packs_names",
+            "retrieve_results_count",
+            "retrieve_sources",
+            "compose_sections_count",
+            "compose_first_titles",
+            "audit_replayable",
+            "audit_missing_count",
+        ]
+        changes: Dict[str, Any] = {}
+        for k in keys:
+            av = a.get(k)
+            bv = b.get(k)
+            if av != bv:
+                changes[k] = {"from": av, "to": bv}
+        # file sizes
+        af = a.get("files") if isinstance(a.get("files"), dict) else {}
+        bf = b.get("files") if isinstance(b.get("files"), dict) else {}
+        fchg = {}
+        for fn in sorted(set(af.keys()) | set(bf.keys())):
+            av = (af.get(fn) or {}).get("size_bytes")
+            bv = (bf.get(fn) or {}).get("size_bytes")
+            if av != bv:
+                fchg[fn] = {"from": av, "to": bv}
+        if fchg:
+            changes["files.size_bytes"] = fchg
+        return changes
+
+    print("[EVAL] baseline_pack:", baseline_pack)
+    print("[EVAL] candidate_pack:", candidate_pack)
+
+    _run_smoke("baseline")
+    baseline_metrics = _extract_metrics()
+
+    # Activate candidate with smoke (auto-rollback on failure is handled by cmd_activate)
+    print("[EVAL] activating candidate pack with --smoke ...")
+    r = cmd_activate(argparse.Namespace(pack_id=candidate_pack, smoke=True))
+    if r != 0:
+        return int(r)
+
+    candidate_metrics = _extract_metrics()
+    changes = _diff(baseline_metrics, candidate_metrics)
+
+    report = {
+        "generated_at": _now_iso(),
+        "baseline_pack": baseline_pack,
+        "candidate_pack": candidate_pack,
+        "baseline_metrics": baseline_metrics,
+        "candidate_metrics": candidate_metrics,
+        "changes": changes,
+    }
+    out_path = ROOT_DIR / "build" / "kg_pack_eval.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("[EVAL] diff_keys_count:", len(changes))
+    for k, v in list(changes.items())[:80]:
+        print(" -", k, ":", v)
+    print("[EVAL] report_saved:", str(out_path))
+
+    if not args.keep:
+        print("[EVAL] rolling back to baseline (no smoke) ...")
+        cmd_activate(argparse.Namespace(pack_id=baseline_pack, smoke=False))
+        print("[EVAL] active_pack restored:", baseline_pack)
+    else:
+        print("[EVAL] keeping candidate active:", candidate_pack)
+
+    return 0
+
 def cmd_rollback(args: argparse.Namespace) -> int:
     cfg = _load_cfg()
     to_pack = args.to_pack
@@ -429,6 +578,11 @@ def main() -> int:
     p_act.add_argument("--pack-id", required=True)
     p_act.add_argument("--smoke", action="store_true")
     p_act.set_defaults(func=cmd_activate)
+
+    p_eval = sub.add_parser("eval", help="evaluate a pack: baseline smoke -> activate+smoke -> diff report (default rollback)")
+    p_eval.add_argument("--pack-id", required=True)
+    p_eval.add_argument("--keep", action="store_true", help="keep candidate active after eval (default rollback to baseline)")
+    p_eval.set_defaults(func=cmd_eval)
 
     p_rb = sub.add_parser("rollback", help="rollback to previous pack or specified --to")
     p_rb.add_argument("--to", dest="to_pack", default=None)

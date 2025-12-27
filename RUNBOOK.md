@@ -47,3 +47,17 @@
 - `build/compose.json`：包含 `kg_pack`
 - 在线：`GET /debug/kg_pack`
 
+### 7) KG 升级评测（eval）
+
+目标：把“KG 升级”标准化为可回放的发布流程：基线 smoke → 候选 pack 激活+smoke → diff 摘要 → 报告落盘（默认回滚到基线，防止污染当前环境）。
+
+- 评测命令（默认评测后回滚到基线）：
+  `python3 scripts/kg_pack.py eval --pack-id <pack_id>`
+
+- 保留候选为当前 active（评测通过后不回滚）：
+  `python3 scripts/kg_pack.py eval --pack-id <pack_id> --keep`
+
+- 评测报告落盘：
+  `build/kg_pack_eval.json`
+  包含 baseline/candidate 的关键指标与 diff（如检索结果数、selected_packs、compose 章节数、kg_pack.manifest_sha256 等）。
+
