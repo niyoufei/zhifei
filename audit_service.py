@@ -278,7 +278,6 @@ def build_audit_report() -> Dict[str, Any]:
             checks.append({"check": "selected_pack_files", "value": None})
     except Exception as e:
         checks.append({"check": "selected_pack_files", "value": {"error": repr(e)}})
-
     # replayability = artifacts + rule files all present
     missing: List[str] = []
     for _, path in artifacts.items():
@@ -324,7 +323,50 @@ def build_audit_report() -> Dict[str, Any]:
 
     replayable = (len(missing) == 0)
 
-    return {
+    # quality metrics (soft gate; recorded only)
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        _build_dir = globals().get("BUILD_DIR") or _Path("build")
+        def _safe_load(_fn: str):
+            _p = _build_dir / _fn
+            if not _p.exists():
+                return None
+            return _json.loads(_p.read_text(encoding="utf-8"))
+        _rj = _safe_load("retrieve.json") or {}
+        _results = _rj.get("results") if isinstance(_rj, dict) else None
+        retrieve_results_count = len(_results) if isinstance(_results, list) else 0
+        _cj = _safe_load("compose.json") or {}
+        _secs = _cj.get("sections") if isinstance(_cj, dict) else None
+        if isinstance(_secs, list):
+            compose_sections_count = len(_secs)
+            compose_nonempty_sections_count = sum(1 for _s in _secs if isinstance(_s, dict) and str(_s.get("content","")).strip())
+        else:
+            compose_sections_count = int(_cj.get("sections_count") or 0) if isinstance(_cj, dict) else 0
+            compose_nonempty_sections_count = None
+        compose_nonempty_ratio = (compose_nonempty_sections_count / compose_sections_count) if (compose_nonempty_sections_count is not None and compose_sections_count) else None
+        thresholds = {"retrieve_results_min": 1, "compose_sections_min": 3, "compose_nonempty_ratio_min": 0.90}
+        ok = {
+            "retrieve_results_ok": (retrieve_results_count >= thresholds["retrieve_results_min"]),
+            "compose_sections_ok": (compose_sections_count >= thresholds["compose_sections_min"]),
+            "compose_nonempty_ok": (compose_nonempty_ratio is None) or (compose_nonempty_ratio >= thresholds["compose_nonempty_ratio_min"]),
+        }
+        checks.append({
+            "check": "quality_metrics_soft",
+            "value": {
+                "soft_gate": True,
+                "thresholds": thresholds,
+                "retrieve_results_count": retrieve_results_count,
+                "compose_sections_count": compose_sections_count,
+                "compose_nonempty_sections_count": compose_nonempty_sections_count,
+                "compose_nonempty_ratio": compose_nonempty_ratio,
+                "ok": ok,
+            }
+        })
+    except Exception as e:
+        checks.append({"check": "quality_metrics_soft", "value": {"soft_gate": True, "error": repr(e)}})
+
+    report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "project_profile": project_profile,
         "kg_context": kg_context,
@@ -335,6 +377,17 @@ def build_audit_report() -> Dict[str, Any]:
         "checks": checks,
         "replay": {"replayable": replayable, "missing": missing},
     }
+    # persist audit report to build/audit_report.json
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        _out = _Path("build") / "audit_report.json"
+        _out.parent.mkdir(parents=True, exist_ok=True)
+        _out.write_text(_json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return report
+
 
 
 __all__ = ["build_audit_report"]

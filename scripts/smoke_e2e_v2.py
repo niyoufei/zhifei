@@ -184,6 +184,33 @@ def main():
         _must_have_kg_pack(_fp)
     print("[OK] kg_pack hard gate passed")
     
+    # SOFT GATE: quality_metrics_soft (warn only)
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        _p = _Path("build/audit_report.json")
+        if _p.exists():
+            _d = _json.loads(_p.read_text(encoding="utf-8"))
+            _checks = _d.get("checks", []) if isinstance(_d, dict) else []
+            _qm = None
+            for _c in _checks:
+                if isinstance(_c, dict) and _c.get("check") == "quality_metrics_soft":
+                    _qm = _c.get("value") if isinstance(_c.get("value"), dict) else None
+                    break
+            if _qm and isinstance(_qm.get("ok"), dict):
+                _ok = _qm["ok"]
+                _bad = [k for k,v in _ok.items() if v is False]
+                if _bad:
+                    print("[WARN] quality soft gate not met:", _bad, "details:", _qm)
+                else:
+                    print("[OK] quality soft gate passed")
+            else:
+                print("[WARN] quality_metrics_soft missing or malformed in build/audit_report.json")
+        else:
+            print("[WARN] build/audit_report.json not found; skip quality soft gate")
+    except Exception as _e:
+        print("[WARN] quality soft gate error:", repr(_e))
+
     print("\n[SUCCESS] smoke_e2e_v2 passed: openapi(/retrieve) + /compose + artifacts + /audit + /export")
 
 if __name__ == "__main__":
