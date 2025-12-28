@@ -352,6 +352,19 @@ def build_audit_report() -> Dict[str, Any]:
             compose_sections_count = int(_cj.get("sections_count") or 0) if isinstance(_cj, dict) else 0
             compose_nonempty_sections_count = None
         compose_nonempty_ratio = (compose_nonempty_sections_count / compose_sections_count) if (compose_nonempty_sections_count is not None and compose_sections_count) else None
+        import re as _re
+        _evidence_pat = _re.compile(r'(来源|证据|佐证|引用|出处|依据|锚点)\s*[:：]', _re.I)
+        evidence_sections_count = None
+        evidence_coverage_ratio = None
+        if isinstance(_secs, list):
+            evidence_sections_count = sum(
+                1 for _s in _secs
+                if isinstance(_s, dict) and _evidence_pat.search(str(_s.get('content', '')))
+            )
+            evidence_coverage_ratio = (evidence_sections_count / compose_sections_count) if compose_sections_count else None
+        else:
+            evidence_sections_count = 0
+            evidence_coverage_ratio = None
         thresholds = {"retrieve_results_min": 1, "compose_sections_min": 3, "compose_nonempty_ratio_min": 0.90}
         ok = {
             "retrieve_results_ok": (retrieve_results_count >= thresholds["retrieve_results_min"]),
@@ -367,6 +380,8 @@ def build_audit_report() -> Dict[str, Any]:
                 "compose_sections_count": compose_sections_count,
                 "compose_nonempty_sections_count": compose_nonempty_sections_count,
                 "compose_nonempty_ratio": compose_nonempty_ratio,
+                "evidence_sections_count": evidence_sections_count,
+                "evidence_coverage_ratio": evidence_coverage_ratio,
                 "ok": ok,
             }
         })
