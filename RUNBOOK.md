@@ -96,3 +96,30 @@
 示例（演练告警但不失败）：
 - `QUALITY_RETRIEVE_MIN=999 ./scripts/run_smoke.sh`
 
+
+
+## Quality Gate（质量门禁：quality_metrics_soft）
+
+本门禁基于 /audit 生成的 build/audit_report.json 中的 quality_metrics_soft（retrieve/compose 统计指标）。
+
+### Mode
+- QUALITY_GATE_MODE=warn（默认）：仅输出 [WARN]，不使 smoke 失败（本地默认）
+- QUALITY_GATE_MODE=fail：不达标直接退出并使 smoke 失败（建议 CI / 发布分支启用）
+
+### Env Vars
+- QUALITY_GATE_ENABLED=1|0（默认 1）
+- QUALITY_GATE_MODE=warn|fail（默认 warn）
+- QUALITY_RETRIEVE_MIN（默认 1）
+- QUALITY_SECTIONS_MIN（默认 3）
+- QUALITY_NONEMPTY_RATIO_MIN（默认 0.90）
+
+### Examples
+```bash
+```
+# 本地：只告警不失败（即使阈值很高）
+QUALITY_GATE_MODE=warn QUALITY_RETRIEVE_MIN=999 ./scripts/run_smoke.sh
+
+# CI：不达标直接失败
+QUALITY_GATE_MODE=fail QUALITY_RETRIEVE_MIN=1 ./scripts/run_smoke.sh
+```
+```
