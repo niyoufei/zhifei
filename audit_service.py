@@ -353,7 +353,7 @@ def build_audit_report() -> Dict[str, Any]:
             compose_nonempty_sections_count = None
         compose_nonempty_ratio = (compose_nonempty_sections_count / compose_sections_count) if (compose_nonempty_sections_count is not None and compose_sections_count) else None
         import re as _re
-        _evidence_pat = _re.compile(r'(来源|证据|佐证|引用|出处|依据|锚点)\s*[:：]', _re.I)
+        _evidence_pat = _re.compile(r'(来源|证据|佐证|引用|出处|依据|锚点)', _re.I)
         evidence_sections_count = None
         evidence_coverage_ratio = None
         if isinstance(_secs, list):
