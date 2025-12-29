@@ -362,6 +362,18 @@ def build_audit_report() -> Dict[str, Any]:
                 if isinstance(_s, dict) and _evidence_pat.search(str(_s.get('content', '')))
             )
             evidence_coverage_ratio = (evidence_sections_count / compose_sections_count) if compose_sections_count else None
+            _param_pat = _re.compile(r"\d+(?:\.\d+)?\s*(mm|cm|m|㎡|m2|m²|MPa|kN|kW|h|小时|d|天|%|℃)", _re.I)
+            param_coverage_sections_count = None
+            param_coverage_ratio = None
+            if isinstance(_secs, list):
+                param_coverage_sections_count = sum(
+                    1 for _s in _secs
+                    if isinstance(_s, dict) and _param_pat.search(str(_s.get('content', '')))
+                )
+                param_coverage_ratio = (param_coverage_sections_count / compose_sections_count) if compose_sections_count else None
+            else:
+                param_coverage_sections_count = 0
+                param_coverage_ratio = None
         else:
             evidence_sections_count = 0
             evidence_coverage_ratio = None
@@ -382,6 +394,8 @@ def build_audit_report() -> Dict[str, Any]:
                 "compose_nonempty_ratio": compose_nonempty_ratio,
                 "evidence_sections_count": evidence_sections_count,
                 "evidence_coverage_ratio": evidence_coverage_ratio,
+                "param_coverage_sections_count": param_coverage_sections_count,
+                "param_coverage_ratio": param_coverage_ratio,
                 "ok": ok,
             }
         })
