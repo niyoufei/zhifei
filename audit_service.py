@@ -383,6 +383,17 @@ def build_audit_report() -> Dict[str, Any]:
             "compose_sections_ok": (compose_sections_count >= thresholds["compose_sections_min"]),
             "compose_nonempty_ok": (compose_nonempty_ratio is None) or (compose_nonempty_ratio >= thresholds["compose_nonempty_ratio_min"]),
         }
+        # topic consistency (project_profile / kg_context / compose)
+        topic_pp = (project_profile or {}).get('topic') if isinstance(project_profile, dict) else None
+        topic_kg = (kg_context or {}).get('topic') if isinstance(kg_context, dict) else None
+        topic_cp = (compose or {}).get('topic') if isinstance(compose, dict) else None
+        topic_vals = [v for v in [topic_pp, topic_kg, topic_cp] if isinstance(v, str) and v.strip()]
+        topic_consistency_ok = True
+        topic_mismatch = None
+        if topic_vals:
+            topic_consistency_ok = (len(set(topic_vals)) == 1)
+            if not topic_consistency_ok:
+                topic_mismatch = {'project_profile': topic_pp, 'kg_context': topic_kg, 'compose': topic_cp}
         checks.append({
             "check": "quality_metrics_soft",
             "value": {
