@@ -396,10 +396,23 @@ def build_audit_report() -> Dict[str, Any]:
                 "evidence_coverage_ratio": evidence_coverage_ratio,
                 "param_coverage_sections_count": param_coverage_sections_count,
                 "param_coverage_ratio": param_coverage_ratio,
+                "topic_consistency_ok": topic_consistency_ok,
+                "topic_mismatch": topic_mismatch,
                 "ok": ok,
             }
         })
     except Exception as e:
+        # topic consistency (project_profile / kg_context / compose)
+        topic_pp = (project_profile or {}).get('topic') if isinstance(project_profile, dict) else None
+        topic_kg = (kg_context or {}).get('topic') if isinstance(kg_context, dict) else None
+        topic_cp = (compose or {}).get('topic') if isinstance(compose, dict) else None
+        topic_vals = [v for v in [topic_pp, topic_kg, topic_cp] if isinstance(v, str) and v.strip()]
+        topic_consistency_ok = True
+        topic_mismatch = None
+        if topic_vals:
+            topic_consistency_ok = (len(set(topic_vals)) == 1)
+            if not topic_consistency_ok:
+                topic_mismatch = {'project_profile': topic_pp, 'kg_context': topic_kg, 'compose': topic_cp}
         checks.append({"check": "quality_metrics_soft", "value": {"soft_gate": True, "error": repr(e)}})
 
     report = {
