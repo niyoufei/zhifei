@@ -55,6 +55,13 @@ def compose(req: ComposeRequest):
             _req_topic = _req_topic.replace('（合肥）','').replace('(合肥)','')
             _req_topic = _req_topic.replace('（安徽合肥）','').replace('(安徽合肥)','')
             _req_topic = _req_topic.strip()
+            # propagate sanitized topic into payload/request to prevent downstream Hefei leakage
+            if isinstance(payload, dict) and _req_topic:
+                payload['topic'] = _req_topic
+            try:
+                setattr(req, 'topic', _req_topic)
+            except Exception:
+                pass
         result = {
             'sections': build_sections_from_kg(
                 payload=locals().get('payload'),
