@@ -122,7 +122,8 @@ def compose(req: ComposeRequest):
                     _dk = kg_context.get(domain_key)
                 if not _dk:
                     _dk = decoration
-                project_profile[domain_key] = project_profile.get(domain_key) or _dk
+                if isinstance(project_profile, dict):
+                    project_profile[domain_key] = project_profile.get(domain_key) or _dk
             if isinstance(upgrade, dict) and upgrade.get('region_key'):
                 project_profile['region_key'] = project_profile.get('region_key') or upgrade.get('region_key')
             with open('build/project_profile.json', 'w', encoding='utf-8') as _f_pp:
