@@ -113,8 +113,16 @@ def compose(req: ComposeRequest):
                 _topic = _topic.replace('（安徽合肥）','').replace('(安徽合肥)','')
                 _topic = _topic.strip()
             project_profile['topic'] = _topic
-            if isinstance(kg_context, dict) and kg_context.get('domain_key'):
-                project_profile['domain_key'] = project_profile.get('domain_key') or kg_context.get('domain_key')
+            if isinstance(kg_context, dict):
+                _dr = kg_context.get(domain_resolution)
+                _dk = None
+                if isinstance(_dr, dict):
+                    _dk = _dr.get(domain_key)
+                if not _dk:
+                    _dk = kg_context.get(domain_key)
+                if not _dk:
+                    _dk = decoration
+                project_profile[domain_key] = project_profile.get(domain_key) or _dk
             if isinstance(upgrade, dict) and upgrade.get('region_key'):
                 project_profile['region_key'] = project_profile.get('region_key') or upgrade.get('region_key')
             with open('build/project_profile.json', 'w', encoding='utf-8') as _f_pp:
