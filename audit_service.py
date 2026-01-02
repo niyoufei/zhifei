@@ -463,6 +463,25 @@ def build_audit_report() -> Dict[str, Any]:
         "checks": checks,
         "replay": {"replayable": replayable, "missing": missing},
     }
+    # MECE/Observability: surface quality_metrics_soft key results at top-level for easy lookup
+    _soft = None
+    if isinstance(checks, list):
+        for _c in checks:
+            if isinstance(_c, dict) and _c.get('check') == 'quality_metrics_soft' and isinstance(_c.get('value'), dict):
+                _soft = _c.get('value')
+                break
+    if isinstance(_soft, dict):
+        _keys = [
+            'soft_gate',
+            'topic_consistency_ok','topic_mismatch',
+            'domain_key_consistency_ok','domain_key_mismatch',
+            'region_key_consistency_ok','region_key_mismatch',
+            'evidence_coverage_ratio','param_coverage_ratio',
+            'retrieve_results_count','compose_sections_count','compose_nonempty_ratio',
+        ]
+        report['quality_metrics_soft_summary'] = {k: _soft.get(k) for k in _keys}
+        for _k in _keys:
+            report[_k] = _soft.get(_k)
     # persist audit report to build/audit_report.json
     try:
         import json as _json
