@@ -50,6 +50,11 @@ def compose(req: ComposeRequest):
         from compose_engine_service import build_sections_from_kg
         _req_outline = getattr(req, 'outline', None)
         _req_topic = getattr(req, 'topic', None)
+        # sanitize topic: strip Hefei suffixes to avoid leaking city name
+        if isinstance(_req_topic, str):
+            _req_topic = _req_topic.replace('（合肥）','').replace('(合肥)','')
+            _req_topic = _req_topic.replace('（安徽合肥）','').replace('(安徽合肥)','')
+            _req_topic = _req_topic.strip()
         result = {
             'sections': build_sections_from_kg(
                 payload=locals().get('payload'),
@@ -103,6 +108,10 @@ def compose(req: ComposeRequest):
         if not _topic:
             _topic = _req_topic
         if isinstance(project_profile, dict):
+            if isinstance(_topic, str):
+                _topic = _topic.replace('（合肥）','').replace('(合肥)','')
+                _topic = _topic.replace('（安徽合肥）','').replace('(安徽合肥)','')
+                _topic = _topic.strip()
             project_profile['topic'] = _topic
             if isinstance(kg_context, dict) and kg_context.get('domain_key'):
                 project_profile['domain_key'] = project_profile.get('domain_key') or kg_context.get('domain_key')
