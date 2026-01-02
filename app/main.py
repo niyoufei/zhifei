@@ -91,6 +91,27 @@ def compose(req: ComposeRequest):
     with open('build/kg_context.json', 'w', encoding='utf-8') as _f_kg:
         _json_kg.dump(kg_context, _f_kg, ensure_ascii=False, indent=2)
     # ----------------------------------------------------------------------
+    # enrich project_profile (topic/domain_key/region_key) for traceability
+    try:
+        import os as _os_pp, json as _json_pp
+        _os_pp.makedirs('build', exist_ok=True)
+        _topic = None
+        if isinstance(project_profile, dict):
+            _topic = project_profile.get('topic')
+        if not _topic:
+            _topic = payload.get('topic') if isinstance(payload, dict) else None
+        if not _topic:
+            _topic = _req_topic
+        if isinstance(project_profile, dict):
+            project_profile['topic'] = _topic
+            if isinstance(kg_context, dict) and kg_context.get('domain_key'):
+                project_profile['domain_key'] = project_profile.get('domain_key') or kg_context.get('domain_key')
+            if isinstance(upgrade, dict) and upgrade.get('region_key'):
+                project_profile['region_key'] = project_profile.get('region_key') or upgrade.get('region_key')
+            with open('build/project_profile.json', 'w', encoding='utf-8') as _f_pp:
+                _json_pp.dump(project_profile, _f_pp, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
     from precheck_guard_service import run_precheck_guard
     precheck = run_precheck_guard(payload, project_profile)
     import os as _os2, json as _json2
