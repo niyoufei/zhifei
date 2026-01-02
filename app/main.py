@@ -100,34 +100,51 @@ def compose(req: ComposeRequest):
     try:
         import os as _os_pp, json as _json_pp
         _os_pp.makedirs('build', exist_ok=True)
-        _topic = None
-        if isinstance(project_profile, dict):
-            _topic = project_profile.get('topic')
-        if not _topic:
-            _topic = payload.get('topic') if isinstance(payload, dict) else None
+        # normalize project_profile to dict for stable persistence
+        if project_profile is None:
+            project_profile = {}
+        elif not isinstance(project_profile, dict):
+            if hasattr(project_profile, 'model_dump'):
+                project_profile = project_profile.model_dump()
+            elif hasattr(project_profile, 'dict'):
+                project_profile = project_profile.dict()
+            else:
+                project_profile = dict(project_profile)
+        
+        # topic backfill + sanitize (remove Hefei suffix markers)
+        _topic = project_profile.get('topic') if isinstance(project_profile, dict) else None
+        if not _topic and isinstance(payload, dict):
+            _topic = payload.get('topic')
         if not _topic:
             _topic = _req_topic
-        if isinstance(project_profile, dict):
-            if isinstance(_topic, str):
-                _topic = _topic.replace('（合肥）','').replace('(合肥)','')
-                _topic = _topic.replace('（安徽合肥）','').replace('(安徽合肥)','')
-                _topic = _topic.strip()
+        if isinstance(_topic, str):
+            for _sfx in ('（合肥）','(合肥)','（安徽合肥）','(安徽合肥)'):
+                _topic = _topic.replace(_sfx, '')
+            _topic = _topic.strip()
+        if isinstance(project_profile, dict) and _topic:
             project_profile['topic'] = _topic
-            if isinstance(kg_context, dict):
-                _dr = kg_context.get(domain_resolution)
-                _dk = None
-                if isinstance(_dr, dict):
-                    _dk = _dr.get(domain_key)
-                if not _dk:
-                    _dk = kg_context.get(domain_key)
-                if not _dk:
-                    _dk = decoration
-                if isinstance(project_profile, dict):
-                    project_profile[domain_key] = project_profile.get(domain_key) or _dk
-            if isinstance(upgrade, dict) and upgrade.get('region_key'):
-                project_profile['region_key'] = project_profile.get('region_key') or upgrade.get('region_key')
-            with open('build/project_profile.json', 'w', encoding='utf-8') as _f_pp:
-                _json_pp.dump(project_profile, _f_pp, ensure_ascii=False, indent=2)
+        
+        # domain_key backfill: prefer kg_context.domain_resolution.domain_key, fallback decoration
+        _dk = None
+        if isinstance(kg_context, dict):
+            _dr = kg_context.get('domain_resolution')
+            if isinstance(_dr, dict):
+                _dk = _dr.get('domain_key')
+            if not _dk:
+                _dk = kg_context.get('domain_key')
+        if not _dk:
+            _dk = 'decoration'
+        if isinstance(project_profile, dict):
+            project_profile['domain_key'] = project_profile.get('domain_key') or _dk
+        
+        # region_key backfill (if available)
+        if isinstance(upgrade, dict):
+            _rk = upgrade.get('region_key')
+            if _rk and isinstance(project_profile, dict):
+                project_profile['region_key'] = project_profile.get('region_key') or _rk
+        
+        with open('build/project_profile.json', 'w', encoding='utf-8') as _f_pp:
+            _json_pp.dump(project_profile, _f_pp, ensure_ascii=False, indent=2)
     except Exception:
         pass
     from precheck_guard_service import run_precheck_guard
