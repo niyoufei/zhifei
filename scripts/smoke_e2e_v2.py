@@ -191,6 +191,7 @@ def main():
 #   QUALITY_SECTIONS_MIN=3
 #   QUALITY_NONEMPTY_RATIO_MIN=0.90
 #   QUALITY_EVIDENCE_COVERAGE_MIN=0.80
+#   QUALITY_PARAM_COVERAGE_MIN=0.80
 try:
     import os, json
     from pathlib import Path
@@ -203,6 +204,7 @@ try:
         thr_sections = int(os.getenv("QUALITY_SECTIONS_MIN", "3"))
         thr_ratio = float(os.getenv("QUALITY_NONEMPTY_RATIO_MIN", "0.90"))
         thr_evcov = float(os.getenv("QUALITY_EVIDENCE_COVERAGE_MIN", "0.80"))
+        thr_param = float(os.getenv("QUALITY_PARAM_COVERAGE_MIN", "0.80"))
 
         p = Path("build/audit_report.json")
         if not p.exists():
@@ -222,6 +224,7 @@ try:
                 sc = qm.get("compose_sections_count", 0)
                 ratio = qm.get("compose_nonempty_ratio", None)
                 evcov = qm.get("evidence_coverage_ratio", None)
+                pcov = qm.get("param_coverage_ratio", None)
                 bad = []
                 if rr < thr_retrieve:
                     bad.append("retrieve_results_ok")
@@ -231,8 +234,10 @@ try:
                     bad.append("compose_nonempty_ok")
                 if (evcov is not None) and (evcov < thr_evcov):
                     bad.append("evidence_coverage_ok")
+                if (pcov is not None) and (pcov < thr_param):
+                    bad.append("param_coverage_ok")
                 if bad:
-                    print("[WARN] quality soft gate not met:", bad, "env_thr=", {"retrieve": thr_retrieve, "sections": thr_sections, "ratio": thr_ratio, "evidence": thr_evcov}, "qm=", qm)
+                    print("[WARN] quality soft gate not met:", bad, "env_thr=", {"retrieve": thr_retrieve, "sections": thr_sections, "ratio": thr_ratio, "evidence": thr_evcov, "param": thr_param}, "qm=", qm)
                 else:
                     print("[OK] quality soft gate passed")
 except Exception as _e:
