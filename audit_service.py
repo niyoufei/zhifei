@@ -387,6 +387,28 @@ def build_audit_report() -> Dict[str, Any]:
         topic_pp = (project_profile or {}).get('topic') if isinstance(project_profile, dict) else None
         topic_kg = (kg_context or {}).get('topic') if isinstance(kg_context, dict) else None
         topic_cp = (compose or {}).get('topic') if isinstance(compose, dict) else None
+        # domain_key / region_key consistency (warn-only; metrics)
+        dk_pp = (project_profile or {}).get('domain_key') if isinstance(project_profile, dict) else None
+        dk_kg = None
+        if isinstance(kg_context, dict):
+            _dr = kg_context.get('domain_resolution')
+            if isinstance(_dr, dict):
+                dk_kg = _dr.get('domain_key')
+            if not dk_kg:
+                dk_kg = kg_context.get('domain_key')
+        dk_vals = [v.strip() for v in (dk_pp, dk_kg) if isinstance(v, str) and v.strip()]
+        domain_key_consistency_ok = (len(set(dk_vals)) <= 1)
+        domain_key_mismatch = None
+        if not domain_key_consistency_ok:
+            domain_key_mismatch = {'project_profile': dk_pp, 'kg_context': dk_kg}
+        
+        rk_pp = (project_profile or {}).get('region_key') if isinstance(project_profile, dict) else None
+        rk_ru = ru.get('region_key') if isinstance(ru, dict) else None
+        rk_vals = [v.strip() for v in (rk_pp, rk_ru) if isinstance(v, str) and v.strip()]
+        region_key_consistency_ok = (len(set(rk_vals)) <= 1)
+        region_key_mismatch = None
+        if not region_key_consistency_ok:
+            region_key_mismatch = {'project_profile': rk_pp, 'region_upgrade': rk_ru}
         topic_vals = [v for v in [topic_pp, topic_kg, topic_cp] if isinstance(v, str) and v.strip()]
         topic_consistency_ok = True
         topic_mismatch = None
@@ -409,6 +431,10 @@ def build_audit_report() -> Dict[str, Any]:
                 "param_coverage_ratio": param_coverage_ratio,
                 "topic_consistency_ok": topic_consistency_ok,
                 "topic_mismatch": topic_mismatch,
+                "domain_key_consistency_ok": domain_key_consistency_ok,
+                "domain_key_mismatch": domain_key_mismatch,
+                "region_key_consistency_ok": region_key_consistency_ok,
+                "region_key_mismatch": region_key_mismatch,
                 "ok": ok,
             }
         })
