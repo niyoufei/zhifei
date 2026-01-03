@@ -103,7 +103,33 @@
 本门禁基于 /audit 生成的 build/audit_report.json 中的 quality_metrics_soft（retrieve/compose 统计指标）。
 
 ### Mode
-- QUALITY_GATE_MODE=warn（默认）：仅输出 [WARN]，不使 smoke 失败（本地默认）
+- QUALITY_GATE_MODE
+
+## Consistency Gate（MECE 控制闸口）
+
+### 目的
+- 将 topic / domain_key / region_key 的一致性检查从“可观测”升级为“可控”。
+
+### 产物与字段
+- build/audit_report.json 顶层：topic_consistency_ok、domain_key_consistency_ok、region_key_consistency_ok（以及 *_mismatch）。
+- build/audit_report.json 顶层：quality_metrics_soft_summary（便于快速检索）。
+
+### 运行与模式
+- 默认：QUALITY_CONSISTENCY_MODE=warn（不拦截，仅输出提示）。
+- 强制拦截：QUALITY_CONSISTENCY_MODE=fail（任一一致性为 False 则 smoke 失败退出）。
+
+### 示例
+- 默认（warn）：
+  - ./scripts/run_smoke.sh
+- 拦截（fail）：
+  - QUALITY_CONSISTENCY_MODE=fail ./scripts/run_smoke.sh
+
+### 输出约定
+- smoke 输出包含两行：
+  - [WARN] consistency(mode=...): topic=... domain_key=... region_key=...
+  - [OK]/[WARN]/[FAIL] consistency_gate: ... (mode=...)
+
+=warn（默认）：仅输出 [WARN]，不使 smoke 失败（本地默认）
 - QUALITY_GATE_MODE=fail：不达标直接退出并使 smoke 失败（建议 CI / 发布分支启用）
 
 ### Env Vars
