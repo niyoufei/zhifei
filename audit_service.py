@@ -372,31 +372,46 @@ def build_audit_report() -> Dict[str, Any]:
                     if isinstance(_s, dict) and _param_pat.search(str(_s.get('content', '')))
                 )
                 param_coverage_ratio = (param_coverage_sections_count / compose_sections_count) if compose_sections_count else None
-                # param category coverage (MECE: size/time/strength/equipment/personnel) (warn-only metrics)
+                                # param category coverage (MECE: size/time/strength/equipment/personnel) (warn-only metrics)
                 param_category_coverage = {'size': 0, 'time': 0, 'strength': 0, 'equipment': 0, 'personnel': 0}
+                param_category_examples = {'size': [], 'time': [], 'strength': [], 'equipment': [], 'personnel': []}
                 try:
                     _secs = compose.get('sections') if isinstance(compose, dict) else None
+                    _outline = compose.get('outline') if isinstance(compose, dict) else None
+                    _extra_text = json.dumps(_outline, ensure_ascii=False) if _outline is not None else ''
                     if isinstance(_secs, list):
                         _pat = {
-                            'size': re.compile(r"(\d+(?:\.\d+)?)\s*(mm|cm|m|㎡|m2|m²)|毫米|厘米|米|平方"),
-                            'time': re.compile(r"(\d+(?:\.\d+)?)\s*(min|h|d)|分钟|小时|天|日"),
-                            'strength': re.compile(r"MPa|kPa|\bC\d{2}\b|强度|压实度|坍落度|允许偏差|平整度"),
-                            'equipment': re.compile(r"型号|功率|\b[kK][wW]\b|\b\d+\s*t\b|吨|作业半径|挖掘机|吊车|泵|机具"),
-                            'personnel': re.compile(r"\b\d+\s*人\b|人数|班组|工人|木工|钢筋工|电工|焊工|劳动力"),
+                            'size': re.compile("(厚度|间距|长度|宽度|高度|标高|直径|面积|尺寸)\\s*[:：]?\\s*\\d+(?:\\.\\d+)?\\s*(mm|cm|m|㎡|m2|m²)|\\d+(?:\\.\\d+)?\\s*(mm|cm|m|㎡|m2|m²)"),
+                            'time': re.compile("(养护|间隔|等待|工期|周期|持续)\\s*[:：]?\\s*\\d+(?:\\.\\d+)?\\s*(min|h|d)|\\d+(?:\\.\\d+)?\\s*(min|h|d)|分钟|小时|天|日"),
+                            'strength': re.compile("(强度|等级|压实度|坍落度|允许偏差|平整度|含水率)\\s*[:：]?[^\\n]{0,20}|MPa|kPa|\\bC\\d{2}\\b|\\b\\d{2,3}%\\b"),
+                            'equipment': re.compile("(型号|功率|吨位|作业半径)\\s*[:：]?[^\\n]{0,20}|\\b\\d+(?:\\.\\d+)?\\s*(kW|kw)\\b|\\b\\d+(?:\\.\\d+)?\\s*t\\b|挖掘机|吊车|泵车|搅拌机|压路机|发电机|振动棒|切割机"),
+                            'personnel': re.compile("\\b\\d+\\s*人\\b|人数\\s*[:：]?\\s*\\d+|班组|工种|劳动力|木工|钢筋工|电工|焊工|架子工|普工|安全员|质检员"),
                         }
+                        def _add_example(_k, _txt, _m):
+                            if len(param_category_examples[_k]) >= 3:
+                                return
+                            a = max(0, _m.start() - 20)
+                            b = min(len(_txt), _m.end() + 20)
+                            snip = _txt[a:b].replace('\n',' ').strip()
+                            if len(snip) > 120:
+                                snip = snip[:120] + '...'
+                            param_category_examples[_k].append(snip)
                         for _sec in _secs:
                             if not isinstance(_sec, dict):
                                 continue
-                            _txt = str(_sec.get('title','')) + "\n" + str(_sec.get('content',''))
+                            _txt = str(_sec.get('title','')) + "\n" + str(_sec.get('content','')) + "\n" + _extra_text
                             for _k, _r in _pat.items():
-                                if _r.search(_txt):
+                                _mm = _r.search(_txt)
+                                if _mm:
                                     param_category_coverage[_k] += 1
+                                    _add_example(_k, _txt, _mm)
                 except Exception:
                     pass
                 param_category_covered = sum(1 for _v in param_category_coverage.values() if _v > 0)
                 param_category_total = len(param_category_coverage)
                 param_category_coverage_ratio = (param_category_covered / param_category_total) if param_category_total else None
                 param_category_missing = [k for k, v in param_category_coverage.items() if v == 0]
+
 
             else:
                 param_coverage_sections_count = 0
@@ -459,6 +474,7 @@ def build_audit_report() -> Dict[str, Any]:
                 "param_category_coverage": param_category_coverage,
                 "param_category_coverage_ratio": param_category_coverage_ratio,
                 "param_category_missing": param_category_missing,
+            "param_category_examples": param_category_examples,
                 "topic_consistency_ok": topic_consistency_ok,
                 "topic_mismatch": topic_mismatch,
                 "domain_key_consistency_ok": domain_key_consistency_ok,
@@ -510,6 +526,7 @@ def build_audit_report() -> Dict[str, Any]:
             'param_category_coverage_ratio',
             'param_category_missing',
             'param_category_coverage',
+        'param_category_examples',
             'retrieve_results_count','compose_sections_count','compose_nonempty_ratio',
         ]
         report['quality_metrics_soft_summary'] = {k: _soft.get(k) for k in _keys}
