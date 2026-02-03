@@ -1,0 +1,14 @@
+# clawdbot audit log
+
+## 2026-02-03 初始化运行
+[READ] build/clawdbot/goal.md
+  结果: 空模板，无任务定义
+
+[READ] build/clawdbot/status.md
+  结果: last_run: never
+
+[READ] build/clawdbot/blockers.md
+  结果: 空
+
+[DECISION] 记录 BLOCKER-001: goal.md 未定义具体任务
+[STATUS] blocked - 等待用户输入
