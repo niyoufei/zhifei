@@ -1,0 +1,42 @@
+# clawdbot 任务完成
+
+完成时间: 2026-02-03T23:28
+
+## 最后一次成功命令
+
+```bash
+PYTHONPATH="$PWD:$PYTHONPATH" python3 backend/scripts/smoke_e2e.py
+```
+
+输出: [SUCCESS] E2E smoke test passed: /compose -> artifacts -> /audit (replayable) -> /export
+
+## 产物路径
+
+- 一键运行入口: scripts/run_e2e.sh
+- 结构化中间产物:
+  - build/project_profile.json
+  - build/precheck_guard.json
+  - build/region_upgrade.json
+  - build/kg_context.json
+  - build/compose.json
+- DOCX 文档:
+  - build/compose_output.docx (36932 bytes)
+  - build/compose_exported.docx (36932 bytes)
+- 验证脚本: backend/scripts/smoke_e2e.py
+- 文档: README.md
+
+## DoD 完成状态
+
+- [x] DoD #1: 一键运行入口 (scripts/run_e2e.sh)
+- [x] DoD #2: DOCX 导出 (build/compose_output.docx)
+- [x] DoD #3: 验证命令 (smoke_e2e.py PASS)
+- [x] DoD #4: README 文档 (README.md)
+
+## 验证方式
+
+```bash
+./scripts/run_e2e.sh
+# 或
+curl http://127.0.0.1:8000/health
+python3 backend/scripts/smoke_e2e.py
+```

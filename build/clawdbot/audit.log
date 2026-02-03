@@ -12,3 +12,342 @@
 
 [DECISION] 记录 BLOCKER-001: goal.md 未定义具体任务
 [STATUS] blocked - 等待用户输入
+**本轮完成：**
+- 读取 goal.md → 发现是空模板，无任务定义
+- 记录阻塞 BLOCKER-001 到 blockers.md
+- 更新 status.md 和 audit.log
+- 提交到 clawdbot/autopilot 分支 (adea2e1)
+
+**阻塞原因：** `build/clawdbot/goal.md` 未填写具体任务内容
+
+**需要用户操作：** 请在 `build/clawdbot/goal.md` 中填写：
+1. 系统最终目标
+2. 当前卡点
+3. DoD（完成定义）
+
+CLAWDBOT_STATUS: DONE
+[2026-02-03T22:48:07+0800] DONE detected. Exit.
+[2026-02-03T23:17:28+0800] clawdbot started. CLI=agent (stop: touch /Users/youfeini/Desktop/文档生成系统/build/clawdbot/STOP) (done: /Users/youfeini/Desktop/文档生成系统/build/clawdbot/DONE)
+[2026-02-03T23:17:28+0800] === ITERATION START ===
+[2026-02-03 23:19:06] === E2E Test Start ===
+[2026-02-03 23:19:06] Working directory: /Users/youfeini/Desktop/文档生成系统
+[2026-02-03 23:19:06] [OK] Python: Python 3.13.3
+[2026-02-03 23:19:06] Checking key dependencies...
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import fastapi, uvicorn, docx; print('Dependencies OK')
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/__init__.py", line 7, in <module>
+    from .applications import FastAPI as FastAPI
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/applications.py", line 16, in <module>
+    from fastapi import routing
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/routing.py", line 27, in <module>
+    from fastapi import params
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/params.py", line 5, in <module>
+    from fastapi.openapi.models import Example
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/openapi/models.py", line 4, in <module>
+    from fastapi._compat import (
+    ...<6 lines>...
+    )
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/_compat.py", line 22, in <module>
+    from fastapi.exceptions import RequestErrorModel
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/exceptions.py", line 3, in <module>
+    from pydantic import BaseModel, create_model
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic/__init__.py", line 5, in <module>
+    from ._migration import getattr_migration
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic/_migration.py", line 4, in <module>
+    from .version import version_short
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic/version.py", line 5, in <module>
+    from pydantic_core import __version__ as __pydantic_core_version__
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/__init__.py", line 6, in <module>
+    from ._pydantic_core import (
+    ...<22 lines>...
+    )
+ImportError: dlopen(/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so, 0x0002): tried: '/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so' (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64')), '/System/Volumes/Preboot/Cryptexes/OS/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so' (no such file), '/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so' (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64'))
+[2026-02-03 23:19:07] [WARN] Missing dependencies, attempting install...
+[2026-02-03 23:19:09] Starting FastAPI server...
+[2026-02-03 23:19:09] Server PID: 46327
+[2026-02-03 23:19:09] Waiting for server to be ready...
+[2026-02-03T23:19:47+0800] Continue in 2s...
+[2026-02-03T23:19:50+0800] === ITERATION START ===
+[2026-02-03T23:20:02+0800] Continue in 2s...
+[2026-02-03T23:20:20+0800] clawdbot started. CLI=agent (stop: touch /Users/youfeini/Desktop/文档生成系统/build/clawdbot/STOP) (done: /Users/youfeini/Desktop/文档生成系统/build/clawdbot/DONE)
+[2026-02-03T23:20:21+0800] === ITERATION START ===
+[2026-02-03T23:20:34+0800] clawdbot started. CLI=agent (stop: touch /Users/youfeini/Desktop/文档生成系统/build/clawdbot/STOP) (done: /Users/youfeini/Desktop/文档生成系统/build/clawdbot/DONE)
+[2026-02-03T23:20:34+0800] === ITERATION START ===
+[2026-02-03 23:21:42] === E2E Test Start ===
+[2026-02-03 23:21:42] Working directory: /Users/youfeini/Desktop/文档生成系统
+[2026-02-03 23:21:42] [OK] Python: Python 3.13.3
+[2026-02-03 23:21:42] Checking key dependencies...
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import fastapi, uvicorn, docx; print('Dependencies OK')
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/__init__.py", line 7, in <module>
+    from .applications import FastAPI as FastAPI
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/applications.py", line 16, in <module>
+    from fastapi import routing
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/routing.py", line 27, in <module>
+    from fastapi import params
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/params.py", line 5, in <module>
+    from fastapi.openapi.models import Example
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/openapi/models.py", line 4, in <module>
+    from fastapi._compat import (
+    ...<6 lines>...
+    )
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/_compat.py", line 22, in <module>
+    from fastapi.exceptions import RequestErrorModel
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/fastapi/exceptions.py", line 3, in <module>
+    from pydantic import BaseModel, create_model
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic/__init__.py", line 5, in <module>
+    from ._migration import getattr_migration
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic/_migration.py", line 4, in <module>
+    from .version import version_short
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic/version.py", line 5, in <module>
+    from pydantic_core import __version__ as __pydantic_core_version__
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/__init__.py", line 6, in <module>
+    from ._pydantic_core import (
+    ...<22 lines>...
+    )
+ImportError: dlopen(/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so, 0x0002): tried: '/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so' (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64')), '/System/Volumes/Preboot/Cryptexes/OS/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so' (no such file), '/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pydantic_core/_pydantic_core.cpython-313-darwin.so' (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64'))
+[2026-02-03 23:21:43] [WARN] Missing dependencies, attempting install...
+[2026-02-03 23:21:44] Starting FastAPI server...
+[2026-02-03 23:21:44] Server PID: 50086
+[2026-02-03 23:21:44] Waiting for server to be ready...
+[2026-02-03 23:24:11] === E2E Test Start ===
+[2026-02-03 23:24:11] Working directory: /Users/youfeini/Desktop/文档生成系统
+[2026-02-03 23:24:11] [OK] Python: Python 3.13.3
+[2026-02-03 23:24:11] Checking key dependencies...
+Dependencies OK
+[2026-02-03 23:24:12] Starting FastAPI server...
+[2026-02-03 23:24:12] Server PID: 51268
+[2026-02-03 23:24:12] Waiting for server to be ready...
+[2026-02-03 23:27:11] === E2E Test Start ===
+[2026-02-03 23:27:11] Working directory: /Users/youfeini/Desktop/文档生成系统
+[2026-02-03 23:27:12] [OK] Python: Python 3.13.3
+[2026-02-03 23:27:12] Checking key dependencies...
+Dependencies OK
+[2026-02-03 23:27:12] Starting FastAPI server...
+[2026-02-03 23:27:12] Server PID: 51504
+[2026-02-03 23:27:12] Waiting for server to be ready...
+[2026-02-03 23:27:17] Cleaning up...
+[2026-02-03 23:27:17] Cleaning up...
+[2026-02-03 23:27:30] [OK] Server ready after 13s
+[2026-02-03 23:27:30] [OK] Server ready after 13s
+[2026-02-03 23:27:30] Running smoke E2E test...
+[2026-02-03 23:27:30] Running smoke E2E test...
+[CLEAN] removed /Users/youfeini/Desktop/文档生成系统/build/project_profile.json
+[CLEAN] removed /Users/youfeini/Desktop/文档生成系统/build/precheck_guard.json
+[CLEAN] removed /Users/youfeini/Desktop/文档生成系统/build/region_upgrade.json
+[CLEAN] removed /Users/youfeini/Desktop/文档生成系统/build/compose.json
+[CLEAN] removed /Users/youfeini/Desktop/文档生成系统/build/compose_output.docx
+
+---- POST /compose payload ----
+{
+  "topic": "建筑装饰装修工程施工组织设计（合肥）",
+  "outline": [
+    "工程概况",
+    "施工准备",
+    "装饰装修工程施工方案",
+    "质量管理体系与措施",
+    "安全管理体系与措施",
+    "文明施工与环保"
+  ]
+}
+
+[HTTP] POST /compose -> 200
+[BODY head 1200 chars]:
+{"status":"ok","topic":"建筑装饰装修工程施工组织设计","outline":["工程概况","施工准备","装饰装修工程施工方案","质量管理体系与措施","安全管理体系与措施","文明施工与环保"],"sections":[{"id":1,"title":"工程概况","content":"工程概况 —— 本章节内容由自动生成器生成（示例）。"},{"id":2,"title":"施工准备","content":"施工准备 —— 本章节内容由自动生成器生成（示例）。"},{"id":3,"title":"装饰装修工程施工方案","content":"装饰装修工程施工方案 —— 本章节内容由自动生成器生成（示例）。"},{"id":4,"title":"质量管理体系与措施","content":"质量管理体系与措施 —— 本章节内容由自动生成器生成（示例）。"},{"id":5,"title":"安全管理体系与措施","content":"安全管理体系与措施 —— 本章节内容由自动生成器生成（示例）。"},{"id":6,"title":"文明施工与环保","content":"文明施工与环保 —— 本章节内容由自动生成器生成（示例）。"}],"style":{"paper":"A4","margins":[20,20,20,20],"font":"SimSun","font_size":12,"line_spacing":1.5,"auto_page_break":true},"saved_at":"build/compose.json"}
+[OK] exists: /Users/youfeini/Desktop/文档生成系统/build/project_profile.json size=1381 bytes
+[OK] exists: /Users/youfeini/Desktop/文档生成系统/build/precheck_guard.json size=1756 bytes
+[OK] exists: /Users/youfeini/Desktop/文档生成系统/build/region_upgrade.json size=805 bytes
+[OK] exists: /Users/youfeini/Desktop/文档生成系统/build/compose.json size=2377 bytes
+
+[project_profile.json]
+ - decision = require_manual_confirm
+ - project_type = {"value": "装饰装修", "confidence": 0.78, "source": "keyword", "evidence": ["装修", "装饰"]}
+ - mandatory_dimensions = ['施工安全风险识别与控制', '工程质量保障体系', '绿色施工与环保措施']
+ - input_sha256 = cae8020b719849e70dd7b3f3a65415e63ee3e8dba578e2ace11cbd4b51c6a196
+ - rule_path = /Users/youfeini/Desktop/文档生成系统/backend/kg_packs/kgpack-20251227_104512/ZhiFei-Auto-Project-Profile-Rules-V1.1.json
+ - rule_sha256 = 2b83508f5c86c703fa4c8575139d7dd55decb8e13b7130b8ee42c69cbd9a1377
+
+[precheck_guard.json]
+ - passed = True
+ - project_profile_decision = require_manual_confirm
+ - input_sha256 = f927ac6397a96a879de2079d0cf9494722a28d1f0385b4f12b411603bad40315
+ - rule_path = /Users/youfeini/Desktop/文档生成系统/backend/kg_packs/kgpack-20251227_104512/ZhiFei-KG-PreCheck-Guard-FULLSCORE-PLUS-PROFILE.json
+ - rule_sha256 = 630a683d3679c59a9b929010e87859cf20bf3df3fc6566021951d0e4a3b08a3e
+
+[region_upgrade.json]
+ - applied = True
+ - region_key = anhui_hefei_general
+ - project_profile_decision = require_manual_confirm
+ - input_sha256 = cae8020b719849e70dd7b3f3a65415e63ee3e8dba578e2ace11cbd4b51c6a196
+ - rule_path = /Users/youfeini/Desktop/文档生成系统/backend/kg_packs/kgpack-20251227_104512/ZhiFei-KG-Upgrade-Rules-7.1-Anhui-Hefei.json
+ - rule_sha256 = 882f54dd70bee5f1a76a496614403c24d4d7d68a95fb114aa2588299e9bee246
+
+[compose.json]
+ - status = ok
+ - saved_at = build/compose.json
+ - topic = 建筑装饰装修工程施工组织设计
+
+[HTTP] GET /audit -> 200
+
+[AUDIT replay]
+ - replayable = True
+ - missing    = []
+
+[HTTP] POST /export -> 200
+ - content-type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+[OK] exported docx saved: /Users/youfeini/Desktop/文档生成系统/build/compose_exported.docx size=36932 bytes
+
+[SUCCESS] E2E smoke test passed: /compose -> artifacts -> /audit (replayable) -> /export
+
+---- POST /compose payload ----
+{
+  "topic": "建筑装饰装修工程施工组织设计（合肥）",
+  "outline": [
+    "工程概况",
+    "施工准备",
+    "装饰装修工程施工方案",
+    "质量管理体系与措施",
+    "安全管理体系与措施",
+    "文明施工与环保"
+  ]
+}
+
+[HTTP] POST /compose -> 200
+[BODY head 1200 chars]:
+{"status":"ok","topic":"建筑装饰装修工程施工组织设计","outline":["工程概况","施工准备","装饰装修工程施工方案","质量管理体系与措施","安全管理体系与措施","文明施工与环保"],"sections":[{"id":1,"title":"工程概况","content":"工程概况 —— 本章节内容由自动生成器生成（示例）。"},{"id":2,"title":"施工准备","content":"施工准备 —— 本章节内容由自动生成器生成（示例）。"},{"id":3,"title":"装饰装修工程施工方案","content":"装饰装修工程施工方案 —— 本章节内容由自动生成器生成（示例）。"},{"id":4,"title":"质量管理体系与措施","content":"质量管理体系与措施 —— 本章节内容由自动生成器生成（示例）。"},{"id":5,"title":"安全管理体系与措施","content":"安全管理体系与措施 —— 本章节内容由自动生成器生成（示例）。"},{"id":6,"title":"文明施工与环保","content":"文明施工与环保 —— 本章节内容由自动生成器生成（示例）。"}],"style":{"paper":"A4","margins":[20,20,20,20],"font":"SimSun","font_size":12,"line_spacing":1.5,"auto_page_break":true},"saved_at":"build/compose.json"}
+[OK] exists: /Users/youfeini/Desktop/文档生成系统/build/project_profile.json size=1381 bytes
+[OK] exists: /Users/youfeini/Desktop/文档生成系统/build/precheck_guard.json size=1756 bytes
+[OK] exists: /Users/youfeini/Desktop/文档生成系统/build/region_upgrade.json size=805 bytes
+[OK] exists: /Users/youfeini/Desktop/文档生成系统/build/compose.json size=2377 bytes
+
+[project_profile.json]
+ - decision = require_manual_confirm
+ - project_type = {"value": "装饰装修", "confidence": 0.78, "source": "keyword", "evidence": ["装修", "装饰"]}
+ - mandatory_dimensions = ['施工安全风险识别与控制', '工程质量保障体系', '绿色施工与环保措施']
+ - input_sha256 = cae8020b719849e70dd7b3f3a65415e63ee3e8dba578e2ace11cbd4b51c6a196
+ - rule_path = /Users/youfeini/Desktop/文档生成系统/backend/kg_packs/kgpack-20251227_104512/ZhiFei-Auto-Project-Profile-Rules-V1.1.json
+ - rule_sha256 = 2b83508f5c86c703fa4c8575139d7dd55decb8e13b7130b8ee42c69cbd9a1377
+
+[precheck_guard.json]
+ - passed = True
+ - project_profile_decision = require_manual_confirm
+ - input_sha256 = f927ac6397a96a879de2079d0cf9494722a28d1f0385b4f12b411603bad40315
+ - rule_path = /Users/youfeini/Desktop/文档生成系统/backend/kg_packs/kgpack-20251227_104512/ZhiFei-KG-PreCheck-Guard-FULLSCORE-PLUS-PROFILE.json
+ - rule_sha256 = 630a683d3679c59a9b929010e87859cf20bf3df3fc6566021951d0e4a3b08a3e
+
+[region_upgrade.json]
+ - applied = True
+ - region_key = anhui_hefei_general
+ - project_profile_decision = require_manual_confirm
+ - input_sha256 = cae8020b719849e70dd7b3f3a65415e63ee3e8dba578e2ace11cbd4b51c6a196
+ - rule_path = /Users/youfeini/Desktop/文档生成系统/backend/kg_packs/kgpack-20251227_104512/ZhiFei-KG-Upgrade-Rules-7.1-Anhui-Hefei.json
+ - rule_sha256 = 882f54dd70bee5f1a76a496614403c24d4d7d68a95fb114aa2588299e9bee246
+
+[compose.json]
+ - status = ok
+ - saved_at = build/compose.json
+ - topic = 建筑装饰装修工程施工组织设计
+
+[HTTP] GET /audit -> 200
+
+[AUDIT replay]
+ - replayable = True
+ - missing    = []
+
+[HTTP] POST /export -> 200
+ - content-type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+[OK] exported docx saved: /Users/youfeini/Desktop/文档生成系统/build/compose_exported.docx size=36932 bytes
+
+[SUCCESS] E2E smoke test passed: /compose -> artifacts -> /audit (replayable) -> /export
+[2026-02-03 23:27:31] Verifying artifacts...
+[2026-02-03 23:27:31] Verifying artifacts...
+[2026-02-03 23:27:31] [OK] build/project_profile.json exists (1381 bytes)
+[2026-02-03 23:27:31] [OK] build/project_profile.json exists (1381 bytes)
+[2026-02-03 23:27:31] [OK] build/precheck_guard.json exists (1756 bytes)
+[2026-02-03 23:27:31] [OK] build/precheck_guard.json exists (1756 bytes)
+[2026-02-03 23:27:31] [OK] build/region_upgrade.json exists (805 bytes)
+[2026-02-03 23:27:31] [OK] build/region_upgrade.json exists (805 bytes)
+[2026-02-03 23:27:31] [OK] build/compose.json exists (2377 bytes)
+[2026-02-03 23:27:31] [OK] build/compose.json exists (2377 bytes)
+[2026-02-03 23:27:31] [OK] DOCX output: build/compose_exported.docx
+[2026-02-03 23:27:31] [OK] DOCX output: build/compose_exported.docx
+[2026-02-03 23:27:31] === E2E Test Complete ===
+[2026-02-03 23:27:31] === E2E Test Complete ===
+[2026-02-03 23:27:31] [PASS] All checks passed
+[2026-02-03 23:27:31] [PASS] All checks passed
+[2026-02-03 23:27:31] Cleaning up...
+[2026-02-03 23:27:31] Cleaning up...
+
+[2026-02-03T23:27] === clawdbot 执行轮次 ===
+目标: 修复依赖 + 运行端到端测试
+
+1. 依赖问题诊断:
+   $ python3 -c "import fastapi, uvicorn, docx"
+   -> ImportError: pydantic_core arm64 vs x86_64
+
+2. 修复 pydantic:
+   $ pip3 uninstall pydantic pydantic_core -y && pip3 install pydantic pydantic_core
+   -> Successfully installed pydantic-2.12.5 pydantic_core-2.41.5
+
+3. 修复 pandas:
+   $ pip3 uninstall pandas -y && pip3 install pandas
+   -> Successfully installed pandas-3.0.0
+
+4. 修复 pillow/matplotlib/numpy:
+   $ pip3 uninstall pillow matplotlib numpy -y && pip3 install pillow matplotlib numpy
+   -> Successfully installed matplotlib-3.10.8 numpy-2.4.2 pillow-12.1.0
+
+5. 验证应用加载:
+   $ PYTHONPATH="$PWD" python3 -c "from backend.app.main import app; print(len(app.routes))"
+   -> App loaded OK, routes: 76
+
+6. 端到端测试:
+   $ PYTHONPATH="$PWD" python3 backend/scripts/smoke_e2e.py
+   -> [SUCCESS] E2E smoke test passed
+   
+   产物:
+   - build/project_profile.json (1381 bytes)
+   - build/precheck_guard.json (1756 bytes)
+   - build/region_upgrade.json (805 bytes)
+   - build/compose.json (2377 bytes)
+   - build/compose_exported.docx (36932 bytes)
+
+结果: PASS
+下一步: 创建 README.md (DoD #4)
+
+[2026-02-03T23:28] === clawdbot 最终轮次 ===
+目标: 修复 audit_service 导入问题 + 创建 README
+
+1. 诊断 /audit 500 错误:
+   $ curl http://127.0.0.1:8000/audit
+   -> ModuleNotFoundError: No module named 'kg_loader'
+   原因: backend/audit_service.py 使用 `import kg_loader` 但运行目录不在 backend/
+
+2. 修复导入:
+   修改 backend/audit_service.py:
+   - 旧: import kg_loader
+   + 新: try: import kg_loader except: from backend import kg_loader
+
+3. 重新运行 E2E 测试:
+   $ bash scripts/run_e2e.sh
+   -> [PASS] All checks passed
+   
+   关键输出:
+   - [HTTP] GET /audit -> 200
+   - replayable = True
+   - [OK] exported docx saved: build/compose_exported.docx size=36932 bytes
+
+4. 创建 README.md:
+   内容包含: 环境准备、启动命令、生成命令、产物路径、排错方式
+
+DoD 最终检查:
+[✓] DoD #1: 一键运行入口 - scripts/run_e2e.sh
+[✓] DoD #2: DOCX 导出 - build/compose_exported.docx (36932 bytes)
+[✓] DoD #3: 验证命令 - smoke_e2e.py, e2e_result.txt=PASS
+[✓] DoD #4: README 文档 - README.md 已创建
+
+结果: 全部 DoD 满足
