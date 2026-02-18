@@ -1,0 +1,548 @@
+# -*- coding: utf-8 -*-
+"""
+Audit & Replay (traceability)
+- 汇总 build/ 下的可追溯产物：project_profile / kg_context / region_upgrade / precheck_guard / compose
+- 校验关键规则文件：project_profile_rules / precheck_guard_rules / region_upgrade_rules / domain_map / base_packs
+"""
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, List, Tuple
+import json
+import hashlib
+
+import kg_loader
+
+
+
+# ---- Quality Gate Mode (warn|fail) ----
+QUALITY_GATE_MODE = os.getenv('QUALITY_GATE_MODE', 'warn').lower()
+mode = QUALITY_GATE_MODE
+# --------------------------------------
+
+BACKEND_DIR = Path(__file__).resolve().parent
+BUILD_DIR = BACKEND_DIR / "build"
+
+
+def _sha256_file(p: Optional[Path]) -> Optional[str]:
+    if not p or not isinstance(p, Path) or (not p.exists()) or (not p.is_file()):
+        return None
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _file_meta(p: Path) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {"path": str(p), "exists": False}
+    try:
+        if p.exists():
+            meta["exists"] = True
+            st = p.stat()
+            meta["size_bytes"] = st.st_size
+            meta["mtime"] = datetime.fromtimestamp(st.st_mtime).isoformat()
+    except Exception:
+        pass
+    return meta
+
+
+def _safe_read_json(p: Path) -> Tuple[Optional[Any], Optional[str]]:
+    if not p.exists():
+        return None, "not_found"
+    try:
+        txt = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return None, f"read_error:{e!r}"
+    try:
+        return json.loads(txt), None
+    except Exception as e:
+        return None, f"json_error:{e!r}"
+
+
+def _first_str(d: Any, keys: List[str]) -> Optional[str]:
+    if not isinstance(d, dict):
+        return None
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def build_audit_report() -> Dict[str, Any]:
+    BUILD_DIR.mkdir(exist_ok=True)
+    cfg = kg_loader.load_kg_config()
+
+    artifacts = {
+        "project_profile": BUILD_DIR / "project_profile.json",
+        "kg_context": BUILD_DIR / "kg_context.json",
+        "region_upgrade": BUILD_DIR / "region_upgrade.json",
+        "precheck_guard": BUILD_DIR / "precheck_guard.json",
+        "compose": BUILD_DIR / "compose.json",
+        "retrieve": BUILD_DIR / "retrieve.json",
+    }
+
+    parsed: Dict[str, Any] = {}
+    for name, path in artifacts.items():
+        obj, err = _safe_read_json(path)
+        parsed[name] = {"file": _file_meta(path), "json": obj, "error": err}
+
+    def _get_json(name: str) -> Any:
+        return parsed.get(name, {}).get("json")
+
+    pp = _get_json("project_profile") or {}
+    kg = _get_json("kg_context") or {}
+    ru = _get_json("region_upgrade") or {}
+    pg = _get_json("precheck_guard") or {}
+    cj = _get_json("compose") or {}
+
+    # retrieve (trace)
+    rt = _get_json("retrieve") or {}
+    retrieve_trace = {
+        **parsed.get("retrieve", {}).get("file", {}),
+        "query": rt.get("query") if isinstance(rt, dict) else None,
+        "tokens": rt.get("tokens") if isinstance(rt, dict) else None,
+        "top_k": rt.get("top_k") if isinstance(rt, dict) else None,
+        "docs_scanned": rt.get("docs_scanned") if isinstance(rt, dict) else None,
+        "results_count": (len(rt.get("results") or []) if isinstance(rt, dict) else None),
+        "trace_file": str(BUILD_DIR / "retrieve.json"),
+    }
+
+    project_profile = {
+        **parsed["project_profile"]["file"],
+        "decision": pp.get("decision") if isinstance(pp, dict) else None,
+        "project_type": pp.get("project_type") if isinstance(pp, dict) else None,
+        "mandatory_dimensions": pp.get("mandatory_dimensions") if isinstance(pp, dict) else None,
+        "input_sha256": pp.get("input_sha256") if isinstance(pp, dict) else None,
+        "rule_path": pp.get("rule_path") if isinstance(pp, dict) else None,
+        "rule_sha256": pp.get("rule_sha256") if isinstance(pp, dict) else None,
+    }
+
+    kg_context = {
+        **parsed["kg_context"]["file"],
+        "input_sha256": kg.get("input_sha256") if isinstance(kg, dict) else None,
+        "domain_resolution": kg.get("domain_resolution") if isinstance(kg, dict) else None,
+        "selected_packs": kg.get("selected_packs") if isinstance(kg, dict) else None,
+        "domain_map_path": _first_str(kg.get("domain_map") if isinstance(kg, dict) else None, ["path", "rule_path"]),
+        "domain_map_sha256": _first_str(kg.get("domain_map") if isinstance(kg, dict) else None, ["sha256", "rule_sha256"]),
+    }
+
+    region_upgrade = {
+        **parsed["region_upgrade"]["file"],
+        "applied": ru.get("applied") if isinstance(ru, dict) else None,
+        "region_key": ru.get("region_key") if isinstance(ru, dict) else None,
+        "rule_path": ru.get("rule_path") if isinstance(ru, dict) else None,
+        "rule_sha256": ru.get("rule_sha256") if isinstance(ru, dict) else None,
+        "project_profile_decision": ru.get("project_profile_decision") if isinstance(ru, dict) else None,
+        "input_sha256": ru.get("input_sha256") if isinstance(ru, dict) else None,
+    }
+
+    precheck_guard = {
+        **parsed["precheck_guard"]["file"],
+        "passed": pg.get("passed") if isinstance(pg, dict) else None,
+        "project_profile_decision": pg.get("project_profile_decision") if isinstance(pg, dict) else None,
+        "rule_path": pg.get("rule_path") if isinstance(pg, dict) else None,
+        "rule_sha256": pg.get("rule_sha256") if isinstance(pg, dict) else None,
+        "input_sha256": pg.get("input_sha256") if isinstance(pg, dict) else None,
+    }
+
+    compose = {
+        **parsed["compose"]["file"],
+        "status": cj.get("status") if isinstance(cj, dict) else None,
+        "saved_at": cj.get("saved_at") if isinstance(cj, dict) else None,
+        "topic": cj.get("topic") if isinstance(cj, dict) else None,
+        "sections_count": (len(cj.get("sections") or []) if isinstance(cj, dict) else None),
+    }
+
+    checks: List[Dict[str, Any]] = []
+
+    # 1) input_sha256 consistency
+    candidates: List[str] = []
+    for name in ["project_profile", "kg_context", "region_upgrade", "precheck_guard"]:
+        obj = _get_json(name)
+        if isinstance(obj, dict) and isinstance(obj.get("input_sha256"), str) and obj.get("input_sha256").strip():
+            candidates.append(obj["input_sha256"].strip())
+    uniq = sorted(set(candidates))
+    checks.append({
+        "check": "input_sha256_consistency",
+        "value": {"ok": len(uniq) <= 1, "candidates": candidates, "unique": uniq},
+    })
+
+    # 2) project_profile rule file
+    try:
+        pp_rule = kg_loader.get_project_profile_rule_path(cfg)
+        pp_rule_sha = _sha256_file(pp_rule)
+        expected = pp.get("rule_sha256") if isinstance(pp, dict) else None
+        checks.append({
+            "check": "project_profile_rule_file",
+            "value": {
+                "rule_path": str(pp_rule),
+                "exists": pp_rule.exists(),
+                "sha256": pp_rule_sha,
+                "sha256_match": (pp_rule_sha == expected) if (pp_rule_sha and isinstance(expected, str)) else None,
+            },
+        })
+    except Exception as e:
+        checks.append({"check": "project_profile_rule_file", "value": {"error": repr(e)}})
+
+    # 3) precheck_guard rule file
+    try:
+        pg_rule = kg_loader.get_precheck_guard_rule_path(cfg)
+        pg_rule_sha = _sha256_file(pg_rule)
+        expected = pg.get("rule_sha256") if isinstance(pg, dict) else None
+        checks.append({
+            "check": "precheck_guard_rule_file",
+            "value": {
+                "rule_path": str(pg_rule),
+                "exists": pg_rule.exists(),
+                "sha256": pg_rule_sha,
+                "sha256_match": (pg_rule_sha == expected) if (pg_rule_sha and isinstance(expected, str)) else None,
+            },
+        })
+    except Exception as e:
+        checks.append({"check": "precheck_guard_rule_file", "value": {"error": repr(e)}})
+
+    # 4) region_upgrade rule file
+    try:
+        region_key = ru.get("region_key") if isinstance(ru, dict) else None
+        if not region_key:
+            keys = sorted((cfg.get("region_upgrade_rules") or {}).keys())
+            region_key = keys[0] if keys else None
+        rp = kg_loader.get_region_upgrade_rule(region_key, cfg) if region_key else None
+        rp_sha = _sha256_file(rp) if rp else None
+        expected = ru.get("rule_sha256") if isinstance(ru, dict) else None
+        checks.append({
+            "check": "region_upgrade_rule_file",
+            "value": {
+                "region_key": region_key,
+                "rule_path": (str(rp) if rp else None),
+                "exists": (rp.exists() if rp else None),
+                "sha256": rp_sha,
+                "sha256_match": (rp_sha == expected) if (rp_sha and isinstance(expected, str)) else None,
+            },
+        })
+    except Exception as e:
+        checks.append({"check": "region_upgrade_rule_file", "value": {"error": repr(e)}})
+
+    # 5) domain_map rule file
+    try:
+        dm = kg_loader.get_domain_map_path(cfg)
+        dm_sha = _sha256_file(dm)
+        expected = None
+        if isinstance(kg, dict):
+            dm_info = kg.get("domain_map")
+            if isinstance(dm_info, dict):
+                expected = dm_info.get("sha256") or dm_info.get("rule_sha256")
+        checks.append({
+            "check": "domain_map_rule_file",
+            "value": {
+                "rule_path": str(dm),
+                "exists": dm.exists(),
+                "sha256": dm_sha,
+                "sha256_match": (dm_sha == expected) if (dm_sha and isinstance(expected, str)) else None,
+            },
+        })
+    except Exception as e:
+        checks.append({"check": "domain_map_rule_file", "value": {"error": repr(e)}})
+
+    # 6) base pack files (all configured)
+    try:
+        bps = kg_loader.get_base_pack_paths(cfg)
+        values = []
+        for p in bps:
+            values.append({
+                "name": p.name,
+                "path": str(p),
+                "exists": p.exists(),
+                "sha256": _sha256_file(p),
+            })
+        checks.append({"check": "base_pack_files", "value": values})
+    except Exception as e:
+        checks.append({"check": "base_pack_files", "value": {"error": repr(e)}})
+
+    # 7) selected pack files (from kg_context)
+    try:
+        sel = kg.get("selected_packs") if isinstance(kg, dict) else None
+        if isinstance(sel, list):
+            values = []
+            for x in sel:
+                if not isinstance(x, dict):
+                    continue
+                path_s = x.get("path")
+                p = Path(path_s) if isinstance(path_s, str) and path_s else None
+                values.append({
+                    "name": x.get("name") or (p.name if p else None),
+                    "path": path_s,
+                    "exists": (p.exists() if p else None),
+                    "sha256": (_sha256_file(p) if p else None),
+                    "reason": x.get("reason"),
+                })
+            checks.append({"check": "selected_pack_files", "value": values})
+        else:
+            checks.append({"check": "selected_pack_files", "value": None})
+    except Exception as e:
+        checks.append({"check": "selected_pack_files", "value": {"error": repr(e)}})
+    # replayability = artifacts + rule files all present
+    missing: List[str] = []
+    for _, path in artifacts.items():
+        if not path.exists():
+            missing.append(str(path))
+
+    # rule files required
+    try:
+        if not kg_loader.get_project_profile_rule_path(cfg).exists():
+            missing.append(str(kg_loader.get_project_profile_rule_path(cfg)))
+    except Exception as e:
+        missing.append(f"project_profile_rule_error:{e!r}")
+
+    try:
+        if not kg_loader.get_precheck_guard_rule_path(cfg).exists():
+            missing.append(str(kg_loader.get_precheck_guard_rule_path(cfg)))
+    except Exception as e:
+        missing.append(f"precheck_guard_rule_error:{e!r}")
+
+    try:
+        keys = sorted((cfg.get("region_upgrade_rules") or {}).keys())
+        default_key = keys[0] if keys else None
+        region_key = (ru.get("region_key") if isinstance(ru, dict) else None) or default_key
+        rp = kg_loader.get_region_upgrade_rule(region_key, cfg) if region_key else None
+        if rp and not rp.exists():
+            missing.append(str(rp))
+    except Exception as e:
+        missing.append(f"region_upgrade_rule_error:{e!r}")
+
+    try:
+        dm = kg_loader.get_domain_map_path(cfg)
+        if not dm.exists():
+            missing.append(str(dm))
+    except Exception as e:
+        missing.append(f"domain_map_error:{e!r}")
+
+    try:
+        for p in kg_loader.get_base_pack_paths(cfg):
+            if not p.exists():
+                missing.append(str(p))
+    except Exception as e:
+        missing.append(f"base_pack_error:{e!r}")
+
+    replayable = (len(missing) == 0)
+
+    # quality metrics (soft gate; recorded only)
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        _build_dir = globals().get("BUILD_DIR") or _Path("build")
+        def _safe_load(_fn: str):
+            _p = _build_dir / _fn
+            if not _p.exists():
+                return None
+            return _json.loads(_p.read_text(encoding="utf-8"))
+        _rj = _safe_load("retrieve.json") or {}
+        _results = _rj.get("results") if isinstance(_rj, dict) else None
+        retrieve_results_count = len(_results) if isinstance(_results, list) else 0
+        _cj = _safe_load("compose.json") or {}
+        _secs = _cj.get("sections") if isinstance(_cj, dict) else None
+        if isinstance(_secs, list):
+            compose_sections_count = len(_secs)
+            compose_nonempty_sections_count = sum(1 for _s in _secs if isinstance(_s, dict) and str(_s.get("content","")).strip())
+        else:
+            compose_sections_count = int(_cj.get("sections_count") or 0) if isinstance(_cj, dict) else 0
+            compose_nonempty_sections_count = None
+        compose_nonempty_ratio = (compose_nonempty_sections_count / compose_sections_count) if (compose_nonempty_sections_count is not None and compose_sections_count) else None
+        import re as _re
+        _evidence_pat = _re.compile(r'(来源|证据|佐证|引用|出处|依据|锚点)', _re.I)
+        evidence_sections_count = None
+        evidence_coverage_ratio = None
+        if isinstance(_secs, list):
+            evidence_sections_count = sum(
+                1 for _s in _secs
+                if isinstance(_s, dict) and _evidence_pat.search(str(_s.get('content', '')))
+            )
+            evidence_coverage_ratio = (evidence_sections_count / compose_sections_count) if compose_sections_count else None
+            _param_pat = _re.compile(r"\d+(?:\.\d+)?\s*(mm|cm|m|㎡|m2|m²|MPa|kN|kW|h|小时|d|天|%|℃)", _re.I)
+            param_coverage_sections_count = None
+            param_coverage_ratio = None
+            if isinstance(_secs, list):
+                param_coverage_sections_count = sum(
+                    1 for _s in _secs
+                    if isinstance(_s, dict) and _param_pat.search(str(_s.get('content', '')))
+                )
+                param_coverage_ratio = (param_coverage_sections_count / compose_sections_count) if compose_sections_count else None
+                                # param category coverage (MECE: size/time/strength/equipment/personnel) (warn-only metrics)
+                param_category_coverage = {'size': 0, 'time': 0, 'strength': 0, 'equipment': 0, 'personnel': 0}
+                param_category_examples = {'size': [], 'time': [], 'strength': [], 'equipment': [], 'personnel': []}
+                try:
+                    _secs = compose.get('sections') if isinstance(compose, dict) else None
+                    _outline = compose.get('outline') if isinstance(compose, dict) else None
+                    _extra_text = json.dumps(_outline, ensure_ascii=False) if _outline is not None else ''
+                    if isinstance(_secs, list):
+                        _pat = {
+                            'size': re.compile("(厚度|间距|长度|宽度|高度|标高|直径|面积|尺寸)\\s*[:：]?\\s*\\d+(?:\\.\\d+)?\\s*(mm|cm|m|㎡|m2|m²)|\\d+(?:\\.\\d+)?\\s*(mm|cm|m|㎡|m2|m²)"),
+                            'time': re.compile("(养护|间隔|等待|工期|周期|持续)\\s*[:：]?\\s*\\d+(?:\\.\\d+)?\\s*(min|h|d)|\\d+(?:\\.\\d+)?\\s*(min|h|d)|分钟|小时|天|日"),
+                            'strength': re.compile("(强度|等级|压实度|坍落度|允许偏差|平整度|含水率)\\s*[:：]?[^\\n]{0,20}|MPa|kPa|\\bC\\d{2}\\b|\\b\\d{2,3}%\\b"),
+                            'equipment': re.compile("(型号|功率|吨位|作业半径)\\s*[:：]?[^\\n]{0,20}|\\b\\d+(?:\\.\\d+)?\\s*(kW|kw)\\b|\\b\\d+(?:\\.\\d+)?\\s*t\\b|挖掘机|吊车|泵车|搅拌机|压路机|发电机|振动棒|切割机"),
+                            'personnel': re.compile("\\b\\d+\\s*人\\b|人数\\s*[:：]?\\s*\\d+|班组|工种|劳动力|木工|钢筋工|电工|焊工|架子工|普工|安全员|质检员"),
+                        }
+                        def _add_example(_k, _txt, _m):
+                            if len(param_category_examples[_k]) >= 3:
+                                return
+                            a = max(0, _m.start() - 20)
+                            b = min(len(_txt), _m.end() + 20)
+                            snip = _txt[a:b].replace('\n',' ').strip()
+                            if len(snip) > 120:
+                                snip = snip[:120] + '...'
+                            param_category_examples[_k].append(snip)
+                        for _sec in _secs:
+                            if not isinstance(_sec, dict):
+                                continue
+                            _txt = str(_sec.get('title','')) + "\n" + str(_sec.get('content','')) + "\n" + _extra_text
+                            for _k, _r in _pat.items():
+                                _mm = _r.search(_txt)
+                                if _mm:
+                                    param_category_coverage[_k] += 1
+                                    _add_example(_k, _txt, _mm)
+                except Exception:
+                    pass
+                param_category_covered = sum(1 for _v in param_category_coverage.values() if _v > 0)
+                param_category_total = len(param_category_coverage)
+                param_category_coverage_ratio = (param_category_covered / param_category_total) if param_category_total else None
+                param_category_missing = [k for k, v in param_category_coverage.items() if v == 0]
+
+
+            else:
+                param_coverage_sections_count = 0
+                param_coverage_ratio = None
+        else:
+            evidence_sections_count = 0
+            evidence_coverage_ratio = None
+        thresholds = {"retrieve_results_min": 1, "compose_sections_min": 3, "compose_nonempty_ratio_min": 0.90}
+        ok = {
+            "retrieve_results_ok": (retrieve_results_count >= thresholds["retrieve_results_min"]),
+            "compose_sections_ok": (compose_sections_count >= thresholds["compose_sections_min"]),
+            "compose_nonempty_ok": (compose_nonempty_ratio is None) or (compose_nonempty_ratio >= thresholds["compose_nonempty_ratio_min"]),
+        }
+        # topic consistency (project_profile / kg_context / compose)
+        topic_pp = (project_profile or {}).get('topic') if isinstance(project_profile, dict) else None
+        topic_kg = (kg_context or {}).get('topic') if isinstance(kg_context, dict) else None
+        topic_cp = (compose or {}).get('topic') if isinstance(compose, dict) else None
+        # domain_key / region_key consistency (warn-only; metrics)
+        dk_pp = (project_profile or {}).get('domain_key') if isinstance(project_profile, dict) else None
+        dk_kg = None
+        if isinstance(kg_context, dict):
+            _dr = kg_context.get('domain_resolution')
+            if isinstance(_dr, dict):
+                dk_kg = _dr.get('domain_key')
+            if not dk_kg:
+                dk_kg = kg_context.get('domain_key')
+        dk_vals = [v.strip() for v in (dk_pp, dk_kg) if isinstance(v, str) and v.strip()]
+        domain_key_consistency_ok = (len(set(dk_vals)) <= 1)
+        domain_key_mismatch = None
+        if not domain_key_consistency_ok:
+            domain_key_mismatch = {'project_profile': dk_pp, 'kg_context': dk_kg}
+        
+        rk_pp = (project_profile or {}).get('region_key') if isinstance(project_profile, dict) else None
+        rk_ru = ru.get('region_key') if isinstance(ru, dict) else None
+        rk_vals = [v.strip() for v in (rk_pp, rk_ru) if isinstance(v, str) and v.strip()]
+        region_key_consistency_ok = (len(set(rk_vals)) <= 1)
+        region_key_mismatch = None
+        if not region_key_consistency_ok:
+            region_key_mismatch = {'project_profile': rk_pp, 'region_upgrade': rk_ru}
+        topic_vals = [v for v in [topic_pp, topic_kg, topic_cp] if isinstance(v, str) and v.strip()]
+        topic_consistency_ok = True
+        topic_mismatch = None
+        if topic_vals:
+            topic_consistency_ok = (len(set(topic_vals)) == 1)
+            if not topic_consistency_ok:
+                topic_mismatch = {'project_profile': topic_pp, 'kg_context': topic_kg, 'compose': topic_cp}
+        checks.append({
+            "check": "quality_metrics_soft",
+            "value": {
+                "soft_gate": True,
+                "thresholds": thresholds,
+                "retrieve_results_count": retrieve_results_count,
+                "compose_sections_count": compose_sections_count,
+                "compose_nonempty_sections_count": compose_nonempty_sections_count,
+                "compose_nonempty_ratio": compose_nonempty_ratio,
+                "evidence_sections_count": evidence_sections_count,
+                "evidence_coverage_ratio": evidence_coverage_ratio,
+                "param_coverage_sections_count": param_coverage_sections_count,
+                "param_coverage_ratio": param_coverage_ratio,
+                "param_category_coverage": param_category_coverage,
+                "param_category_coverage_ratio": param_category_coverage_ratio,
+                "param_category_missing": param_category_missing,
+            "param_category_examples": param_category_examples,
+                "topic_consistency_ok": topic_consistency_ok,
+                "topic_mismatch": topic_mismatch,
+                "domain_key_consistency_ok": domain_key_consistency_ok,
+                "domain_key_mismatch": domain_key_mismatch,
+                "region_key_consistency_ok": region_key_consistency_ok,
+                "region_key_mismatch": region_key_mismatch,
+                "ok": ok,
+            }
+        })
+    except Exception as e:
+        # topic consistency (project_profile / kg_context / compose)
+        topic_pp = (project_profile or {}).get('topic') if isinstance(project_profile, dict) else None
+        topic_kg = (kg_context or {}).get('topic') if isinstance(kg_context, dict) else None
+        topic_cp = (compose or {}).get('topic') if isinstance(compose, dict) else None
+        topic_vals = [v for v in [topic_pp, topic_kg, topic_cp] if isinstance(v, str) and v.strip()]
+        topic_consistency_ok = True
+        topic_mismatch = None
+        if topic_vals:
+            topic_consistency_ok = (len(set(topic_vals)) == 1)
+            if not topic_consistency_ok:
+                topic_mismatch = {'project_profile': topic_pp, 'kg_context': topic_kg, 'compose': topic_cp}
+        checks.append({"check": "quality_metrics_soft", "value": {"soft_gate": True, "error": repr(e)}})
+
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "project_profile": project_profile,
+        "kg_context": kg_context,
+        "retrieve": retrieve_trace,
+        "region_upgrade": region_upgrade,
+        "precheck_guard": precheck_guard,
+        "compose": compose,
+        "checks": checks,
+        "replay": {"replayable": replayable, "missing": missing},
+    }
+    # MECE/Observability: surface quality_metrics_soft key results at top-level for easy lookup
+    _soft = None
+    if isinstance(checks, list):
+        for _c in checks:
+            if isinstance(_c, dict) and _c.get('check') == 'quality_metrics_soft' and isinstance(_c.get('value'), dict):
+                _soft = _c.get('value')
+                break
+    if isinstance(_soft, dict):
+        _keys = [
+            'soft_gate',
+            'topic_consistency_ok','topic_mismatch',
+            'domain_key_consistency_ok','domain_key_mismatch',
+            'region_key_consistency_ok','region_key_mismatch',
+            'evidence_coverage_ratio','param_coverage_ratio',
+            'param_category_coverage_ratio',
+            'param_category_missing',
+            'param_category_coverage',
+        'param_category_examples',
+            'retrieve_results_count','compose_sections_count','compose_nonempty_ratio',
+        ]
+        report['quality_metrics_soft_summary'] = {k: _soft.get(k) for k in _keys}
+        for _k in _keys:
+            report[_k] = _soft.get(_k)
+    # persist audit report to build/audit_report.json
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        _out = _Path("build") / "audit_report.json"
+        _out.parent.mkdir(parents=True, exist_ok=True)
+        _out.write_text(_json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return report
+
+
+
+__all__ = ["build_audit_report"]
