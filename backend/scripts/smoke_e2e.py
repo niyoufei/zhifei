@@ -26,7 +26,7 @@ def http_request(method: str, path: str, payload=None, timeout=60):
         return e.code, e.read() or b"", dict(e.headers or {})
     except Exception as e:
         print("[FATAL] Cannot reach server:", repr(e))
-        print("        请确认终端1正在运行：python3 -m uvicorn backend.app.main:app --reload")
+        print("        请确认终端1正在运行：python3 -m uvicorn app.main:app --reload")
         sys.exit(2)
 
 def read_json(path: Path):

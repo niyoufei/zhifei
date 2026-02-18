@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "pack_id": "default",
+  "pack_version": "v0-root-layout",
+  "created_at": "2025-12-27T14:34:49",
+  "file_count": 11,
+  "total_bytes": 1077777,
+  "files": [
+    {
+      "path": "Civil_Basic_Pack.json",
+      "size": 404175,
+      "sha256": "c002134118e007b415f02688bce6342af748e2fa48e4a49acec43c8bf442e57b"
+    },
+    {
+      "path": "Energy_Industrial_Pack.json",
+      "size": 64575,
+      "sha256": "a9f53ea3b30f85c46bf5443248a781bcfc837f554c4f34aabf6ca38daa6cd4da"
+    },
+    {
+      "path": "Risk_Specialist_Pack.json",
+      "size": 431042,
+      "sha256": "dc9f53ec980469c5c7b18152ae186a2b733378557ccc2556eb6635a0bc2dcbb1"
+    },
+    {
+      "path": "Special_Medical_Pack.json",
+      "size": 33714,
+      "sha256": "210f3ca4e1c974563f72d7b96daa477db4487e112461a6ad7eccc7167cecb186"
+    },
+    {
+      "path": "SuperKG-DOMAIN-MAP.json",
+      "size": 16467,
+      "sha256": "4181fdc2b0dd24895d52175f66d45cf30209694e4443081922de99c579a21692"
+    },
+    {
+      "path": "Transport_Infra_Pack.json",
+      "size": 108250,
+      "sha256": "abdff8efad9b2d1eaee26b09394c38022a2baa8efd5e1061e3e5e054d97770f0"
+    },
+    {
+      "path": "Universal_Base_Pack.json",
+      "size": 9712,
+      "sha256": "188f6648f20bf7f78fe501553e91efa165382cda000e0b1575c662fb44aa14c6"
+    },
+    {
+      "path": "ZhiFei-Auto-Project-Profile-Rules-V1.1.json",
+      "size": 2813,
+      "sha256": "2b83508f5c86c703fa4c8575139d7dd55decb8e13b7130b8ee42c69cbd9a1377"
+    },
+    {
+      "path": "ZhiFei-KG-PreCheck-Guard-FULLSCORE-PLUS-PROFILE.json",
+      "size": 2119,
+      "sha256": "630a683d3679c59a9b929010e87859cf20bf3df3fc6566021951d0e4a3b08a3e"
+    },
+    {
+      "path": "ZhiFei-KG-Upgrade-Rules-7.1-Anhui-Hefei.json",
+      "size": 2092,
+      "sha256": "882f54dd70bee5f1a76a496614403c24d4d7d68a95fb114aa2588299e9bee246"
+    },
+    {
+      "path": "ZhiFei-KG-Upgrade-Rules-7.1-Anhui-QingTian-AI-FULLSCORE-PLUS.json",
+      "size": 2818,
+      "sha256": "cbca2667fba239e063447fa8f8671e006dd0188d8e8044f4a8cc51446b99e734"
+    }
+  ]
+}

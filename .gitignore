@@ -23,6 +23,9 @@ __pycache__/
 # ===== Project input materials =====
 # Raw tender/BoQ/drawing materials are source inputs, not repo code
 /projects/inbox/**
+/projects/work/**
+/projects/done/**
+/projects/failed/**
 
 # ===== Local runtime / IDE state =====
 .bin/
@@ -59,9 +62,45 @@ __pycache__/
 /sample.txt
 /tmp.txt
 
-# ===== Embedded repo / web uploads =====
-# backend is a standalone git repo; keep it managed separately
-/backend/
+# ===== Backend convergence (single-repo source, ignore runtime noise) =====
+# Nested git metadata (will be removed during convergence)
+/backend/.git/
+
+# Backend caches / backups / temp
+/backend/**/__pycache__/
+/backend/**/*.py[cod]
+/backend/**/*.bak
+/backend/**/*.bak.*
+/backend/**/*.bak_*
+/backend/**/*.wip
+/backend/**/*.wip.*
+/backend/**/*.wip_*
+/backend/.kg_pack_state.json
+
+# Backend local runtime/output
+/backend/build/**
+/backend/data/uploads/**
+/backend/data/extracts/**
+/backend/data/audit/**
+/backend/data/auth/**
+/backend/data/previews/**
+/backend/data/autoplan/jobs/**
+/backend/data/autoplan/media/**
+/backend/data/autoplan/projects/**
+/backend/data/autoplan/tender_matrix.json
+/backend/data/autoplan/boq_data.json
+/backend/data/autoplan/param_receipt_latest.json
+/backend/data/autoplan/params.json
+/backend/data/autoplan/variant_cycle_global.json
+
+# Backend local assets / generated packs
+/backend/Project_Files/**
+/backend/ZhiFei_V20.1*/
+/backend/SuperKG-DOMAIN-MAP.json
+/backend/*_Pack.json
+/backend/ZhiFei-*.json
+
+# ===== Web uploads/runtime =====
 /frontend_web/uploads/**
 /frontend_web/*.docx
 /frontend_web/*.zip

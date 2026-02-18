@@ -1,0 +1,577 @@
+"""
+TenderParser 单元测试
+覆盖 tender_parser.py 的所有方法
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from backend.zhifei_autoplan.parsers.tender_parser import TenderParser, Section
+from backend.zhifei_autoplan.models import (
+    TenderDimension,
+    TenderIndexMatrix,
+    TenderIndexItem,
+    SourceSpan,
+)
+
+
+# ==============================================================================
+# Fixtures
+# ==============================================================================
+
+
+@pytest.fixture
+def parser():
+    """创建不带 LLM 的解析器实例"""
+    return TenderParser(llm=None)
+
+
+@pytest.fixture
+def parser_with_llm():
+    """创建带 LLM 的解析器实例"""
+    mock_llm = MagicMock()
+    mock_llm.complete = AsyncMock(return_value="关键词1,关键词2")
+    return TenderParser(llm=mock_llm)
+
+
+# ==============================================================================
+# __init__ tests
+# ==============================================================================
+
+
+class TestInit:
+    """测试 __init__ 方法"""
+
+    def test_init_without_llm(self):
+        """初始化时不提供 LLM"""
+        parser = TenderParser()
+        assert parser.llm is None
+
+    def test_init_with_llm(self):
+        """初始化时提供 LLM"""
+        mock_llm = MagicMock()
+        parser = TenderParser(llm=mock_llm)
+        assert parser.llm is mock_llm
+
+
+# ==============================================================================
+# _is_qa_file tests
+# ==============================================================================
+
+
+class TestIsQaFile:
+    """测试 _is_qa_file 方法"""
+
+    def test_qa_file_by_path_dyi(self, parser):
+        """路径包含'答疑'"""
+        result = parser._is_qa_file("/path/to/答疑文件.pdf", "普通内容")
+        assert result is True
+
+    def test_qa_file_by_path_chengqing(self, parser):
+        """路径包含'澄清'"""
+        result = parser._is_qa_file("/path/to/澄清说明.pdf", "普通内容")
+        assert result is True
+
+    def test_qa_file_by_path_buyi(self, parser):
+        """路径包含'补遗'"""
+        result = parser._is_qa_file("/path/to/补遗文件.pdf", "普通内容")
+        assert result is True
+
+    def test_qa_file_by_path_biangeng(self, parser):
+        """路径包含'变更'"""
+        result = parser._is_qa_file("/path/to/变更通知.pdf", "普通内容")
+        assert result is True
+
+    def test_qa_file_by_text_dyi(self, parser):
+        """内容包含'答疑'"""
+        result = parser._is_qa_file("/path/to/normal.pdf", "这是答疑内容")
+        assert result is True
+
+    def test_qa_file_by_text_chengqing(self, parser):
+        """内容包含'澄清'"""
+        result = parser._is_qa_file("/path/to/normal.pdf", "澄清说明如下")
+        assert result is True
+
+    def test_qa_file_by_text_buyi(self, parser):
+        """内容包含'补遗'"""
+        result = parser._is_qa_file("/path/to/normal.pdf", "补遗第一条")
+        assert result is True
+
+    def test_qa_file_by_text_biangeng(self, parser):
+        """内容包含'变更'"""
+        result = parser._is_qa_file("/path/to/normal.pdf", "工程变更通知")
+        assert result is True
+
+    def test_not_qa_file(self, parser):
+        """普通文件（路径和内容都不匹配）"""
+        result = parser._is_qa_file("/path/to/tender.pdf", "招标文件正文")
+        assert result is False
+
+    def test_qa_file_both_match(self, parser):
+        """路径和内容都匹配"""
+        result = parser._is_qa_file("/path/答疑.pdf", "答疑内容")
+        assert result is True
+
+
+# ==============================================================================
+# _split_sections tests
+# ==============================================================================
+
+
+class TestSplitSections:
+    """测试 _split_sections 方法"""
+
+    def test_empty_text(self, parser):
+        """空文本 - 返回空列表"""
+        result = parser._split_sections("")
+        assert len(result) == 0
+
+    def test_no_section_match(self, parser):
+        """没有匹配到任何章节标题"""
+        text = "这是一段普通文本\n没有任何章节标题"
+        result = parser._split_sections(text)
+        assert len(result) == 1
+        assert result[0].title == "未分类"
+        assert "普通文本" in result[0].text
+
+    def test_single_section_qianyan(self, parser):
+        """单个章节 - 前言（后续内容不含关键词）"""
+        text = "第一章 前言\n这是内容"
+        result = parser._split_sections(text)
+        assert len(result) == 1
+        assert result[0].title == "前言"
+
+    def test_single_section_gaikuang(self, parser):
+        """单个章节 - 工程概况"""
+        text = "第二章 工程概况\n项目位于XX市"
+        result = parser._split_sections(text)
+        assert len(result) == 1
+        assert result[0].title == "工程概况"
+
+    def test_multiple_sections(self, parser):
+        """多个章节（内容不含关键词）"""
+        text = """第一章 前言
+第一部分内容
+第二章 工程概况
+第二部分内容
+第三章 技术标准
+第三部分内容"""
+        result = parser._split_sections(text)
+        assert len(result) == 3
+        assert result[0].title == "前言"
+        assert result[1].title == "工程概况"
+        assert result[2].title == "技术标准"
+
+    def test_section_jishu_biaozhun(self, parser):
+        """技术标准章节"""
+        text = "一、技术标准\n执行国家标准"
+        result = parser._split_sections(text)
+        assert result[0].title == "技术标准"
+
+    def test_section_anquan(self, parser):
+        """安全章节"""
+        text = "第五章 安全文明施工\n安全措施要求"
+        result = parser._split_sections(text)
+        assert result[0].title == "安全"
+
+    def test_section_jindu(self, parser):
+        """进度计划章节"""
+        text = "第六章 进度计划\n工期为120天"
+        result = parser._split_sections(text)
+        assert result[0].title == "进度计划"
+
+    def test_section_huanbao(self, parser):
+        """环保章节"""
+        text = "第七章 环境保护\n减少扬尘污染"
+        result = parser._split_sections(text)
+        assert result[0].title == "环境保护"
+
+    def test_section_pingfen(self, parser):
+        """评分章节"""
+        text = "附件 评分标准\n技术标得分"
+        result = parser._split_sections(text)
+        assert result[0].title == "评分"
+
+    def test_section_koufen(self, parser):
+        """扣分章节"""
+        text = "第八章 扣分项\n缺失资料扣5分"
+        result = parser._split_sections(text)
+        assert result[0].title == "扣分"
+
+    def test_section_feibiao(self, parser):
+        """废标章节"""
+        text = "第九章 废标条款\n资质不符废标"
+        result = parser._split_sections(text)
+        assert result[0].title == "废标"
+
+    def test_section_content_preserved(self, parser):
+        """章节内容完整保留"""
+        text = """工程概况
+第一行内容
+第二行内容
+第三行内容"""
+        result = parser._split_sections(text)
+        assert "第一行内容" in result[0].text
+        assert "第二行内容" in result[0].text
+        assert "第三行内容" in result[0].text
+
+
+# ==============================================================================
+# _read_pdf tests (with mocking)
+# ==============================================================================
+
+
+class TestReadPdf:
+    """测试 _read_pdf 方法"""
+
+    def test_read_pdf_single_page(self, parser):
+        """读取单页 PDF"""
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "页面内容"
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=None)
+
+        with patch("pdfplumber.open", return_value=mock_pdf):
+            path, text = parser._read_pdf("/path/to/file.pdf")
+            assert path == "/path/to/file.pdf"
+            assert text == "页面内容"
+
+    def test_read_pdf_multiple_pages(self, parser):
+        """读取多页 PDF"""
+        mock_pages = []
+        for i in range(3):
+            page = MagicMock()
+            page.extract_text.return_value = f"第{i+1}页内容"
+            mock_pages.append(page)
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = mock_pages
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=None)
+
+        with patch("pdfplumber.open", return_value=mock_pdf):
+            path, text = parser._read_pdf("/path/to/file.pdf")
+            assert "第1页内容" in text
+            assert "第2页内容" in text
+            assert "第3页内容" in text
+
+    def test_read_pdf_empty_page(self, parser):
+        """读取空页面"""
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = None
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=None)
+
+        with patch("pdfplumber.open", return_value=mock_pdf):
+            path, text = parser._read_pdf("/path/to/file.pdf")
+            assert text == ""
+
+    def test_read_pdf_mixed_pages(self, parser):
+        """读取混合页面（有内容和空页面）"""
+        mock_page1 = MagicMock()
+        mock_page1.extract_text.return_value = "有内容"
+        mock_page2 = MagicMock()
+        mock_page2.extract_text.return_value = None
+        mock_page3 = MagicMock()
+        mock_page3.extract_text.return_value = "又有内容"
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page1, mock_page2, mock_page3]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=None)
+
+        with patch("pdfplumber.open", return_value=mock_pdf):
+            path, text = parser._read_pdf("/path/to/file.pdf")
+            assert "有内容" in text
+            assert "又有内容" in text
+
+
+# ==============================================================================
+# _extract_index_matrix tests
+# ==============================================================================
+
+
+class TestExtractIndexMatrix:
+    """测试 _extract_index_matrix 方法"""
+
+    @pytest.mark.asyncio
+    async def test_extract_empty_sections(self, parser):
+        """空章节列表"""
+        sections = []
+        sources = []
+        result = await parser._extract_index_matrix(sections, sources)
+        assert len(result) == 6  # 6 个维度
+        for item in result:
+            assert item.keywords == []
+
+    @pytest.mark.asyncio
+    async def test_extract_quality_dimension(self, parser):
+        """提取质量维度"""
+        sections = [Section("技术标准", "质量验收标准要求合格", [])]
+        sources = [("/path/file.pdf", "质量标准内容")]
+        result = await parser._extract_index_matrix(sections, sources)
+
+        quality_item = next(i for i in result if i.dimension == TenderDimension.QUALITY)
+        assert "质量" in quality_item.keywords
+        assert quality_item.weight >= 0.2
+
+    @pytest.mark.asyncio
+    async def test_extract_safety_dimension(self, parser):
+        """提取安全维度"""
+        sections = [Section("安全", "安全文明施工风险防控", [])]
+        sources = [("/path/file.pdf", "安全要求")]
+        result = await parser._extract_index_matrix(sections, sources)
+
+        safety_item = next(i for i in result if i.dimension == TenderDimension.SAFETY)
+        assert "安全" in safety_item.keywords
+
+    @pytest.mark.asyncio
+    async def test_extract_schedule_dimension(self, parser):
+        """提取进度维度"""
+        sections = [Section("进度计划", "工期120天进度节点要求", [])]
+        sources = [("/path/file.pdf", "工期计划")]
+        result = await parser._extract_index_matrix(sections, sources)
+
+        schedule_item = next(i for i in result if i.dimension == TenderDimension.SCHEDULE)
+        assert "工期" in schedule_item.keywords or "进度" in schedule_item.keywords
+
+    @pytest.mark.asyncio
+    async def test_extract_environment_dimension(self, parser):
+        """提取环保维度"""
+        sections = [Section("环保", "环保要求扬尘噪声控制", [])]
+        sources = [("/path/file.pdf", "环保措施")]
+        result = await parser._extract_index_matrix(sections, sources)
+
+        env_item = next(i for i in result if i.dimension == TenderDimension.ENVIRONMENT)
+        assert "环保" in env_item.keywords or "扬尘" in env_item.keywords
+
+    @pytest.mark.asyncio
+    async def test_extract_difficulty_dimension(self, parser):
+        """提取重难点维度"""
+        sections = [Section("重难点", "重难点分析关键工序", [])]
+        sources = [("/path/file.pdf", "重难点内容")]
+        result = await parser._extract_index_matrix(sections, sources)
+
+        diff_item = next(i for i in result if i.dimension == TenderDimension.DIFFICULTY)
+        assert "重难点" in diff_item.keywords
+
+    @pytest.mark.asyncio
+    async def test_extract_penalty_dimension(self, parser):
+        """提取扣分维度"""
+        sections = [Section("扣分", "扣分项废标条款", [])]
+        sources = [("/path/file.pdf", "扣分规则")]
+        result = await parser._extract_index_matrix(sections, sources)
+
+        penalty_item = next(i for i in result if i.dimension == TenderDimension.PENALTY)
+        assert "扣分" in penalty_item.keywords or "废标" in penalty_item.keywords
+
+    @pytest.mark.asyncio
+    async def test_weight_increases_with_keywords(self, parser):
+        """权重随关键词增加"""
+        sections = [Section("质量", "质量验收标准合格优良", [])]  # 5个关键词
+        sources = []
+        result = await parser._extract_index_matrix(sections, sources)
+
+        quality_item = next(i for i in result if i.dimension == TenderDimension.QUALITY)
+        # 初始 0.2，每个关键词 +0.1，最多 1.0
+        assert quality_item.weight > 0.2
+
+    @pytest.mark.asyncio
+    async def test_weight_capped_at_1(self, parser):
+        """权重上限为 1.0"""
+        # 大量关键词
+        text = "质量 验收 标准 合格 优良 " * 10
+        sections = [Section("质量", text, [])]
+        sources = []
+        result = await parser._extract_index_matrix(sections, sources)
+
+        quality_item = next(i for i in result if i.dimension == TenderDimension.QUALITY)
+        assert quality_item.weight <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_source_spans_created(self, parser):
+        """创建源文件位置引用"""
+        sections = [Section("质量", "质量要求", [])]
+        sources = [("/path/tender.pdf", "这是质量标准文本")]
+        result = await parser._extract_index_matrix(sections, sources)
+
+        quality_item = next(i for i in result if i.dimension == TenderDimension.QUALITY)
+        assert len(quality_item.source_spans) > 0
+        span = quality_item.source_spans[0]
+        assert span.file_name == "/path/tender.pdf"
+
+    @pytest.mark.asyncio
+    async def test_source_spans_limit(self, parser):
+        """源文件引用最多 5 个"""
+        sections = [Section("质量", "质量要求", [])]
+        # 创建大量源文件
+        sources = [(f"/path/file{i}.pdf", "质量标准") for i in range(10)]
+        result = await parser._extract_index_matrix(sections, sources)
+
+        quality_item = next(i for i in result if i.dimension == TenderDimension.QUALITY)
+        assert len(quality_item.source_spans) <= 5
+
+    @pytest.mark.asyncio
+    async def test_with_llm_client(self, parser_with_llm):
+        """使用 LLM 客户端"""
+        sections = [Section("质量", "质量要求", [])]
+        sources = [("/path/file.pdf", "质量内容")]
+        result = await parser_with_llm._extract_index_matrix(sections, sources)
+
+        # 验证 LLM 被调用
+        assert parser_with_llm.llm.complete.called
+        assert len(result) == 6
+
+
+# ==============================================================================
+# parse tests (integration)
+# ==============================================================================
+
+
+class TestParse:
+    """测试 parse 方法（集成测试）"""
+
+    @pytest.mark.asyncio
+    async def test_parse_single_pdf(self, parser):
+        """解析单个 PDF"""
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "工程概况\n项目位于XX市\n质量标准要求"
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=None)
+
+        with patch("pdfplumber.open", return_value=mock_pdf):
+            result = await parser.parse(["/path/to/tender.pdf"])
+
+        assert isinstance(result, TenderIndexMatrix)
+        assert len(result.items) == 6
+
+    @pytest.mark.asyncio
+    async def test_parse_multiple_pdfs(self, parser):
+        """解析多个 PDF"""
+        mock_page1 = MagicMock()
+        mock_page1.extract_text.return_value = "招标文件正文"
+        mock_page2 = MagicMock()
+        mock_page2.extract_text.return_value = "技术标准内容"
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page1, mock_page2]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=None)
+
+        with patch("pdfplumber.open", return_value=mock_pdf):
+            result = await parser.parse(["/path/to/tender1.pdf", "/path/to/tender2.pdf"])
+
+        assert isinstance(result, TenderIndexMatrix)
+
+    @pytest.mark.asyncio
+    async def test_parse_with_qa_file(self, parser):
+        """解析带答疑文件"""
+        call_count = [0]
+
+        def mock_open(path):
+            mock_page = MagicMock()
+            if "答疑" in path:
+                mock_page.extract_text.return_value = "答疑内容：质量要求修正"
+            else:
+                mock_page.extract_text.return_value = "招标正文"
+
+            mock_pdf = MagicMock()
+            mock_pdf.pages = [mock_page]
+            mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+            mock_pdf.__exit__ = MagicMock(return_value=None)
+            call_count[0] += 1
+            return mock_pdf
+
+        with patch("pdfplumber.open", side_effect=mock_open):
+            result = await parser.parse(["/path/tender.pdf", "/path/答疑.pdf"])
+
+        assert isinstance(result, TenderIndexMatrix)
+
+    @pytest.mark.asyncio
+    async def test_parse_returns_matrix_structure(self, parser):
+        """验证返回的矩阵结构"""
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "工程概况"
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=None)
+
+        with patch("pdfplumber.open", return_value=mock_pdf):
+            result = await parser.parse(["/path/to/tender.pdf"])
+
+        # 验证结构
+        assert hasattr(result, "project_name")
+        assert hasattr(result, "items")
+        assert result.project_name is None
+        for item in result.items:
+            assert isinstance(item, TenderIndexItem)
+            assert isinstance(item.dimension, TenderDimension)
+
+    @pytest.mark.asyncio
+    async def test_parse_all_dimensions_present(self, parser):
+        """验证所有 6 个维度都存在"""
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "招标文件"
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=None)
+
+        with patch("pdfplumber.open", return_value=mock_pdf):
+            result = await parser.parse(["/path/to/tender.pdf"])
+
+        dimensions = {item.dimension for item in result.items}
+        assert TenderDimension.QUALITY in dimensions
+        assert TenderDimension.SAFETY in dimensions
+        assert TenderDimension.SCHEDULE in dimensions
+        assert TenderDimension.ENVIRONMENT in dimensions
+        assert TenderDimension.DIFFICULTY in dimensions
+        assert TenderDimension.PENALTY in dimensions
+
+
+# ==============================================================================
+# Section dataclass tests
+# ==============================================================================
+
+
+class TestSection:
+    """测试 Section 数据类"""
+
+    def test_section_creation(self):
+        """创建 Section"""
+        section = Section(
+            title="工程概况",
+            text="项目位于XX市",
+            page_spans=[(1, 0, 100)]
+        )
+        assert section.title == "工程概况"
+        assert section.text == "项目位于XX市"
+        assert section.page_spans == [(1, 0, 100)]
+
+    def test_section_empty_spans(self):
+        """空 page_spans"""
+        section = Section(title="前言", text="内容", page_spans=[])
+        assert section.page_spans == []
+
+    def test_section_multiple_spans(self):
+        """多个 page_spans"""
+        spans = [(1, 0, 100), (2, 0, 200), (3, 50, 150)]
+        section = Section(title="技术标准", text="内容", page_spans=spans)
+        assert len(section.page_spans) == 3

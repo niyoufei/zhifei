@@ -1,0 +1,16 @@
+{
+  "job_list_default_fields": [
+    "job_id",
+    "status",
+    "created_at",
+    "updated_at",
+    "result",
+    "error"
+  ],
+  "job_list_field_alias": {
+    "time": ["created_at", "updated_at"],
+    "meta": ["job_id", "status", "created_at", "updated_at"],
+    "result_min": ["job_id", "status", "result"]
+  },
+  "config_version": "2026-02-03"
+}

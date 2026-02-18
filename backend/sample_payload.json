@@ -1,0 +1,80 @@
+{
+  "doc_title": "示例项目-施工组织方案",
+  "doc_version": "1.0.0",
+  "audit": {
+    "input_hash": "sha256:deadbeef",
+    "model_version": "gpt-x.y",
+    "ruleset_version": "rules-2025.10",
+    "pipeline_version": "pipe-1.2.3",
+    "generated_at": "2025-10-16T12:33:40.562400",
+    "human_edits": false,
+    "notes": "M9 skeleton"
+  },
+  "sections": [
+    {
+      "section_id": "1.1",
+      "title": "项目概述",
+      "content_summary": "概述本项目范围、关键工期与组织结构。",
+      "evidence": [
+        {
+          "evidence_id": "ev-001",
+          "source_name": "招标文件.pdf",
+          "page": 3,
+          "locator": "第1章 第1.2节",
+          "snippet": "本工程总工期为…",
+          "url": null
+        }
+      ],
+      "scores": [
+        {
+          "rule_id": "S-001",
+          "title": "进度计划完整性",
+          "score": 8.0,
+          "max_score": 10.0,
+          "passed": true,
+          "remarks": "计划节点齐全",
+          "evidence_ids": [
+            "ev-001"
+          ]
+        }
+      ]
+    }
+  ],
+  "appendix": {
+    "reference_index": [
+      {
+        "evidence_id": "ev-001",
+        "source_name": "招标文件.pdf",
+        "page": 3,
+        "locator": "第1章 第1.2节",
+        "snippet": null,
+        "url": null
+      }
+    ],
+    "scoring_coverage": [
+      {
+        "rule_id": "S-001",
+        "title": "进度计划完整性",
+        "score": 8.0,
+        "max_score": 10.0,
+        "passed": true,
+        "remarks": "计划节点齐全",
+        "evidence_ids": [
+          "ev-001"
+        ]
+      }
+    ]
+  },
+  "extras": {
+    "toc": [
+      {
+        "id": "1.1",
+        "title": "项目概述"
+      }
+    ],
+    "export_hints": {
+      "word_template": "templates/m4_word_template.dotx",
+      "pdf_style": "templates/pdf/style.css"
+    }
+  }
+}
