@@ -206,6 +206,46 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _resolve_provider_api_key(payload: Dict[str, Any], provider: str | None) -> str | None:
+    """
+    Resolve text-model API key with clear precedence:
+    1) payload.api_keys[provider]
+    2) payload.api_key
+    3) provider-specific env vars
+    """
+    p = str(provider or "").strip().lower()
+    if not p:
+        v0 = payload.get("api_key")
+        return str(v0).strip() if isinstance(v0, str) and v0.strip() else None
+
+    amap = payload.get("api_keys")
+    if isinstance(amap, dict):
+        v1 = amap.get(p)
+        if isinstance(v1, str) and v1.strip():
+            return v1.strip()
+
+    v2 = payload.get("api_key")
+    if isinstance(v2, str) and v2.strip():
+        return v2.strip()
+
+    env_map = {
+        "openai": ("OPENAI_API_KEY", "ZF_OPENAI_API_KEY"),
+        "google": ("ZF_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        "anthropic": ("ANTHROPIC_API_KEY",),
+        "zhipu": ("ZHIPU_API_KEY",),
+        "qwen": ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
+        "deepseek": ("DEEPSEEK_API_KEY",),
+        "baidu": ("BAIDU_API_KEY",),
+        "iflytek": ("IFLYTEK_API_KEY",),
+        "tencent": ("TENCENT_API_KEY",),
+    }
+    for ek in env_map.get(p, ()):
+        vv = os.environ.get(ek)
+        if isinstance(vv, str) and vv.strip():
+            return vv.strip()
+    return None
+
+
 async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     topic = payload.get("topic") or "未命名项目"
     outline = payload.get("outline") or []
@@ -505,7 +545,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 llm = LLMClient(
                     provider=p,
                     model=m,
-                    api_key=payload.get("api_key"),
+                    api_key=_resolve_provider_api_key(payload, p),
                     base_url=payload.get("base_url"),
                     secret_key=payload.get("secret_key"),
                     token_url=payload.get("token_url"),
@@ -610,7 +650,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 llm = LLMClient(
                     provider=provider,
                     model=model,
-                    api_key=payload.get("api_key"),
+                    api_key=_resolve_provider_api_key(payload, provider),
                     base_url=payload.get("base_url"),
                     secret_key=payload.get("secret_key"),
                     token_url=payload.get("token_url"),

@@ -269,6 +269,34 @@ class TestRunAutoplan:
         assert call_kwargs["api_key"] == "test-key"
 
     @pytest.mark.asyncio
+    async def test_provider_api_key_fallback_from_env_openai(self, mock_dependencies, monkeypatch):
+        """When api_key is absent, OpenAI provider falls back to OPENAI_API_KEY env."""
+        monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+        await run_autoplan({
+            "outline": ["章节1"],
+            "provider": "openai",
+            "model": "gpt-4",
+            "dry_run": False,
+        })
+        mock_dependencies["llm_cls"].assert_called()
+        call_kwargs = mock_dependencies["llm_cls"].call_args.kwargs
+        assert call_kwargs["api_key"] == "env-openai-key"
+
+    @pytest.mark.asyncio
+    async def test_provider_api_key_fallback_from_env_google(self, mock_dependencies, monkeypatch):
+        """When api_key is absent, Google provider falls back to Gemini env keys."""
+        monkeypatch.setenv("ZF_GOOGLE_API_KEY", "env-gemini-key")
+        await run_autoplan({
+            "outline": ["章节1"],
+            "provider": "google",
+            "model": "gemini-2.5-flash",
+            "dry_run": False,
+        })
+        mock_dependencies["llm_cls"].assert_called()
+        call_kwargs = mock_dependencies["llm_cls"].call_args.kwargs
+        assert call_kwargs["api_key"] == "env-gemini-key"
+
+    @pytest.mark.asyncio
     async def test_multi_provider_rotation(self, mock_dependencies):
         """Multiple providers rotate across sections."""
         await run_autoplan({

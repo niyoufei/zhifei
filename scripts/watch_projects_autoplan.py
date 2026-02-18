@@ -175,25 +175,74 @@ def _post_files(
 
 
 def _ingest_files(base: str, project_id: str, file_paths: list[str], timeout: int) -> dict:
-    url = base + "/ingest/upload"
-    files = []
-    handles = []
+    """
+    Upload source docs in small batches to avoid giant multipart requests
+    (real projects may include very large PDFs and drawings).
+    - Default batch size is controlled by ZF_INGEST_BATCH_SIZE (default: 3).
+    - On batch failure, fallback to one-by-one retry to isolate bad files.
+    """
+
+    def _ingest_batch(paths: list[str]) -> dict:
+        url = base + "/ingest/upload"
+        files = []
+        handles = []
+        try:
+            for p in paths:
+                fp = Path(p)
+                f = fp.open("rb")
+                handles.append(f)
+                files.append(("files", (fp.name, f, "application/octet-stream")))
+            r = requests.post(url, params={"project_id": project_id}, files=files, timeout=timeout)
+            if r.status_code >= 400:
+                raise RuntimeError(f"POST /ingest/upload failed: {r.status_code} {r.text[:500]}")
+            return r.json()
+        finally:
+            for h in handles:
+                try:
+                    h.close()
+                except Exception:
+                    pass
+
+    if not file_paths:
+        return {"ok": False, "uploaded": 0, "failed": 0, "errors": []}
+
     try:
-        for p in file_paths:
-            fp = Path(p)
-            f = fp.open("rb")
-            handles.append(f)
-            files.append(("files", (fp.name, f, "application/octet-stream")))
-        r = requests.post(url, params={"project_id": project_id}, files=files, timeout=timeout)
-        if r.status_code >= 400:
-            raise RuntimeError(f"POST /ingest/upload failed: {r.status_code} {r.text[:500]}")
-        return r.json()
-    finally:
-        for h in handles:
-            try:
-                h.close()
-            except Exception:
-                pass
+        batch_size = int(os.environ.get("ZF_INGEST_BATCH_SIZE") or 3)
+    except Exception:
+        batch_size = 3
+    batch_size = max(1, min(8, batch_size))
+
+    uploaded = 0
+    failed = 0
+    errors: list[str] = []
+    receipts: list[dict] = []
+
+    for i in range(0, len(file_paths), batch_size):
+        batch = file_paths[i : i + batch_size]
+        try:
+            rec = _ingest_batch(batch)
+            receipts.append(rec if isinstance(rec, dict) else {"ok": True})
+            uploaded += len(batch)
+            continue
+        except Exception as e:
+            # Fallback to one-by-one to isolate problematic files without aborting the whole project.
+            if len(batch) > 1:
+                _log(f"[{project_id}] ingest batch failed, retry one-by-one: {repr(e)}")
+                for p in batch:
+                    try:
+                        rec = _ingest_batch([p])
+                        receipts.append(rec if isinstance(rec, dict) else {"ok": True})
+                        uploaded += 1
+                    except Exception as e1:
+                        failed += 1
+                        errors.append(f"{Path(p).name}: {repr(e1)}")
+            else:
+                failed += 1
+                errors.append(f"{Path(batch[0]).name}: {repr(e)}")
+
+    if uploaded <= 0:
+        raise RuntimeError(f"all ingest uploads failed: {errors[:3]}")
+    return {"ok": failed == 0, "uploaded": uploaded, "failed": failed, "errors": errors[:20], "receipts": receipts[:20]}
 
 
 def _post_json(base: str, path: str, actions_key: str, payload: dict, timeout: int, params: dict | None = None) -> dict:
@@ -285,9 +334,17 @@ def _process_one_project(base_url: str, actions_key: str, work_dir: Path, out_di
     )
 
     # 3) ingest docs (includes drawings/standards)
-    ingest_paths = [str(p) for p in files.all_docs if p.name != "project.json"]
-    _log(f"[{project_id}] ingest: {len(ingest_paths)} file(s)")
-    _ingest_files(base_url, project_id, ingest_paths, timeout=900)
+    skip_ingest = bool(cfg.get("skip_ingest"))
+    if skip_ingest:
+        _log(f"[{project_id}] ingest skipped by project config (skip_ingest=true)")
+    else:
+        ingest_paths = [str(p) for p in files.all_docs if p.name != "project.json"]
+        _log(f"[{project_id}] ingest: {len(ingest_paths)} file(s)")
+        ingest_ret = _ingest_files(base_url, project_id, ingest_paths, timeout=900)
+        _log(
+            f"[{project_id}] ingest result: uploaded={int(ingest_ret.get('uploaded') or 0)} "
+            f"failed={int(ingest_ret.get('failed') or 0)}"
+        )
 
     # 3.5) optional plan overrides (outline/style/chapter_pages/etc), stored by project_id
     # This lets one project tune page counts, fonts, per-chapter requirements without changing code.
@@ -363,6 +420,9 @@ def _process_one_project(base_url: str, actions_key: str, work_dir: Path, out_di
     for k in ("provider", "model", "api_key", "base_url", "secret_key", "token_url"):
         if cfg.get(k):
             gen[k] = cfg.get(k)
+    # Optional execution controls
+    if "dry_run" in cfg:
+        gen["dry_run"] = bool(cfg.get("dry_run"))
     for k in ("image_provider", "image_model", "image_aspect_ratio", "image_api_key", "bidder_company", "bidder_domain", "logo_url"):
         if cfg.get(k):
             gen[k] = cfg.get(k)
@@ -436,9 +496,10 @@ def _process_one_project(base_url: str, actions_key: str, work_dir: Path, out_di
                 },
                 "quality": {k: (qc.get(k) or {}).get("ok") for k in ("structure", "officialese", "risk_triplet", "qse_closed_loop", "logic_template_adherence", "chapter_blueprint_adherence", "variant_diversity", "quantitative", "required_topics_detail", "evidence_traceability", "drawing_evidence", "standard_evidence", "boq_focus_item_typed_evidence")},
                 "files": {
-                    "docx": str(out_dir / f"autoplan_{project_id}_v{v}.docx"),
-                    "compare_docx": str(out_dir / f"autoplan_{project_id}_compare_v{v}.docx"),
-                    "focus_xlsx": str(out_dir / f"autoplan_{project_id}_focus_v{v}.xlsx"),
+                    # Keep paths workspace-relative to remain valid after moving work -> done/failed.
+                    "docx": f"_output/autoplan_{project_id}_v{v}.docx",
+                    "compare_docx": f"_output/autoplan_{project_id}_compare_v{v}.docx",
+                    "focus_xlsx": f"_output/autoplan_{project_id}_focus_v{v}.xlsx",
                 },
             }
         )
