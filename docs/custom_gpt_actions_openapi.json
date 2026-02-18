@@ -1,0 +1,914 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ZhiFei Actions Bridge",
+    "version": "1.0.0",
+    "description": "Custom GPT Actions for施工组织设计生成、质检与结果回读。"
+  },
+  "servers": [
+    {
+      "url": "https://YOUR_BACKEND_HOST"
+    }
+  ],
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+    "paths": {
+    "/actions/params/get": {
+      "get": {
+        "operationId": "actionsParamsGet",
+        "summary": "读取参数注册表（量化指标/插图默认参数等）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/params/set": {
+      "post": {
+        "operationId": "actionsParamsSet",
+        "summary": "更新参数注册表（可编辑量化指标/插图默认参数等）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选：项目ID（用于按项目读取参数回执并生成差异清单）"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionsParamsSetRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/params/diff": {
+      "post": {
+        "operationId": "actionsParamsDiff",
+        "summary": "预览参数变更差异清单（不落盘）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选：项目ID（用于按项目读取参数回执并生成差异清单）"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionsParamsDiffRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/params/receipt/get": {
+      "get": {
+        "operationId": "actionsParamsReceiptGet",
+        "summary": "读取最近一次生成的参数回执（参数键→出现位置→影响章节）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选：项目ID（用于读取该项目最新的参数回执）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/plan/save": {
+        "post": {
+          "operationId": "actionsPlanSave",
+          "summary": "保存默认编制计划",
+          "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选：项目ID（用于按项目隔离保存 plan.json）"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionsPlanRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/plan/get": {
+      "get": {
+        "operationId": "actionsPlanGet",
+        "summary": "读取默认编制计划",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选：项目ID（用于按项目隔离读取 plan.json）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/tender/parse": {
+      "post": {
+        "operationId": "actionsTenderParse",
+        "summary": "解析招标文件（保存到后端，用于生成）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选：项目ID（用于按项目隔离保存 tender_matrix.json）"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "files"
+                ],
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/boq/parse": {
+      "post": {
+        "operationId": "actionsBoqParse",
+        "summary": "解析工程量清单（保存到后端，用于清单重点与资源测算）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "可选：项目ID（用于按项目隔离保存 boq_data.json）"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/ingest/upload": {
+      "post": {
+        "operationId": "ingestUpload",
+        "summary": "上传资料到证据库（图纸/方案/记录等，用于生成时引用证据片段）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "files"
+                ],
+                "properties": {
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/quality_check": {
+      "post": {
+        "operationId": "actionsQualityCheck",
+        "summary": "对章节文本做严格质量检查，输出问题清单与自动修订建议",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionsQualityCheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/export_docx": {
+      "post": {
+        "operationId": "actionsExportDocx",
+        "summary": "把章节文本导出为 DOCX（并生成下载 job_id）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionsExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/generate": {
+      "post": {
+        "operationId": "actionsGenerate",
+        "summary": "同步生成施组（短任务）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionsGenerateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/generate_async": {
+      "post": {
+        "operationId": "actionsGenerateAsync",
+        "summary": "异步生成施组（推荐）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionsGenerateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/job_status": {
+      "get": {
+        "operationId": "actionsJobStatus",
+        "summary": "查询异步任务状态",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/actions/result": {
+      "get": {
+        "operationId": "actionsResult",
+        "summary": "读取任务结果与质量检查",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "variant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "include_sections",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          {
+            "name": "max_chars",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 4000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+    ,
+    "/actions/download": {
+      "get": {
+        "operationId": "actionsDownload",
+        "summary": "下载结果文件（docx/compare_docx/json）",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+        {
+          "name": "kind",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "default": "docx",
+            "enum": [
+              "docx",
+              "compare_docx",
+              "json",
+              "focus_xlsx"
+            ]
+          }
+        },
+          {
+            "name": "variant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Actions-Key"
+      }
+    },
+    "schemas": {
+      "ActionsPlanRequest": {
+        "type": "object",
+        "required": [
+          "outline"
+        ],
+        "properties": {
+          "outline": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "style": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "variants": {
+            "type": "integer",
+            "default": 1
+          },
+          "chapter_requirements": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "chapter_pages": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "quality_strict": {
+            "type": "boolean",
+            "default": true
+          },
+          "auto_remediate": {
+            "type": "boolean",
+            "default": true
+          },
+          "remediate_mode": {
+            "type": "string",
+            "default": "template"
+          },
+          "compare_mode": {
+            "type": "string",
+            "default": "summary"
+          },
+          "compare_max_chars": {
+            "type": "integer",
+            "default": 1200
+          },
+          "compare_titles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ActionsGenerateRequest": {
+        "type": "object",
+        "required": [
+          "topic"
+        ],
+        "properties": {
+          "topic": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "项目ID（用于证据检索隔离与无人值守批量编制）"
+          },
+          "outline": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "chapter_requirements": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "style": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "variants": {
+            "type": "integer",
+            "default": 1
+          },
+          "chapter_pages": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "quality_strict": {
+            "type": "boolean",
+            "default": true
+          },
+          "auto_remediate": {
+            "type": "boolean",
+            "default": true
+          },
+          "remediate_mode": {
+            "type": "string",
+            "default": "template"
+          },
+          "compare_mode": {
+            "type": "string",
+            "default": "summary"
+          },
+          "compare_max_chars": {
+            "type": "integer",
+            "default": 1200
+          },
+          "compare_titles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "model_map": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "api_key": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "secret_key": {
+            "type": "string"
+          },
+          "token_url": {
+            "type": "string"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false
+          },
+          "generate_images": {
+            "type": "boolean",
+            "default": true
+          },
+          "image_provider": {
+            "type": "string",
+            "description": "图片/思维导图模型提供商（推荐 google）"
+          },
+          "image_model": {
+            "type": "string",
+            "description": "图片模型（推荐 gemini-2.5-flash-image；也可用别名 banana）"
+          },
+          "image_aspect_ratio": {
+            "type": "string",
+            "description": "图片比例（例如 16:9、1:1、9:16）"
+          },
+          "image_api_key": {
+            "type": "string",
+            "description": "Gemini API Key（也可配置环境变量 ZF_GOOGLE_API_KEY/GEMINI_API_KEY）"
+          },
+          "bidder_company": {
+            "type": "string",
+            "description": "投标单位名称（用于尝试解析 LOGO）"
+          },
+          "bidder_domain": {
+            "type": "string",
+            "description": "投标单位官网域名（用于尝试获取标准 LOGO，例如 company.com）"
+          },
+          "logo_url": {
+            "type": "string",
+            "description": "LOGO 图片 URL（优先级最高）"
+          }
+        }
+      },
+      "ActionsSection": {
+        "type": "object",
+        "required": [
+          "title",
+          "content"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "agent_role": {
+            "type": "string"
+          }
+        }
+      },
+      "ActionsQualityCheckRequest": {
+        "type": "object",
+        "required": [
+          "sections"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "可选：项目ID（用于按项目隔离加载招标/清单与入库证据）"
+          },
+          "outline": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActionsSection"
+            }
+          },
+          "strict": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "ActionsExportRequest": {
+        "type": "object",
+        "required": [
+          "topic",
+          "sections"
+        ],
+        "properties": {
+          "topic": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "可选：项目ID（用于按项目隔离加载清单统计/图纸预览/LOGO）"
+          },
+          "style": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "outline": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActionsSection"
+            }
+          },
+          "quality_checks": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "generate_images": {
+            "type": "boolean",
+            "default": true
+          },
+          "image_provider": {
+            "type": "string",
+            "description": "图片/思维导图模型提供商（推荐 google）"
+          },
+          "image_model": {
+            "type": "string",
+            "description": "图片模型（推荐 gemini-2.5-flash-image；也可用别名 banana）"
+          },
+          "image_aspect_ratio": {
+            "type": "string",
+            "description": "图片比例（例如 16:9、1:1、9:16）"
+          },
+          "image_api_key": {
+            "type": "string",
+            "description": "Gemini API Key（也可配置环境变量 ZF_GOOGLE_API_KEY/GEMINI_API_KEY）"
+          },
+          "bidder_company": {
+            "type": "string",
+            "description": "投标单位名称（用于尝试解析 LOGO）"
+          },
+          "bidder_domain": {
+            "type": "string",
+            "description": "投标单位官网域名（用于尝试获取标准 LOGO，例如 company.com）"
+          },
+          "logo_url": {
+            "type": "string",
+            "description": "LOGO 图片 URL（优先级最高）"
+          }
+        }
+      },
+      "ActionsParamsSetRequest": {
+        "type": "object",
+        "required": [
+          "update"
+        ],
+        "properties": {
+          "update": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "merge": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "ActionsParamsDiffRequest": {
+        "type": "object",
+        "required": [
+          "update"
+        ],
+        "properties": {
+          "update": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "merge": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      }
+    }
+  }
+}

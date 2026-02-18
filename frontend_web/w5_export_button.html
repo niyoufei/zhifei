@@ -1,0 +1,32 @@
+<!doctype html><meta charset='utf-8'>
+<title>W5 一键导出页面</title>
+<body style="margin:40px;font-family:system-ui,Segoe UI,Arial;">
+  <h2>W5 一键导出（含插图建议与占位）</h2>
+  <p>点击下方按钮，即可导出带插图建议的优化版报告。</p>
+  <button id="exportW5Btn" style="padding:10px 18px;border:1px solid #333;border-radius:6px;background:#fff;cursor:pointer;">
+    导出含插图版本（W5）
+  </button>
+  <script>
+  async function exportW5(format="docx"){
+    const btn=document.getElementById("exportW5Btn");
+    btn.disabled=true;btn.textContent="导出中…";
+    try{
+      const project="W5_Report";
+      const today=new Date().toISOString().slice(0,10);
+      const filename=`${project}_${today}`;
+      const url=`http://127.0.0.1:5002/export/report?format=${format}&name=${encodeURIComponent(filename)}`;
+      const res=await fetch(url);
+      if(!res.ok)throw new Error("导出失败："+res.status);
+      const blob=await res.blob();
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob);
+      a.download=format==="docx"?`${filename}.docx`:`${filename}.zip`;
+      a.click();a.remove();
+      btn.textContent="✅ 导出完成";
+    }catch(e){
+      alert(e.message);btn.textContent="导出失败，请重试";
+    }finally{btn.disabled=false;}
+  }
+  document.getElementById("exportW5Btn").addEventListener("click",()=>exportW5("docx"));
+  </script>
+</body>

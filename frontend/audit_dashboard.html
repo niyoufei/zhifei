@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>审计仪表板 · Audit Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{--bg:#0b0f14;--card:#121821;--muted:#8aa4b4;--txt:#e6edf3;--green:#19c37d;--red:#ff5d5d}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial}
+    .wrap{max-width:1100px;margin:32px auto;padding:0 16px}
+    h1{font-weight:700;font-size:22px;margin:0 0 12px}
+    .muted{color:var(--muted)}
+    .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 16px}
+    button,select,input[type="text"]{border:1px solid #223244;background:#0f1520;color:var(--txt);padding:8px 10px;border-radius:10px}
+    button{cursor:pointer} button:hover{border-color:#2e425a}
+    .chip{font-size:12px;padding:2px 6px;border-radius:6px;border:1px solid var(--muted)}
+    .chip.ok{border-color:var(--green);color:var(--green)}
+    .chip.err{border-color:var(--red);color:var(--red)}
+    .card{background:var(--card);border:1px solid #1b2533;border-radius:14px;padding:14px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px 8px;border-bottom:1px solid #223244;vertical-align:top}
+    th{color:#bcd9ff;text-align:left;font-weight:600;white-space:nowrap}
+    code{background:#0f1520;border:1px solid #253447;padding:2px 6px;border-radius:8px;color:#bfe7ff}
+    .footer{margin-top:10px;color:var(--muted);font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>审计仪表板 <span class="muted">/ Audit Dashboard</span></h1>
+    <div class="bar">
+      <label class="muted">数量</label>
+      <select id="limit"><option>20</option><option selected>50</option><option>100</option></select>
+      <input id="q" type="text" placeholder="搜索：事件/版本/哈希片段" style="min-width:260px" />
+      <label style="display:flex;align-items:center;gap:6px">
+        <input id="auto" type="checkbox" /> 自动刷新(5s)
+      </label>
+      <button id="refresh">刷新</button>
+      <button id="download">下载JSON</button>
+      <span id="status" class="muted" style="margin-left:auto"></span>
+    </div>
+
+    <div class="card">
+      <table id="tbl">
+        <thead>
+          <tr><th>时间</th><th>事件类型</th><th>输入哈希</th><th>输出哈希</th><th>模型版本</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="footer">数据源：<code>/audit/data</code> · <span id="lastUpdate">上次更新：-</span></div>
+    </div>
+  </div>
+
+<script>
+const api = limit => `/audit/data?limit=${limit}`;
+let timer = null;
+
+function fmt(ts){ try{return new Date(ts).toLocaleString()}catch(e){return ts||'-'} }
+
+function match(item, kw){
+  if(!kw) return true;
+  kw = kw.toLowerCase();
+  return [item.event_type, item.model_version, item.input_hash, item.output_hash]
+    .filter(Boolean).some(v => String(v).toLowerCase().includes(kw));
+}
+
+async function load(){
+  const limit = document.querySelector('#limit').value;
+  const kw = document.querySelector('#q').value.trim();
+  document.querySelector('#status').textContent='加载中…';
+
+  const res = await fetch(api(limit));
+  const data = await res.json();
+  const items = (data.items||[]).filter(it => match(it, kw));
+
+  const tbody = document.querySelector('#tbl tbody');
+  tbody.innerHTML='';
+  items.forEach(it=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td>${fmt(it.timestamp)}</td>
+      <td><span class="chip ${it.event_type==='export_diff'?'ok':'err'}">${it.event_type||'-'}</span></td>
+      <td><code title="${it.input_hash}">${(it.input_hash||'').slice(0,16)}…</code></td>
+      <td><code title="${it.output_hash}">${(it.output_hash||'').slice(0,16)}…</code></td>
+      <td><code>${it.model_version||'-'}</code></td>`;
+    tbody.appendChild(tr);
+  });
+
+  const n = items.length, total = data.total ?? n;
+  document.querySelector('#status').textContent=`已加载 ${n}/${total} 条`;
+  document.querySelector('#lastUpdate').textContent = '上次更新：' + new Date().toLocaleTimeString();
+}
+
+function ensureAuto(){
+  if(document.querySelector('#auto').checked){
+    if(timer) clearInterval(timer);
+    timer = setInterval(load, 5000);
+  }else{
+    if(timer) clearInterval(timer), timer = null;
+  }
+}
+
+document.querySelector('#refresh').onclick = load;
+document.querySelector('#limit').onchange = load;
+document.querySelector('#q').oninput = load;
+document.querySelector('#auto').onchange = ensureAuto;
+
+document.querySelector('#download').onclick = async ()=>{
+  const limit=document.querySelector('#limit').value;
+  const res=await fetch(api(limit));
+  const blob=new Blob([JSON.stringify(await res.json(),null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download='audit_data.json';
+  document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+};
+
+load(); // 首次加载
+ensureAuto(); // 根据勾选状态启动/停止轮询
+</script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+
+<!doctype html><meta charset='utf-8'>
+<body style="margin:40px;font-family:system-ui,Segoe UI,Arial;">
+  <h2>W4 导出联调测试页</h2>
+  <p>点击按钮即可从 5001 端口下载 <code>w4_export_bundle.zip</code>（含 <code>w4_report.docx</code> 与 <code>w4_trace.json</code>）。</p>
+  <button id="exportW4Btn" style="padding:10px 16px;border:1px solid #333;border-radius:8px;background:#fff;cursor:pointer;">
+    导出优化版（W4）
+  </button>
+  <script>
+  async function exportW4(){
+    const btn=document.getElementById('exportW4Btn');
+    btn.disabled=true; btn.textContent='导出中…';
+    try{
+      const res=await fetch('http://127.0.0.1:5001/export/report');
+      if(!res.ok) throw new Error('导出失败：'+res.status);
+      const blob=await res.blob();
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url; a.download='w4_export_bundle.zip'; a.click(); a.remove();
+      btn.textContent='✅ 导出完成';
+    }catch(e){
+      alert(e.message); btn.textContent='导出失败，请重试';
+    }finally{ btn.disabled=false; }
+  }
+  document.getElementById('exportW4Btn').addEventListener('click', exportW4);
+  </script>
+</body>

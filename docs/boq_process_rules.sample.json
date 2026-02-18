@@ -1,0 +1,56 @@
+{
+  "version": "2026-02-14",
+  "notes": [
+    "可选配置：将本文件复制为 backend/data/autoplan/boq_process_rules.json 后生效。",
+    "规则为“先匹配先命中”，请把最关键/最稳定的关键词放在前面。",
+    "process 建议用规范工序名；resources 可填工种/设备/机具名称，用于施组正文的资源提示。"
+  ],
+  "rules": [
+    {
+      "match": ["混凝土"],
+      "process": "混凝土浇筑",
+      "resources": ["搅拌车", "泵车"]
+    },
+    {
+      "match": ["钢筋"],
+      "process": "钢筋绑扎",
+      "resources": ["钢筋工", "电焊机"]
+    },
+    {
+      "match": ["模板"],
+      "process": "模板安装",
+      "resources": ["模板工", "支撑材料"]
+    },
+    {
+      "match": ["回填"],
+      "process": "土方回填",
+      "resources": ["压路机", "装载机"]
+    },
+    {
+      "match": ["管道"],
+      "process": "管道安装",
+      "resources": ["挖机", "起重机"]
+    },
+    {
+      "match": ["防水", "卷材"],
+      "process": "防水施工",
+      "resources": ["防水工", "热风焊机"]
+    },
+    {
+      "match": ["砌体", "砌筑", "加气块", "砖"],
+      "process": "砌体砌筑",
+      "resources": ["砌筑工", "砂浆搅拌机"]
+    },
+    {
+      "match": ["电缆", "桥架"],
+      "process": "电气安装",
+      "resources": ["电工", "电缆牵引机"]
+    },
+    {
+      "match": ["沥青"],
+      "process": "沥青路面施工",
+      "resources": ["摊铺机", "压路机"]
+    }
+  ]
+}
+

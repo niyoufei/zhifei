@@ -1,0 +1,73 @@
+# ===== OS / System junk =====
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# ===== Python cache / bytecode =====
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# ===== Backup folders =====
+# Local backup snapshots, never commit
+/_untracked_backup*/
+
+# ===== ZhiFei_V20.1 generated data =====
+# Ignore generated data folders prefixed with ZhiFei_V20.1
+**/ZhiFei_V20.1*/
+# Keep extra safety rules for JSON/JSONL under same folders
+**/ZhiFei_V20.1*/**/*.json
+**/ZhiFei_V20.1*/**/*.jsonl
+
+# ===== Project input materials =====
+# Raw tender/BoQ/drawing materials are source inputs, not repo code
+/projects/inbox/**
+
+# ===== Local runtime / IDE state =====
+.bin/
+.cursor/
+.coverage
+
+# ===== Generated outputs (non-source artifacts) =====
+/build/**
+/artifacts/**
+/deliveries/**
+/exports/**
+/logs/**
+/tmp/**
+/archive_logs_*.zip
+
+# ===== Root-level binary docs/samples =====
+/*.doc
+/*.docx
+/*.xls
+/*.xlsx
+/*.csv
+/*.pdf
+/*.png
+/*.zip
+
+# ===== Root-level runtime snapshots =====
+/audit_trail.jsonl
+/last_publish_*.json
+/last_score_response.json
+/score_result.json
+/ZhiFei-SuperKG-FullPlus-3.1.json
+/demo.txt
+/pdfdemo.txt
+/sample.txt
+/tmp.txt
+
+# ===== Embedded repo / web uploads =====
+# backend is a standalone git repo; keep it managed separately
+/backend/
+/frontend_web/uploads/**
+/frontend_web/*.docx
+/frontend_web/*.zip
+/frontend_web/users.db
+/frontend_web/w3_compose_preview.json
+/frontend_web/w3_extract_preview.json
+/frontend_web/w4_trace.json
+/frontend_web/w5_illustration_suggestions.json
+/缺口分析附录.md

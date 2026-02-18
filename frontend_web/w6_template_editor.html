@@ -1,0 +1,47 @@
+<!doctype html><meta charset='utf-8'>
+<title>W6 模板配置面板</title>
+<body style="margin:40px;font-family:system-ui,Segoe UI,Arial;">
+<h2>W6 模板配置设置</h2>
+<p>修改以下选项并点击“保存配置”即可立即生效。</p>
+<form id="tplForm">
+<label>中文字体：
+<select id="eastAsia">
+<option>宋体</option><option>黑体</option><option>仿宋</option>
+</select></label><br><br>
+<label>西文字体：
+<select id="latin">
+<option>Times New Roman</option><option>Arial</option><option>Calibri</option>
+</select></label><br><br>
+<label>正文字号（pt）：<input type="number" id="size_pt" value="11"></label><br><br>
+<label>行距倍数：<input type="number" step="0.1" id="line_spacing" value="1.5"></label><br><br>
+<label>是否显示封面：<input type="checkbox" id="cover_show" checked></label><br><br>
+<label>公司名称：<input type="text" id="company" value="某某建设有限公司"></label><br><br>
+<label>编制人：<input type="text" id="author" value="编制人"></label><br><br>
+<button type="button" onclick="saveConfig()">💾 保存配置</button>
+</form>
+
+<script>
+async function saveConfig(){
+  const cfg={
+    font:{
+      eastAsia:document.getElementById('eastAsia').value,
+      latin:document.getElementById('latin').value,
+      size_pt:Number(document.getElementById('size_pt').value),
+      line_spacing:Number(document.getElementById('line_spacing').value)
+    },
+    cover:{
+      show:document.getElementById('cover_show').checked,
+      company:document.getElementById('company').value,
+      author:document.getElementById('author').value
+    }
+  };
+  const blob=new Blob([JSON.stringify(cfg,null,2)],{type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='w6_template_default.json';
+  a.click();
+  a.remove();
+  alert("✅ 已保存为 w6_template_default.json，请将其放回项目目录。");
+}
+</script>
+</body>

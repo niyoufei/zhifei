@@ -1,0 +1,28 @@
+[
+  {
+    "rule_id": "R1",
+    "rule_title": "企业资质符合性",
+    "weight": 20,
+    "covered": true,
+    "evidence_refs": [
+      "Q-07"
+    ]
+  },
+  {
+    "rule_id": "R2",
+    "rule_title": "项目负责人业绩",
+    "weight": 30,
+    "covered": false,
+    "evidence_refs": []
+  },
+  {
+    "rule_id": "R3",
+    "rule_title": "施工组织方案完整性",
+    "weight": 50,
+    "covered": true,
+    "evidence_refs": [
+      "3.2.1",
+      "附图-01"
+    ]
+  }
+]

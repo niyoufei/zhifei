@@ -1,0 +1,25 @@
+{
+  "font": {
+    "eastAsia": "宋体",
+    "latin": "Times New Roman",
+    "size_pt": 11,
+    "line_spacing": 1.5
+  },
+  "headings": {
+    "h1_size": 16,
+    "h2_size": 13
+  },
+  "margins_cm": {
+    "top": 2.54,
+    "bottom": 2.54,
+    "left": 3.0,
+    "right": 2.5
+  },
+  "cover": {
+    "show": true,
+    "company": "某某建设有限公司",
+    "author": "编制人",
+    "extra": "（W6 模板版式）",
+    "logo_path": ""
+  }
+}

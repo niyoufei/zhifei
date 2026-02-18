@@ -1,0 +1,23 @@
+[Unit]
+Description=DocGen Autoplan FastAPI Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/docgen-autoplan
+Environment=PYTHONPATH=/opt/docgen-autoplan
+# Required (set your real secrets)
+Environment=ZF_ACTIONS_KEY=CHANGE_ME
+# Optional: Gemini for mindmap/images
+Environment=ZF_GOOGLE_API_KEY=
+
+ExecStart=/opt/docgen-autoplan/venv/bin/python3 -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+
+StandardOutput=append:/opt/docgen-autoplan/logs/uvicorn.out.log
+StandardError=append:/opt/docgen-autoplan/logs/uvicorn.err.log
+
+[Install]
+WantedBy=multi-user.target
+

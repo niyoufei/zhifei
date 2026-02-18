@@ -53,6 +53,7 @@ log "Waiting for server to be ready..."
 for i in {1..30}; do
     if curl -s http://127.0.0.1:8000/health >/dev/null 2>&1; then
         log "[OK] Server ready after ${i}s"
+        python3 scripts/smoke_api.py http://127.0.0.1:8000 2>&1 | tee -a "$LOG_FILE" || true
         break
     fi
     if [ "$i" -eq 30 ]; then

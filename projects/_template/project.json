@@ -1,0 +1,55 @@
+{
+  "topic": "示例项目（把这里改成工程名）",
+  "project_id": "（可选）固定项目ID（用于重复跑同一项目时保持证据/品牌/计划绑定）",
+  "variants": 3,
+  "generate_images": true,
+  "remediate_mode": "template",
+  "timeout_sec": 1800,
+  "poll_sec": 2,
+
+  "requirements": [
+    "（可选）全局编制要求：每条必须可验收，禁止出现加强/确保/严格等空泛词"
+  ],
+
+  "plan": {
+    "outline": [],
+    "style": {
+      "paper": "A4",
+      "font": {
+        "eastAsia": "SimSun",
+        "latin": "Times New Roman",
+        "size_pt": 12,
+        "line_spacing": 1.5
+      },
+      "margins_cm": {
+        "top": 2.54,
+        "right": 2.5,
+        "bottom": 2.54,
+        "left": 3.0
+      }
+    },
+    "chapter_pages": {},
+    "chapter_requirements": {}
+  },
+
+  "params_override": {
+    "qse_defaults": {
+      "PM10阈值": "≤150ug/m3",
+      "昼间噪声阈值": "≤70dB",
+      "夜间噪声阈值": "≤55dB"
+    }
+  },
+
+  "bidder_company": "（可选）投标单位全称",
+  "bidder_domain": "（可选）company.com",
+  "logo_url": "（可选）https://.../logo.png",
+
+  "provider": "（可选）openai/google/...",
+  "model": "（可选）gpt-4.1/...",
+  "api_key": "（可选）",
+
+  "image_provider": "google",
+  "image_model": "gemini-2.5-flash-image",
+  "image_aspect_ratio": "16:9",
+  "image_api_key": "（可选；也可用环境变量 ZF_GOOGLE_API_KEY）"
+}

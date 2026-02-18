@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-cn">
+<head>
+<meta charset="utf-8">
+<title>Traceable DocSys — 上传与生成</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div>欢迎，{{ user }}</div>
+  <nav><a href="{{ url_for('logout') }}">退出</a></nav>
+</header>
+
+<main class="grid">
+  <section>
+    <h3>① 招标文件入口</h3>
+    <form action="/upload/batch" method="post" enctype="multipart/form-data">
+      <input type="file" name="files" multiple name="file" accept=".doc,.docx,.xls,.xlsx,.pdf,.ppt,.pptx,.jpg,.jpeg,.png,.dxf,.dwg" required />
+      <button type="submit">上传</button>
+    </form>
+  </section>
+
+  <section>
+    <h3>② 招标答疑入口</h3>
+    <form action="/upload/batch" method="post" enctype="multipart/form-data">
+      <input type="file" name="files" multiple name="file" accept=".doc,.docx,.xls,.xlsx,.pdf,.ppt,.pptx,.jpg,.jpeg,.png,.dxf,.dwg" required />
+      <button type="submit">上传</button>
+    </form>
+  </section>
+
+  <section>
+    <h3>③ 项目资料入口（清单/图纸/勘查照片）</h3>
+    <form action="/upload/batch" method="post" enctype="multipart/form-data">
+      <input type="file" name="files" multiple name="file" accept=".doc,.docx,.xls,.xlsx,.pdf,.ppt,.pptx,.jpg,.jpeg,.png,.dxf,.dwg" required />
+      <button type="submit">上传</button>
+    </form>
+  </section>
+
+  <section class="full">
+    <h3>版面与生成设置</h3>
+    <form method="post">
+      <input type="hidden" name="action" value="generate" />
+      <div class="row">
+        <label>行距</label><input value="固定 22 磅" disabled />
+        <label>页边距</label><input value="上2.5cm，左右下2.0cm" disabled />
+      </div>
+      <div class="row">
+        <label>字体</label><input value="宋体（标题三号，正文字号四号）" disabled />
+        <label>首行缩进</label><input value="2 个字符" disabled />
+      </div>
+      <div class="row">
+        <label>章节页数设置</label>
+        <input name="chapter_pages" placeholder="示例：1=5;2=8;3=10 表示第1/2/3章页数上限" />
+      </div>
+      <button type="submit">生成 Word 文档</button>
+    </form>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}<div class="msg">{{ messages[0] }}</div>{% endif %}
+    {% endwith %}
+  </section>
+</main>
+</body>
+</html>
