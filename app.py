@@ -150,12 +150,23 @@ def _extract_project_meta_from_tender(matrix: dict[str, Any] | None) -> tuple[st
 
 def _apply_project_defaults_from_tender(matrix: dict[str, Any] | None) -> tuple[str, str]:
     project_name, project_code = _extract_project_meta_from_tender(matrix)
-    auto_topic = _topic_from_project_name(project_name)
-    if auto_topic:
-        st.session_state["topic_text"] = auto_topic
-    if project_code:
-        st.session_state["project_id_text"] = project_code
-    return auto_topic, project_code
+    return _topic_from_project_name(project_name), project_code
+
+
+def _queue_widget_update(key: str, value: Any) -> None:
+    updates = st.session_state.setdefault("_pending_widget_updates", {})
+    if not isinstance(updates, dict):
+        updates = {}
+    updates[str(key)] = value
+    st.session_state["_pending_widget_updates"] = updates
+
+
+def _apply_pending_widget_updates() -> None:
+    updates = st.session_state.pop("_pending_widget_updates", {})
+    if not isinstance(updates, dict):
+        return
+    for k, v in updates.items():
+        st.session_state[k] = v
 
 
 def _headers(actions_key: str) -> dict[str, str]:
@@ -321,11 +332,11 @@ def _init_state() -> None:
         "params_override_text": "",
         "template_key": PROJECT_TYPES[0] if PROJECT_TYPES else "",
         "strict_tender_outline": True,
-        "body_font": "SimSun",
-        "title_font": "SimHei",
+        "body_font": "宋体",
+        "title_font": "宋体",
         "body_size": 12,
         "title_size": 16,
-        "line_spacing": 1.5,
+        "line_spacing_pt": 22.0,
         "enforce_chapter_pages": False,
         "chapter_start_new_page": False,
         "chart_enabled": True,
@@ -337,6 +348,10 @@ def _init_state() -> None:
         st.session_state.setdefault(k, v)
     if PROJECT_TYPES and st.session_state.get("project_type") not in PROJECT_TYPES:
         st.session_state["project_type"] = PROJECT_TYPES[0]
+    if st.session_state.get("body_font") not in {"宋体", "仿宋体"}:
+        st.session_state["body_font"] = "宋体"
+    if st.session_state.get("title_font") not in {"宋体", "仿宋体"}:
+        st.session_state["title_font"] = "宋体"
     valid_templates = list(TEMPLATE_LIBRARY.keys())
     if valid_templates and st.session_state.get("template_key") not in valid_templates:
         st.session_state["template_key"] = valid_templates[0]
@@ -562,6 +577,7 @@ def _poll_active_job(base_url: str, actions_key: str, poll_sec: float) -> None:
 
 
 _init_state()
+_apply_pending_widget_updates()
 
 st.title("施组专家系统")
 st.caption("Gemini 大脑 + 行业知识图谱 | 评审标准目录驱动 | A/B/C差异化编制")
@@ -657,8 +673,13 @@ if c_load.button("从评审标准载入目录", use_container_width=True):
         matrix = tr.get("matrix") or {}
         auto_topic, auto_pid = _apply_project_defaults_from_tender(matrix)
         resolved_pid = str(tr.get("project_id") or auto_pid or pid).strip()
+        pending_widget_patch = False
+        if auto_topic:
+            _queue_widget_update("topic_text", auto_topic)
+            pending_widget_patch = True
         if auto_pid or resolved_pid:
-            st.session_state["project_id_text"] = auto_pid or resolved_pid
+            _queue_widget_update("project_id_text", auto_pid or resolved_pid)
+            pending_widget_patch = True
         if auto_topic:
             _append_log(f"已自动识别项目主题：{auto_topic}")
         if auto_pid:
@@ -671,6 +692,8 @@ if c_load.button("从评审标准载入目录", use_container_width=True):
             st.rerun()
         else:
             st.warning("未提取到目录")
+            if pending_widget_patch:
+                st.rerun()
     except Exception as e:
         st.error(f"载入目录失败: {e}")
 
@@ -687,11 +710,11 @@ if c_health.button("检查后端连接", use_container_width=True):
 with st.expander("精细化排版渲染引擎", expanded=True):
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.text_input("正文中文字体", key="body_font")
+        st.selectbox("正文中文字体", options=["宋体", "仿宋体"], key="body_font")
         st.number_input("正文字号", min_value=9, max_value=24, key="body_size")
-        st.number_input("行距", min_value=1.0, max_value=2.5, step=0.1, key="line_spacing")
+        st.number_input("行距（磅）", min_value=10.0, max_value=60.0, step=0.5, key="line_spacing_pt")
     with c2:
-        st.text_input("标题中文字体", key="title_font")
+        st.selectbox("标题中文字体", options=["宋体", "仿宋体"], key="title_font")
         st.number_input("标题字号", min_value=10, max_value=36, key="title_size")
         st.checkbox("章节另起新页", key="chapter_start_new_page")
     with c3:
@@ -758,7 +781,7 @@ if run_btn:
             "title_font": st.session_state.get("title_font"),
             "body_size": int(st.session_state.get("body_size") or 12),
             "title_size": int(st.session_state.get("title_size") or 16),
-            "line_spacing": float(st.session_state.get("line_spacing") or 1.5),
+            "line_spacing_pt": float(st.session_state.get("line_spacing_pt") or 22.0),
             "chapter_start_new_page": bool(st.session_state.get("chapter_start_new_page")),
             "enforce_chapter_pages": bool(st.session_state.get("enforce_chapter_pages")),
             "chart_policy": {
@@ -787,12 +810,9 @@ if run_btn:
         auto_topic, auto_pid = _apply_project_defaults_from_tender(matrix)
         resolved_pid = str(tr.get("project_id") or auto_pid or project_id).strip()
         project_id = _safe_project_id(resolved_pid or project_id)
-        st.session_state["project_id_text"] = auto_pid or resolved_pid or project_id
         if auto_topic:
             topic = auto_topic
             _append_log(f"项目主题已自动对齐：{topic}")
-        else:
-            st.session_state["topic_text"] = topic
         if auto_pid:
             _append_log(f"项目ID已自动对齐：{project_id}")
         auto_outline = matrix.get("outline") if isinstance(matrix, dict) else []

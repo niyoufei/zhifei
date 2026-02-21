@@ -274,6 +274,17 @@ class TestExtractProjectMeta:
         assert meta.get("source") == "review_standard"
         assert outline == ["工程概况", "主要施工方法", "拟投入的主要物资计划"]
 
+    def test_extract_outline_review_standard_with_spaced_anchor(self, parser):
+        text = """技 术 文 件 详 细 评 审 标 准
+依据投标人提供的施工组织设计进行评审，包 括 但 不 限 于 以 下 内 容：
+1）工程概况
+2）主要施工方法
+3）拟投入的主要物资计划
+4）拟投入的主要施工机械、设备计划"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert outline[:2] == ["工程概况", "主要施工方法"]
+
 
 # ==============================================================================
 # _read_pdf tests (with mocking)

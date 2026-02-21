@@ -322,6 +322,7 @@ class TenderParser:
             "包括但不限于以下内容",
             "以下内容：",
         )
+        anchor_keywords_compact = tuple(k.replace(" ", "").replace("　", "") for k in anchor_keywords)
         stop_markers = (
             "一般得",
             "良好得",
@@ -391,7 +392,8 @@ class TenderParser:
 
         # A) 按行窗口抽取（锚点向后扫描）
         for i, ln in enumerate(lines[:2500]):
-            if not any(k in ln for k in anchor_keywords):
+            ln_compact = re.sub(r"\s+", "", ln or "")
+            if not any(k in ln or kc in ln_compact for k, kc in zip(anchor_keywords, anchor_keywords_compact)):
                 continue
             window = "\n".join(lines[i : i + 160])
             items = _extract_numbered_items(window)
