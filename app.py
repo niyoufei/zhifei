@@ -48,6 +48,7 @@ def _load_project_types() -> list[str]:
 
 
 PROJECT_TYPES = _load_project_types()
+LATEST_GEMINI_TEXT_MODEL = "gemini-3.1-pro-preview"
 
 
 def _load_template_library(project_types: list[str]) -> dict[str, dict[str, Any]]:
@@ -326,7 +327,7 @@ def _init_state() -> None:
         "image_provider": "google",
         "image_model": "banana",
         "provider_text": "google",
-        "model_text": "gemini-2.0-flash",
+        "model_text": LATEST_GEMINI_TEXT_MODEL,
         "api_key_text": "",
         "chapter_requirements_text": "",
         "params_override_text": "",
@@ -743,6 +744,8 @@ with st.expander("高级参数（可选）", expanded=False):
     with c3:
         st.text_input("文本模型提供商", key="provider_text")
         st.text_input("文本模型", key="model_text")
+        if str(st.session_state.get("provider_text") or "").strip().lower() == "google":
+            st.caption(f"建议：使用 {LATEST_GEMINI_TEXT_MODEL}（Gemini 3 系列）")
         st.text_input("文本模型 API Key", key="api_key_text", type="password")
 
     st.text_area("章级要求 JSON（可选）", key="chapter_requirements_text", height=100)
