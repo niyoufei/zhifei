@@ -65,7 +65,7 @@ def _meta_to_text(parsed_type: str | None, parsed_meta: Any) -> str:
             for k, v in sorted(inserts.items(), key=lambda x: x[1], reverse=True)[:8]:
                 top_blocks.append(f"{k}:{v}")
         return (
-            f"图纸类型: CAD(DXF)\n"
+            f"图纸类型: CAD(DXF ASCII)\n"
             f"图层数量: {layers}\n"
             f"实体数量: {entities}\n"
             f"块引用: {'; '.join(top_blocks)}"

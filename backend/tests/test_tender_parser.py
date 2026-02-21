@@ -221,6 +221,60 @@ class TestSplitSections:
         assert "第三行内容" in result[0].text
 
 
+class TestExtractProjectMeta:
+    """测试项目名称/编号抽取"""
+
+    def test_extract_project_meta_with_colon(self, parser):
+        text = """项目名称：长山路（县界—岱河路）建设工程
+项目编号：CSL-2026-001
+招标文件"""
+        name, code = parser._extract_project_meta(text)
+        assert name == "长山路（县界—岱河路）建设工程"
+        assert code == "CSL-2026-001"
+
+    def test_extract_project_meta_from_title_fallback(self, parser):
+        text = """长山路建设工程招标文件
+第一章 编制说明"""
+        name, code = parser._extract_project_meta(text)
+        assert name == "长山路建设工程"
+        assert code is None
+
+    def test_extract_outline_from_review_standard_block(self, parser):
+        text = """技术文件详细评审标准
+依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
+1）工程概况
+2）主要施工方法
+3）拟投入的主要物资计划
+4）拟投入的主要施工机械、设备计划
+5）劳动力安排计划
+6）确保工程质量的技术组织措施
+7）确保安全生产的技术组织措施
+8）确保工期的技术组织措施
+9）确保文明施工的技术组织措施
+10）施工总平面布置图
+一般得0分<F≤60分，良好得60分<F<90分，优秀得90分≤F≤100分。"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert len(outline) == 10
+        assert outline[0] == "工程概况"
+        assert outline[-1] == "施工总平面布置图"
+
+    def test_extract_outline_prefers_review_standard_over_toc(self, parser):
+        text = """目录
+第一章 编制说明
+第二章 施工部署
+第三章 质量管理
+
+技术文件详细评审标准
+依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
+1）工程概况
+2）主要施工方法
+3）拟投入的主要物资计划"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert outline == ["工程概况", "主要施工方法", "拟投入的主要物资计划"]
+
+
 # ==============================================================================
 # _read_pdf tests (with mocking)
 # ==============================================================================
@@ -517,8 +571,10 @@ class TestParse:
 
         # 验证结构
         assert hasattr(result, "project_name")
+        assert hasattr(result, "project_code")
         assert hasattr(result, "items")
         assert result.project_name is None
+        assert result.project_code is None
         for item in result.items:
             assert isinstance(item, TenderIndexItem)
             assert isinstance(item.dimension, TenderDimension)

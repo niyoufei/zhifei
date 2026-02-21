@@ -53,6 +53,7 @@ class TenderParser:
         style, style_meta = self._extract_style_requirements(merged_text)
         chapter_pages = self._extract_chapter_page_targets(merged_text, outline)
         chapter_requirements = self._extract_chapter_requirements(merged_text, outline)
+        project_name, project_code = self._extract_project_meta(merged_text)
         global_requirements = []
         global_requirements.extend(style_meta.get("global_requirements") or [])
         global_requirements.extend(outline_meta.get("global_requirements") or [])
@@ -61,7 +62,8 @@ class TenderParser:
             "style": style_meta,
         }
         return TenderIndexMatrix(
-            project_name=None,
+            project_name=project_name,
+            project_code=project_code,
             items=items,
             outline=outline,
             outline_source=outline_meta.get("source"),
@@ -72,6 +74,99 @@ class TenderParser:
             global_requirements=global_requirements,
             extraction_meta=extraction_meta,
         )
+
+    def _extract_project_meta(self, text: str) -> tuple[str | None, str | None]:
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
+        if not lines:
+            return None, None
+
+        name_keys = (
+            "项目名称",
+            "工程名称",
+            "招标项目名称",
+            "标段名称",
+            "项目名称及标段",
+        )
+        code_keys = (
+            "项目编号",
+            "招标编号",
+            "招标项目编号",
+            "工程编号",
+            "项目代码",
+            "采购编号",
+        )
+
+        name: str | None = None
+        code: str | None = None
+
+        def _clean_name(raw: str) -> str:
+            s = (raw or "").strip()
+            s = re.sub(r"[（(]?(?:项目编号|招标编号|招标项目编号|工程编号|项目代码|采购编号)\s*[：:].*$", "", s)
+            s = s.strip("：:;；,.，。 ")
+            s = re.sub(r"\s{2,}", " ", s)
+            if len(s) > 120:
+                s = s[:120].strip()
+            return s
+
+        def _clean_code(raw: str) -> str:
+            s = (raw or "").strip()
+            s = re.split(r"[，。；;,\s]", s)[0].strip()
+            s = re.sub(r"[^A-Za-z0-9_\-./\u4e00-\u9fff]+", "", s)
+            if len(s) > 80:
+                s = s[:80]
+            return s
+
+        for ln in lines[:800]:
+            normalized = ln.replace("\u3000", " ").strip()
+
+            if not name:
+                for k in name_keys:
+                    m = re.search(rf"{re.escape(k)}\s*[：:]\s*(.+)$", normalized)
+                    if m:
+                        candidate = _clean_name(m.group(1))
+                        if len(candidate) >= 2:
+                            name = candidate
+                            break
+                if not name:
+                    for k in name_keys:
+                        m = re.search(rf"{re.escape(k)}\s+(.+)$", normalized)
+                        if m:
+                            candidate = _clean_name(m.group(1))
+                            if len(candidate) >= 2:
+                                name = candidate
+                                break
+
+            if not code:
+                for k in code_keys:
+                    m = re.search(rf"{re.escape(k)}\s*[：:]\s*([A-Za-z0-9_\-./\u4e00-\u9fff]+)", normalized)
+                    if m:
+                        candidate = _clean_code(m.group(1))
+                        if len(candidate) >= 2:
+                            code = candidate
+                            break
+                if not code:
+                    for k in code_keys:
+                        m = re.search(rf"{re.escape(k)}\s+([A-Za-z0-9_\-./\u4e00-\u9fff]+)", normalized)
+                        if m:
+                            candidate = _clean_code(m.group(1))
+                            if len(candidate) >= 2:
+                                code = candidate
+                                break
+
+            if name and code:
+                break
+
+        if not name:
+            for ln in lines[:160]:
+                if "招标文件" not in ln:
+                    continue
+                maybe = ln.replace("招标文件", "").strip("：:-_ ")
+                maybe = _clean_name(maybe)
+                if 4 <= len(maybe) <= 80 and any(k in maybe for k in ("工程", "项目", "建设")):
+                    name = maybe
+                    break
+
+        return name or None, code or None
 
     def _read_pdf(self, path: str) -> Tuple[str, str]:
         texts: List[str] = []
@@ -174,6 +269,10 @@ class TenderParser:
             ]
             return fallback, {"source": "fallback", "global_requirements": ["招标文本未解析出可用正文，已启用最小覆盖章集合兜底。"]}
         lines = [ln.strip() for ln in merged.splitlines() if ln.strip()]
+        # 0) 优先从“技术文件详细评审标准/评审标准”中的“包括但不限于以下内容”抽章目录
+        review_outline = self._extract_outline_from_review_standard(merged, lines)
+        if review_outline:
+            return review_outline, {"source": "review_standard", "global_requirements": []}
         # 1) 目录块优先
         toc_idx = None
         for i, ln in enumerate(lines[:1200]):
@@ -205,6 +304,113 @@ class TenderParser:
             "成品保护与交付",
         ]
         return fallback, {"source": "fallback", "global_requirements": ["目录未从招标文本中明确抽取，已启用最小覆盖章集合兜底。"]}
+
+    def _extract_outline_from_review_standard(self, merged: str, lines: list[str]) -> list[str]:
+        """
+        从“技术文件详细评审标准/评审标准”区域抽取章节列表。
+        典型文本：
+        - 依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
+          1）工程概况 2）主要施工方法 ...
+        """
+        if not merged.strip():
+            return []
+
+        anchor_keywords = (
+            "技术文件详细评审标准",
+            "评审标准",
+            "施工组织设计进行评审",
+            "包括但不限于以下内容",
+            "以下内容：",
+        )
+        stop_markers = (
+            "一般得",
+            "良好得",
+            "优秀得",
+            "不得分",
+            "注：",
+            "注:",
+            "编制建议",
+            "AI“类人”评审",
+            "评标委员会",
+        )
+        noise_keywords = (
+            "评分",
+            "得分",
+            "评审",
+            "建议",
+            "页面排版",
+            "字体图片",
+            "编制篇幅",
+            "AI",
+        )
+        noise_exact = {
+            "施工组织设计",
+            "施工组织设计编制",
+            "技术文件详细评审标准",
+            "评审标准",
+        }
+
+        def _norm(s: str) -> str:
+            t = (s or "").strip()
+            t = re.sub(r"\s+", " ", t)
+            return t.strip("：:;；,.，。 ")
+
+        def _extract_numbered_items(blob: str) -> list[str]:
+            if not blob.strip():
+                return []
+            token_re = re.compile(r"(?<![0-9A-Za-z])([0-9]{1,2}|[一二三四五六七八九十]{1,2})\s*[）\)\\.、]")
+            marks = list(token_re.finditer(blob))
+            if not marks:
+                return []
+            out: list[str] = []
+            seen = set()
+            for i, m in enumerate(marks):
+                start = m.end()
+                end = marks[i + 1].start() if i + 1 < len(marks) else len(blob)
+                seg = blob[start:end]
+                for sm in stop_markers:
+                    p = seg.find(sm)
+                    if p >= 0:
+                        seg = seg[:p]
+                        break
+                title = _norm(seg)
+                title = re.sub(r"^[：:、\-\s]+", "", title)
+                title = re.sub(r"[;；。]+$", "", title)
+                if len(title) < 2 or len(title) > 48:
+                    continue
+                if title in noise_exact:
+                    continue
+                if any(nk in title for nk in noise_keywords):
+                    continue
+                if title not in seen:
+                    seen.add(title)
+                    out.append(title)
+            return out
+
+        candidates: list[list[str]] = []
+
+        # A) 按行窗口抽取（锚点向后扫描）
+        for i, ln in enumerate(lines[:2500]):
+            if not any(k in ln for k in anchor_keywords):
+                continue
+            window = "\n".join(lines[i : i + 160])
+            items = _extract_numbered_items(window)
+            if items:
+                candidates.append(items)
+
+        # B) 文本块抽取（“包括但不限于以下内容”后的连续片段）
+        for m in re.finditer(r"(包括但不限于以下内容|以下内容)\s*[：:]", merged):
+            tail = merged[m.end() : m.end() + 2800]
+            items = _extract_numbered_items(tail)
+            if items:
+                candidates.append(items)
+
+        if not candidates:
+            return []
+
+        # 选“条目数最多”的候选，避免误取零碎评分说明。
+        best = max(candidates, key=lambda x: (len(x), -sum(len(i) for i in x)))
+        return best if len(best) >= 3 else []
 
     def _parse_outline_lines(self, lines: list[str]) -> list[str]:
         out: list[str] = []

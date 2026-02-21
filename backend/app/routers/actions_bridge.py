@@ -44,8 +44,10 @@ def _auth_actions_key(x_actions_key: str | None):
 class ActionsGenerateRequest(BaseModel):
     topic: str
     project_id: str | None = None
+    project_type: str | None = None
     outline: List[str] = []
     requirements: List[str] = []
+    global_instruction: str | None = None
     chapter_requirements: dict | None = None
     provider: str | None = None
     model: str | None = None
@@ -82,6 +84,8 @@ class ActionsGenerateRequest(BaseModel):
 class ActionsPlanRequest(BaseModel):
     outline: List[str]
     style: dict = {}
+    project_type: str | None = None
+    global_instruction: str | None = None
     variants: int = 1
     chapter_requirements: dict = {}
     chapter_pages: dict = {}
@@ -132,6 +136,10 @@ class ActionsParamsSetRequest(BaseModel):
 class ActionsParamsDiffRequest(BaseModel):
     update: dict
     merge: bool = True
+
+
+class ActionsJobCancelRequest(BaseModel):
+    job_id: str
 
 
 @router.get("/params/get")
@@ -206,6 +214,14 @@ async def _save_upload(uf: UploadFile) -> str:
         return f.name
 
 
+def _safe_project_scope(raw: str | None) -> str | None:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"[^A-Za-z0-9_\-\.\u4e00-\u9fff]+", "_", s).strip("_")
+    return s[:96] or None
+
+
 def _merge_plan_defaults(payload: dict) -> dict:
     pid = str(payload.get("project_id") or "").strip() or None
     plan = load_plan(project_id=pid) or {}
@@ -240,6 +256,10 @@ def _merge_plan_defaults(payload: dict) -> dict:
         payload["compare_titles"] = plan.get("compare_titles")
     if not payload.get("variants"):
         payload["variants"] = plan.get("variants") or 1
+    if not payload.get("project_type"):
+        payload["project_type"] = plan.get("project_type")
+    if payload.get("global_instruction") is None:
+        payload["global_instruction"] = plan.get("global_instruction")
     return payload
 
 
@@ -443,23 +463,41 @@ async def actions_tender_parse(
     paths = await asyncio.gather(*[_save_upload(f) for f in files])
     parser = TenderParser()
     matrix = await parser.parse(paths)
-    saved_at = save_tender_matrix(matrix.model_dump(), project_id=project_id)
-    return {"ok": True, "matrix": matrix.model_dump(), "saved_at": saved_at}
+    matrix_dict = matrix.model_dump()
+    parsed_code = _safe_project_scope(matrix_dict.get("project_code"))
+    parsed_name = str(matrix_dict.get("project_name") or "").strip() or None
+    requested_pid = _safe_project_scope(project_id)
+    resolved_project_id = parsed_code or requested_pid
+    if not resolved_project_id and parsed_name:
+        resolved_project_id = _safe_project_scope(parsed_name)
+    saved_at = save_tender_matrix(matrix_dict, project_id=resolved_project_id)
+    return {
+        "ok": True,
+        "matrix": matrix_dict,
+        "project_id": resolved_project_id,
+        "project_name": parsed_name,
+        "project_code": parsed_code,
+        "saved_at": saved_at,
+    }
 
 
 @router.post("/boq/parse")
 async def actions_boq_parse(
-    file: UploadFile = File(...),
+    file: List[UploadFile] = File(...),
     project_id: str | None = None,
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
     if not file:
         raise HTTPException(status_code=400, detail="no file")
-    path = await _save_upload(file)
+    paths = await asyncio.gather(*[_save_upload(f) for f in file])
     parser = BoQParser()
-    items, stats = await parser.parse(path)
-    payload = {"items": [it.model_dump() for it in items], "stats": stats}
+    merged_items = []
+    for p in paths:
+        items, _ = await parser.parse(p)
+        merged_items.extend(items)
+    stats = parser._calc_stats(merged_items)
+    payload = {"items": [it.model_dump() for it in merged_items], "stats": stats, "source_file_count": len(paths)}
     saved_at = save_boq_data(payload, project_id=project_id)
     return {**payload, "ok": True, "saved_at": saved_at}
 
@@ -744,6 +782,13 @@ async def actions_generate_async(
     def _run_job(_job_id: str, _payload: dict):
         try:
             local_payload = json.loads(json.dumps(_payload))
+            def _is_cancelled() -> bool:
+                j = get_job(_job_id) or {}
+                return str(j.get("status") or "").strip().lower() == "cancelled"
+
+            if _is_cancelled():
+                update_job(_job_id, status="cancelled", error="cancelled_by_user")
+                return
             update_job(_job_id, status="running")
             variants = int(local_payload.get("variants") or 1)
             variant_ids = local_payload.get("_variant_ids")
@@ -756,8 +801,14 @@ async def actions_generate_async(
                 )
             results = []
             for vid in variant_ids:
+                if _is_cancelled():
+                    update_job(_job_id, status="cancelled", error="cancelled_by_user")
+                    return
                 local_payload["variant_id"] = int(vid)
                 results.append(asyncio.run(run_autoplan(local_payload)))
+            if _is_cancelled():
+                update_job(_job_id, status="cancelled", error="cancelled_by_user")
+                return
             # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort.
             if len(results) >= 2:
                 try:
@@ -825,13 +876,35 @@ async def actions_generate_async(
                     _rebuild_postprocessed_artifacts(results, payload=local_payload, report=report, params=params)
                 except Exception:
                     pass
+            if _is_cancelled():
+                update_job(_job_id, status="cancelled", error="cancelled_by_user")
+                return
             outputs = _save_outputs(f"actions_{_job_id}", results)
+            if _is_cancelled():
+                update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
+                return
             update_job(_job_id, status="done", result=outputs)
         except Exception as e:
             update_job(_job_id, status="failed", error=repr(e))
 
     background_tasks.add_task(_run_job, job_id, payload)
     return {"ok": True, "job_id": job_id, "status": "queued"}
+
+
+@router.post("/job_cancel")
+async def actions_job_cancel(req: ActionsJobCancelRequest, x_actions_key: str | None = Header(default=None)):
+    _auth_actions_key(x_actions_key)
+    job_id = str(req.job_id or "").strip()
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id required")
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    status = str(job.get("status") or "").strip().lower()
+    if status in {"done", "failed", "cancelled"}:
+        return {"ok": True, "job_id": job_id, "status": status}
+    update_job(job_id, status="cancelled", error="cancelled_by_user")
+    return {"ok": True, "job_id": job_id, "status": "cancelled"}
 
 
 @router.get("/job_status")

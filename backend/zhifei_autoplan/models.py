@@ -35,6 +35,7 @@ class TenderIndexItem(BaseModel):
 class TenderIndexMatrix(BaseModel):
     # 招标文件指数矩阵
     project_name: Optional[str] = None
+    project_code: Optional[str] = None
     items: List[TenderIndexItem]
     # 以下为“投标文件编制要求”抽取结果：用于自动生成章节结构与版式参数
     outline: List[str] = Field(default_factory=list)
