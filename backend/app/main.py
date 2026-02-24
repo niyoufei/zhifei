@@ -24,6 +24,7 @@ from .routers.retrieve import router as retrieve_router
 from .routers.publish_router import router as publish_router
 from .routers.score_router import router as score_router
 from .routers.zhifei_autoplan import router as zhifei_autoplan_router
+from .routers.zhifei_autoplan_v2 import router as zhifei_autoplan_v2_router
 from .routers.actions_bridge import router as actions_bridge_router
 from .routers.auth import router as auth_router
 
@@ -32,6 +33,7 @@ app.include_router(retrieve_router)
 app.include_router(publish_router)
 app.include_router(score_router)
 app.include_router(zhifei_autoplan_router)
+app.include_router(zhifei_autoplan_v2_router)
 app.include_router(actions_bridge_router)
 app.include_router(auth_router)
 
