@@ -97,6 +97,22 @@ def _arg_parser() -> argparse.ArgumentParser:
         default="build/Missing_Knowledge_Report.md",
         help="知识盲区体检报告输出路径。",
     )
+    p.add_argument(
+        "--self-heal",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="启用知识图谱自愈合Agent并在缺口后自动二次重跑。",
+    )
+    p.add_argument(
+        "--self-heal-provider",
+        default=None,
+        help="自愈Agent模型提供商（默认自动选择）。",
+    )
+    p.add_argument(
+        "--self-heal-model",
+        default=None,
+        help="自愈Agent模型名称（默认自动选择）。",
+    )
     return p
 
 
@@ -117,7 +133,11 @@ async def _run(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"kg root not found: {kg_root}")
 
     boq_payload = await _load_boq_payload(boq_path)
-    pipeline = MultiAgentDocPipeline(kg_db_path=kg_db)
+    pipeline = MultiAgentDocPipeline(
+        kg_db_path=kg_db,
+        self_healing_provider=args.self_heal_provider,
+        self_healing_model=args.self_heal_model,
+    )
 
     result = await pipeline.run(
         tender_paths=tender_paths,
@@ -125,6 +145,7 @@ async def _run(args: argparse.Namespace) -> int:
         graph_root=kg_root,
         output_path=output_path,
         missing_report_path=report_path,
+        enable_self_healing=bool(args.self_heal),
     )
 
     audit_agent = (result.get("agents") or {}).get("audit_agent") or {}
@@ -141,6 +162,15 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"Score Coverage OK: {bool(score_audit.get('ok'))}")
     print(f"Graph Support OK: {bool(graph_audit.get('ok'))}")
     print(f"Knowledge Gaps: {len(gaps)}")
+    self_heal = result.get("self_healing") or {}
+    if self_heal.get("triggered"):
+        print(
+            "Self-Healing: "
+            f"triggered=True, provider={self_heal.get('llm_provider')}, model={self_heal.get('llm_model')}, "
+            f"patch_nodes={self_heal.get('patch_nodes')}, used_fallback={self_heal.get('used_fallback')}"
+        )
+    else:
+        print("Self-Healing: triggered=False")
 
     for i, gap in enumerate(gaps[:20], start=1):
         gtype = str(gap.get("type") or "")

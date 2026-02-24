@@ -4,7 +4,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from backend.zhifei_autoplan.v2.audit_failfast import FailFastAuditError, run_with_fail_fast_retry
 from backend.zhifei_autoplan.v2.data_graph_ingestion import (
@@ -19,6 +19,7 @@ from backend.zhifei_autoplan.v2.quantitative_boq_engine import (
     QuantitativeBoQEngine,
     assert_paragraph_quantitative_support,
 )
+from backend.zhifei_autoplan.v2.self_healing_agent import SelfHealingAgent
 
 DEFAULT_PIPELINE_OUTPUT = Path("build/v2_multi_agent_output.json")
 DEFAULT_MISSING_REPORT = Path("build/Missing_Knowledge_Report.md")
@@ -45,9 +46,19 @@ class AgentContext:
 class MultiAgentDocPipeline:
     """End-to-end v2 multi-agent document generation pipeline."""
 
-    def __init__(self, *, kg_db_path: Path | str = DEFAULT_DB_PATH):
+    def __init__(
+        self,
+        *,
+        kg_db_path: Path | str = DEFAULT_DB_PATH,
+        self_healing_provider: Optional[str] = None,
+        self_healing_model: Optional[str] = None,
+        self_healing_api_key: Optional[str] = None,
+    ):
         self.kg_db_path = Path(kg_db_path)
         self.quant_engine = QuantitativeBoQEngine()
+        self.self_healing_provider = self_healing_provider
+        self.self_healing_model = self_healing_model
+        self.self_healing_api_key = self_healing_api_key
 
     def _make_section_text(
         self,
@@ -206,18 +217,40 @@ class MultiAgentDocPipeline:
             dim = str(item.get("dimension") or "").strip()
             keywords = item.get("keywords") or []
             section = by_title.get(dim) or {}
-            graph_hit = section.get("graph_hit") if isinstance(section.get("graph_hit"), dict) else {}
+            query = section.get("graph_query") or f"{dim} {' '.join(item.get('keywords') or [])}"
+            graph_search = search_graph_index(
+                query=query,
+                top_k=8,
+                db_path=self.kg_db_path,
+            )
+            graph_candidates = graph_search.get("results") or []
+
+            selected_graph_hit: Dict[str, Any] = {}
+            selected_parameter_ok = False
+            for candidate in graph_candidates:
+                c_node_id = str(candidate.get("node_id") or "").strip()
+                c_title = str(candidate.get("title") or "").strip()
+                c_score = float(candidate.get("score") or 0.0)
+                c_node_ok = bool((c_node_id or c_title) and c_score > 0)
+                c_applicable = candidate.get("applicable_conditions")
+                c_resources = candidate.get("resource_requirements")
+                c_safety = str(candidate.get("safety_level") or "unknown").strip().lower()
+                c_has_conditions = isinstance(c_applicable, dict) and len(c_applicable) > 0
+                c_has_resources = isinstance(c_resources, dict) and len(c_resources) > 0
+                c_parameter_ok = bool(c_node_ok and c_has_conditions and c_has_resources and c_safety != "unknown")
+                if not selected_graph_hit:
+                    selected_graph_hit = candidate
+                if c_parameter_ok:
+                    selected_graph_hit = candidate
+                    selected_parameter_ok = True
+                    break
+
+            graph_hit = selected_graph_hit
             node_id = str(graph_hit.get("node_id") or "").strip()
             title = str(graph_hit.get("title") or "").strip()
             score = float(graph_hit.get("score") or 0.0)
             node_ok = bool((node_id or title) and score > 0)
-
-            applicable = graph_hit.get("applicable_conditions")
-            resources = graph_hit.get("resource_requirements")
-            safety_level = str(graph_hit.get("safety_level") or "unknown").strip().lower()
-            has_conditions = isinstance(applicable, dict) and len(applicable) > 0
-            has_resources = isinstance(resources, dict) and len(resources) > 0
-            parameter_ok = node_ok and has_conditions and has_resources and safety_level != "unknown"
+            parameter_ok = bool(node_ok and selected_parameter_ok)
 
             formula_required = _formula_required(dim, keywords)
             formula_query = f"{dim} {' '.join([str(x) for x in keywords])} 公式 计算".strip()
@@ -227,22 +260,32 @@ class MultiAgentDocPipeline:
                 formula_search = search_graph_index(
                     query=formula_query,
                     node_types=["FormulaNode"],
-                    top_k=1,
+                    top_k=8,
                     db_path=self.kg_db_path,
                 )
                 formula_total = int(formula_search.get("total") or 0)
-                formula_hit = (formula_search.get("results") or [{}])[0]
+                formula_candidates = formula_search.get("results") or []
+                for candidate in formula_candidates:
+                    expr = str(candidate.get("formula_expression") or "").strip()
+                    c_node_id = str(candidate.get("node_id") or "").strip()
+                    c_score = float(candidate.get("score") or 0.0)
+                    if c_node_id and c_score > 0 and expr:
+                        formula_hit = candidate
+                        break
+                if not formula_hit and formula_candidates:
+                    formula_hit = formula_candidates[0]
             formula_ok = True
             if formula_required:
                 f_node_id = str(formula_hit.get("node_id") or "").strip()
                 f_score = float(formula_hit.get("score") or 0.0)
-                formula_ok = bool(f_node_id and f_score > 0)
+                f_expr = str(formula_hit.get("formula_expression") or "").strip()
+                formula_ok = bool(f_node_id and f_score > 0 and f_expr)
 
             ok = bool(node_ok and parameter_ok and formula_ok)
             check = {
                 "dimension": dim,
                 "keywords": keywords,
-                "graph_query": section.get("graph_query") or f"{dim} {' '.join(item.get('keywords') or [])}",
+                "graph_query": query,
                 "graph_node_id": node_id,
                 "graph_title": title,
                 "graph_score": score,
@@ -355,6 +398,7 @@ class MultiAgentDocPipeline:
         audit_result: Dict[str, Any],
         graph_audit: Dict[str, Any],
         fail_fast_error: str | None,
+        self_healing: Optional[Dict[str, Any]] = None,
         path: Path | str = DEFAULT_MISSING_REPORT,
     ) -> str:
         out = Path(path)
@@ -371,6 +415,16 @@ class MultiAgentDocPipeline:
         lines.append(f"- Intercepted: {bool(gaps or fail_fast_error)}")
         if fail_fast_error:
             lines.append(f"- FailFast Error: {fail_fast_error}")
+        if isinstance(self_healing, dict) and self_healing:
+            lines.append(f"- Self-Healing Triggered: {bool(self_healing.get('triggered'))}")
+            lines.append(f"- Self-Healing Patch Nodes: {int(self_healing.get('patch_nodes') or 0)}")
+            lines.append(f"- Self-Healing Used Fallback: {bool(self_healing.get('used_fallback'))}")
+            if self_healing.get("patch_file"):
+                lines.append(f"- Self-Healing Patch File: {self_healing.get('patch_file')}")
+            if self_healing.get("llm_model"):
+                lines.append(
+                    f"- Self-Healing LLM: {self_healing.get('llm_provider')} / {self_healing.get('llm_model')}"
+                )
         lines.append("")
 
         if not gaps:
@@ -401,6 +455,78 @@ class MultiAgentDocPipeline:
         out.write_text("\n".join(lines), encoding="utf-8")
         return str(out)
 
+    def _run_generation_pass(
+        self,
+        *,
+        index_matrix: Dict[str, Any],
+        quant_index: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        paragraph_cache: Dict[str, Any] = {}
+        fail_fast_error: str | None = None
+
+        try:
+            writing = self._build_sections_with_retry(
+                index_matrix=index_matrix,
+                quant_index=quant_index,
+                paragraph_cache=paragraph_cache,
+            )
+        except FailFastAuditError as exc:
+            fail_fast_error = str(exc)
+            writing = {
+                "sections": self._fallback_sections(index_matrix, quant_index),
+                "audit_result": exc.audit_result,
+            }
+        except Exception as exc:  # keep pipeline alive for report output
+            fail_fast_error = str(exc)
+            writing = {
+                "sections": self._fallback_sections(index_matrix, quant_index),
+                "audit_result": {"ok": False, "checks": [], "failed_count": 0, "error": str(exc)},
+            }
+
+        guarded_sections = self._apply_guardrails(writing.get("sections") or [])
+        graph_audit = self._audit_graph_support(index_matrix=index_matrix, sections=guarded_sections)
+        gaps = self._collect_knowledge_gaps(
+            graph_audit=graph_audit,
+            audit_result=writing.get("audit_result") or {},
+        )
+        return {
+            "writing": writing,
+            "sections": guarded_sections,
+            "graph_audit": graph_audit,
+            "gaps": gaps,
+            "fail_fast_error": fail_fast_error,
+            "intercepted": bool(gaps or fail_fast_error),
+        }
+
+    async def _run_self_healing(
+        self,
+        *,
+        graph_root: Path | str,
+        gaps: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not gaps:
+            return {"triggered": False, "patch_nodes": 0}
+
+        healer = SelfHealingAgent(
+            provider=self.self_healing_provider,
+            model=self.self_healing_model,
+            api_key=self.self_healing_api_key,
+        )
+        built = await healer.build_patch_nodes(gaps)
+        nodes = built.get("nodes") or []
+        persisted = healer.persist_patch_nodes(graph_root=graph_root, nodes=nodes)
+
+        return {
+            "triggered": True,
+            "llm_provider": built.get("provider"),
+            "llm_model": built.get("model"),
+            "llm_error": built.get("llm_error"),
+            "used_fallback": bool(built.get("used_fallback")),
+            "patch_nodes": len(nodes),
+            "patch_file": persisted.get("saved_at"),
+            "merged_node_count": persisted.get("merged_node_count"),
+        }
+
     async def run(
         self,
         *,
@@ -409,6 +535,7 @@ class MultiAgentDocPipeline:
         graph_root: Path | str = DEFAULT_KG_ROOT,
         output_path: Path | str = DEFAULT_PIPELINE_OUTPUT,
         missing_report_path: Path | str = DEFAULT_MISSING_REPORT,
+        enable_self_healing: bool = False,
     ) -> Dict[str, Any]:
         graph_report = ingest_knowledge_graph(graph_root, db_path=self.kg_db_path)
         matrix_result = await build_index_matrix(tender_paths)
@@ -416,44 +543,30 @@ class MultiAgentDocPipeline:
         quant_index = self.quant_engine.build_quantitative_index(boq_payload)
 
         ctx = AgentContext(graph_report=graph_report, index_matrix=index_matrix, quant_index=quant_index)
-        paragraph_cache: Dict[str, Any] = {}
+        first_pass = self._run_generation_pass(index_matrix=ctx.index_matrix, quant_index=ctx.quant_index)
+        final_pass = dict(first_pass)
 
-        fail_fast_error: str | None = None
-        try:
-            writing = self._build_sections_with_retry(
-                index_matrix=ctx.index_matrix,
-                quant_index=ctx.quant_index,
-                paragraph_cache=paragraph_cache,
+        self_healing_result: Dict[str, Any] = {"triggered": False, "patch_nodes": 0}
+        if enable_self_healing and first_pass.get("gaps"):
+            self_healing_result = await self._run_self_healing(
+                graph_root=graph_root,
+                gaps=first_pass.get("gaps") or [],
             )
-        except FailFastAuditError as exc:
-            fail_fast_error = str(exc)
-            writing = {
-                "sections": self._fallback_sections(ctx.index_matrix, ctx.quant_index),
-                "audit_result": exc.audit_result,
-            }
-        except Exception as exc:  # keep pipeline alive for report output
-            fail_fast_error = str(exc)
-            writing = {
-                "sections": self._fallback_sections(ctx.index_matrix, ctx.quant_index),
-                "audit_result": {"ok": False, "checks": [], "failed_count": 0, "error": str(exc)},
-            }
+            # Re-ingest graph after auto patch and rerun full generation/audit.
+            ctx.graph_report = ingest_knowledge_graph(graph_root, db_path=self.kg_db_path)
+            final_pass = self._run_generation_pass(index_matrix=ctx.index_matrix, quant_index=ctx.quant_index)
 
-        guarded_sections = self._apply_guardrails(writing.get("sections") or [])
-        graph_audit = self._audit_graph_support(index_matrix=ctx.index_matrix, sections=guarded_sections)
-        gaps = self._collect_knowledge_gaps(
-            graph_audit=graph_audit,
-            audit_result=writing.get("audit_result") or {},
-        )
         missing_report_saved = self._write_missing_knowledge_report(
-            gaps=gaps,
+            gaps=final_pass.get("gaps") or [],
             graph_report=ctx.graph_report,
-            audit_result=writing.get("audit_result") or {},
-            graph_audit=graph_audit,
-            fail_fast_error=fail_fast_error,
+            audit_result=(final_pass.get("writing") or {}).get("audit_result") or {},
+            graph_audit=final_pass.get("graph_audit") or {},
+            fail_fast_error=final_pass.get("fail_fast_error"),
+            self_healing=self_healing_result,
             path=missing_report_path,
         )
 
-        intercepted = bool(gaps or fail_fast_error)
+        intercepted = bool(final_pass.get("intercepted"))
         output = {
             "ok": True,
             "intercepted": intercepted,
@@ -463,17 +576,24 @@ class MultiAgentDocPipeline:
                 "quant_agent": {"status": "done", "cpm": ctx.quant_index.get("cpm")},
                 "audit_agent": {
                     "status": "done",
-                    "result": writing.get("audit_result") or {},
-                    "graph_support": graph_audit,
+                    "result": (final_pass.get("writing") or {}).get("audit_result") or {},
+                    "graph_support": final_pass.get("graph_audit") or {},
                 },
                 "guardrail_agent": {"status": "done"},
+                "self_healing_agent": {"status": "done" if self_healing_result.get("triggered") else "skipped"},
             },
             "index_matrix": ctx.index_matrix,
             "quant_index": ctx.quant_index,
-            "sections": guarded_sections,
-            "knowledge_gaps": gaps,
+            "sections": final_pass.get("sections") or [],
+            "knowledge_gaps": final_pass.get("gaps") or [],
             "missing_knowledge_report": missing_report_saved,
-            "fail_fast_error": fail_fast_error,
+            "fail_fast_error": final_pass.get("fail_fast_error"),
+            "self_healing": self_healing_result,
+            "pre_healing": {
+                "intercepted": bool(first_pass.get("intercepted")),
+                "knowledge_gaps": first_pass.get("gaps") or [],
+                "fail_fast_error": first_pass.get("fail_fast_error"),
+            },
         }
 
         out = Path(output_path)

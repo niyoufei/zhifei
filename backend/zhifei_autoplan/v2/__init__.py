@@ -13,6 +13,7 @@ from .quantitative_boq_engine import QuantitativeBoQEngine, QuantitativeSupportE
 from .audit_failfast import audit_against_index_matrix, enforce_fail_fast, FailFastAuditError
 from .language_guardrails import validate_guardrails, enforce_guardrails, GuardrailBugError
 from .multi_agent_pipeline import MultiAgentDocPipeline
+from .self_healing_agent import SelfHealingAgent
 
 __all__ = [
     "KnowledgeGraphIndex",
@@ -32,4 +33,5 @@ __all__ = [
     "enforce_guardrails",
     "GuardrailBugError",
     "MultiAgentDocPipeline",
+    "SelfHealingAgent",
 ]
