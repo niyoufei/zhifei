@@ -22,6 +22,8 @@ from backend.zhifei_autoplan.v2.quantitative_boq_engine import (
 
 DEFAULT_PIPELINE_OUTPUT = Path("build/v2_multi_agent_output.json")
 DEFAULT_MISSING_REPORT = Path("build/Missing_Knowledge_Report.md")
+FORMULA_REQUIRED_DIMENSIONS = {"进度", "重难点"}
+FORMULA_HINT_KEYWORDS = ("公式", "计算", "推算", "时长", "温控", "工期", "产能", "动力学")
 
 DIMENSION_PARAMETER_HINTS: Dict[str, List[str]] = {
     "质量": ["强度等级(MPa)", "允许偏差(mm)", "抽检频次(次/批)", "验收合格率(%)"],
@@ -186,6 +188,12 @@ class MultiAgentDocPipeline:
         index_matrix: Dict[str, Any],
         sections: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        def _formula_required(dimension: str, keywords: List[str]) -> bool:
+            if dimension in FORMULA_REQUIRED_DIMENSIONS:
+                return True
+            text = " ".join([dimension] + [str(x) for x in (keywords or [])]).lower()
+            return any(hint in text for hint in FORMULA_HINT_KEYWORDS)
+
         by_title: Dict[str, Dict[str, Any]] = {}
         for section in sections:
             title = str(section.get("title") or "").strip()
@@ -196,19 +204,56 @@ class MultiAgentDocPipeline:
         checks: List[Dict[str, Any]] = []
         for item in index_matrix.get("index_matrix") or []:
             dim = str(item.get("dimension") or "").strip()
+            keywords = item.get("keywords") or []
             section = by_title.get(dim) or {}
             graph_hit = section.get("graph_hit") if isinstance(section.get("graph_hit"), dict) else {}
             node_id = str(graph_hit.get("node_id") or "").strip()
             title = str(graph_hit.get("title") or "").strip()
             score = float(graph_hit.get("score") or 0.0)
-            ok = bool((node_id or title) and score > 0)
+            node_ok = bool((node_id or title) and score > 0)
+
+            applicable = graph_hit.get("applicable_conditions")
+            resources = graph_hit.get("resource_requirements")
+            safety_level = str(graph_hit.get("safety_level") or "unknown").strip().lower()
+            has_conditions = isinstance(applicable, dict) and len(applicable) > 0
+            has_resources = isinstance(resources, dict) and len(resources) > 0
+            parameter_ok = node_ok and has_conditions and has_resources and safety_level != "unknown"
+
+            formula_required = _formula_required(dim, keywords)
+            formula_query = f"{dim} {' '.join([str(x) for x in keywords])} 公式 计算".strip()
+            formula_hit = {}
+            formula_total = 0
+            if formula_required:
+                formula_search = search_graph_index(
+                    query=formula_query,
+                    node_types=["FormulaNode"],
+                    top_k=1,
+                    db_path=self.kg_db_path,
+                )
+                formula_total = int(formula_search.get("total") or 0)
+                formula_hit = (formula_search.get("results") or [{}])[0]
+            formula_ok = True
+            if formula_required:
+                f_node_id = str(formula_hit.get("node_id") or "").strip()
+                f_score = float(formula_hit.get("score") or 0.0)
+                formula_ok = bool(f_node_id and f_score > 0)
+
+            ok = bool(node_ok and parameter_ok and formula_ok)
             check = {
                 "dimension": dim,
-                "keywords": item.get("keywords") or [],
+                "keywords": keywords,
                 "graph_query": section.get("graph_query") or f"{dim} {' '.join(item.get('keywords') or [])}",
                 "graph_node_id": node_id,
                 "graph_title": title,
                 "graph_score": score,
+                "node_ok": node_ok,
+                "parameter_ok": parameter_ok,
+                "formula_required": formula_required,
+                "formula_ok": formula_ok,
+                "formula_query": formula_query if formula_required else None,
+                "formula_total": formula_total,
+                "formula_node_id": formula_hit.get("node_id") if formula_required else None,
+                "formula_title": formula_hit.get("title") if formula_required else None,
                 "ok": ok,
             }
             checks.append(check)
@@ -234,19 +279,53 @@ class MultiAgentDocPipeline:
 
         for item in graph_audit.get("missing") or []:
             dim = str(item.get("dimension") or "未知维度")
-            key = ("graph_support_missing", dim)
-            if key in seen:
-                continue
-            seen.add(key)
-            gaps.append(
-                {
-                    "type": "graph_support_missing",
-                    "dimension": dim,
-                    "required_keywords": item.get("keywords") or [],
-                    "query": item.get("graph_query"),
-                    "suggested_parameters": DIMENSION_PARAMETER_HINTS.get(dim, ["补充参数阈值/频次/责任岗位"]),
-                }
-            )
+            if not item.get("node_ok"):
+                key = ("graph_support_missing", dim)
+                if key not in seen:
+                    seen.add(key)
+                    gaps.append(
+                        {
+                            "type": "graph_support_missing",
+                            "dimension": dim,
+                            "required_keywords": item.get("keywords") or [],
+                            "query": item.get("graph_query"),
+                            "suggested_parameters": DIMENSION_PARAMETER_HINTS.get(dim, ["补充参数阈值/频次/责任岗位"]),
+                        }
+                    )
+            if item.get("node_ok") and not item.get("parameter_ok"):
+                key = ("parameter_missing", dim)
+                if key not in seen:
+                    seen.add(key)
+                    gaps.append(
+                        {
+                            "type": "parameter_missing",
+                            "dimension": dim,
+                            "required_keywords": item.get("keywords") or [],
+                            "query": item.get("graph_query"),
+                            "suggested_parameters": [
+                                "applicable_conditions(气候/地质)",
+                                "resource_requirements(资源消耗模型)",
+                                "safety_level(风险等级)",
+                            ],
+                        }
+                    )
+            if item.get("formula_required") and not item.get("formula_ok"):
+                key = ("formula_missing", dim)
+                if key not in seen:
+                    seen.add(key)
+                    gaps.append(
+                        {
+                            "type": "formula_missing",
+                            "dimension": dim,
+                            "required_keywords": item.get("keywords") or [],
+                            "query": item.get("formula_query") or item.get("graph_query"),
+                            "suggested_parameters": [
+                                "FormulaNode.formula_expression",
+                                "FormulaNode.formula_variables",
+                                "可计算变量映射(volume/productivity等)",
+                            ],
+                        }
+                    )
 
         for check in audit_result.get("checks") or []:
             if check.get("ok"):
