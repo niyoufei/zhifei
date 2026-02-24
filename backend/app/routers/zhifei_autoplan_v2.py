@@ -33,6 +33,7 @@ class PipelineRunRequest(BaseModel):
     graph_root: str = str(DEFAULT_KG_ROOT)
     kg_db_path: str = str(DEFAULT_DB_PATH)
     output_path: str = "build/v2_multi_agent_output.json"
+    missing_report_path: str = "build/Missing_Knowledge_Report.md"
 
 
 async def _save_upload(uf: UploadFile) -> str:
@@ -111,6 +112,7 @@ async def run_pipeline_api(req: PipelineRunRequest):
             boq_payload=req.boq_payload,
             graph_root=req.graph_root,
             output_path=req.output_path,
+            missing_report_path=req.missing_report_path,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))

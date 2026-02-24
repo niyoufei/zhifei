@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
-from backend.zhifei_autoplan.v2.audit_failfast import run_with_fail_fast_retry
+from backend.zhifei_autoplan.v2.audit_failfast import FailFastAuditError, run_with_fail_fast_retry
 from backend.zhifei_autoplan.v2.data_graph_ingestion import (
     DEFAULT_DB_PATH,
     DEFAULT_KG_ROOT,
@@ -20,6 +21,16 @@ from backend.zhifei_autoplan.v2.quantitative_boq_engine import (
 )
 
 DEFAULT_PIPELINE_OUTPUT = Path("build/v2_multi_agent_output.json")
+DEFAULT_MISSING_REPORT = Path("build/Missing_Knowledge_Report.md")
+
+DIMENSION_PARAMETER_HINTS: Dict[str, List[str]] = {
+    "质量": ["强度等级(MPa)", "允许偏差(mm)", "抽检频次(次/批)", "验收合格率(%)"],
+    "安全": ["风险等级", "检查频次(次/日)", "临电漏保参数(mA)", "应急响应时限(min)"],
+    "进度": ["关键线路工序间隔(天)", "里程碑节点(日期)", "资源峰值(人/台)", "纠偏时限(h)"],
+    "环保": ["PM10阈值(ug/m3)", "噪声阈值(dB)", "污水pH范围", "巡检频次(次/日)"],
+    "重难点": ["关键工序参数", "专项资源配置(人/台)", "风险触发阈值", "验收闭环指标"],
+    "扣分点": ["扣分触发条件", "响应时限(h)", "责任岗位", "闭环校验频次"],
+}
 
 
 @dataclass
@@ -75,6 +86,31 @@ class MultiAgentDocPipeline:
         )
         return text
 
+    def _fallback_sections(self, index_matrix: Dict[str, Any], quant_index: Dict[str, Any]) -> List[Dict[str, Any]]:
+        mapping_items = list((quant_index.get("mapping_3d") or {}).items())
+        if not mapping_items:
+            return []
+
+        sections: List[Dict[str, Any]] = []
+        for idx, item in enumerate(index_matrix.get("index_matrix") or []):
+            item_name, support = mapping_items[idx % len(mapping_items)]
+            title = str(item.get("dimension") or f"section_{idx + 1}")
+            checker = "质量员" if title in {"质量", "重难点", "扣分点"} else "安全员"
+            text = (
+                f"执行{support.get('process') or '关键工序'}参数控制，阈值95%，"
+                f"{checker}每班次检查2次，偏差处置时限4h，资源投入{len(support.get('resources') or [])}人。"
+            )
+            sections.append(
+                {
+                    "title": title,
+                    "content": text,
+                    "source_boq_item": item_name,
+                    "graph_hit": {},
+                    "fallback": True,
+                }
+            )
+        return sections
+
     def _build_sections_with_retry(
         self,
         *,
@@ -91,8 +127,9 @@ class MultiAgentDocPipeline:
             sections: List[Dict[str, Any]] = []
             for idx, item in enumerate(matrix_items):
                 item_name, support = mapping_items[idx % len(mapping_items)]
+                query = f"{item.get('dimension', '')} {' '.join(item.get('keywords') or [])}".strip()
                 graph_hits = search_graph_index(
-                    query=f"{item.get('dimension', '')} {' '.join(item.get('keywords') or [])}",
+                    query=query,
                     top_k=1,
                     db_path=self.kg_db_path,
                 )
@@ -110,6 +147,8 @@ class MultiAgentDocPipeline:
                         "content": text,
                         "source_boq_item": item_name,
                         "graph_hit": first_graph,
+                        "graph_query": query,
+                        "graph_hits_total": int(graph_hits.get("total") or 0),
                     }
                 )
                 cache[title] = text
@@ -141,6 +180,148 @@ class MultiAgentDocPipeline:
 
         return guarded
 
+    def _audit_graph_support(
+        self,
+        *,
+        index_matrix: Dict[str, Any],
+        sections: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        by_title: Dict[str, Dict[str, Any]] = {}
+        for section in sections:
+            title = str(section.get("title") or "").strip()
+            if title and title not in by_title:
+                by_title[title] = section
+
+        missing: List[Dict[str, Any]] = []
+        checks: List[Dict[str, Any]] = []
+        for item in index_matrix.get("index_matrix") or []:
+            dim = str(item.get("dimension") or "").strip()
+            section = by_title.get(dim) or {}
+            graph_hit = section.get("graph_hit") if isinstance(section.get("graph_hit"), dict) else {}
+            node_id = str(graph_hit.get("node_id") or "").strip()
+            title = str(graph_hit.get("title") or "").strip()
+            score = float(graph_hit.get("score") or 0.0)
+            ok = bool((node_id or title) and score > 0)
+            check = {
+                "dimension": dim,
+                "keywords": item.get("keywords") or [],
+                "graph_query": section.get("graph_query") or f"{dim} {' '.join(item.get('keywords') or [])}",
+                "graph_node_id": node_id,
+                "graph_title": title,
+                "graph_score": score,
+                "ok": ok,
+            }
+            checks.append(check)
+            if not ok:
+                missing.append(check)
+
+        return {
+            "ok": len(missing) == 0,
+            "checked": len(checks),
+            "missing_count": len(missing),
+            "checks": checks,
+            "missing": missing,
+        }
+
+    def _collect_knowledge_gaps(
+        self,
+        *,
+        graph_audit: Dict[str, Any],
+        audit_result: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        gaps: List[Dict[str, Any]] = []
+        seen = set()
+
+        for item in graph_audit.get("missing") or []:
+            dim = str(item.get("dimension") or "未知维度")
+            key = ("graph_support_missing", dim)
+            if key in seen:
+                continue
+            seen.add(key)
+            gaps.append(
+                {
+                    "type": "graph_support_missing",
+                    "dimension": dim,
+                    "required_keywords": item.get("keywords") or [],
+                    "query": item.get("graph_query"),
+                    "suggested_parameters": DIMENSION_PARAMETER_HINTS.get(dim, ["补充参数阈值/频次/责任岗位"]),
+                }
+            )
+
+        for check in audit_result.get("checks") or []:
+            if check.get("ok"):
+                continue
+            dim = str(check.get("dimension") or "未知维度")
+            key = ("response_point_missing", dim)
+            if key in seen:
+                continue
+            seen.add(key)
+            gaps.append(
+                {
+                    "type": "response_point_missing",
+                    "dimension": dim,
+                    "required_keywords": check.get("missing_keywords") or check.get("keywords") or [],
+                    "query": f"{dim} {' '.join(check.get('missing_keywords') or check.get('keywords') or [])}".strip(),
+                    "suggested_parameters": DIMENSION_PARAMETER_HINTS.get(dim, ["补充参数阈值/频次/责任岗位"]),
+                }
+            )
+
+        return gaps
+
+    def _write_missing_knowledge_report(
+        self,
+        *,
+        gaps: List[Dict[str, Any]],
+        graph_report: Dict[str, Any],
+        audit_result: Dict[str, Any],
+        graph_audit: Dict[str, Any],
+        fail_fast_error: str | None,
+        path: Path | str = DEFAULT_MISSING_REPORT,
+    ) -> str:
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        lines: List[str] = []
+        lines.append("# Missing Knowledge Report")
+        lines.append("")
+        lines.append(f"- Generated At: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+        lines.append(f"- Graph Files Parsed: {graph_report.get('files_parsed')}")
+        lines.append(f"- Graph Nodes Indexed: {graph_report.get('nodes_indexed')}")
+        lines.append(f"- Auditor Score Coverage OK: {bool(audit_result.get('ok'))}")
+        lines.append(f"- Auditor Graph Support OK: {bool(graph_audit.get('ok'))}")
+        lines.append(f"- Intercepted: {bool(gaps or fail_fast_error)}")
+        if fail_fast_error:
+            lines.append(f"- FailFast Error: {fail_fast_error}")
+        lines.append("")
+
+        if not gaps:
+            lines.append("## Summary")
+            lines.append("")
+            lines.append("No knowledge gaps detected. Current graph coverage supports this simulation run.")
+            lines.append("")
+        else:
+            lines.append("## Gap List")
+            lines.append("")
+            lines.append("| # | Gap Type | Dimension | Required Keywords | Suggested Parameters | Search Query |")
+            lines.append("|---|---|---|---|---|---|")
+            for idx, gap in enumerate(gaps, start=1):
+                keywords = "、".join([str(x) for x in (gap.get("required_keywords") or [])[:8]])
+                hints = "、".join([str(x) for x in (gap.get("suggested_parameters") or [])[:6]])
+                query = str(gap.get("query") or "").replace("|", "\\|")
+                lines.append(
+                    f"| {idx} | {gap.get('type')} | {gap.get('dimension')} | {keywords} | {hints} | `{query}` |"
+                )
+            lines.append("")
+            lines.append("## KG Enrichment Action")
+            lines.append("")
+            lines.append("1. 按维度补齐参数化节点：动作+参数+检查岗位。")
+            lines.append("2. 每个节点至少包含：阈值/频次/时限/责任岗位/验收标准。")
+            lines.append("3. 补齐后重新运行 run_v2_simulation.py 验证缺口是否收敛为 0。")
+            lines.append("")
+
+        out.write_text("\n".join(lines), encoding="utf-8")
+        return str(out)
+
     async def run(
         self,
         *,
@@ -148,6 +329,7 @@ class MultiAgentDocPipeline:
         boq_payload: Dict[str, Any],
         graph_root: Path | str = DEFAULT_KG_ROOT,
         output_path: Path | str = DEFAULT_PIPELINE_OUTPUT,
+        missing_report_path: Path | str = DEFAULT_MISSING_REPORT,
     ) -> Dict[str, Any]:
         graph_report = ingest_knowledge_graph(graph_root, db_path=self.kg_db_path)
         matrix_result = await build_index_matrix(tender_paths)
@@ -157,25 +339,62 @@ class MultiAgentDocPipeline:
         ctx = AgentContext(graph_report=graph_report, index_matrix=index_matrix, quant_index=quant_index)
         paragraph_cache: Dict[str, Any] = {}
 
-        writing = self._build_sections_with_retry(
-            index_matrix=ctx.index_matrix,
-            quant_index=ctx.quant_index,
-            paragraph_cache=paragraph_cache,
-        )
-        guarded_sections = self._apply_guardrails(writing["sections"])
+        fail_fast_error: str | None = None
+        try:
+            writing = self._build_sections_with_retry(
+                index_matrix=ctx.index_matrix,
+                quant_index=ctx.quant_index,
+                paragraph_cache=paragraph_cache,
+            )
+        except FailFastAuditError as exc:
+            fail_fast_error = str(exc)
+            writing = {
+                "sections": self._fallback_sections(ctx.index_matrix, ctx.quant_index),
+                "audit_result": exc.audit_result,
+            }
+        except Exception as exc:  # keep pipeline alive for report output
+            fail_fast_error = str(exc)
+            writing = {
+                "sections": self._fallback_sections(ctx.index_matrix, ctx.quant_index),
+                "audit_result": {"ok": False, "checks": [], "failed_count": 0, "error": str(exc)},
+            }
 
+        guarded_sections = self._apply_guardrails(writing.get("sections") or [])
+        graph_audit = self._audit_graph_support(index_matrix=ctx.index_matrix, sections=guarded_sections)
+        gaps = self._collect_knowledge_gaps(
+            graph_audit=graph_audit,
+            audit_result=writing.get("audit_result") or {},
+        )
+        missing_report_saved = self._write_missing_knowledge_report(
+            gaps=gaps,
+            graph_report=ctx.graph_report,
+            audit_result=writing.get("audit_result") or {},
+            graph_audit=graph_audit,
+            fail_fast_error=fail_fast_error,
+            path=missing_report_path,
+        )
+
+        intercepted = bool(gaps or fail_fast_error)
         output = {
             "ok": True,
+            "intercepted": intercepted,
             "agents": {
                 "graph_agent": {"status": "done", "report": ctx.graph_report},
                 "tender_agent": {"status": "done", "index_matrix_meta": ctx.index_matrix.get("meta")},
                 "quant_agent": {"status": "done", "cpm": ctx.quant_index.get("cpm")},
-                "audit_agent": {"status": "done", "result": writing["audit_result"]},
+                "audit_agent": {
+                    "status": "done",
+                    "result": writing.get("audit_result") or {},
+                    "graph_support": graph_audit,
+                },
                 "guardrail_agent": {"status": "done"},
             },
             "index_matrix": ctx.index_matrix,
             "quant_index": ctx.quant_index,
             "sections": guarded_sections,
+            "knowledge_gaps": gaps,
+            "missing_knowledge_report": missing_report_saved,
+            "fail_fast_error": fail_fast_error,
         }
 
         out = Path(output_path)
