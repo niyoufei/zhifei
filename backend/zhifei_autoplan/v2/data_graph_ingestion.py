@@ -12,14 +12,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-SUPPORTED_EXTENSIONS = {".json", ".md", ".markdown", ".xml", ".csv"}
+from .dxf_parser import parse_dxf_payload
+
+SUPPORTED_EXTENSIONS = {".json", ".md", ".markdown", ".xml", ".csv", ".dxf"}
 DEFAULT_KG_ROOT = Path("/Users/youfeini/Desktop/文档生成系统/知识图谱")
 DEFAULT_DB_PATH = Path("backend/data/autoplan/v2/knowledge_graph.sqlite3")
 
 EDGE_REQUIRES = "REQUIRES"
 EDGE_MITIGATES = "MITIGATES"
 EDGE_CONFLICTS_WITH = "CONFLICTS_WITH"
-EDGE_TYPES = (EDGE_REQUIRES, EDGE_MITIGATES, EDGE_CONFLICTS_WITH)
+EDGE_BELONGS_TO = "BELONGS_TO"
+EDGE_TYPES = (EDGE_REQUIRES, EDGE_MITIGATES, EDGE_CONFLICTS_WITH, EDGE_BELONGS_TO)
 
 SOURCE_HIERARCHY_RULE = "答疑文件 > 设计图纸 > 国标 > 行标 > 企标"
 SOURCE_HIERARCHY_WEIGHTS: Dict[str, int] = {
@@ -55,6 +58,12 @@ RELATION_KEYS: Dict[str, Tuple[str, ...]] = {
         "exclusions",
         "互斥",
         "冲突工艺",
+    ),
+    EDGE_BELONGS_TO: (
+        "belongs_to",
+        "layer",
+        "from_layer",
+        "所属图层",
     ),
 }
 
@@ -109,6 +118,8 @@ class ParsedNode:
     source_hierarchy: str = "企标"
     formula_expression: str = ""
     formula_variables_json: str = "[]"
+    data_source_type: str = "FILE"
+    spatial_context_json: str = "{}"
     reference_keys: List[str] = field(default_factory=list)
     edge_drafts: List[ParsedEdgeDraft] = field(default_factory=list)
 
@@ -535,6 +546,8 @@ def _build_parsed_node(
     formula_variables: List[str],
     reference_keys: List[str],
     edge_drafts: List[ParsedEdgeDraft],
+    data_source_type: str = "FILE",
+    spatial_context: Optional[Dict[str, Any]] = None,
 ) -> ParsedNode:
     uid = hashlib.sha1(f"{path}::{node_id}".encode("utf-8")).hexdigest()[:20]
     return ParsedNode(
@@ -552,6 +565,8 @@ def _build_parsed_node(
         source_hierarchy=source_hierarchy,
         formula_expression=formula_expression,
         formula_variables_json=_ensure_ascii_json(formula_variables),
+        data_source_type=str(data_source_type or "FILE"),
+        spatial_context_json=_ensure_ascii_json(spatial_context or {}),
         reference_keys=reference_keys,
         edge_drafts=edge_drafts,
     )
@@ -857,6 +872,300 @@ def _parse_json(path: Path) -> List[ParsedNode]:
     return nodes
 
 
+def _parse_dxf(path: Path) -> List[ParsedNode]:
+    payload = parse_dxf_payload(path)
+    source_hierarchy = _normalize_source_hierarchy("设计图纸", source_path=str(path))
+    nodes: List[ParsedNode] = []
+
+    layer_ref_map: Dict[str, str] = {}
+    layer_domain_map: Dict[str, str] = {}
+
+    for layer in payload.get("layers") or []:
+        layer_name = str(layer.get("layer_name") or "").strip() or "0"
+        professional_domain = str(layer.get("professional_domain") or "general").strip() or "general"
+        entity_count = int(layer.get("entity_count") or 0)
+        node_id = f"{path.stem}:layer:{layer_name}"
+        title = f"系统图层 {layer_name}"
+        body = "\n".join(
+            [
+                f"图层名称: {layer_name}",
+                f"专业属性: {professional_domain}",
+                f"实体数量: {entity_count}",
+            ]
+        )
+        object_key = _normalize_alias(layer_name) or _normalize_alias(node_id)
+        node = _build_parsed_node(
+            path=path,
+            node_id=node_id,
+            title=title,
+            body=body,
+            tags=["dxf", "layer", professional_domain, layer_name],
+            keywords=_tokenize(f"{title} {body}"),
+            payload={"type": "dxf_layer", "raw": layer},
+            node_type="EngineeringNode",
+            object_key=object_key,
+            applicable_conditions={},
+            resource_requirements={},
+            safety_level="unknown",
+            source_hierarchy=source_hierarchy,
+            formula_expression="",
+            formula_variables=[],
+            data_source_type="DXF",
+            spatial_context={"drawing": path.name, "layer": layer_name, "context_type": "layer"},
+            reference_keys=[node_id, title, layer_name, object_key],
+            edge_drafts=[],
+        )
+        nodes.append(node)
+        layer_ref_map[layer_name] = node_id
+        layer_domain_map[layer_name] = professional_domain
+
+    text_title_map = {
+        "design_general_notes": "设计总说明",
+        "technical_requirement": "技术要求",
+        "title_block_info": "图框信息",
+        "leader_annotation": "引线标注文本",
+        "drawing_text": "图纸文本",
+    }
+
+    for idx, item in enumerate(payload.get("texts") or [], start=1):
+        text = str(item.get("text") or "").strip()
+        if len(text) < 2:
+            continue
+        layer_name = str(item.get("layer") or "0")
+        category = str(item.get("category") or "drawing_text")
+        professional_domain = str(item.get("professional_domain") or layer_domain_map.get(layer_name) or "general")
+        node_id = f"{path.stem}:text:{idx}"
+        title = text_title_map.get(category, "图纸文本")
+        object_key = _normalize_alias(f"{layer_name}-{category}-{idx}")
+        edge_drafts: List[ParsedEdgeDraft] = []
+        layer_ref = layer_ref_map.get(layer_name)
+        if layer_ref:
+            edge_drafts.append(
+                ParsedEdgeDraft(
+                    from_ref=node_id,
+                    to_ref=layer_ref,
+                    edge_type=EDGE_BELONGS_TO,
+                    edge_label="text_layer_binding",
+                )
+            )
+
+        node = _build_parsed_node(
+            path=path,
+            node_id=node_id,
+            title=title,
+            body=text,
+            tags=["dxf", "text", category, layer_name, professional_domain],
+            keywords=_tokenize(f"{title} {text} {layer_name}"),
+            payload={"type": "dxf_text", "raw": item},
+            node_type="EngineeringNode",
+            object_key=object_key,
+            applicable_conditions={},
+            resource_requirements={},
+            safety_level=_normalize_safety_level(None, text),
+            source_hierarchy=source_hierarchy,
+            formula_expression="",
+            formula_variables=[],
+            data_source_type="DXF",
+            spatial_context={
+                "drawing": path.name,
+                "layer": layer_name,
+                "entity_type": item.get("entity_type"),
+                "position": item.get("position") or {},
+                "handle": item.get("handle") or "",
+                "context_type": category,
+            },
+            reference_keys=[node_id, title, layer_name, object_key],
+            edge_drafts=edge_drafts,
+        )
+        nodes.append(node)
+
+    title_block = payload.get("title_block") or {}
+    project_name = str(title_block.get("project_name") or "").strip()
+    drawing_scale = str(title_block.get("drawing_scale") or "").strip()
+    if project_name or drawing_scale:
+        body_lines = ["图框信息提取"]
+        if project_name:
+            body_lines.append(f"项目名称: {project_name}")
+        if drawing_scale:
+            body_lines.append(f"出图比例: {drawing_scale}")
+        node_id = f"{path.stem}:title_block"
+        title = "图框信息"
+        object_key = _normalize_alias(f"{path.stem}-title-block")
+        node = _build_parsed_node(
+            path=path,
+            node_id=node_id,
+            title=title,
+            body="\n".join(body_lines),
+            tags=["dxf", "title_block"],
+            keywords=_tokenize(" ".join(body_lines)),
+            payload={"type": "dxf_title_block", "raw": title_block},
+            node_type="EngineeringNode",
+            object_key=object_key,
+            applicable_conditions={},
+            resource_requirements={},
+            safety_level="unknown",
+            source_hierarchy=source_hierarchy,
+            formula_expression="",
+            formula_variables=[],
+            data_source_type="DXF",
+            spatial_context={"drawing": path.name, "context_type": "title_block"},
+            reference_keys=[node_id, title, object_key],
+            edge_drafts=[],
+        )
+        nodes.append(node)
+
+    for idx, item in enumerate(payload.get("blocks") or [], start=1):
+        block_name = str(item.get("block_name") or "").strip()
+        if not block_name:
+            continue
+        layer_name = str(item.get("layer") or "0")
+        professional_domain = str(item.get("professional_domain") or layer_domain_map.get(layer_name) or "general")
+        count = int(item.get("count") or 0)
+        node_id = f"{path.stem}:block:{idx}:{block_name}"
+        title = f"块符号 {block_name}"
+        body = "\n".join(
+            [
+                f"块名称: {block_name}",
+                f"所在图层: {layer_name}",
+                f"数量: {count}",
+                f"缩放: ({item.get('scale_x', 1.0)}, {item.get('scale_y', 1.0)}, {item.get('scale_z', 1.0)})",
+                f"旋转: {item.get('rotation', 0.0)}",
+            ]
+        )
+        object_key = _normalize_alias(f"{block_name}-{layer_name}")
+        edge_drafts: List[ParsedEdgeDraft] = []
+        layer_ref = layer_ref_map.get(layer_name)
+        if layer_ref:
+            edge_drafts.append(
+                ParsedEdgeDraft(
+                    from_ref=node_id,
+                    to_ref=layer_ref,
+                    edge_type=EDGE_BELONGS_TO,
+                    edge_label="block_layer_binding",
+                )
+            )
+
+        node = _build_parsed_node(
+            path=path,
+            node_id=node_id,
+            title=title,
+            body=body,
+            tags=["dxf", "block", professional_domain, layer_name],
+            keywords=_tokenize(f"{title} {body}"),
+            payload={"type": "dxf_block", "raw": item},
+            node_type="EngineeringNode",
+            object_key=object_key,
+            applicable_conditions={},
+            resource_requirements={"symbol_count": count},
+            safety_level="unknown",
+            source_hierarchy=source_hierarchy,
+            formula_expression="",
+            formula_variables=[],
+            data_source_type="DXF",
+            spatial_context={
+                "drawing": path.name,
+                "layer": layer_name,
+                "context_type": "block",
+                "sample_inserts": item.get("sample_inserts") or [],
+            },
+            reference_keys=[node_id, title, block_name, object_key],
+            edge_drafts=edge_drafts,
+        )
+        nodes.append(node)
+
+    for idx, item in enumerate(payload.get("dimensions") or [], start=1):
+        layer_name = str(item.get("layer") or "0")
+        measurement = item.get("measurement")
+        text = str(item.get("text") or "").strip()
+        detail = text or (f"{measurement}" if measurement is not None else "")
+        if not detail:
+            continue
+        node_id = f"{path.stem}:dimension:{idx}"
+        title = "尺寸标注"
+        body_lines = [f"所在图层: {layer_name}"]
+        if measurement is not None:
+            body_lines.append(f"量测值: {measurement}")
+        if text:
+            body_lines.append(f"标注文本: {text}")
+        object_key = _normalize_alias(f"{layer_name}-dimension-{idx}")
+        edge_drafts: List[ParsedEdgeDraft] = []
+        layer_ref = layer_ref_map.get(layer_name)
+        if layer_ref:
+            edge_drafts.append(
+                ParsedEdgeDraft(
+                    from_ref=node_id,
+                    to_ref=layer_ref,
+                    edge_type=EDGE_BELONGS_TO,
+                    edge_label="dimension_layer_binding",
+                )
+            )
+
+        node = _build_parsed_node(
+            path=path,
+            node_id=node_id,
+            title=title,
+            body="\n".join(body_lines),
+            tags=["dxf", "dimension", layer_name],
+            keywords=_tokenize(f"{title} {' '.join(body_lines)}"),
+            payload={"type": "dxf_dimension", "raw": item},
+            node_type="EngineeringNode",
+            object_key=object_key,
+            applicable_conditions={},
+            resource_requirements={},
+            safety_level="unknown",
+            source_hierarchy=source_hierarchy,
+            formula_expression="",
+            formula_variables=[],
+            data_source_type="DXF",
+            spatial_context={
+                "drawing": path.name,
+                "layer": layer_name,
+                "context_type": "dimension",
+                "defpoint": item.get("defpoint") or {},
+                "defpoint2": item.get("defpoint2") or {},
+                "defpoint3": item.get("defpoint3") or {},
+            },
+            reference_keys=[node_id, title, object_key],
+            edge_drafts=edge_drafts,
+        )
+        nodes.append(node)
+
+    geometry_features = payload.get("geometry_features") or []
+    if geometry_features:
+        counter: Dict[str, int] = {}
+        for feature in geometry_features:
+            ftype = str(feature.get("entity_type") or "UNKNOWN")
+            counter[ftype] = int(counter.get(ftype, 0)) + 1
+        summary = ", ".join(f"{key}:{value}" for key, value in sorted(counter.items()))
+        node_id = f"{path.stem}:geometry_summary"
+        title = "几何特征摘要"
+        body = f"几何实体统计: {summary}"
+        node = _build_parsed_node(
+            path=path,
+            node_id=node_id,
+            title=title,
+            body=body,
+            tags=["dxf", "geometry"],
+            keywords=_tokenize(f"{title} {summary}"),
+            payload={"type": "dxf_geometry_summary", "raw": geometry_features[:80]},
+            node_type="EngineeringNode",
+            object_key=_normalize_alias(f"{path.stem}-geometry-summary"),
+            applicable_conditions={},
+            resource_requirements={},
+            safety_level="unknown",
+            source_hierarchy=source_hierarchy,
+            formula_expression="",
+            formula_variables=[],
+            data_source_type="DXF",
+            spatial_context={"drawing": path.name, "context_type": "geometry_summary"},
+            reference_keys=[node_id, title],
+            edge_drafts=[],
+        )
+        nodes.append(node)
+
+    return nodes
+
+
 def _safe_eval_formula(expression: str, variables: Dict[str, Any]) -> Any:
     text = str(expression or "").strip()
     if not text:
@@ -935,6 +1244,8 @@ class KnowledgeGraphIndex:
                     source_hierarchy TEXT NOT NULL DEFAULT '企标',
                     formula_expression TEXT NOT NULL DEFAULT '',
                     formula_variables_json TEXT NOT NULL DEFAULT '[]',
+                    data_source_type TEXT NOT NULL DEFAULT 'FILE',
+                    spatial_context_json TEXT NOT NULL DEFAULT '{}',
                     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
                     UNIQUE(document_id, node_uid)
                 );
@@ -975,6 +1286,7 @@ class KnowledgeGraphIndex:
                 CREATE INDEX IF NOT EXISTS idx_nodes_document_id ON nodes(document_id);
                 CREATE INDEX IF NOT EXISTS idx_nodes_object_key ON nodes(object_key);
                 CREATE INDEX IF NOT EXISTS idx_nodes_source_hierarchy ON nodes(source_hierarchy);
+                CREATE INDEX IF NOT EXISTS idx_nodes_data_source_type ON nodes(data_source_type);
                 CREATE INDEX IF NOT EXISTS idx_node_tags_tag ON node_tags(tag);
                 CREATE INDEX IF NOT EXISTS idx_node_keywords_keyword ON node_keywords(keyword);
                 CREATE INDEX IF NOT EXISTS idx_node_aliases_alias ON node_aliases(alias);
@@ -991,6 +1303,8 @@ class KnowledgeGraphIndex:
             self._ensure_column(conn, "nodes", "source_hierarchy TEXT NOT NULL DEFAULT '企标'")
             self._ensure_column(conn, "nodes", "formula_expression TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "nodes", "formula_variables_json TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "nodes", "data_source_type TEXT NOT NULL DEFAULT 'FILE'")
+            self._ensure_column(conn, "nodes", "spatial_context_json TEXT NOT NULL DEFAULT '{}'")
 
             try:
                 conn.execute(
@@ -1012,10 +1326,10 @@ class KnowledgeGraphIndex:
             # Schema version tracking for reindex safety.
             vrow = conn.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
             version = str(vrow[0]) if vrow else "0"
-            if version != "2":
+            if version != "3":
                 self._schema_needs_reindex = True
                 conn.execute(
-                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '2')"
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '3')"
                 )
             conn.commit()
 
@@ -1041,6 +1355,8 @@ class KnowledgeGraphIndex:
             return _parse_xml(path)
         if ext == ".csv":
             return _parse_csv(path)
+        if ext == ".dxf":
+            return _parse_dxf(path)
         return []
 
     def _resolve_node_id(self, conn: sqlite3.Connection, ref: str, local_alias_map: Dict[str, int]) -> Optional[int]:
@@ -1137,9 +1453,11 @@ class KnowledgeGraphIndex:
                             safety_level,
                             source_hierarchy,
                             formula_expression,
-                            formula_variables_json
+                            formula_variables_json,
+                            data_source_type,
+                            spatial_context_json
                         )
-                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             doc_id,
@@ -1155,6 +1473,8 @@ class KnowledgeGraphIndex:
                             node.source_hierarchy,
                             node.formula_expression,
                             node.formula_variables_json,
+                            node.data_source_type,
+                            node.spatial_context_json,
                         ),
                     )
                     node_id = int(cursor.lastrowid)
@@ -1383,6 +1703,8 @@ class KnowledgeGraphIndex:
                     n.source_hierarchy,
                     n.formula_expression,
                     n.formula_variables_json,
+                    n.data_source_type,
+                    n.spatial_context_json,
                     d.file_name,
                     d.source_path,
                     COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags_csv,
@@ -1442,6 +1764,8 @@ class KnowledgeGraphIndex:
                 "safety_level": row["safety_level"],
                 "formula_expression": row["formula_expression"],
                 "formula_variables": _safe_json_load(row["formula_variables_json"], []),
+                "data_source_type": row["data_source_type"],
+                "spatial_context": _safe_json_load(row["spatial_context_json"], {}),
                 "score": round(score, 4),
                 "payload": _safe_json_load(row["payload_json"], {}),
                 "source_provenance": {
