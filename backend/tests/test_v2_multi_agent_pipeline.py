@@ -175,6 +175,7 @@ async def test_multi_agent_pipeline_can_trigger_self_healing(tmp_path: Path) -> 
     boq_payload = {"items": [{"boq_code": "A1", "name": "土方开挖", "quantity": 1000, "unit": "m3"}]}
     output_path = tmp_path / "out.json"
     report_path = tmp_path / "Missing_Knowledge_Report.md"
+    docx_path = tmp_path / "最终施组草案_带AI审校标记.docx"
 
     pipeline = MultiAgentDocPipeline(
         kg_db_path=tmp_path / "kg.sqlite3",
@@ -188,9 +189,14 @@ async def test_multi_agent_pipeline_can_trigger_self_healing(tmp_path: Path) -> 
         output_path=output_path,
         missing_report_path=report_path,
         enable_self_healing=True,
+        enable_docx_export=True,
+        docx_output_path=docx_path,
     )
 
     assert result["ok"] is True
     assert result["self_healing"]["triggered"] is True
     assert result["self_healing"]["patch_nodes"] >= 1
     assert Path(result["self_healing"]["patch_file"]).exists()
+    assert result["intercepted"] is False
+    assert result["docx_output"] == str(docx_path)
+    assert docx_path.exists()

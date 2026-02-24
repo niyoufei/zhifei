@@ -74,7 +74,7 @@ async def _load_boq_payload(path: Path) -> Dict[str, Any]:
 
 
 def _arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Run V2 engine on a real project (diagnosis mode).")
+    p = argparse.ArgumentParser(description="Run V2 engine on a real project (production mode).")
     p.add_argument("--tender", nargs="+", required=True, help="招标文件路径（PDF/Word/TXT等）。")
     p.add_argument("--boq", required=True, help="工程量清单路径（Excel/CSV/PDF）。")
     p.add_argument(
@@ -96,6 +96,17 @@ def _arg_parser() -> argparse.ArgumentParser:
         "--missing-report",
         default="build/Missing_Knowledge_Report.md",
         help="知识盲区体检报告输出路径。",
+    )
+    p.add_argument(
+        "--docx-out",
+        default="/Users/youfeini/Desktop/文档生成系统/01_真实项目测试/最终施组草案_带AI审校标记.docx",
+        help="最终施组草案DOCX输出路径。",
+    )
+    p.add_argument(
+        "--docx-export",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否导出最终DOCX文档。",
     )
     p.add_argument(
         "--self-heal",
@@ -123,6 +134,7 @@ async def _run(args: argparse.Namespace) -> int:
     kg_db = Path(args.kg_db).expanduser().resolve()
     output_path = Path(args.out).expanduser().resolve()
     report_path = Path(args.missing_report).expanduser().resolve()
+    docx_out_path = Path(args.docx_out).expanduser().resolve()
 
     for tender in tender_paths:
         if not Path(tender).exists():
@@ -146,6 +158,8 @@ async def _run(args: argparse.Namespace) -> int:
         output_path=output_path,
         missing_report_path=report_path,
         enable_self_healing=bool(args.self_heal),
+        enable_docx_export=bool(args.docx_export),
+        docx_output_path=docx_out_path,
     )
 
     audit_agent = (result.get("agents") or {}).get("audit_agent") or {}
@@ -158,6 +172,7 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"BOQ: {boq_path}")
     print(f"Diagnosis JSON: {result.get('saved_at')}")
     print(f"Missing_Knowledge_Report: {result.get('missing_knowledge_report')}")
+    print(f"Production DOCX: {result.get('docx_output')}")
     print(f"Strict Fail-Fast Intercepted: {result.get('intercepted')}")
     print(f"Score Coverage OK: {bool(score_audit.get('ok'))}")
     print(f"Graph Support OK: {bool(graph_audit.get('ok'))}")

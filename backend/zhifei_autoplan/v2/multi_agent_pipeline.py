@@ -19,6 +19,7 @@ from backend.zhifei_autoplan.v2.quantitative_boq_engine import (
     QuantitativeBoQEngine,
     assert_paragraph_quantitative_support,
 )
+from backend.zhifei_autoplan.v2.docx_generator import generate_v2_docx
 from backend.zhifei_autoplan.v2.self_healing_agent import SelfHealingAgent
 
 DEFAULT_PIPELINE_OUTPUT = Path("build/v2_multi_agent_output.json")
@@ -60,6 +61,78 @@ class MultiAgentDocPipeline:
         self.self_healing_model = self_healing_model
         self.self_healing_api_key = self_healing_api_key
 
+    def _is_auto_generated_hit(self, hit: Dict[str, Any] | None) -> bool:
+        if not isinstance(hit, dict):
+            return False
+        source_path = str(hit.get("source_path") or "").lower()
+        if "self_healing_patch_nodes" in source_path:
+            return True
+        snippet = str(hit.get("snippet") or "").lower()
+        if "is_auto_generated" in snippet:
+            return True
+        payload = hit.get("payload")
+        if isinstance(payload, dict):
+            text = json.dumps(payload, ensure_ascii=False).lower()
+            if "is_auto_generated" in text:
+                return True
+        return False
+
+    def _hit_parameter_ok(self, hit: Dict[str, Any] | None) -> bool:
+        if not isinstance(hit, dict):
+            return False
+        node_id = str(hit.get("node_id") or "").strip()
+        title = str(hit.get("title") or "").strip()
+        score = float(hit.get("score") or 0.0)
+        node_ok = bool((node_id or title) and score > 0)
+        applicable = hit.get("applicable_conditions")
+        resources = hit.get("resource_requirements")
+        safety_level = str(hit.get("safety_level") or "unknown").strip().lower()
+        has_conditions = isinstance(applicable, dict) and len(applicable) > 0
+        has_resources = isinstance(resources, dict) and len(resources) > 0
+        return bool(node_ok and has_conditions and has_resources and safety_level != "unknown")
+
+    def _select_graph_hit(self, query: str) -> Dict[str, Any]:
+        graph_search = search_graph_index(
+            query=query,
+            top_k=8,
+            db_path=self.kg_db_path,
+        )
+        candidates = graph_search.get("results") or []
+        if not candidates:
+            return {}
+
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                1 if self._hit_parameter_ok(item) else 0,
+                1 if self._is_auto_generated_hit(item) else 0,
+                float(item.get("score") or 0.0),
+            ),
+            reverse=True,
+        )
+        return ranked[0] if ranked else {}
+
+    def _select_formula_hit(self, query: str) -> Dict[str, Any]:
+        search = search_graph_index(
+            query=query,
+            node_types=["FormulaNode"],
+            top_k=8,
+            db_path=self.kg_db_path,
+        )
+        candidates = search.get("results") or []
+        if not candidates:
+            return {}
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                1 if str(item.get("formula_expression") or "").strip() else 0,
+                1 if self._is_auto_generated_hit(item) else 0,
+                float(item.get("score") or 0.0),
+            ),
+            reverse=True,
+        )
+        return ranked[0] if ranked else {}
+
     def _make_section_text(
         self,
         *,
@@ -81,11 +154,21 @@ class MultiAgentDocPipeline:
 
         kw_text = "、".join(keywords) if keywords else dimension
         graph_title = str((graph_support or {}).get("title") or "图谱证据")
+        auto_support = self._is_auto_generated_hit(graph_support or {})
+        graph_resources = graph_support.get("resource_requirements") if isinstance(graph_support, dict) else {}
+        resource_params = []
+        if isinstance(graph_resources, dict):
+            for key, value in list(graph_resources.items())[:3]:
+                resource_params.append(f"{key}={value}")
+        graph_param_text = f"图谱参数({'; '.join(resource_params)})。" if resource_params else ""
+        if auto_support and graph_param_text:
+            graph_param_text = f"AI自动补全参数{graph_param_text}"
 
         text = (
             f"执行{process}{kw_text}控制，持续{duration}天，每班次检查2次，"
             f"投入{resources}，由{quality_checker}复核并记录；"
             f"关键参数阈值=95%，偏差处置时限=4h。"
+            f"{graph_param_text}"
             f"【证据:{graph_title}】"
         )
 
@@ -141,17 +224,17 @@ class MultiAgentDocPipeline:
             for idx, item in enumerate(matrix_items):
                 item_name, support = mapping_items[idx % len(mapping_items)]
                 query = f"{item.get('dimension', '')} {' '.join(item.get('keywords') or [])}".strip()
+                selected_graph = self._select_graph_hit(query)
                 graph_hits = search_graph_index(
                     query=query,
-                    top_k=1,
+                    top_k=8,
                     db_path=self.kg_db_path,
                 )
-                first_graph = (graph_hits.get("results") or [{}])[0]
                 title = str(item.get("dimension") or f"section_{idx + 1}")
                 text = self._make_section_text(
                     dimension_item=item,
                     boq_support=support,
-                    graph_support=first_graph,
+                    graph_support=selected_graph,
                     attempt=attempt,
                 )
                 sections.append(
@@ -159,9 +242,16 @@ class MultiAgentDocPipeline:
                         "title": title,
                         "content": text,
                         "source_boq_item": item_name,
-                        "graph_hit": first_graph,
+                        "graph_hit": selected_graph,
                         "graph_query": query,
                         "graph_hits_total": int(graph_hits.get("total") or 0),
+                        "auto_generated_support": self._is_auto_generated_hit(selected_graph),
+                        "source_trace": {
+                            "node_id": selected_graph.get("node_id") if isinstance(selected_graph, dict) else None,
+                            "title": selected_graph.get("title") if isinstance(selected_graph, dict) else None,
+                            "source_path": selected_graph.get("source_path") if isinstance(selected_graph, dict) else None,
+                            "is_auto_generated": self._is_auto_generated_hit(selected_graph),
+                        },
                     }
                 )
                 cache[title] = text
@@ -218,62 +308,28 @@ class MultiAgentDocPipeline:
             keywords = item.get("keywords") or []
             section = by_title.get(dim) or {}
             query = section.get("graph_query") or f"{dim} {' '.join(item.get('keywords') or [])}"
-            graph_search = search_graph_index(
-                query=query,
-                top_k=8,
-                db_path=self.kg_db_path,
-            )
-            graph_candidates = graph_search.get("results") or []
-
-            selected_graph_hit: Dict[str, Any] = {}
-            selected_parameter_ok = False
-            for candidate in graph_candidates:
-                c_node_id = str(candidate.get("node_id") or "").strip()
-                c_title = str(candidate.get("title") or "").strip()
-                c_score = float(candidate.get("score") or 0.0)
-                c_node_ok = bool((c_node_id or c_title) and c_score > 0)
-                c_applicable = candidate.get("applicable_conditions")
-                c_resources = candidate.get("resource_requirements")
-                c_safety = str(candidate.get("safety_level") or "unknown").strip().lower()
-                c_has_conditions = isinstance(c_applicable, dict) and len(c_applicable) > 0
-                c_has_resources = isinstance(c_resources, dict) and len(c_resources) > 0
-                c_parameter_ok = bool(c_node_ok and c_has_conditions and c_has_resources and c_safety != "unknown")
-                if not selected_graph_hit:
-                    selected_graph_hit = candidate
-                if c_parameter_ok:
-                    selected_graph_hit = candidate
-                    selected_parameter_ok = True
-                    break
-
-            graph_hit = selected_graph_hit
+            graph_hit = self._select_graph_hit(query)
             node_id = str(graph_hit.get("node_id") or "").strip()
             title = str(graph_hit.get("title") or "").strip()
             score = float(graph_hit.get("score") or 0.0)
             node_ok = bool((node_id or title) and score > 0)
-            parameter_ok = bool(node_ok and selected_parameter_ok)
+            parameter_ok = bool(node_ok and self._hit_parameter_ok(graph_hit))
 
             formula_required = _formula_required(dim, keywords)
             formula_query = f"{dim} {' '.join([str(x) for x in keywords])} 公式 计算".strip()
-            formula_hit = {}
+            formula_hit: Dict[str, Any] = {}
             formula_total = 0
             if formula_required:
-                formula_search = search_graph_index(
-                    query=formula_query,
-                    node_types=["FormulaNode"],
-                    top_k=8,
-                    db_path=self.kg_db_path,
+                formula_hit = self._select_formula_hit(formula_query)
+                formula_total = int(
+                    search_graph_index(
+                        query=formula_query,
+                        node_types=["FormulaNode"],
+                        top_k=1,
+                        db_path=self.kg_db_path,
+                    ).get("total")
+                    or 0
                 )
-                formula_total = int(formula_search.get("total") or 0)
-                formula_candidates = formula_search.get("results") or []
-                for candidate in formula_candidates:
-                    expr = str(candidate.get("formula_expression") or "").strip()
-                    c_node_id = str(candidate.get("node_id") or "").strip()
-                    c_score = float(candidate.get("score") or 0.0)
-                    if c_node_id and c_score > 0 and expr:
-                        formula_hit = candidate
-                        break
-                if not formula_hit and formula_candidates:
-                    formula_hit = formula_candidates[0]
             formula_ok = True
             if formula_required:
                 f_node_id = str(formula_hit.get("node_id") or "").strip()
@@ -536,6 +592,8 @@ class MultiAgentDocPipeline:
         output_path: Path | str = DEFAULT_PIPELINE_OUTPUT,
         missing_report_path: Path | str = DEFAULT_MISSING_REPORT,
         enable_self_healing: bool = False,
+        enable_docx_export: bool = False,
+        docx_output_path: Path | str | None = None,
     ) -> Dict[str, Any]:
         graph_report = ingest_knowledge_graph(graph_root, db_path=self.kg_db_path)
         matrix_result = await build_index_matrix(tender_paths)
@@ -567,6 +625,23 @@ class MultiAgentDocPipeline:
         )
 
         intercepted = bool(final_pass.get("intercepted"))
+        docx_saved: str | None = None
+        docx_meta: Dict[str, Any] = {"exported": False}
+        if enable_docx_export and not intercepted and docx_output_path:
+            docx_result = generate_v2_docx(
+                index_matrix=ctx.index_matrix,
+                sections=final_pass.get("sections") or [],
+                output_path=docx_output_path,
+                title_hint="施工组织设计草案（自动生成）",
+            )
+            docx_saved = str(docx_result.get("saved_at") or "")
+            docx_meta = {
+                "exported": True,
+                "saved_at": docx_saved,
+                "highlighted_paragraphs": int(docx_result.get("highlighted_paragraphs") or 0),
+                "auto_generated_sections": int(docx_result.get("auto_generated_sections") or 0),
+            }
+
         output = {
             "ok": True,
             "intercepted": intercepted,
@@ -581,6 +656,7 @@ class MultiAgentDocPipeline:
                 },
                 "guardrail_agent": {"status": "done"},
                 "self_healing_agent": {"status": "done" if self_healing_result.get("triggered") else "skipped"},
+                "document_assembler": {"status": "done" if docx_meta.get("exported") else "skipped", "meta": docx_meta},
             },
             "index_matrix": ctx.index_matrix,
             "quant_index": ctx.quant_index,
@@ -589,6 +665,7 @@ class MultiAgentDocPipeline:
             "missing_knowledge_report": missing_report_saved,
             "fail_fast_error": final_pass.get("fail_fast_error"),
             "self_healing": self_healing_result,
+            "docx_output": docx_saved,
             "pre_healing": {
                 "intercepted": bool(first_pass.get("intercepted")),
                 "knowledge_gaps": first_pass.get("gaps") or [],

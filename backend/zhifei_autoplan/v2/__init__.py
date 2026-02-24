@@ -14,6 +14,7 @@ from .audit_failfast import audit_against_index_matrix, enforce_fail_fast, FailF
 from .language_guardrails import validate_guardrails, enforce_guardrails, GuardrailBugError
 from .multi_agent_pipeline import MultiAgentDocPipeline
 from .self_healing_agent import SelfHealingAgent
+from .docx_generator import generate_v2_docx
 
 __all__ = [
     "KnowledgeGraphIndex",
@@ -34,4 +35,5 @@ __all__ = [
     "GuardrailBugError",
     "MultiAgentDocPipeline",
     "SelfHealingAgent",
+    "generate_v2_docx",
 ]
