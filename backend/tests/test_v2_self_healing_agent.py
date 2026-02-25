@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.zhifei_autoplan.v2.self_healing_agent import SelfHealingAgent
+from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
 
 @pytest.mark.asyncio
@@ -64,3 +65,10 @@ async def test_self_healing_agent_fallback_build_and_persist(tmp_path: Path) -> 
     assert len(nodes) == 2
     assert all(bool(node.get("is_auto_generated")) for node in nodes)
     assert all(bool(node.get("reference_standard")) for node in nodes)
+
+
+def test_self_healing_agent_defaults_to_gemini_31_pro(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ZF_DEFAULT_MODEL", raising=False)
+    monkeypatch.setattr(LLMClient, "load_defaults", staticmethod(lambda: {}))
+    agent = SelfHealingAgent(provider="google", model=None, api_key="dummy")
+    assert agent.model == "gemini-3.1-pro-preview"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from typing import Dict, List, Tuple, Any
 
@@ -359,6 +360,149 @@ class BoQParser:
         self._PROCESS_RULES_MTIME_NS = mtime
         return parsed
 
+    def _split_code_hierarchy(self, code: str) -> Tuple[str, str]:
+        raw = str(code or "").strip()
+        if not raw:
+            return "", ""
+
+        # Prefer explicit separators first.
+        if any(sep in raw for sep in (".", "-", "_", "/")):
+            parts = [p for p in re.split(r"[.\-_/]+", raw) if p]
+            if len(parts) == 1:
+                return parts[0], parts[0]
+            return parts[0], ".".join(parts[:2])
+
+        # Fallback for long continuous digit codes.
+        compact = re.sub(r"[^0-9A-Za-z]+", "", raw)
+        if compact.isdigit() and len(compact) >= 4:
+            return compact[:2], compact[:4]
+        if len(compact) >= 2:
+            return compact[:2], compact[:4] if len(compact) >= 4 else compact[:2]
+        return compact, compact
+
+    def _infer_chapter_structure(self, items: List[BoQItem]) -> Dict[str, Any]:
+        by_chapter: Dict[str, Dict[str, Any]] = {}
+        by_item: Dict[str, Dict[str, Any]] = {}
+
+        for idx, it in enumerate(items, start=1):
+            code = str(it.boq_code or "").strip()
+            chapter_id, subchapter_id = self._split_code_hierarchy(code)
+            if not chapter_id:
+                # Fallback: infer chapter by process name or first two chars in name.
+                pname = str((it.process.name if it.process else "") or "").strip()
+                if pname:
+                    chapter_id = pname
+                else:
+                    chapter_id = str(it.name or f"CH-{idx}")[:2] or f"CH-{idx}"
+            if not subchapter_id:
+                subchapter_id = chapter_id
+
+            chapter = by_chapter.setdefault(
+                chapter_id,
+                {
+                    "chapter_id": chapter_id,
+                    "item_count": 0,
+                    "total_quantity": 0.0,
+                    "subchapters": {},
+                },
+            )
+            chapter["item_count"] += 1
+            chapter["total_quantity"] += float(it.quantity or 0.0)
+
+            sub = chapter["subchapters"].setdefault(
+                subchapter_id,
+                {
+                    "subchapter_id": subchapter_id,
+                    "item_count": 0,
+                    "total_quantity": 0.0,
+                },
+            )
+            sub["item_count"] += 1
+            sub["total_quantity"] += float(it.quantity or 0.0)
+
+            item_key = code or str(it.name or f"item_{idx}")
+            by_item[item_key] = {
+                "chapter_id": chapter_id,
+                "subchapter_id": subchapter_id,
+            }
+
+        chapters: List[Dict[str, Any]] = []
+        for cid in sorted(by_chapter.keys()):
+            chapter = by_chapter[cid]
+            children = []
+            for sid in sorted(chapter["subchapters"].keys()):
+                children.append(chapter["subchapters"][sid])
+            chapters.append(
+                {
+                    "chapter_id": chapter["chapter_id"],
+                    "item_count": int(chapter["item_count"]),
+                    "total_quantity": round(float(chapter["total_quantity"]), 6),
+                    "subchapter_count": len(children),
+                    "subchapters": children,
+                }
+            )
+
+        return {
+            "chapter_count": len(chapters),
+            "chapters": chapters,
+            "by_item": by_item,
+        }
+
+    def _calc_complexity_metrics(self, items: List[BoQItem]) -> Dict[str, Any]:
+        if not items:
+            return {
+                "complexity_index": 0.0,
+                "resource_density_index": 0.0,
+                "quantity_scale_index": 0.0,
+                "construction_density_index": 0.0,
+                "process_diversity": 0.0,
+            }
+
+        process_names = {str(it.process.name) for it in items if it.process and str(it.process.name).strip()}
+        process_diversity = len(process_names) / max(1, len(items))
+
+        resource_counts = [len(it.resources or []) for it in items]
+        avg_resource_count = sum(resource_counts) / max(1, len(resource_counts))
+        resource_density_index = min(1.0, avg_resource_count / 4.0)
+
+        quantities = [float(it.quantity or 0.0) for it in items if it.quantity is not None]
+        total_quantity = sum(quantities)
+        avg_quantity = (total_quantity / max(1, len(quantities))) if quantities else 0.0
+        variance = 0.0
+        if quantities:
+            variance = sum((q - avg_quantity) ** 2 for q in quantities) / max(1, len(quantities))
+        std_dev = math.sqrt(variance)
+        dispersion = (std_dev / max(1.0, abs(avg_quantity))) if avg_quantity else 0.0
+        quantity_scale_index = min(1.0, math.log10(max(1.0, total_quantity) + 1.0) / 6.0)
+
+        # Density reflects workload concentration; higher total and lower item spread => denser.
+        construction_density_index = min(1.0, (total_quantity / max(1.0, len(items))) / 1500.0)
+
+        special_keywords = ("高性能", "特种", "抗渗", "防腐", "不锈钢", "高强", "预应力", "四新")
+        hazard_keywords = ("危化", "易燃", "易爆", "有毒", "溶剂", "油漆", "涂料", "沥青", "气瓶")
+        special_ratio = sum(1 for it in items if any(k in (it.name or "") for k in special_keywords)) / max(1, len(items))
+        hazard_ratio = sum(1 for it in items if any(k in (it.name or "") for k in hazard_keywords)) / max(1, len(items))
+
+        complexity_index = (
+            process_diversity * 0.25
+            + resource_density_index * 0.2
+            + min(1.0, dispersion) * 0.2
+            + construction_density_index * 0.15
+            + special_ratio * 0.1
+            + hazard_ratio * 0.1
+        )
+        complexity_index = round(min(1.0, complexity_index), 4)
+
+        return {
+            "complexity_index": complexity_index,
+            "resource_density_index": round(min(1.0, resource_density_index), 4),
+            "quantity_scale_index": round(min(1.0, quantity_scale_index), 4),
+            "construction_density_index": round(min(1.0, construction_density_index), 4),
+            "process_diversity": round(min(1.0, process_diversity), 4),
+            "quantity_dispersion": round(max(0.0, dispersion), 4),
+            "avg_resource_count": round(avg_resource_count, 4),
+        }
+
     def _calc_stats(self, items: List[BoQItem]) -> Dict[str, Any]:
         # 统计分析：数量级与密度（简化版）
         total_qty = 0.0
@@ -419,8 +563,10 @@ class BoQParser:
         hazard_items = [it for it in items if any(k in (it.name or "") for k in hazard_keywords)][:12]
         special_items = [it for it in items if any(k in (it.name or "") for k in special_keywords)][:12]
         ppe_items = [it for it in items if any(k in (it.name or "") for k in ppe_keywords)][:12]
+        chapter_structure = self._infer_chapter_structure(items)
+        complexity_metrics = self._calc_complexity_metrics(items)
 
-        return {
+        output = {
             "total_quantity": total_qty,
             "item_count": count,
             "density": density,
@@ -431,7 +577,10 @@ class BoQParser:
             "special_material_items": [_brief(it) for it in special_items],
             "hazardous_material_items": [_brief(it) for it in hazard_items],
             "ppe_items": [_brief(it) for it in ppe_items],
+            "chapter_structure": chapter_structure,
         }
+        output.update(complexity_metrics)
+        return output
 
     def _to_float(self, v) -> float | None:
         if v is None:

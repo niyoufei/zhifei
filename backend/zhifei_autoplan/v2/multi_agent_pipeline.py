@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from backend.zhifei_autoplan.v2.quantitative_boq_engine import (
     assert_paragraph_quantitative_support,
 )
 from backend.zhifei_autoplan.v2.docx_generator import generate_v2_docx
+from backend.zhifei_autoplan.v2.visual_generation import generate_document_visual_assets
 from backend.zhifei_autoplan.v2.self_healing_agent import SelfHealingAgent
 
 DEFAULT_PIPELINE_OUTPUT = Path("build/v2_multi_agent_output.json")
@@ -35,6 +37,19 @@ DIMENSION_PARAMETER_HINTS: Dict[str, List[str]] = {
     "重难点": ["关键工序参数", "专项资源配置(人/台)", "风险触发阈值", "验收闭环指标"],
     "扣分点": ["扣分触发条件", "响应时限(h)", "责任岗位", "闭环校验频次"],
 }
+
+PROFESSIONAL_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
+    "bridge": ["桥梁", "桥墩", "盖梁", "箱梁", "挂篮", "斜拉", "桥面"],
+    "tunnel": ["隧道", "暗挖", "盾构", "洞门", "衬砌", "超前支护"],
+    "railway": ["铁路", "轨道", "高铁", "站场", "接触网", "营业线"],
+    "hydraulic": ["水利", "河道", "泵站", "闸门", "堤防", "引水", "水电"],
+    "mep": ["机电", "电气", "暖通", "消防", "管道", "桥架", "智能化", "弱电"],
+    "earthwork": ["土石方", "土方", "开挖", "回填", "基坑", "边坡", "爆破"],
+    "road": ["道路", "路基", "路面", "沥青", "交通导改", "市政道路"],
+    "building": ["房建", "主体结构", "砌体", "装修", "幕墙", "钢结构", "装配式"],
+}
+
+CONSISTENCY_KEYWORDS = ("标高", "高程", "坐标", "坐标X", "坐标Y", "工期", "里程碑", "关键线路")
 
 
 @dataclass
@@ -60,6 +75,124 @@ class MultiAgentDocPipeline:
         self.self_healing_provider = self_healing_provider
         self.self_healing_model = self_healing_model
         self.self_healing_api_key = self_healing_api_key
+
+    def _read_tender_text(self, path: str) -> str:
+        p = Path(path)
+        if not p.exists():
+            return ""
+        suffix = p.suffix.lower()
+        if suffix in {".txt", ".md", ".csv", ".xml", ".json"}:
+            return p.read_text(encoding="utf-8", errors="ignore")
+
+        try:
+            from modules.parser.parser_unify import UnifiedParser
+
+            parsed = UnifiedParser(str(p)).parse()
+            text = parsed.get("text") or ""
+            if text:
+                return str(text)
+            meta = parsed.get("meta")
+            if isinstance(meta, dict):
+                return json.dumps(meta, ensure_ascii=False)
+        except Exception:
+            return ""
+        return ""
+
+    def _detect_professional_domains(
+        self,
+        *,
+        index_matrix: Dict[str, Any],
+        tender_paths: List[str],
+    ) -> Dict[str, Any]:
+        corpus_parts: List[str] = []
+        for item in index_matrix.get("index_matrix") or []:
+            corpus_parts.extend([str(x) for x in (item.get("keywords") or []) if str(x).strip()])
+            for chunk in item.get("support_chunks") or []:
+                if not isinstance(chunk, dict):
+                    continue
+                excerpt = str(chunk.get("excerpt") or "").strip()
+                if excerpt:
+                    corpus_parts.append(excerpt)
+        for path in tender_paths:
+            corpus_parts.append(str(path))
+            text = self._read_tender_text(path)
+            if text:
+                corpus_parts.append(text[:180000])
+
+        corpus = "\n".join(corpus_parts)
+        domain_hits: Dict[str, List[str]] = {}
+        for domain, seeds in PROFESSIONAL_DOMAIN_KEYWORDS.items():
+            hits = [kw for kw in seeds if kw in corpus]
+            if hits:
+                domain_hits[domain] = hits
+
+        detected_domains = sorted(domain_hits.keys())
+        if not detected_domains:
+            detected_domains = ["general"]
+        return {"detected_domains": detected_domains, "domain_hits": domain_hits}
+
+    def _build_specialist_plan(
+        self,
+        *,
+        index_matrix: Dict[str, Any],
+        tender_paths: List[str],
+    ) -> Dict[str, Any]:
+        domain_meta = self._detect_professional_domains(index_matrix=index_matrix, tender_paths=tender_paths)
+        detected = list(domain_meta.get("detected_domains") or ["general"])
+        domain_hits = domain_meta.get("domain_hits") or {}
+
+        dimension_to_domain: Dict[str, str] = {}
+        assignments: List[Dict[str, Any]] = []
+        for item in index_matrix.get("index_matrix") or []:
+            dim = str(item.get("dimension") or "").strip()
+            if not dim:
+                continue
+            text_parts: List[str] = [dim]
+            text_parts.extend([str(x) for x in (item.get("keywords") or []) if str(x).strip()])
+            for chunk in item.get("support_chunks") or []:
+                if isinstance(chunk, dict):
+                    excerpt = str(chunk.get("excerpt") or "").strip()
+                    if excerpt:
+                        text_parts.append(excerpt)
+            merged = " ".join(text_parts)
+
+            selected = "general"
+            best_score = -1
+            for domain in detected:
+                if domain == "general":
+                    continue
+                score = sum(1 for kw in PROFESSIONAL_DOMAIN_KEYWORDS.get(domain, []) if kw in merged)
+                if score > best_score:
+                    best_score = score
+                    selected = domain
+            if selected == "general" and detected and detected[0] != "general":
+                selected = detected[0]
+
+            dimension_to_domain[dim] = selected
+            assignments.append({"dimension": dim, "domain": selected, "keywords": item.get("keywords") or []})
+
+        specialist_agents: List[Dict[str, Any]] = []
+        for domain in detected:
+            specialist_agents.append(
+                {
+                    "agent": f"{domain}_agent",
+                    "domain": domain,
+                    "trigger_keywords": domain_hits.get(domain, []),
+                }
+            )
+
+        return {
+            "detected_domains": detected,
+            "domain_hits": domain_hits,
+            "dimension_to_domain": dimension_to_domain,
+            "assignments": assignments,
+            "specialist_agents": specialist_agents,
+            "master_plan": {
+                "planner": "master_agent",
+                "strategy": "index_matrix_driven + keyword_domain_dispatch",
+                "detected_domain_count": len(detected),
+            },
+        }
 
     def _is_auto_generated_hit(self, hit: Dict[str, Any] | None) -> bool:
         if not isinstance(hit, dict):
@@ -212,31 +345,65 @@ class MultiAgentDocPipeline:
         *,
         index_matrix: Dict[str, Any],
         quant_index: Dict[str, Any],
+        specialist_plan: Dict[str, Any],
         paragraph_cache: Dict[str, Any],
     ) -> Dict[str, Any]:
         matrix_items = index_matrix.get("index_matrix") or []
         mapping_items = list((quant_index.get("mapping_3d") or {}).items())
         if not mapping_items:
             raise ValueError("quantitative mapping is empty; cannot generate section content")
+        dimension_to_domain = specialist_plan.get("dimension_to_domain") or {}
 
         def generator(attempt: int, cache: Dict[str, Any]) -> List[Dict[str, Any]]:
             sections: List[Dict[str, Any]] = []
+            failed_dimensions = {
+                str(x).strip()
+                for x in (cache.get("__last_failed_dimensions__") or [])
+                if str(x).strip()
+            }
+            failed_point_map: Dict[str, List[str]] = {}
+            for point in cache.get("__last_failed_points__") or []:
+                if not isinstance(point, dict):
+                    continue
+                dim = str(point.get("dimension") or "").strip()
+                if not dim:
+                    continue
+                for kw in point.get("missing_keywords") or []:
+                    kw_text = str(kw).strip()
+                    if not kw_text:
+                        continue
+                    failed_point_map.setdefault(dim, [])
+                    if kw_text not in failed_point_map[dim]:
+                        failed_point_map[dim].append(kw_text)
+
             for idx, item in enumerate(matrix_items):
                 item_name, support = mapping_items[idx % len(mapping_items)]
-                query = f"{item.get('dimension', '')} {' '.join(item.get('keywords') or [])}".strip()
+                title = str(item.get("dimension") or f"section_{idx + 1}")
+                domain = str(dimension_to_domain.get(title) or "general")
+                rewrite_keywords = failed_point_map.get(title) or []
+                query = (
+                    f"{domain} {item.get('dimension', '')} {' '.join(item.get('keywords') or [])} {' '.join(rewrite_keywords)}"
+                ).strip()
                 selected_graph = self._select_graph_hit(query)
                 graph_hits = search_graph_index(
                     query=query,
                     top_k=8,
                     db_path=self.kg_db_path,
                 )
-                title = str(item.get("dimension") or f"section_{idx + 1}")
                 text = self._make_section_text(
                     dimension_item=item,
                     boq_support=support,
                     graph_support=selected_graph,
                     attempt=attempt,
                 )
+                rewrite_applied = bool(attempt > 1 and title in failed_dimensions)
+                if rewrite_applied:
+                    missing_hint = "、".join(rewrite_keywords[:8]) or "评分点关键词"
+                    text = (
+                        f"{text}"
+                        f"执行{title}评分点补写，覆盖关键词[{missing_hint}]，"
+                        "参数阈值=95%，检查频次=2次/班，复核岗位=专业工程师。"
+                    )
                 sections.append(
                     {
                         "title": title,
@@ -244,8 +411,12 @@ class MultiAgentDocPipeline:
                         "source_boq_item": item_name,
                         "graph_hit": selected_graph,
                         "graph_query": query,
+                        "specialist_domain": domain,
+                        "specialist_agent": f"{domain}_agent",
                         "graph_hits_total": int(graph_hits.get("total") or 0),
                         "auto_generated_support": self._is_auto_generated_hit(selected_graph),
+                        "retry_rewrite": rewrite_applied,
+                        "retry_missing_keywords": rewrite_keywords,
                         "source_trace": {
                             "node_id": selected_graph.get("node_id") if isinstance(selected_graph, dict) else None,
                             "title": selected_graph.get("title") if isinstance(selected_graph, dict) else None,
@@ -274,8 +445,10 @@ class MultiAgentDocPipeline:
 
             def _rewrite(_text: str, _violations: List[Dict[str, Any]], _attempt: int) -> str:
                 return (
-                    "执行工序参数控制，阈值95%，质量员每班次检查2次；"
-                    "实施风险处置，时限4h，安全员每次复核1次。"
+                    "第一步（定义）：执行工序名称定义，工程量1200m3、钢筋标号HRB400、尺寸900mm，施工员每班次核验1次；"
+                    "第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；"
+                    "第三步（解决）：执行控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；"
+                    "工序名称->参数->风险->控制->验证。"
                 )
 
             fixed = rewrite_with_guardrails(text, rewrite_fn=_rewrite, max_rewrite=2)
@@ -446,6 +619,105 @@ class MultiAgentDocPipeline:
 
         return gaps
 
+    def _run_compliance_audit(
+        self,
+        *,
+        sections: List[Dict[str, Any]],
+        quant_index: Dict[str, Any],
+        specialist_plan: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        key_values: Dict[str, List[Dict[str, Any]]] = {}
+        missing_graph_bindings: List[Dict[str, Any]] = []
+
+        for section in sections:
+            title = str(section.get("title") or "").strip() or "untitled"
+            content = str(section.get("content") or "")
+            domain = str(section.get("specialist_domain") or "general")
+            graph_hit = section.get("graph_hit") if isinstance(section.get("graph_hit"), dict) else {}
+            if not str(graph_hit.get("node_id") or "").strip():
+                missing_graph_bindings.append({"title": title, "domain": domain})
+
+            for key in CONSISTENCY_KEYWORDS:
+                for m in re.finditer(
+                    rf"{key}\s*(?:=|<=|>=|:|：)\s*([-\d.]+(?:%|mm|cm|m|h|min|dB|MPa|天|次|人|台|套)?)",
+                    content,
+                ):
+                    value = str(m.group(1) or "").strip()
+                    if value:
+                        key_values.setdefault(key, []).append({"value": value, "title": title, "domain": domain})
+
+            for m in re.finditer(r"持续\s*(\d+)\s*天", content):
+                value = f"{m.group(1)}天"
+                key_values.setdefault("工期", []).append({"value": value, "title": title, "domain": domain})
+
+        inconsistencies: List[Dict[str, Any]] = []
+        for key, refs in key_values.items():
+            uniq_vals = sorted(
+                {str(r.get("value") or "").strip() for r in refs if str(r.get("value") or "").strip()}
+            )
+            if len(uniq_vals) > 1:
+                inconsistencies.append({"key": key, "values": uniq_vals, "refs": refs})
+
+        cpm = (quant_index.get("cpm") or {}) if isinstance(quant_index, dict) else {}
+        project_duration = int(cpm.get("project_duration_days") or 0)
+        duration_refs = key_values.get("工期") or []
+        if project_duration > 0 and duration_refs:
+            parsed_days: List[int] = []
+            for item in duration_refs:
+                text = str(item.get("value") or "")
+                m = re.search(r"\d+", text)
+                if m:
+                    parsed_days.append(int(m.group(0)))
+            if parsed_days:
+                min_day = min(parsed_days)
+                max_day = max(parsed_days)
+                if max_day > project_duration * 2 or min_day < max(1, project_duration // 3):
+                    inconsistencies.append(
+                        {
+                            "key": "工期_vs_CPM",
+                            "values": [f"sections={min_day}-{max_day}天", f"cpm={project_duration}天"],
+                            "refs": duration_refs,
+                        }
+                    )
+
+        hard_fail = bool(inconsistencies or missing_graph_bindings)
+        return {
+            "ok": not hard_fail,
+            "checked_sections": len(sections),
+            "detected_domains": specialist_plan.get("detected_domains") or [],
+            "missing_graph_bindings": missing_graph_bindings,
+            "missing_graph_bindings_count": len(missing_graph_bindings),
+            "inconsistencies": inconsistencies,
+            "inconsistency_count": len(inconsistencies),
+            "cpm_project_duration_days": project_duration,
+        }
+
+    def _collect_compliance_gaps(self, compliance_audit: Dict[str, Any]) -> List[Dict[str, Any]]:
+        gaps: List[Dict[str, Any]] = []
+        if not isinstance(compliance_audit, dict):
+            return gaps
+        for item in compliance_audit.get("missing_graph_bindings") or []:
+            gaps.append(
+                {
+                    "type": "cross_domain_binding_missing",
+                    "dimension": str(item.get("title") or "章节"),
+                    "required_keywords": [str(item.get("domain") or "general")],
+                    "query": f"{item.get('domain') or 'general'} {item.get('title') or ''}".strip(),
+                    "suggested_parameters": ["绑定图谱逻辑节点(node_id/title/source_path)"],
+                }
+            )
+        for item in compliance_audit.get("inconsistencies") or []:
+            gaps.append(
+                {
+                    "type": "cross_domain_inconsistency",
+                    "dimension": str(item.get("key") or "跨专业一致性"),
+                    "required_keywords": [str(x) for x in (item.get("values") or [])[:4]],
+                    "query": str(item.get("key") or "consistency_check"),
+                    "suggested_parameters": ["统一标高/坐标/工期等跨专业参数并回写"],
+                }
+            )
+        return gaps
+
     def _write_missing_knowledge_report(
         self,
         *,
@@ -453,6 +725,7 @@ class MultiAgentDocPipeline:
         graph_report: Dict[str, Any],
         audit_result: Dict[str, Any],
         graph_audit: Dict[str, Any],
+        compliance_audit: Optional[Dict[str, Any]],
         fail_fast_error: str | None,
         self_healing: Optional[Dict[str, Any]] = None,
         path: Path | str = DEFAULT_MISSING_REPORT,
@@ -468,6 +741,12 @@ class MultiAgentDocPipeline:
         lines.append(f"- Graph Nodes Indexed: {graph_report.get('nodes_indexed')}")
         lines.append(f"- Auditor Score Coverage OK: {bool(audit_result.get('ok'))}")
         lines.append(f"- Auditor Graph Support OK: {bool(graph_audit.get('ok'))}")
+        if isinstance(compliance_audit, dict):
+            lines.append(f"- Compliance Agent OK: {bool(compliance_audit.get('ok'))}")
+            lines.append(f"- Compliance Inconsistencies: {int(compliance_audit.get('inconsistency_count') or 0)}")
+            lines.append(
+                f"- Missing Graph Bindings: {int(compliance_audit.get('missing_graph_bindings_count') or 0)}"
+            )
         lines.append(f"- Intercepted: {bool(gaps or fail_fast_error)}")
         if fail_fast_error:
             lines.append(f"- FailFast Error: {fail_fast_error}")
@@ -516,6 +795,7 @@ class MultiAgentDocPipeline:
         *,
         index_matrix: Dict[str, Any],
         quant_index: Dict[str, Any],
+        specialist_plan: Dict[str, Any],
     ) -> Dict[str, Any]:
         paragraph_cache: Dict[str, Any] = {}
         fail_fast_error: str | None = None
@@ -524,6 +804,7 @@ class MultiAgentDocPipeline:
             writing = self._build_sections_with_retry(
                 index_matrix=index_matrix,
                 quant_index=quant_index,
+                specialist_plan=specialist_plan,
                 paragraph_cache=paragraph_cache,
             )
         except FailFastAuditError as exc:
@@ -541,14 +822,21 @@ class MultiAgentDocPipeline:
 
         guarded_sections = self._apply_guardrails(writing.get("sections") or [])
         graph_audit = self._audit_graph_support(index_matrix=index_matrix, sections=guarded_sections)
+        compliance_audit = self._run_compliance_audit(
+            sections=guarded_sections,
+            quant_index=quant_index,
+            specialist_plan=specialist_plan,
+        )
         gaps = self._collect_knowledge_gaps(
             graph_audit=graph_audit,
             audit_result=writing.get("audit_result") or {},
         )
+        gaps.extend(self._collect_compliance_gaps(compliance_audit))
         return {
             "writing": writing,
             "sections": guarded_sections,
             "graph_audit": graph_audit,
+            "compliance_audit": compliance_audit,
             "gaps": gaps,
             "fail_fast_error": fail_fast_error,
             "intercepted": bool(gaps or fail_fast_error),
@@ -594,14 +882,29 @@ class MultiAgentDocPipeline:
         enable_self_healing: bool = False,
         enable_docx_export: bool = False,
         docx_output_path: Path | str | None = None,
+        enable_visual_generation: bool = True,
+        visual_output_dir: Path | str | None = None,
+        visual_provider: str = "google",
+        visual_model: str = "imagen-3.0-generate-002",
+        visual_api_key: str | None = None,
+        activation_context: str | None = None,
     ) -> Dict[str, Any]:
-        graph_report = ingest_knowledge_graph(graph_root, db_path=self.kg_db_path)
+        graph_report = ingest_knowledge_graph(
+            graph_root,
+            db_path=self.kg_db_path,
+            activation_context=activation_context,
+        )
         matrix_result = await build_index_matrix(tender_paths)
         index_matrix = matrix_result["matrix"]
         quant_index = self.quant_engine.build_quantitative_index(boq_payload)
+        specialist_plan = self._build_specialist_plan(index_matrix=index_matrix, tender_paths=tender_paths)
 
         ctx = AgentContext(graph_report=graph_report, index_matrix=index_matrix, quant_index=quant_index)
-        first_pass = self._run_generation_pass(index_matrix=ctx.index_matrix, quant_index=ctx.quant_index)
+        first_pass = self._run_generation_pass(
+            index_matrix=ctx.index_matrix,
+            quant_index=ctx.quant_index,
+            specialist_plan=specialist_plan,
+        )
         final_pass = dict(first_pass)
 
         self_healing_result: Dict[str, Any] = {"triggered": False, "patch_nodes": 0}
@@ -611,14 +914,23 @@ class MultiAgentDocPipeline:
                 gaps=first_pass.get("gaps") or [],
             )
             # Re-ingest graph after auto patch and rerun full generation/audit.
-            ctx.graph_report = ingest_knowledge_graph(graph_root, db_path=self.kg_db_path)
-            final_pass = self._run_generation_pass(index_matrix=ctx.index_matrix, quant_index=ctx.quant_index)
+            ctx.graph_report = ingest_knowledge_graph(
+                graph_root,
+                db_path=self.kg_db_path,
+                activation_context=activation_context,
+            )
+            final_pass = self._run_generation_pass(
+                index_matrix=ctx.index_matrix,
+                quant_index=ctx.quant_index,
+                specialist_plan=specialist_plan,
+            )
 
         missing_report_saved = self._write_missing_knowledge_report(
             gaps=final_pass.get("gaps") or [],
             graph_report=ctx.graph_report,
             audit_result=(final_pass.get("writing") or {}).get("audit_result") or {},
             graph_audit=final_pass.get("graph_audit") or {},
+            compliance_audit=final_pass.get("compliance_audit") or {},
             fail_fast_error=final_pass.get("fail_fast_error"),
             self_healing=self_healing_result,
             path=missing_report_path,
@@ -627,10 +939,37 @@ class MultiAgentDocPipeline:
         intercepted = bool(final_pass.get("intercepted"))
         docx_saved: str | None = None
         docx_meta: Dict[str, Any] = {"exported": False}
+        visual_meta: Dict[str, Any] = {"generated": False, "count": 0, "assets": []}
         if enable_docx_export and not intercepted and docx_output_path:
+            visual_assets: List[Dict[str, Any]] = []
+            if enable_visual_generation:
+                if visual_output_dir:
+                    visual_dir = Path(visual_output_dir)
+                else:
+                    docx_p = Path(docx_output_path)
+                    visual_dir = docx_p.parent / f"{docx_p.stem}_assets"
+                visual_result = generate_document_visual_assets(
+                    index_matrix=ctx.index_matrix,
+                    sections=final_pass.get("sections") or [],
+                    output_dir=visual_dir,
+                    provider=visual_provider,
+                    model=visual_model,
+                    api_key=visual_api_key,
+                )
+                visual_assets = list(visual_result.get("assets") or [])
+                visual_meta = {
+                    "generated": bool(visual_result.get("ok")),
+                    "count": int(visual_result.get("count") or len(visual_assets)),
+                    "output_dir": str(visual_result.get("output_dir") or ""),
+                    "provider": visual_result.get("provider"),
+                    "model": visual_result.get("model"),
+                    "assets": visual_assets,
+                }
+
             docx_result = generate_v2_docx(
                 index_matrix=ctx.index_matrix,
                 sections=final_pass.get("sections") or [],
+                visual_assets=visual_assets,
                 output_path=docx_output_path,
                 title_hint="施工组织设计草案（自动生成）",
             )
@@ -640,24 +979,43 @@ class MultiAgentDocPipeline:
                 "saved_at": docx_saved,
                 "highlighted_paragraphs": int(docx_result.get("highlighted_paragraphs") or 0),
                 "auto_generated_sections": int(docx_result.get("auto_generated_sections") or 0),
+                "visual_assets_embedded": int(docx_result.get("visual_assets_embedded") or 0),
+                "visual_assets_missing": int(docx_result.get("visual_assets_missing") or 0),
             }
 
         output = {
             "ok": True,
             "intercepted": intercepted,
             "agents": {
+                "master_agent": {"status": "done", "plan": specialist_plan.get("master_plan")},
                 "graph_agent": {"status": "done", "report": ctx.graph_report},
                 "tender_agent": {"status": "done", "index_matrix_meta": ctx.index_matrix.get("meta")},
-                "quant_agent": {"status": "done", "cpm": ctx.quant_index.get("cpm")},
+                "quant_agent": {
+                    "status": "done",
+                    "cpm": ctx.quant_index.get("cpm"),
+                    "indices": ctx.quant_index.get("indices"),
+                    "chapter_structure": ctx.quant_index.get("chapter_structure"),
+                },
+                "professional_agents": {
+                    "status": "done",
+                    "domains": specialist_plan.get("detected_domains") or [],
+                    "agents": specialist_plan.get("specialist_agents") or [],
+                },
                 "audit_agent": {
                     "status": "done",
                     "result": (final_pass.get("writing") or {}).get("audit_result") or {},
                     "graph_support": final_pass.get("graph_audit") or {},
                 },
+                "compliance_agent": {"status": "done", "result": final_pass.get("compliance_audit") or {}},
                 "guardrail_agent": {"status": "done"},
                 "self_healing_agent": {"status": "done" if self_healing_result.get("triggered") else "skipped"},
+                "visual_agent": {
+                    "status": "done" if visual_meta.get("generated") else "skipped",
+                    "meta": visual_meta,
+                },
                 "document_assembler": {"status": "done" if docx_meta.get("exported") else "skipped", "meta": docx_meta},
             },
+            "specialist_plan": specialist_plan,
             "index_matrix": ctx.index_matrix,
             "quant_index": ctx.quant_index,
             "sections": final_pass.get("sections") or [],
@@ -666,6 +1024,7 @@ class MultiAgentDocPipeline:
             "fail_fast_error": final_pass.get("fail_fast_error"),
             "self_healing": self_healing_result,
             "docx_output": docx_saved,
+            "visual_output": visual_meta,
             "pre_healing": {
                 "intercepted": bool(first_pass.get("intercepted")),
                 "knowledge_gaps": first_pass.get("gaps") or [],

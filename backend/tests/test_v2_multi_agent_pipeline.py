@@ -200,3 +200,91 @@ async def test_multi_agent_pipeline_can_trigger_self_healing(tmp_path: Path) -> 
     assert result["intercepted"] is False
     assert result["docx_output"] == str(docx_path)
     assert docx_path.exists()
+    assert result["agents"]["visual_agent"]["status"] == "done"
+    assert int(result["visual_output"]["count"]) == 4
+    for asset in result["visual_output"]["assets"]:
+        assert Path(asset["image_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_multi_agent_pipeline_builds_dynamic_specialist_and_compliance_agents(tmp_path: Path) -> None:
+    kg_root = tmp_path / "知识图谱"
+    kg_root.mkdir(parents=True, exist_ok=True)
+    (kg_root / "kg.json").write_text(
+        json.dumps(
+            {
+                "name": "sample-kg",
+                "domain": "综合工程",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "N-ENG-1",
+                                "name": "综合工程参数节点",
+                                "keywords": ["桥梁", "隧道", "机电", "水利", "质量", "安全", "环保", "重难点"],
+                                "content": {"desc": "参数化控制"},
+                                "applicable_conditions": {"climate": "常温"},
+                                "resource_requirements": {"inspection_frequency_per_day": 2},
+                                "safety_level": "medium",
+                                "source_hierarchy": "企标",
+                            },
+                            {
+                                "node_id": "N-FORM-1",
+                                "name": "进度计算公式",
+                                "node_type": "FormulaNode",
+                                "keywords": ["进度", "重难点", "工期", "关键线路", "公式"],
+                                "content": {"formula": "work_volume / max(productivity_per_day, 1)"},
+                                "formula_expression": "work_volume / max(productivity_per_day, 1)",
+                                "formula_variables": ["work_volume", "productivity_per_day"],
+                                "applicable_conditions": {"climate": "常温"},
+                                "resource_requirements": {"resource_peak_workers": 10},
+                                "safety_level": "medium",
+                                "source_hierarchy": "企标",
+                            },
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    tender = tmp_path / "招标文件.txt"
+    tender.write_text(
+        """
+        本工程包含桥梁、隧道、机电、水利及土石方施工内容。
+        质量、安全、进度、环保、重难点、扣分点均需完整响应。
+        """,
+        encoding="utf-8",
+    )
+
+    boq_payload = {
+        "items": [
+            {"boq_code": "A1", "name": "桥梁下部结构", "quantity": 1200, "unit": "m3"},
+            {"boq_code": "A2", "name": "隧道二衬", "quantity": 800, "unit": "m3"},
+            {"boq_code": "A3", "name": "机电管线安装", "quantity": 600, "unit": "m"},
+        ]
+    }
+
+    output_path = tmp_path / "out.json"
+    report_path = tmp_path / "Missing_Knowledge_Report.md"
+    pipeline = MultiAgentDocPipeline(kg_db_path=tmp_path / "kg.sqlite3")
+    result = await pipeline.run(
+        tender_paths=[str(tender)],
+        boq_payload=boq_payload,
+        graph_root=kg_root,
+        output_path=output_path,
+        missing_report_path=report_path,
+    )
+
+    assert result["ok"] is True
+    assert result["agents"]["master_agent"]["status"] == "done"
+    assert result["agents"]["professional_agents"]["status"] == "done"
+    domains = set(result["agents"]["professional_agents"]["domains"])
+    assert domains.intersection({"bridge", "tunnel", "mep", "hydraulic"})
+    compliance = result["agents"]["compliance_agent"]["result"]
+    assert isinstance(compliance.get("checked_sections"), int)
+    assert len(result["sections"]) == len(result["index_matrix"]["index_matrix"])
+    assert all("specialist_domain" in sec for sec in result["sections"])
+    assert all("specialist_agent" in sec for sec in result["sections"])

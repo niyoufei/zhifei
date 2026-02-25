@@ -60,10 +60,35 @@ def _resource_items(resource_requirements: Any) -> List[str]:
     return out
 
 
+def _render_visual_assets(doc: Document, visual_assets: List[Dict[str, Any]]) -> Dict[str, int]:
+    if not visual_assets:
+        return {"embedded": 0, "missing": 0}
+    embedded = 0
+    missing = 0
+    doc.add_page_break()
+    doc.add_heading("附图与视觉生成", level=1)
+    for asset in visual_assets:
+        title = str(asset.get("title") or "自动生成图").strip()
+        caption = str(asset.get("caption") or "").strip()
+        image_path = str(asset.get("image_path") or "").strip()
+        doc.add_paragraph(title)
+        p = Path(image_path)
+        if p.exists():
+            doc.add_picture(str(p), width=Cm(15.5))
+            embedded += 1
+        else:
+            doc.add_paragraph(f"图像缺失: {image_path or 'unknown'}")
+            missing += 1
+        if caption:
+            doc.add_paragraph(caption)
+    return {"embedded": embedded, "missing": missing}
+
+
 def generate_v2_docx(
     *,
     index_matrix: Dict[str, Any],
     sections: List[Dict[str, Any]],
+    visual_assets: List[Dict[str, Any]] | None = None,
     output_path: Path | str,
     title_hint: str = "施工组织设计草案",
 ) -> Dict[str, Any]:
@@ -134,10 +159,13 @@ def generate_v2_docx(
             warning_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
             highlighted_paragraphs += 1
 
+    visuals_meta = _render_visual_assets(doc, list(visual_assets or []))
     doc.save(str(out))
     return {
         "ok": True,
         "saved_at": str(out),
         "highlighted_paragraphs": highlighted_paragraphs,
         "auto_generated_sections": auto_generated_sections,
+        "visual_assets_embedded": int(visuals_meta["embedded"]),
+        "visual_assets_missing": int(visuals_meta["missing"]),
     }

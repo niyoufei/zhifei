@@ -162,7 +162,7 @@ class SelfHealingAgent:
             model
             or os.getenv("ZF_DEFAULT_MODEL")
             or defaults.get("default_model")
-            or "gemini-2.5-flash"
+            or "gemini-3.1-pro-preview"
         )
         self.api_key = api_key or self._resolve_api_key(self.provider)
         self._llm = LLMClient(

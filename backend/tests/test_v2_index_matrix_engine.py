@@ -8,6 +8,7 @@ import pytest
 
 from backend.zhifei_autoplan.v2.index_matrix_engine import (
     DIMENSION_RULES,
+    DIMENSION_WEIGHTS,
     IndexMatrixEngine,
     build_index_matrix,
     save_index_matrix,
@@ -82,6 +83,37 @@ async def test_qa_file_overrides_base_matrix(tmp_path: Path) -> None:
     assert quality["source_type"] == "qa_override"
     assert schedule["source_type"] == "qa_override"
     assert quality["override"]["applied"] is True
+    assert "score" in quality
+    assert "signals" in quality
+
+
+@pytest.mark.asyncio
+async def test_parse_tender_supports_semantic_keyword_exhaustion_and_weight_signals(tmp_path: Path) -> None:
+    tender = tmp_path / "招标文件.txt"
+    tender.write_text(
+        """
+        第一章 安全文明施工
+        危大工程清单必须逐项交底，脚手架搭设验收频次2次/日，安全员复核。
+
+        第二章 环境保护
+        PM10控制值不高于150ug/m3，施工噪声昼间≤70dB，环保员每日检查并记录。
+        """,
+        encoding="utf-8",
+    )
+
+    engine = IndexMatrixEngine()
+    matrix = await engine.parse_files([str(tender)])
+    by_dim = {item["dimension"]: item for item in matrix["index_matrix"]}
+
+    safety = by_dim["安全"]
+    env = by_dim["环保"]
+    assert "危大工程" in safety["keywords"]
+    assert safety["weight"] > DIMENSION_WEIGHTS["安全"]
+    assert safety["signals"]["mandatory_hits"] >= 1
+    assert any(chunk.get("section_title") for chunk in safety["support_chunks"])
+    assert any(term in {"2次/日", "150ug/m3", "70dB"} for chunk in env["support_chunks"] for term in chunk.get("numeric_terms") or [])
+    assert matrix["meta"]["semantic_sections_total"] >= 2
+    assert matrix["meta"]["keyword_candidates_total"] >= 1
 
 
 @pytest.mark.asyncio

@@ -13,12 +13,107 @@ DEFAULT_INDEX_MATRIX_DIR = Path("backend/data/autoplan/v2")
 DEFAULT_INDEX_MATRIX_PATH = DEFAULT_INDEX_MATRIX_DIR / "index_matrix.json"
 
 DIMENSION_RULES: Dict[str, List[str]] = {
-    "质量": ["质量", "验收", "合格", "缺陷", "平整度", "强度", "检验", "抽检", "试验"],
-    "安全": ["安全", "危险", "防护", "应急", "事故", "临电", "高处", "消防", "培训"],
-    "进度": ["工期", "进度", "节点", "里程碑", "关键线路", "计划", "穿插", "延误", "赶工"],
-    "环保": ["环保", "扬尘", "噪声", "污水", "固废", "节能", "低碳", "绿色", "排放"],
-    "重难点": ["重难点", "难点", "关键工序", "复杂", "深基坑", "大体积", "高风险", "控制点", "专项"],
-    "扣分点": ["扣分", "否决", "废标", "处罚", "违约", "偏差", "不响应", "遗漏", "失分"],
+    "质量": [
+        "质量",
+        "验收",
+        "合格",
+        "缺陷",
+        "平整度",
+        "强度",
+        "检验",
+        "抽检",
+        "试验",
+        "一次验收合格率",
+        "复检",
+        "首件",
+        "样板",
+        "质量通病",
+        "成品保护",
+    ],
+    "安全": [
+        "安全",
+        "危险",
+        "防护",
+        "应急",
+        "事故",
+        "临电",
+        "高处",
+        "消防",
+        "培训",
+        "危大工程",
+        "脚手架",
+        "吊装",
+        "动火",
+        "隐患",
+        "安全交底",
+    ],
+    "进度": [
+        "工期",
+        "进度",
+        "节点",
+        "里程碑",
+        "关键线路",
+        "计划",
+        "穿插",
+        "延误",
+        "赶工",
+        "总工期",
+        "倒排",
+        "流水段",
+        "月计划",
+        "周计划",
+        "资源配置",
+    ],
+    "环保": [
+        "环保",
+        "扬尘",
+        "噪声",
+        "污水",
+        "固废",
+        "节能",
+        "低碳",
+        "绿色",
+        "排放",
+        "PM10",
+        "TSP",
+        "泥浆",
+        "水土保持",
+        "在线监测",
+        "弃土",
+    ],
+    "重难点": [
+        "重难点",
+        "难点",
+        "关键工序",
+        "复杂",
+        "深基坑",
+        "大体积",
+        "高风险",
+        "控制点",
+        "专项",
+        "高支模",
+        "双曲面",
+        "超长结构",
+        "大跨度",
+        "临近营业线",
+    ],
+    "扣分点": [
+        "扣分",
+        "否决",
+        "废标",
+        "处罚",
+        "违约",
+        "偏差",
+        "不响应",
+        "遗漏",
+        "失分",
+        "一票否决",
+        "扣罚",
+        "信用扣分",
+        "未按时",
+        "未报审",
+        "红线",
+    ],
 }
 
 DIMENSION_WEIGHTS: Dict[str, float] = {
@@ -29,6 +124,53 @@ DIMENSION_WEIGHTS: Dict[str, float] = {
     "重难点": 0.16,
     "扣分点": 0.10,
 }
+
+MANDATORY_MARKERS: Tuple[str, ...] = (
+    "必须",
+    "应当",
+    "应",
+    "需",
+    "不得",
+    "严禁",
+    "禁止",
+    "确保",
+    "shall",
+)
+
+KEYWORD_STOPWORDS = {
+    "项目",
+    "工程",
+    "施工",
+    "要求",
+    "条款",
+    "本工程",
+    "本项目",
+    "应当",
+    "必须",
+    "不得",
+    "进行",
+    "落实",
+    "执行",
+    "管理",
+    "措施",
+    "内容",
+    "标准",
+    "规范",
+    "相关",
+    "以及",
+    "其中",
+    "负责",
+    "完成",
+    "工作",
+}
+
+HEADING_RE = re.compile(r"^(第[一二三四五六七八九十百零\d]+[章节篇]|[一二三四五六七八九十]+、|\d+[\.、])")
+SENTENCE_SPLIT_RE = re.compile(r"[。\n；;!?！？]+")
+CHINESE_TERM_RE = re.compile(r"[\u4e00-\u9fff]{2,16}")
+MIXED_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-./%]{1,24}")
+NUMERIC_TERM_RE = re.compile(
+    r"\d+(?:\.\d+)?(?:%|‰|dB|MPa|kPa|mm|cm|m|km|天|h|小时|分钟|min|次/日|次/班|次|m3|m²|m2|t|kg|ug/m3|μg/m3)?"
+)
 
 
 def _normalize_keywords(values: List[str]) -> List[str]:
@@ -45,11 +187,67 @@ def _normalize_keywords(values: List[str]) -> List[str]:
     return out
 
 
+def _normalize_term(value: str) -> str:
+    term = re.sub(r"^[\s:：，,。；;、\[\]（）(){}]+|[\s:：，,。；;、\[\]（）(){}]+$", "", str(value or "").strip())
+    return term
+
+
+def _candidate_terms(sentence: str) -> List[str]:
+    terms: List[str] = []
+    for pattern in (NUMERIC_TERM_RE, MIXED_TERM_RE, CHINESE_TERM_RE):
+        for match in pattern.finditer(sentence):
+            term = _normalize_term(match.group(0))
+            if len(term) < 2:
+                continue
+            if term in KEYWORD_STOPWORDS:
+                continue
+            terms.append(term)
+    return _normalize_keywords(terms)
+
+
+def _chunk_semantic_tags(text: str) -> List[str]:
+    tags: List[str] = []
+    for dim, seeds in DIMENSION_RULES.items():
+        if any(seed in text for seed in seeds):
+            tags.append(dim)
+    return tags
+
+
+def _dimension_sentence_terms(text: str, dimension: str) -> List[str]:
+    seeds = DIMENSION_RULES.get(dimension, [])
+    terms: List[str] = []
+    for sentence in SENTENCE_SPLIT_RE.split(text or ""):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if any(seed in sentence for seed in seeds):
+            terms.extend(_candidate_terms(sentence))
+    return _normalize_keywords(terms)
+
+
+def _score_to_weight(
+    base_weight: float,
+    raw_score: float,
+    *,
+    total_chunks: int,
+    hit_chunks: int,
+    mandatory_hits: int,
+) -> float:
+    coverage = hit_chunks / max(total_chunks, 1)
+    score_factor = min(0.12, raw_score * 0.004)
+    coverage_factor = min(0.10, coverage * 0.10)
+    mandatory_factor = min(0.06, mandatory_hits * 0.008)
+    weight = base_weight + score_factor + coverage_factor + mandatory_factor
+    return round(min(0.50, max(base_weight * 0.60, weight)), 4)
+
+
 def _semantic_chunks(text: str, *, max_chars: int = 680) -> List[Dict[str, Any]]:
-    paragraphs = [line.strip() for line in re.split(r"\n{2,}", text or "") if line.strip()]
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     chunks: List[Dict[str, Any]] = []
     carry: List[str] = []
     carry_len = 0
+    current_heading = "正文"
+    section_index = 0
 
     def flush() -> None:
         nonlocal carry, carry_len
@@ -57,29 +255,45 @@ def _semantic_chunks(text: str, *, max_chars: int = 680) -> List[Dict[str, Any]]
             return
         body = "\n".join(carry).strip()
         if body:
-            chunks.append({"id": len(chunks) + 1, "text": body, "size": len(body)})
+            chunks.append(
+                {
+                    "id": len(chunks) + 1,
+                    "text": body,
+                    "size": len(body),
+                    "section_title": current_heading,
+                    "section_index": section_index,
+                    "semantic_tags": _chunk_semantic_tags(body),
+                }
+            )
         carry = []
         carry_len = 0
 
-    for para in paragraphs:
-        # heading-like lines become their own semantic chunk anchor.
-        is_heading = bool(re.match(r"^(第[一二三四五六七八九十百零\d]+[章节篇]|[一二三四五六七八九十]+、|\d+[\.、])", para))
-        if is_heading and carry:
+    for line in lines:
+        if HEADING_RE.match(line):
             flush()
-        if len(para) > max_chars:
-            for i in range(0, len(para), max_chars):
-                piece = para[i : i + max_chars]
-                if carry_len + len(piece) > max_chars:
-                    flush()
-                carry.append(piece)
-                carry_len += len(piece)
-                flush()
+            section_index += 1
+            current_heading = line[:120]
             continue
 
-        if carry_len + len(para) > max_chars:
-            flush()
-        carry.append(para)
-        carry_len += len(para)
+        pieces = [part.strip() for part in re.split(r"(?<=[。；;!?！？])", line) if part.strip()]
+        if not pieces:
+            pieces = [line]
+
+        for piece in pieces:
+            if len(piece) > max_chars:
+                for i in range(0, len(piece), max_chars):
+                    block = piece[i : i + max_chars]
+                    if carry_len + len(block) > max_chars:
+                        flush()
+                    carry.append(block)
+                    carry_len += len(block)
+                    flush()
+                continue
+
+            if carry_len + len(piece) > max_chars:
+                flush()
+            carry.append(piece)
+            carry_len += len(piece)
 
     flush()
     return chunks
@@ -172,9 +386,16 @@ class IndexMatrixEngine:
                 matrix_items.append(
                     {
                         "dimension": dim,
-                        "keywords": seeds[:4],
+                        "keywords": seeds[:6],
                         "weight": DIMENSION_WEIGHTS.get(dim, 0.1),
+                        "score": 0.0,
                         "source_type": source_type,
+                        "signals": {
+                            "hit_chunks": 0,
+                            "coverage": 0.0,
+                            "mandatory_hits": 0,
+                            "keyword_count": min(6, len(seeds)),
+                        },
                         "support_chunks": [],
                     }
                 )
@@ -184,7 +405,7 @@ class IndexMatrixEngine:
                     "required_dimensions": list(DIMENSION_RULES.keys()),
                     "strict_mode": True,
                 },
-                "meta": {"chunks_total": 0},
+                "meta": {"chunks_total": 0, "semantic_sections_total": 0, "keyword_candidates_total": 0},
             }
 
         all_chunks: List[Dict[str, Any]] = []
@@ -193,42 +414,82 @@ class IndexMatrixEngine:
             for chunk in chunks:
                 all_chunks.append({"path": doc.get("path"), **chunk})
 
+        keyword_candidates_total = 0
         for dim, seeds in DIMENSION_RULES.items():
             hit_keywords: List[str] = []
             support_chunks: List[Dict[str, Any]] = []
-            score = 0
+            raw_score = 0.0
+            hit_chunk_count = 0
+            mandatory_hits = 0
+
             for chunk in all_chunks:
                 ctext = chunk.get("text") or ""
                 matched = [kw for kw in seeds if kw in ctext]
-                if not matched:
+                semantic_tags = [str(x) for x in (chunk.get("semantic_tags") or [])]
+                if not matched and dim not in semantic_tags:
                     continue
-                score += len(matched)
-                for kw in matched:
+
+                hit_chunk_count += 1
+                sentence_terms = _dimension_sentence_terms(ctext, dim)
+                numeric_terms = [term for term in sentence_terms if any(ch.isdigit() for ch in term)]
+                mandatory_terms = [mk for mk in MANDATORY_MARKERS if mk in ctext]
+
+                mandatory_hits += len(mandatory_terms)
+                keyword_candidates_total += len(sentence_terms)
+
+                for kw in matched + sentence_terms:
                     if kw not in hit_keywords:
                         hit_keywords.append(kw)
+
+                chunk_score = (
+                    len(matched) * 1.6
+                    + (1.0 if dim in semantic_tags else 0.0)
+                    + len(sentence_terms) * 0.12
+                    + len(mandatory_terms) * 0.40
+                    + min(1.40, len(numeric_terms) * 0.20)
+                )
+                raw_score += chunk_score
+
                 support_chunks.append(
                     {
                         "chunk_id": chunk.get("id"),
                         "source_path": chunk.get("path"),
+                        "section_title": chunk.get("section_title"),
+                        "semantic_tags": semantic_tags,
                         "matched_keywords": matched,
+                        "extracted_terms": sentence_terms[:12],
+                        "numeric_terms": numeric_terms[:8],
+                        "mandatory_markers": mandatory_terms[:8],
                         "excerpt": ctext[:220],
                     }
                 )
 
             if not hit_keywords:
-                hit_keywords = seeds[:4]
+                hit_keywords = seeds[:6]
 
-            weight = DIMENSION_WEIGHTS.get(dim, 0.1)
-            if score > 0:
-                weight = min(0.35, round(weight + min(0.10, score * 0.01), 4))
+            merged_keywords = _normalize_keywords(hit_keywords + seeds)
+            weight = _score_to_weight(
+                DIMENSION_WEIGHTS.get(dim, 0.1),
+                raw_score,
+                total_chunks=len(all_chunks),
+                hit_chunks=hit_chunk_count,
+                mandatory_hits=mandatory_hits,
+            )
 
             matrix_items.append(
                 {
                     "dimension": dim,
-                    "keywords": _normalize_keywords(hit_keywords)[:12],
-                    "weight": round(weight, 4),
+                    "keywords": merged_keywords[:18],
+                    "weight": weight,
+                    "score": round(raw_score, 3),
                     "source_type": source_type,
-                    "support_chunks": support_chunks[:8],
+                    "signals": {
+                        "hit_chunks": hit_chunk_count,
+                        "coverage": round(hit_chunk_count / max(1, len(all_chunks)), 4),
+                        "mandatory_hits": mandatory_hits,
+                        "keyword_count": len(merged_keywords[:18]),
+                    },
+                    "support_chunks": support_chunks[:12],
                 }
             )
 
@@ -238,7 +499,11 @@ class IndexMatrixEngine:
                 "required_dimensions": list(DIMENSION_RULES.keys()),
                 "strict_mode": True,
             },
-            "meta": {"chunks_total": len(all_chunks)},
+            "meta": {
+                "chunks_total": len(all_chunks),
+                "semantic_sections_total": len({str(chunk.get("section_title") or "") for chunk in all_chunks}),
+                "keyword_candidates_total": keyword_candidates_total,
+            },
         }
 
     def _override_with_qa(self, base: Dict[str, Any], qa: Dict[str, Any]) -> Dict[str, Any]:
@@ -254,7 +519,9 @@ class IndexMatrixEngine:
                         "dimension": dim,
                         "keywords": qa_item.get("keywords") or item.get("keywords") or [],
                         "weight": qa_item.get("weight") or item.get("weight"),
+                        "score": qa_item.get("score", item.get("score", 0.0)),
                         "source_type": "qa_override",
+                        "signals": qa_item.get("signals") or item.get("signals") or {},
                         "support_chunks": qa_item.get("support_chunks") or [],
                         "override": {
                             "applied": True,
@@ -266,12 +533,21 @@ class IndexMatrixEngine:
             else:
                 out_items.append(item)
 
+        base_meta = dict(base.get("meta") or {})
+        qa_meta = dict(qa.get("meta") or {})
+        base_chunks = int(base_meta.get("chunks_total") or 0)
+        qa_chunks = int(qa_meta.get("chunks_total") or 0)
+        effective_chunks = max(base_chunks, qa_chunks)
+
         return {
             "index_matrix": out_items,
             "legal_boundary": base.get("legal_boundary") or {},
             "meta": {
-                **(base.get("meta") or {}),
+                **base_meta,
                 "override_strategy": "qa_file_overrides_tender",
+                "base_chunks_total": base_chunks,
+                "qa_chunks_total": qa_chunks,
+                "chunks_total": effective_chunks,
             },
         }
 

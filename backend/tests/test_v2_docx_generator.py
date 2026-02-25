@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
+from PIL import Image
 
 from backend.zhifei_autoplan.v2.docx_generator import generate_v2_docx
 
@@ -40,18 +41,37 @@ def test_generate_v2_docx_with_visual_guardrails(tmp_path: Path) -> None:
         },
     ]
 
+    image_path = tmp_path / "visual.png"
+    Image.new("RGB", (300, 180), color="#005BAC").save(image_path)
+    visual_assets = [
+        {
+            "asset_id": "VIS-01",
+            "title": "流程图",
+            "caption": "流程图（GB/T 50104, CSCEC VI蓝绿灰, 仿宋）",
+            "image_path": str(image_path),
+        }
+    ]
+
     out = tmp_path / "final.docx"
-    result = generate_v2_docx(index_matrix=index_matrix, sections=sections, output_path=out)
+    result = generate_v2_docx(
+        index_matrix=index_matrix,
+        sections=sections,
+        visual_assets=visual_assets,
+        output_path=out,
+    )
 
     assert result["ok"] is True
     assert out.exists()
     assert result["auto_generated_sections"] >= 1
     assert result["highlighted_paragraphs"] >= 1
+    assert result["visual_assets_embedded"] == 1
+    assert result["visual_assets_missing"] == 0
 
     doc = Document(str(out))
     all_text = "\n".join([p.text for p in doc.paragraphs])
     assert "1. 质量" in all_text
     assert "2. 安全" in all_text
+    assert "附图与视觉生成" in all_text
 
     has_highlight = False
     for paragraph in doc.paragraphs:

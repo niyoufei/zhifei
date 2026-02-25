@@ -4,6 +4,7 @@ import ast
 import csv
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
@@ -33,6 +34,8 @@ SOURCE_HIERARCHY_WEIGHTS: Dict[str, int] = {
     "企标": 1,
     "未知": 0,
 }
+
+DNA_CONTEXT_ENV_KEYS = ("ZHIFEI_DNA_CONTEXT", "ZF_DNA_CONTEXT", "TACTICAL_DNA_CONTEXT")
 
 RELATION_KEYS: Dict[str, Tuple[str, ...]] = {
     EDGE_REQUIRES: (
@@ -120,6 +123,15 @@ class ParsedNode:
     formula_variables_json: str = "[]"
     data_source_type: str = "FILE"
     spatial_context_json: str = "{}"
+    activation_signal: str = ""
+    dna_verified: int = 1
+    tactical_mode: str = ""
+    bid_response_strategy_json: str = "{}"
+    competitor_shield_json: str = "{}"
+    qt_score_booster_json: str = "{}"
+    quantitative_indices_json: str = "{}"
+    numeric_sources_json: str = "[]"
+    schedule_constraints_json: str = "{}"
     reference_keys: List[str] = field(default_factory=list)
     edge_drafts: List[ParsedEdgeDraft] = field(default_factory=list)
 
@@ -464,6 +476,326 @@ def _extract_resource_requirements(node: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _clamp_01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _extract_numeric_sources(
+    node: Dict[str, Any],
+    *,
+    body: str,
+    formula_expression: str,
+    resource_requirements: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    candidates = _dict_get_case_insensitive(
+        node,
+        (
+            "numeric_sources",
+            "numeric_source",
+            "parameter_sources",
+            "data_sources",
+            "quantitative_evidence",
+            "参数来源",
+            "数值依据",
+        ),
+    )
+
+    out: List[Dict[str, Any]] = []
+    if isinstance(candidates, dict):
+        candidates = [candidates]
+    if isinstance(candidates, list):
+        for item in candidates:
+            if isinstance(item, dict):
+                rec = {str(k): v for k, v in item.items() if str(k).strip() and v not in (None, "", [], {})}
+                if rec:
+                    out.append(rec)
+            elif item not in (None, ""):
+                out.append({"parameter": "raw", "value": str(item)})
+
+    pattern = re.compile(
+        r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>%|‰|dB|MPa|kPa|mm|cm|m|km|天|h|小时|min|分钟|次/日|次/班|次|人|台|套|m3|m²|m2|t|kg|ug/m3|μg/m3)",
+        flags=re.IGNORECASE,
+    )
+    for m in pattern.finditer(body or ""):
+        left = (body[max(0, m.start() - 16) : m.start()] or "").strip()
+        parameter = re.sub(r"[\s:：，,。；;、\[\]（）(){}]+", "", left[-12:]) or "parameter"
+        out.append(
+            {
+                "parameter": parameter,
+                "value": m.group("value"),
+                "unit": m.group("unit"),
+                "source_text": (body[max(0, m.start() - 28) : min(len(body), m.end() + 18)] or "").strip(),
+            }
+        )
+        if len(out) >= 12:
+            break
+
+    if formula_expression and not any(str(item.get("formula") or "").strip() for item in out if isinstance(item, dict)):
+        out.append(
+            {
+                "parameter": "formula_result",
+                "formula": formula_expression,
+                "source_text": "formula_expression",
+            }
+        )
+
+    if not out and isinstance(resource_requirements, dict):
+        freq = _dict_get_case_insensitive(
+            resource_requirements,
+            ("inspection_frequency", "inspection_frequency_per_day", "巡检频次", "检查频次"),
+        )
+        if freq is not None:
+            out.append(
+                {
+                    "parameter": "inspection_frequency",
+                    "value": str(freq),
+                    "unit": "次/日",
+                    "source_text": "resource_requirements",
+                }
+            )
+
+    if not out:
+        out.append(
+            {
+                "parameter": "inspection_frequency",
+                "value": "2",
+                "unit": "次/班",
+                "source_text": "default_quantitative_baseline",
+            }
+        )
+
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for item in out:
+        if not isinstance(item, dict):
+            continue
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped[:16]
+
+
+def _extract_quantitative_indices(
+    node: Dict[str, Any],
+    *,
+    safety_level: str,
+    resource_requirements: Dict[str, Any],
+) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "quantitative_indices",
+            "indices",
+            "index_metrics",
+            "量化指数",
+            "量化指标",
+        ),
+    )
+    out = _coerce_dict(raw)
+
+    safety_score_map = {
+        "critical": 0.92,
+        "high": 0.78,
+        "medium": 0.58,
+        "low": 0.38,
+        "unknown": 0.5,
+    }
+    risk_default = safety_score_map.get(str(safety_level or "unknown").lower(), 0.5)
+
+    manpower = _dict_get_case_insensitive(resource_requirements, ("manpower", "人力"))
+    crew_size = 0.0
+    if isinstance(manpower, dict):
+        raw_crew = _dict_get_case_insensitive(manpower, ("crew_size", "班组规模", "人数"))
+        text = str(raw_crew or "")
+        nums = re.findall(r"\d+(?:\.\d+)?", text)
+        if nums:
+            vals = [float(x) for x in nums]
+            crew_size = sum(vals) / max(1, len(vals))
+
+    resource_density_default = _clamp_01((crew_size / 12.0) if crew_size > 0 else 0.5)
+    duration_default = _clamp_01(0.65 if risk_default >= 0.75 else 0.5)
+
+    duration_index = float(_dict_get_case_insensitive(out, ("duration_index", "工期指数")) or duration_default)
+    risk_index = float(_dict_get_case_insensitive(out, ("risk_index", "风险指数")) or risk_default)
+    resource_density_index = float(
+        _dict_get_case_insensitive(out, ("resource_density_index", "资源密度指数")) or resource_density_default
+    )
+
+    out["duration_index"] = round(_clamp_01(duration_index), 4)
+    out["risk_index"] = round(_clamp_01(risk_index), 4)
+    out["resource_density_index"] = round(_clamp_01(resource_density_index), 4)
+    if "complexity_index" not in out:
+        out["complexity_index"] = round(
+            _clamp_01(out["duration_index"] * 0.35 + out["risk_index"] * 0.35 + out["resource_density_index"] * 0.30),
+            4,
+        )
+    return out
+
+
+def _extract_schedule_constraints(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "schedule_constraints",
+            "schedule_constraint",
+            "cpm_constraints",
+            "schedule",
+            "进度约束",
+            "工序约束",
+        ),
+    )
+    out = _coerce_dict(raw)
+
+    min_interval = _dict_get_case_insensitive(
+        out,
+        ("min_process_interval_days", "minimum_interval_days", "min_lag_days", "最小工序间隔"),
+    )
+    if min_interval is None:
+        min_interval = _dict_get_case_insensitive(
+            node,
+            ("min_process_interval_days", "minimum_interval_days", "最小工序间隔"),
+        )
+    try:
+        min_interval_int = max(1, int(float(min_interval))) if min_interval is not None else 1
+    except Exception:
+        min_interval_int = 1
+
+    critical_path = _dict_get_case_insensitive(
+        out,
+        ("critical_path_hint", "critical_path", "key_path", "关键线路"),
+    )
+    if critical_path is None:
+        critical_path = _dict_get_case_insensitive(
+            node,
+            ("critical_path_hint", "critical_path", "key_path", "关键线路"),
+        )
+    if isinstance(critical_path, str):
+        critical_path = [x.strip() for x in re.split(r"[;,，；、/|]+", critical_path) if x.strip()]
+    if not isinstance(critical_path, list):
+        critical_path = []
+
+    out["min_process_interval_days"] = min_interval_int
+    out["critical_path_hint"] = [str(x).strip() for x in critical_path if str(x).strip()][:12]
+    return out
+
+
+def _extract_activation_terms(signal_text: str) -> List[str]:
+    text = str(signal_text or "").strip()
+    if not text:
+        return []
+    quoted = [str(x).strip() for x in re.findall(r"[\"']([^\"']+)[\"']", text) if str(x).strip()]
+    if quoted:
+        return quoted
+    m = re.search(r"contains\s+(.+)$", text, flags=re.IGNORECASE)
+    if m:
+        tail = str(m.group(1) or "").strip()
+        parts = [p.strip() for p in re.split(r"\s+and\s+|[;,，；、|]+", tail, flags=re.IGNORECASE) if p.strip()]
+        return parts
+    return [text]
+
+
+def _resolve_activation_context(explicit_context: str | None, root_meta: Dict[str, Any]) -> str:
+    if explicit_context is not None and str(explicit_context).strip():
+        return str(explicit_context).strip()
+    for env_key in DNA_CONTEXT_ENV_KEYS:
+        env_val = os.getenv(env_key)
+        if env_val and str(env_val).strip():
+            return str(env_val).strip()
+    activation_key = _dict_get_case_insensitive(root_meta, ("activation_key", "activationKey", "dna_key"))
+    if activation_key is not None and str(activation_key).strip():
+        return str(activation_key).strip()
+    return ""
+
+
+def _dna_verify_signal(signal_text: str, context_text: str) -> bool:
+    signal = str(signal_text or "").strip()
+    if not signal:
+        return True
+    terms = _extract_activation_terms(signal)
+    if not terms:
+        return False
+    context = _normalize_term(context_text)
+    if not context:
+        return False
+    return all(_normalize_term(term) in context for term in terms)
+
+
+def _coerce_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value is None:
+        return {}
+    return {"raw": value}
+
+
+def _extract_tactical_fields(
+    node: Dict[str, Any],
+    *,
+    activation_context: str,
+) -> Dict[str, Any]:
+    content = _dict_get_case_insensitive(node, ("content",))
+    if isinstance(content, dict):
+        root = content
+    else:
+        root = node
+
+    env_sensing = _dict_get_case_insensitive(root, ("environment_sensing",))
+    activation_signal = ""
+    if isinstance(env_sensing, dict):
+        activation_signal = str(
+            _dict_get_case_insensitive(env_sensing, ("activation_signal", "dna_signal", "signal")) or ""
+        ).strip()
+    else:
+        activation_signal = str(_dict_get_case_insensitive(root, ("activation_signal", "dna_signal")) or "").strip()
+
+    premium_raw = _dict_get_case_insensitive(root, ("operation_desc_premium", "premium"))
+    premium = _coerce_dict(premium_raw)
+    mediocre_desc = str(_dict_get_case_insensitive(root, ("operation_desc_mediocre", "mediocre")) or "").strip()
+
+    strategy = _coerce_dict(_dict_get_case_insensitive(premium, ("bid_response_strategy", "response_strategy")))
+    shield = _coerce_dict(_dict_get_case_insensitive(premium, ("competitor_shield", "rival_shield", "shield")))
+    booster = _coerce_dict(_dict_get_case_insensitive(premium, ("qt_score_booster", "score_booster", "booster")))
+
+    premium_desc = str(_dict_get_case_insensitive(premium, ("desc", "description", "operation")) or "").strip()
+    has_tactical = bool(activation_signal or strategy or shield or booster or premium_desc or mediocre_desc)
+    if not has_tactical:
+        return {}
+
+    dna_verified = _dna_verify_signal(activation_signal, activation_context)
+    tactical_mode = "premium"
+    selected_operation_desc = premium_desc or mediocre_desc
+    if (not dna_verified) and mediocre_desc:
+        tactical_mode = "mediocre"
+        selected_operation_desc = mediocre_desc
+
+    tags: List[str] = ["tactical_kg"]
+    if _dict_get_case_insensitive(shield, ("trap_logic", "trap", "陷阱")):
+        tags.append("trap_logic")
+    if booster:
+        tags.append("score_booster")
+
+    keywords: List[str] = []
+    keywords.extend(_extract_terms(strategy))
+    keywords.extend(_extract_terms(shield))
+    keywords.extend(_extract_terms(booster))
+    keywords.extend(_extract_terms(selected_operation_desc))
+    keywords.extend(_extract_terms(activation_signal))
+
+    return {
+        "activation_signal": activation_signal,
+        "dna_verified": bool(dna_verified),
+        "tactical_mode": tactical_mode,
+        "selected_operation_desc": selected_operation_desc,
+        "bid_response_strategy": strategy,
+        "competitor_shield": shield,
+        "qt_score_booster": booster,
+        "tags": tags,
+        "keywords": keywords,
+    }
+
+
 def _extract_formula_info(node: Dict[str, Any], body: str) -> Tuple[str, str, List[str]]:
     raw_type = str(_dict_get_case_insensitive(node, ("node_type", "type")) or "EngineeringNode").strip()
     expr = _dict_get_case_insensitive(node, ("formula_expression", "formula", "expression", "compute_formula"))
@@ -548,6 +880,15 @@ def _build_parsed_node(
     edge_drafts: List[ParsedEdgeDraft],
     data_source_type: str = "FILE",
     spatial_context: Optional[Dict[str, Any]] = None,
+    activation_signal: str = "",
+    dna_verified: bool = True,
+    tactical_mode: str = "",
+    bid_response_strategy: Optional[Dict[str, Any]] = None,
+    competitor_shield: Optional[Dict[str, Any]] = None,
+    qt_score_booster: Optional[Dict[str, Any]] = None,
+    quantitative_indices: Optional[Dict[str, Any]] = None,
+    numeric_sources: Optional[List[Dict[str, Any]]] = None,
+    schedule_constraints: Optional[Dict[str, Any]] = None,
 ) -> ParsedNode:
     uid = hashlib.sha1(f"{path}::{node_id}".encode("utf-8")).hexdigest()[:20]
     return ParsedNode(
@@ -567,6 +908,15 @@ def _build_parsed_node(
         formula_variables_json=_ensure_ascii_json(formula_variables),
         data_source_type=str(data_source_type or "FILE"),
         spatial_context_json=_ensure_ascii_json(spatial_context or {}),
+        activation_signal=str(activation_signal or ""),
+        dna_verified=1 if bool(dna_verified) else 0,
+        tactical_mode=str(tactical_mode or ""),
+        bid_response_strategy_json=_ensure_ascii_json(bid_response_strategy or {}),
+        competitor_shield_json=_ensure_ascii_json(competitor_shield or {}),
+        qt_score_booster_json=_ensure_ascii_json(qt_score_booster or {}),
+        quantitative_indices_json=_ensure_ascii_json(quantitative_indices or {}),
+        numeric_sources_json=_ensure_ascii_json(numeric_sources or []),
+        schedule_constraints_json=_ensure_ascii_json(schedule_constraints or {}),
         reference_keys=reference_keys,
         edge_drafts=edge_drafts,
     )
@@ -724,9 +1074,11 @@ def _parse_xml(path: Path) -> List[ParsedNode]:
     return nodes
 
 
-def _parse_json(path: Path) -> List[ParsedNode]:
+def _parse_json(path: Path, *, activation_context: str | None = None) -> List[ParsedNode]:
     raw = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
     nodes: List[ParsedNode] = []
+    root_meta = raw.get("meta") if isinstance(raw, dict) else {}
+    activation_ctx = _resolve_activation_context(activation_context, root_meta if isinstance(root_meta, dict) else {})
 
     def walk(
         node: Any,
@@ -771,6 +1123,18 @@ def _parse_json(path: Path) -> List[ParsedNode]:
                         _dict_get_case_insensitive(node, ("safety_level", "risk_level", "风险等级")),
                         body,
                     )
+                    numeric_sources = _extract_numeric_sources(
+                        node,
+                        body=body,
+                        formula_expression=formula_expression,
+                        resource_requirements=resource_requirements,
+                    )
+                    quantitative_indices = _extract_quantitative_indices(
+                        node,
+                        safety_level=safety_level,
+                        resource_requirements=resource_requirements,
+                    )
+                    schedule_constraints = _extract_schedule_constraints(node)
                     object_key = _build_object_key(node, title, node_id)
                     refs = _build_reference_keys(
                         node,
@@ -800,15 +1164,72 @@ def _parse_json(path: Path) -> List[ParsedNode]:
                         "title": title,
                         "node_type": node_type,
                         "source_hierarchy": source_hierarchy,
+                        "quantitative_indices": quantitative_indices,
+                        "numeric_sources": numeric_sources,
+                        "schedule_constraints": schedule_constraints,
                     }
+
+                    tactical = _extract_tactical_fields(node, activation_context=activation_ctx)
+                    tags = local_tags + _extract_terms(path.stem)
+                    keywords = local_keywords + _tokenize(f"{title} {body}")
+                    keywords.extend(_extract_terms(numeric_sources))
+                    keywords.extend(_extract_terms(quantitative_indices))
+                    keywords.extend(_extract_terms(schedule_constraints))
+                    activation_signal = ""
+                    dna_verified = True
+                    tactical_mode = ""
+                    bid_response_strategy: Dict[str, Any] = {}
+                    competitor_shield: Dict[str, Any] = {}
+                    qt_score_booster: Dict[str, Any] = {}
+
+                    if tactical:
+                        activation_signal = str(tactical.get("activation_signal") or "")
+                        dna_verified = bool(tactical.get("dna_verified"))
+                        tactical_mode = str(tactical.get("tactical_mode") or "")
+                        bid_response_strategy = _coerce_dict(tactical.get("bid_response_strategy"))
+                        competitor_shield = _coerce_dict(tactical.get("competitor_shield"))
+                        qt_score_booster = _coerce_dict(tactical.get("qt_score_booster"))
+                        tags.extend([str(x) for x in (tactical.get("tags") or []) if str(x).strip()])
+                        keywords.extend([str(x) for x in (tactical.get("keywords") or []) if str(x).strip()])
+                        selected_operation_desc = str(tactical.get("selected_operation_desc") or "").strip()
+                        response_template = str(
+                            _dict_get_case_insensitive(bid_response_strategy, ("response_template", "template")) or ""
+                        ).strip()
+                        trap_logic = str(
+                            _dict_get_case_insensitive(competitor_shield, ("trap_logic", "trap", "陷阱")) or ""
+                        ).strip()
+                        score_weight = str(
+                            _dict_get_case_insensitive(qt_score_booster, ("score_weight", "weight", "加分权重")) or ""
+                        ).strip()
+                        tactical_lines: List[str] = [
+                            f"DNA校验: {'PASS' if dna_verified else 'FAIL'}",
+                            f"战术模式: {tactical_mode or 'default'}",
+                        ]
+                        if selected_operation_desc:
+                            tactical_lines.append(f"执行说明: {selected_operation_desc}")
+                        if response_template:
+                            tactical_lines.append(f"响应策略: {response_template}")
+                        if trap_logic:
+                            tactical_lines.append(f"竞争护盾/陷阱: {trap_logic}")
+                        if score_weight:
+                            tactical_lines.append(f"加分权重: {score_weight}")
+                        body = "\n".join(tactical_lines + [body]).strip()
+                        payload["tactical"] = {
+                            "activation_signal": activation_signal,
+                            "dna_verified": dna_verified,
+                            "tactical_mode": tactical_mode,
+                            "bid_response_strategy": bid_response_strategy,
+                            "competitor_shield": competitor_shield,
+                            "qt_score_booster": qt_score_booster,
+                        }
 
                     parsed = _build_parsed_node(
                         path=path,
                         node_id=node_id,
                         title=title,
                         body=body,
-                        tags=local_tags + _extract_terms(path.stem),
-                        keywords=local_keywords + _tokenize(f"{title} {body}"),
+                        tags=tags,
+                        keywords=keywords,
                         payload=payload,
                         node_type=node_type,
                         object_key=object_key,
@@ -820,6 +1241,15 @@ def _parse_json(path: Path) -> List[ParsedNode]:
                         formula_variables=formula_variables,
                         reference_keys=refs,
                         edge_drafts=edge_drafts,
+                        activation_signal=activation_signal,
+                        dna_verified=dna_verified,
+                        tactical_mode=tactical_mode,
+                        bid_response_strategy=bid_response_strategy,
+                        competitor_shield=competitor_shield,
+                        qt_score_booster=qt_score_booster,
+                        quantitative_indices=quantitative_indices,
+                        numeric_sources=numeric_sources,
+                        schedule_constraints=schedule_constraints,
                     )
                     # inject uid reference after creation
                     parsed.reference_keys = _build_reference_keys(
@@ -1189,10 +1619,11 @@ def _safe_eval_formula(expression: str, variables: Dict[str, Any]) -> Any:
 class KnowledgeGraphIndex:
     """SQLite-backed unified knowledge graph index with structure/relations/formula/arbitration support."""
 
-    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH):
+    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH, *, activation_context: str | None = None):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._schema_needs_reindex = False
+        self.activation_context = activation_context
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -1246,6 +1677,15 @@ class KnowledgeGraphIndex:
                     formula_variables_json TEXT NOT NULL DEFAULT '[]',
                     data_source_type TEXT NOT NULL DEFAULT 'FILE',
                     spatial_context_json TEXT NOT NULL DEFAULT '{}',
+                    activation_signal TEXT NOT NULL DEFAULT '',
+                    dna_verified INTEGER NOT NULL DEFAULT 1,
+                    tactical_mode TEXT NOT NULL DEFAULT '',
+                    bid_response_strategy_json TEXT NOT NULL DEFAULT '{}',
+                    competitor_shield_json TEXT NOT NULL DEFAULT '{}',
+                    qt_score_booster_json TEXT NOT NULL DEFAULT '{}',
+                    quantitative_indices_json TEXT NOT NULL DEFAULT '{}',
+                    numeric_sources_json TEXT NOT NULL DEFAULT '[]',
+                    schedule_constraints_json TEXT NOT NULL DEFAULT '{}',
                     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
                     UNIQUE(document_id, node_uid)
                 );
@@ -1305,6 +1745,15 @@ class KnowledgeGraphIndex:
             self._ensure_column(conn, "nodes", "formula_variables_json TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(conn, "nodes", "data_source_type TEXT NOT NULL DEFAULT 'FILE'")
             self._ensure_column(conn, "nodes", "spatial_context_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "activation_signal TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "nodes", "dna_verified INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(conn, "nodes", "tactical_mode TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "nodes", "bid_response_strategy_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "competitor_shield_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "qt_score_booster_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "quantitative_indices_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "numeric_sources_json TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "nodes", "schedule_constraints_json TEXT NOT NULL DEFAULT '{}'")
 
             try:
                 conn.execute(
@@ -1326,10 +1775,10 @@ class KnowledgeGraphIndex:
             # Schema version tracking for reindex safety.
             vrow = conn.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
             version = str(vrow[0]) if vrow else "0"
-            if version != "3":
+            if version != "5":
                 self._schema_needs_reindex = True
                 conn.execute(
-                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '3')"
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '5')"
                 )
             conn.commit()
 
@@ -1348,7 +1797,7 @@ class KnowledgeGraphIndex:
     def _parse_file(self, path: Path) -> List[ParsedNode]:
         ext = path.suffix.lower()
         if ext == ".json":
-            return _parse_json(path)
+            return _parse_json(path, activation_context=self.activation_context)
         if ext in {".md", ".markdown"}:
             return _parse_markdown(path)
         if ext == ".xml":
@@ -1455,9 +1904,18 @@ class KnowledgeGraphIndex:
                             formula_expression,
                             formula_variables_json,
                             data_source_type,
-                            spatial_context_json
+                            spatial_context_json,
+                            activation_signal,
+                            dna_verified,
+                            tactical_mode,
+                            bid_response_strategy_json,
+                            competitor_shield_json,
+                            qt_score_booster_json,
+                            quantitative_indices_json,
+                            numeric_sources_json,
+                            schedule_constraints_json
                         )
-                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             doc_id,
@@ -1475,6 +1933,15 @@ class KnowledgeGraphIndex:
                             node.formula_variables_json,
                             node.data_source_type,
                             node.spatial_context_json,
+                            node.activation_signal,
+                            node.dna_verified,
+                            node.tactical_mode,
+                            node.bid_response_strategy_json,
+                            node.competitor_shield_json,
+                            node.qt_score_booster_json,
+                            node.quantitative_indices_json,
+                            node.numeric_sources_json,
+                            node.schedule_constraints_json,
                         ),
                     )
                     node_id = int(cursor.lastrowid)
@@ -1705,6 +2172,15 @@ class KnowledgeGraphIndex:
                     n.formula_variables_json,
                     n.data_source_type,
                     n.spatial_context_json,
+                    n.activation_signal,
+                    n.dna_verified,
+                    n.tactical_mode,
+                    n.bid_response_strategy_json,
+                    n.competitor_shield_json,
+                    n.qt_score_booster_json,
+                    n.quantitative_indices_json,
+                    n.numeric_sources_json,
+                    n.schedule_constraints_json,
                     d.file_name,
                     d.source_path,
                     COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags_csv,
@@ -1766,6 +2242,15 @@ class KnowledgeGraphIndex:
                 "formula_variables": _safe_json_load(row["formula_variables_json"], []),
                 "data_source_type": row["data_source_type"],
                 "spatial_context": _safe_json_load(row["spatial_context_json"], {}),
+                "activation_signal": row["activation_signal"],
+                "dna_verified": bool(int(row["dna_verified"] or 0)),
+                "tactical_mode": row["tactical_mode"],
+                "bid_response_strategy": _safe_json_load(row["bid_response_strategy_json"], {}),
+                "competitor_shield": _safe_json_load(row["competitor_shield_json"], {}),
+                "qt_score_booster": _safe_json_load(row["qt_score_booster_json"], {}),
+                "quantitative_indices": _safe_json_load(row["quantitative_indices_json"], {}),
+                "numeric_sources": _safe_json_load(row["numeric_sources_json"], []),
+                "schedule_constraints": _safe_json_load(row["schedule_constraints_json"], {}),
                 "score": round(score, 4),
                 "payload": _safe_json_load(row["payload_json"], {}),
                 "source_provenance": {
@@ -1969,8 +2454,9 @@ def ingest_knowledge_graph(
     *,
     db_path: Path | str = DEFAULT_DB_PATH,
     force_reindex: bool = False,
+    activation_context: str | None = None,
 ) -> Dict[str, Any]:
-    index = KnowledgeGraphIndex(db_path=db_path)
+    index = KnowledgeGraphIndex(db_path=db_path, activation_context=activation_context)
     return index.ingest_directory(root_dir=root_dir, force_reindex=force_reindex)
 
 

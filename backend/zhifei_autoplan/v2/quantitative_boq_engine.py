@@ -135,6 +135,69 @@ class QuantitativeBoQEngine:
             "process_edges": edges,
         }
 
+    def _split_code_hierarchy(self, code: str) -> Tuple[str, str]:
+        raw = str(code or "").strip()
+        if not raw:
+            return "", ""
+        if any(sep in raw for sep in (".", "-", "_", "/")):
+            parts = [p for p in re.split(r"[.\-_/]+", raw) if p]
+            if len(parts) == 1:
+                return parts[0], parts[0]
+            return parts[0], ".".join(parts[:2])
+
+        compact = re.sub(r"[^0-9A-Za-z]+", "", raw)
+        if compact.isdigit() and len(compact) >= 4:
+            return compact[:2], compact[:4]
+        if len(compact) >= 2:
+            return compact[:2], compact[:4] if len(compact) >= 4 else compact[:2]
+        return compact, compact
+
+    def _build_chapter_structure(self, boq_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        by_chapter: Dict[str, Dict[str, Any]] = {}
+        for idx, item in enumerate(boq_items, start=1):
+            code = str(item.get("boq_code") or "").strip()
+            chapter_id, subchapter_id = self._split_code_hierarchy(code)
+            if not chapter_id:
+                name = str(item.get("name") or "").strip()
+                chapter_id = name[:2] or f"CH-{idx}"
+            if not subchapter_id:
+                subchapter_id = chapter_id
+
+            chapter = by_chapter.setdefault(
+                chapter_id,
+                {
+                    "chapter_id": chapter_id,
+                    "item_count": 0,
+                    "total_quantity": 0.0,
+                    "subchapters": {},
+                },
+            )
+            chapter["item_count"] += 1
+            qty = self._to_float(item.get("quantity")) or 0.0
+            chapter["total_quantity"] += float(qty)
+
+            sub = chapter["subchapters"].setdefault(
+                subchapter_id,
+                {"subchapter_id": subchapter_id, "item_count": 0, "total_quantity": 0.0},
+            )
+            sub["item_count"] += 1
+            sub["total_quantity"] += float(qty)
+
+        chapters: List[Dict[str, Any]] = []
+        for cid in sorted(by_chapter.keys()):
+            chapter = by_chapter[cid]
+            subs = [chapter["subchapters"][sid] for sid in sorted(chapter["subchapters"].keys())]
+            chapters.append(
+                {
+                    "chapter_id": cid,
+                    "item_count": int(chapter["item_count"]),
+                    "total_quantity": round(float(chapter["total_quantity"]), 6),
+                    "subchapter_count": len(subs),
+                    "subchapters": subs,
+                }
+            )
+        return {"chapter_count": len(chapters), "chapters": chapters}
+
     def _compute_cpm(self, process_nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, Any]:
         durations = {str(n["process"]): int(n.get("duration_days") or 1) for n in process_nodes}
         preds: Dict[str, List[Tuple[str, int]]] = defaultdict(list)
@@ -217,18 +280,78 @@ class QuantitativeBoQEngine:
             "risk_index": risk_index,
         }
 
+    def _compute_quant_indices(
+        self,
+        *,
+        boq_items: List[Dict[str, Any]],
+        mapping: Dict[str, Any],
+        cpm: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        quantities = [self._to_float(item.get("quantity")) or 0.0 for item in boq_items]
+        total_quantity = sum(quantities)
+        item_count = max(1, len(boq_items))
+        avg_quantity = total_quantity / item_count if boq_items else 0.0
+
+        variance = 0.0
+        if boq_items:
+            variance = sum((q - avg_quantity) ** 2 for q in quantities) / item_count
+        std_dev = math.sqrt(max(0.0, variance))
+        quantity_dispersion = (std_dev / max(1.0, abs(avg_quantity))) if avg_quantity else 0.0
+
+        process_nodes = mapping.get("process_nodes") or []
+        unique_process_count = len(process_nodes)
+        process_diversity = unique_process_count / max(1, len(PROCESS_RULES))
+
+        mapping_items = mapping.get("items") or {}
+        resource_counts = [len((payload or {}).get("resources") or []) for payload in mapping_items.values()]
+        avg_resource_count = sum(resource_counts) / max(1, len(resource_counts))
+        resource_density_index = min(1.0, avg_resource_count / 4.0)
+
+        project_duration = int(cpm.get("project_duration_days") or 0)
+        duration_index = min(1.0, project_duration / max(1.0, len(boq_items) * 1.2))
+        quantity_scale_index = min(1.0, math.log10(max(1.0, total_quantity) + 1.0) / 6.0)
+        construction_density_index = min(1.0, (total_quantity / max(1.0, item_count)) / 1500.0)
+        risk_index = float(cpm.get("risk_index") or 0.0)
+
+        complexity_index = (
+            process_diversity * 0.25
+            + resource_density_index * 0.2
+            + min(1.0, quantity_dispersion) * 0.2
+            + risk_index * 0.2
+            + construction_density_index * 0.15
+        )
+        complexity_index = min(1.0, complexity_index)
+
+        return {
+            "quantity_scale_index": round(quantity_scale_index, 4),
+            "resource_density_index": round(resource_density_index, 4),
+            "construction_density_index": round(construction_density_index, 4),
+            "complexity_index": round(complexity_index, 4),
+            "duration_index": round(duration_index, 4),
+            "risk_index": round(risk_index, 4),
+            "process_diversity": round(min(1.0, process_diversity), 4),
+            "avg_resource_count": round(avg_resource_count, 4),
+            "quantity_dispersion": round(max(0.0, quantity_dispersion), 4),
+            "item_count": int(len(boq_items)),
+            "total_quantity": round(float(total_quantity), 6),
+        }
+
     def build_quantitative_index(self, boq_payload: Dict[str, Any]) -> Dict[str, Any]:
         items = boq_payload.get("items") if isinstance(boq_payload.get("items"), list) else []
         mapping = self.build_mapping(items)
         cpm = self._compute_cpm(mapping["process_nodes"], mapping["process_edges"])
+        chapter_structure = self._build_chapter_structure(items)
+        indices = self._compute_quant_indices(boq_items=items, mapping=mapping, cpm=cpm)
 
         return {
             "mapping_3d": mapping["items"],
+            "chapter_structure": chapter_structure,
             "process_network": {
                 "nodes": mapping["process_nodes"],
                 "edges": mapping["process_edges"],
             },
             "cpm": cpm,
+            "indices": indices,
         }
 
 

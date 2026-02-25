@@ -28,6 +28,8 @@ def test_build_quantitative_index_contains_mapping_and_cpm() -> None:
 
     assert "mapping_3d" in result
     assert "cpm" in result
+    assert "chapter_structure" in result
+    assert "indices" in result
 
     mapping = result["mapping_3d"]
     assert "土方开挖" in mapping
@@ -39,6 +41,22 @@ def test_build_quantitative_index_contains_mapping_and_cpm() -> None:
     assert cpm["min_process_interval_days"] >= 1
     assert 0.0 <= cpm["risk_index"] <= 1.0
     assert len(cpm["critical_path"]) >= 1
+
+    chapter = result["chapter_structure"]
+    assert chapter["chapter_count"] >= 1
+    assert isinstance(chapter["chapters"], list)
+
+    indices = result["indices"]
+    for key in (
+        "quantity_scale_index",
+        "resource_density_index",
+        "construction_density_index",
+        "complexity_index",
+        "duration_index",
+        "risk_index",
+    ):
+        assert key in indices
+        assert 0.0 <= float(indices[key]) <= 1.0
 
 
 def test_assert_paragraph_quantitative_support_passes() -> None:
