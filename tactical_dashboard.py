@@ -15,9 +15,10 @@ import streamlit as st
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
 from backend.zhifei_autoplan.v2.data_graph_ingestion import ingest_knowledge_graph, search_graph_index
 from backend.zhifei_autoplan.v2.index_matrix_engine import IndexMatrixEngine
+from backend.zhifei_autoplan.v2.kg_paths import resolve_default_kg_root
 from backend.zhifei_autoplan.v2.multi_agent_pipeline import MultiAgentDocPipeline
 
-DEFAULT_KG_ROOT = "/Users/youfeini/Desktop/文档生成系统/知识图谱"
+DEFAULT_KG_ROOT = str(resolve_default_kg_root())
 DEFAULT_DB_PATH = "backend/data/autoplan/v2/tactical_graph.sqlite3"
 DEFAULT_BUILD_ROOT = Path("build/tactical_dashboard")
 DEFAULT_BUILD_ROOT.mkdir(parents=True, exist_ok=True)
