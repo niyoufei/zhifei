@@ -14,6 +14,19 @@ from backend.zhifei_autoplan.media import generate_boq_chart, generate_ingested_
 from backend.zhifei_autoplan.quality_check import run_quality_checks, apply_remediation, strip_nonconcrete_language
 from backend.zhifei_autoplan.params_runtime import load_params, get_image_defaults
 from backend.zhifei_autoplan.boq_focus_enforcer import ensure_boq_focus_item_cards
+from backend.zhifei_autoplan.project_types import (
+    detect_project_type,
+    normalize_project_type,
+    project_type_requirements,
+)
+from backend.zhifei_autoplan.style_policy import resolve_style
+from backend.zhifei_autoplan.outline_planner import (
+    enrich_outline,
+    infer_total_page_limit,
+    plan_chapter_pages,
+    recommend_chart_every_n,
+)
+from backend.zhifei_autoplan.multi_agent_runtime import build_multi_agent_plan
 
 
 STANDARD_TRADES = [
@@ -40,6 +53,20 @@ SYSTEM_MANDATORY_REQUIREMENTS = [
     f"工种名称应使用规范称谓，例如：{'、'.join(STANDARD_TRADES)}。",
     "全文禁止官话、套话、空话，不得出现“加强、确保、严格、压实责任、形成合力、高质量推进”等无落地表达。",
 ]
+
+
+def _dedup_lines(lines: List[str], limit: int | None = None) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if limit and len(out) >= limit:
+            break
+    return out
 
 
 def _build_weights_and_penalties(tender: Dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -126,8 +153,10 @@ def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
     if line_spacing_pt is None:
         line_spacing_pt = font_cfg.get("line_spacing_pt")
 
-    size = max(8.0, min(22.0, _to_float(body_size, 12.0)))
+    size = max(8.0, min(22.0, _to_float(body_size, 14.0)))
     spacing = max(1.0, min(2.5, _to_float(line_spacing, 1.5)))
+    if line_spacing_pt is None:
+        line_spacing_pt = 22.0
     # 固定值行距（磅）转近似倍数，用于估算字数/页
     if line_spacing_pt is not None:
         try:
@@ -135,10 +164,10 @@ def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
         except Exception:
             pass
 
-    left = _to_float(margins_cfg.get("left"), 3.0)
-    right = _to_float(margins_cfg.get("right"), 2.5)
-    top = _to_float(margins_cfg.get("top"), 2.54)
-    bottom = _to_float(margins_cfg.get("bottom"), 2.54)
+    left = _to_float(margins_cfg.get("left"), 2.0)
+    right = _to_float(margins_cfg.get("right"), 2.0)
+    top = _to_float(margins_cfg.get("top"), 2.5)
+    bottom = _to_float(margins_cfg.get("bottom"), 2.0)
 
     width_factor = 5.5 / max(2.0, left + right)
     height_factor = 5.0 / max(2.0, top + bottom)
@@ -231,6 +260,7 @@ def _resolve_provider_api_key(payload: Dict[str, Any], provider: str | None) -> 
     env_map = {
         "openai": ("OPENAI_API_KEY", "ZF_OPENAI_API_KEY"),
         "google": ("ZF_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        "grok": ("XAI_API_KEY", "GROK_API_KEY", "ZF_GROK_API_KEY"),
         "anthropic": ("ANTHROPIC_API_KEY",),
         "zhipu": ("ZHIPU_API_KEY",),
         "qwen": ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
@@ -250,6 +280,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     topic = payload.get("topic") or "未命名项目"
     outline = payload.get("outline") or []
     requirements = payload.get("requirements") or []
+    global_instruction = str(payload.get("global_instruction") or "").strip()
     chapter_requirements = payload.get("chapter_requirements") or {}
     style = payload.get("style") or {}
     chapter_pages = payload.get("chapter_pages") or {}
@@ -352,12 +383,43 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     # 若调用方未显式给出目录/版式/页数约束，优先使用招标文件抽取结果兜底
     if not outline:
         outline = tender.get("outline") or []
-    if not style:
-        style = tender.get("style") or {}
+    tender_style = tender.get("style") if isinstance(tender.get("style"), dict) else {}
+    tender_chapter_pages = tender.get("chapter_pages") if isinstance(tender.get("chapter_pages"), dict) else {}
     if not chapter_pages:
-        chapter_pages = tender.get("chapter_pages") or {}
+        chapter_pages = tender_chapter_pages
     if not chapter_requirements:
         chapter_requirements = tender.get("chapter_requirements") or {}
+    tender_globals = tender.get("global_requirements") if isinstance(tender, dict) else None
+    if not isinstance(tender_globals, list):
+        tender_globals = []
+    tender_globals = [strip_nonconcrete_language(str(x)) for x in tender_globals if str(x).strip()]
+    project_type = normalize_project_type(payload.get("project_type")) or detect_project_type(
+        topic=str(topic),
+        outline=outline if isinstance(outline, list) else [],
+        requirements=requirements if isinstance(requirements, list) else [],
+        tender=tender if isinstance(tender, dict) else {},
+    )
+    # 在不破坏招标目录的前提下，按项目类型补齐缺失章节。
+    outline = enrich_outline(outline if isinstance(outline, list) else [], project_type=project_type)
+    # 版式策略：招标有明确要求时覆盖；否则用系统默认（22磅+2.5/2.0边距+宋体三号/四号）。
+    style, style_source = resolve_style(user_style=style, tender_style=tender_style)
+    # 页数策略：默认按 50 页规划；若招标明确上限则以招标为准；始终保证不超上限。
+    total_pages_limit = infer_total_page_limit(tender, default=50)
+    chapter_pages = plan_chapter_pages(
+        outline,
+        total_pages=total_pages_limit,
+        chapter_pages=chapter_pages if isinstance(chapter_pages, dict) else {},
+    )
+    # 图表策略：若调用方未设置频率，按章页权重自动建议。
+    chart_policy = style.get("chart_policy") if isinstance(style.get("chart_policy"), dict) else {}
+    if "every_n_chapters" not in chart_policy:
+        chart_policy = dict(chart_policy)
+        chart_policy["enabled"] = bool(chart_policy.get("enabled", True))
+        chart_policy["every_n_chapters"] = recommend_chart_every_n(outline, chapter_pages)
+        chart_policy["position"] = chart_policy.get("position") or "chapter"
+        style["chart_policy"] = chart_policy
+    if total_pages_limit:
+        tender_globals.append(f"总页数不超过{total_pages_limit}页。")
     boq = payload.get("boq_data") or load_boq_data(project_id=project_id) or {}
     boq_focus = _build_boq_focus(boq)
     # 四新技术（可编辑库+按清单/工序匹配）建议清单：用于章节写作与自动补齐，避免“新技术”泛泛而谈。
@@ -369,11 +431,33 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             boq_focus["four_new_recommendations"] = recs
     except Exception:
         pass
-    tender_globals = tender.get("global_requirements") if isinstance(tender, dict) else None
-    if not isinstance(tender_globals, list):
-        tender_globals = []
-    tender_globals = [strip_nonconcrete_language(str(x)) for x in tender_globals if str(x).strip()]
-    base_requirements = list(requirements) + tender_globals + SYSTEM_MANDATORY_REQUIREMENTS
+    type_requirements = project_type_requirements(project_type)
+
+    base_requirements: list[str] = []
+    if global_instruction:
+        base_requirements.append(f"【系统全局指令（必须无条件执行）】{global_instruction}")
+    if project_type:
+        base_requirements.append(f"【项目类型】{project_type}（按该行业专项逻辑编制）")
+        base_requirements.extend(type_requirements)
+    base_requirements.extend(list(requirements))
+    base_requirements.extend(tender_globals)
+    base_requirements.extend(SYSTEM_MANDATORY_REQUIREMENTS)
+    # Stable de-dup while preserving order.
+    _seen = set()
+    _deduped = []
+    for it in base_requirements:
+        txt = str(it).strip()
+        if not txt or txt in _seen:
+            continue
+        _seen.add(txt)
+        _deduped.append(txt)
+    base_requirements = _deduped
+    multi_agent_plan = build_multi_agent_plan(
+        topic=str(topic),
+        outline=outline if isinstance(outline, list) else [],
+        requirements=base_requirements,
+        tender=tender if isinstance(tender, dict) else {},
+    )
 
     def _pick_provider(idx: int) -> tuple[str | None, str | None]:
         if providers:
@@ -417,7 +501,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         return "技术负责人"
 
     async def build_section(idx: int, title: str):
-        # 章节级重试：多模型轮询重试 2 次
+        # 章节级重试：多模型轮询重试，最多尝试 3 个 provider（主+备1+备2）
         tries = []
         if providers:
             for i in range(len(providers)):
@@ -425,7 +509,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 tries.append((p, m))
         else:
             tries.append((provider, model))
-        tries = tries[:2]
+        tries = tries[:3]
         kg_hits = search_kg(f"{topic} {title} 施工组织 质量 安全 工期", top_k=4)
         doc_hits = search_ingested_docs(
             f"{topic} {title} 招标 清单 图纸 质量 安全 工期",
@@ -483,6 +567,26 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             section_requirements.append(f"危险品材料清单：{'；'.join(boq_focus.get('hazardous_materials')[:10])}")
         if boq_focus.get("ppe_items"):
             section_requirements.append(f"劳保用品清单：{'；'.join(boq_focus.get('ppe_items')[:10])}")
+        graph_ctx = multi_agent_plan.chapter_graph_context(
+            title=title,
+            query=f"{topic} {title} 施工组织 质量 安全 工期 图纸 清单",
+            section_requirements=section_requirements,
+            top_k=6,
+        )
+        graph_hits = graph_ctx.get("hits") or []
+        for gh in graph_hits[:6]:
+            gname = str(gh.get("graph_name") or gh.get("graph_file") or "图谱").strip()
+            gtitle = str(gh.get("title") or "节点").strip()
+            gtext = str(gh.get("text") or "").strip()
+            if not gtext:
+                continue
+            kg_evidence.append(f"{gname}/{gtitle}: {gtext}")
+        kg_evidence = _dedup_lines(kg_evidence, limit=12)
+        exp_values = [str(x).strip() for x in (graph_ctx.get("experience_values") or []) if str(x).strip()]
+        if exp_values:
+            section_requirements.append("招标文件未明确给值的参数，按图谱同类工程经验值补位并显式标注：")
+            section_requirements.extend(exp_values[:4])
+            section_requirements.append("凡经验值必须保留“【经验值:...】”与“【图谱经验值:...】”标记。")
 
         ctx = {
             "requirements": section_requirements,
@@ -497,10 +601,18 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "boq_focus": boq_focus,
             "standard_trades": STANDARD_TRADES,
             "params": params,
+            "project_type": project_type,
+            "global_instruction": global_instruction,
             # Use numeric index for templates so v1/v2/v3 can map to A/B/C deterministically.
             "variant_id": variant_index,
             "logic_template": {"id": "A", "name": "交付清单驱动"},
             "chapter_domain": "general",
+            "master_agent": graph_ctx.get("agents", {}).get("master") or multi_agent_plan.master_agent,
+            "specialist_agents": graph_ctx.get("agents", {}).get("specialists") or [],
+            "compliance_agent": graph_ctx.get("agents", {}).get("compliance") or multi_agent_plan.compliance_agent,
+            "specialty_tags": graph_ctx.get("agents", {}).get("specialty_tags") or [],
+            "graph_nodes": graph_ctx.get("node_bindings") or [],
+            "graph_experience_values": exp_values,
         }
         if bp:
             ctx["chapter_blueprint"] = bp
@@ -536,22 +648,51 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     rec.setdefault("chapter_blueprint_id", bid)
                 if bname:
                     rec.setdefault("chapter_blueprint_name", bname)
+            rec.setdefault("master_agent", ctx.get("master_agent"))
+            rec.setdefault("specialist_agents", list(ctx.get("specialist_agents") or []))
+            rec.setdefault("compliance_agent", ctx.get("compliance_agent"))
+            rec.setdefault("specialty_tags", list(ctx.get("specialty_tags") or []))
+            rec.setdefault("graph_nodes", list(ctx.get("graph_nodes") or []))
             return rec
 
         last = None
         for p, m in tries:
             llm = None
             if p and m and not dry_run:
-                llm = LLMClient(
-                    provider=p,
-                    model=m,
-                    api_key=_resolve_provider_api_key(payload, p),
-                    base_url=payload.get("base_url"),
-                    secret_key=payload.get("secret_key"),
-                    token_url=payload.get("token_url"),
-                )
+                try:
+                    llm = LLMClient(
+                        provider=p,
+                        model=m,
+                        api_key=_resolve_provider_api_key(payload, p),
+                        base_url=payload.get("base_url"),
+                        secret_key=payload.get("secret_key"),
+                        token_url=payload.get("token_url"),
+                    )
+                except Exception as e:
+                    last = _attach_section_meta(
+                        {
+                            "title": title,
+                            "content": "",
+                            "provider": p,
+                            "model": m,
+                            "error": f"provider_init_failed: {e}",
+                        }
+                    )
+                    continue
             writer = SectionWriter(llm=llm)
-            last = _attach_section_meta(await writer.write(title, ctx))
+            try:
+                last = _attach_section_meta(await writer.write(title, ctx))
+            except Exception as e:
+                last = _attach_section_meta(
+                    {
+                        "title": title,
+                        "content": "",
+                        "provider": p,
+                        "model": m,
+                        "error": f"section_write_failed: {e}",
+                    }
+                )
+                continue
             if last and not last.get("error"):
                 return last
         if last:
@@ -647,14 +788,17 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 return
             llm = None
             if provider and model and not dry_run:
-                llm = LLMClient(
-                    provider=provider,
-                    model=model,
-                    api_key=_resolve_provider_api_key(payload, provider),
-                    base_url=payload.get("base_url"),
-                    secret_key=payload.get("secret_key"),
-                    token_url=payload.get("token_url"),
-                )
+                try:
+                    llm = LLMClient(
+                        provider=provider,
+                        model=model,
+                        api_key=_resolve_provider_api_key(payload, provider),
+                        base_url=payload.get("base_url"),
+                        secret_key=payload.get("secret_key"),
+                        token_url=payload.get("token_url"),
+                    )
+                except Exception:
+                    llm = None
             if llm is None:
                 return
             title = sec.get("title") or "章节"
@@ -827,8 +971,26 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
     except Exception:
         params_used = None
+    graph_binding_missing = [
+        str(sec.get("title") or "")
+        for sec in sections
+        if not list(sec.get("graph_nodes") or [])
+    ]
+    multi_agent_compliance = {
+        "agent": multi_agent_plan.compliance_agent,
+        "graph_binding": {
+            "ok": len(graph_binding_missing) == 0,
+            "missing_titles": graph_binding_missing,
+        },
+        "consistency": {
+            "ok": bool((plan_receipt or {}).get("ok", True)),
+            "canonical": (plan_receipt or {}).get("canonical") if isinstance(plan_receipt, dict) else {},
+        },
+    }
     return {
         "topic": topic,
+        "project_type": project_type,
+        "global_instruction": global_instruction,
         "outline": outline,
         "sections": sections,
         "media": media,
@@ -843,6 +1005,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "chapter_requirements": chapter_requirements,
         "chapter_pages": chapter_pages,
         "style": style,
+        "style_source": style_source,
         "quality_strict": strict_quality,
         "boq_focus": boq_focus,
         "compare": {
@@ -864,5 +1027,9 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "standard_index": standard_index,
         "cross_index": cross_index,
         "plan_consistency": plan_receipt,
+        "multi_agent": {
+            **multi_agent_plan.summary(),
+            "compliance": multi_agent_compliance,
+        },
         "params_used": params_used,
     }

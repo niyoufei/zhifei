@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -63,6 +63,7 @@ class ActionsGenerateRequest(BaseModel):
     compare_max_chars: int = 1200
     compare_titles: list[str] | None = None
     api_key: str | None = None
+    api_keys: dict | None = None
     base_url: str | None = None
     secret_key: str | None = None
     token_url: str | None = None
@@ -140,6 +141,19 @@ class ActionsParamsDiffRequest(BaseModel):
 
 class ActionsJobCancelRequest(BaseModel):
     job_id: str
+
+
+class ActionsReviewDecision(BaseModel):
+    issue_id: str
+    apply: bool = True
+    replacement: str | None = None
+
+
+class ActionsReviewApplyRequest(BaseModel):
+    job_id: str
+    variant: int = 1
+    apply_all: bool = False
+    decisions: List[ActionsReviewDecision] = []
 
 
 @router.get("/params/get")
@@ -438,6 +452,96 @@ def _rebuild_postprocessed_artifacts(
             pass
 
 
+def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if str(job.get("status") or "").strip() != "done":
+        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
+    result = job.get("result") or {}
+    json_path = str(result.get("json") or "").strip()
+    if not json_path or not Path(json_path).exists():
+        raise HTTPException(status_code=404, detail="result json not found")
+    data = json.loads(Path(json_path).read_text(encoding="utf-8", errors="ignore"))
+    variants = data.get("variants") if isinstance(data.get("variants"), list) else []
+    if not variants:
+        raise HTTPException(status_code=404, detail="empty result variants")
+    return job, result, data, variants
+
+
+def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> list[dict]:
+    qc = variant_rec.get("quality_checks") if isinstance(variant_rec.get("quality_checks"), dict) else {}
+    issues = qc.get("issue_list") if isinstance(qc.get("issue_list"), list) else []
+    recs = qc.get("auto_revision_suggestions") if isinstance(qc.get("auto_revision_suggestions"), list) else []
+    sections = variant_rec.get("sections") if isinstance(variant_rec.get("sections"), list) else []
+
+    title_to_excerpt: Dict[str, str] = {}
+    for s in sections:
+        if not isinstance(s, dict):
+            continue
+        t = str(s.get("title") or "").strip()
+        if not t or t in title_to_excerpt:
+            continue
+        c = str(s.get("content") or "").strip()
+        title_to_excerpt[t] = c[:max_excerpt] + ("..." if len(c) > max_excerpt else "")
+
+    out: list[dict] = []
+    severity_rank = {"high": 3, "medium": 2, "low": 1}
+    for i, it in enumerate(issues, start=1):
+        if not isinstance(it, dict):
+            continue
+        title = str(it.get("title") or "").strip() or "章节"
+        source = "issue_list"
+        issue_id = f"I{i:04d}"
+        out.append(
+            {
+                "issue_id": issue_id,
+                "source": source,
+                "title": title,
+                "type": str(it.get("type") or "issue"),
+                "severity": str(it.get("severity") or "medium"),
+                "severity_rank": severity_rank.get(str(it.get("severity") or "").lower(), 2),
+                "problem": str(it.get("problem") or ""),
+                "suggestion": str(it.get("suggestion") or ""),
+                "section_excerpt": title_to_excerpt.get(title, ""),
+                "apply": True,
+                "replacement": "",
+            }
+        )
+
+    # Add recs not already covered by issue_list.
+    seen = {(str(x.get("title")), str(x.get("type")), str(x.get("suggestion"))) for x in out}
+    rid = 0
+    for rec in recs:
+        if not isinstance(rec, dict):
+            continue
+        title = str(rec.get("title") or "").strip() or "章节"
+        rtype = str(rec.get("type") or "issue")
+        sugg = str(rec.get("suggestion") or "")
+        key = (title, rtype, sugg)
+        if key in seen:
+            continue
+        seen.add(key)
+        rid += 1
+        out.append(
+            {
+                "issue_id": f"R{rid:04d}",
+                "source": "auto_revision_suggestions",
+                "title": title,
+                "type": rtype,
+                "severity": "medium",
+                "severity_rank": 2,
+                "problem": "",
+                "suggestion": sugg,
+                "section_excerpt": title_to_excerpt.get(title, ""),
+                "apply": True,
+                "replacement": "",
+            }
+        )
+    out.sort(key=lambda x: (-int(x.get("severity_rank") or 0), str(x.get("title") or ""), str(x.get("type") or "")))
+    return out
+
+
 @router.post("/plan/save")
 async def actions_plan_save(req: ActionsPlanRequest, project_id: str | None = None, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
@@ -541,6 +645,13 @@ async def actions_export_docx(req: ActionsExportRequest, x_actions_key: str | No
     sections = [s.model_dump() for s in req.sections]
     for s in sections:
         s["content"] = strip_nonconcrete_language(s.get("content") or "")
+    plan_receipt = None
+    try:
+        from backend.zhifei_autoplan.plan_consistency import normalize_metrics_in_sections
+
+        plan_receipt = normalize_metrics_in_sections(sections)
+    except Exception:
+        plan_receipt = None
     outline = req.outline or [s.get("title") for s in sections]
     # Four-new recommendations for realism (used by focus_xlsx + downstream remediation).
     try:
@@ -592,6 +703,7 @@ async def actions_export_docx(req: ActionsExportRequest, x_actions_key: str | No
         "drawing_index": drawing_index,
         "standard_index": standard_index,
         "cross_index": cross_index,
+        "plan_consistency": plan_receipt,
     }
     if bool(req.generate_images):
         stats = boq.get("stats") if isinstance(boq, dict) else None
@@ -936,6 +1048,145 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
             except Exception:
                 pass
     return {"ok": True, "job": out}
+
+
+@router.get("/review/issues")
+async def actions_review_issues(
+    job_id: str,
+    variant: int = 1,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    _, _, _, variants = _load_done_job_variants(job_id)
+    v = max(1, int(variant or 1))
+    rec = variants[v - 1] if v <= len(variants) else variants[0]
+    items = _review_items_for_variant(rec)
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "variant": int(v if v <= len(variants) else 1),
+        "count": len(items),
+        "items": items,
+    }
+
+
+@router.post("/review/apply")
+async def actions_review_apply(
+    req: ActionsReviewApplyRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    job_id = str(req.job_id or "").strip()
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id required")
+    job, _, data, variants = _load_done_job_variants(job_id)
+
+    v = max(1, int(req.variant or 1))
+    idx = (v - 1) if v <= len(variants) else 0
+    target = variants[idx]
+    if not isinstance(target, dict):
+        raise HTTPException(status_code=400, detail="invalid variant record")
+
+    items = _review_items_for_variant(target)
+    item_map = {str(it.get("issue_id") or ""): it for it in items}
+
+    selected: list[dict] = []
+    if bool(req.apply_all) and not req.decisions:
+        selected = [it for it in items]
+    else:
+        for d in req.decisions or []:
+            iid = str(d.issue_id or "").strip()
+            if not iid:
+                continue
+            base = item_map.get(iid)
+            if not base or not bool(d.apply):
+                continue
+            rec = dict(base)
+            rep = str(d.replacement or "").strip()
+            if rep:
+                rec["replacement"] = rep
+            selected.append(rec)
+
+    if not selected:
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "variant": idx + 1,
+            "applied_count": 0,
+            "message": "no selected items",
+        }
+
+    sections = target.get("sections") if isinstance(target.get("sections"), list) else []
+    if not isinstance(sections, list):
+        raise HTTPException(status_code=400, detail="variant sections missing")
+
+    remediation = []
+    replacement_count = 0
+    for it in selected:
+        title = str(it.get("title") or "").strip()
+        rtype = str(it.get("type") or "issue").strip()
+        suggestion = str(it.get("suggestion") or it.get("problem") or "").strip()
+        replacement = str(it.get("replacement") or "").strip()
+        if replacement and title:
+            for sec in sections:
+                if not isinstance(sec, dict):
+                    continue
+                if str(sec.get("title") or "").strip() == title:
+                    sec["original_content"] = sec.get("content") or ""
+                    sec["content"] = replacement
+                    sec["auto_remediated"] = "review_apply"
+                    replacement_count += 1
+                    break
+            continue
+        remediation.append({"title": title, "type": rtype, "suggestion": suggestion})
+
+    pid = str(target.get("project_id") or (job.get("payload") or {}).get("project_id") or "").strip() or None
+    boq_focus = target.get("boq_focus") if isinstance(target.get("boq_focus"), dict) else {}
+    params = load_params()
+    payload_obj = (job.get("payload") or {}) if isinstance(job.get("payload"), dict) else {}
+    overrides = payload_obj.get("params_override")
+    if isinstance(overrides, dict) and overrides:
+        for k, v in overrides.items():
+            if isinstance(v, dict) and isinstance(params.get(k), dict):
+                merged = dict(params.get(k) or {})
+                merged.update(v)
+                params[k] = merged
+            else:
+                params[k] = v
+
+    if remediation:
+        apply_remediation(
+            sections,
+            remediation,
+            project_id=pid,
+            boq_focus=boq_focus,
+            params=params,
+        )
+    for sec in sections:
+        if isinstance(sec, dict):
+            sec["content"] = strip_nonconcrete_language(str(sec.get("content") or ""))
+
+    # Rebuild receipts/QC/cross-index for this variant after manual confirmation.
+    _rebuild_postprocessed_artifacts([target], payload=payload_obj, report=None, params=params)
+
+    # Persist all variants back to output files and refresh job result paths.
+    out = _save_outputs(f"actions_{job_id}", variants)
+    update_job(job_id, status="done", result=out, error=None)
+    data["variants"] = variants
+    try:
+        Path(out["json"]).write_text(json.dumps({"variants": variants}, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "variant": idx + 1,
+        "applied_count": len(selected),
+        "template_applied_count": len(remediation),
+        "replacement_count": replacement_count,
+        "files": out,
+    }
 
 
 @router.get("/result")

@@ -608,7 +608,33 @@ def _check_consistency(sections: List[Dict[str, Any]]):
     for metric, values in metric_values.items():
         if len(values) > 1:
             conflicts.append({"metric": metric, "values": values})
-    return {"ok": len(conflicts) == 0, "conflicts": conflicts}
+
+    cpm_receipt = None
+    try:
+        from backend.zhifei_autoplan.schedule_cpm import build_cpm_receipt
+
+        cpm_receipt = build_cpm_receipt(sections, canonical={})
+        cpm_conflicts = cpm_receipt.get("conflicts") if isinstance(cpm_receipt, dict) else []
+        if isinstance(cpm_conflicts, list):
+            for c in cpm_conflicts:
+                if not isinstance(c, dict):
+                    continue
+                conflicts.append(
+                    {
+                        "metric": c.get("metric"),
+                        "values": {
+                            "mentioned": c.get("mentioned"),
+                            "computed": c.get("computed"),
+                            "tolerance": c.get("tolerance"),
+                            "delta": c.get("delta"),
+                        },
+                        "source": "cpm",
+                    }
+                )
+    except Exception:
+        cpm_receipt = None
+
+    return {"ok": len(conflicts) == 0, "conflicts": conflicts, "cpm": cpm_receipt}
 
 
 def _check_boq_focus_coverage(boq_focus: Dict[str, Any], all_text: str):

@@ -57,11 +57,17 @@ class SectionWriter:
         four_new_text = "\n".join(four_new_lines)
         standard_trades = "、".join(context.get("standard_trades") or [])
         role = context.get("agent_role") or "总负责人"
+        master_agent = str(context.get("master_agent") or "").strip()
+        specialist_agents = [str(x).strip() for x in (context.get("specialist_agents") or []) if str(x).strip()]
+        compliance_agent = str(context.get("compliance_agent") or "").strip()
+        graph_nodes = [str(x).strip() for x in (context.get("graph_nodes") or []) if str(x).strip()]
         variant_id = context.get("variant_id")
         try:
             variant_id = int(variant_id or 1)
         except Exception:
             variant_id = 1
+        project_type = str(context.get("project_type") or "").strip()
+        global_instruction = str(context.get("global_instruction") or "").strip()
 
         logic = context.get("logic_template") if isinstance(context.get("logic_template"), dict) else {}
         logic_id = str(logic.get("id") or "").strip() or ""
@@ -109,16 +115,37 @@ class SectionWriter:
                 + "；".join([f"{k}={str(v).strip()}" for k, v in qse_defaults.items() if str(k).strip() and str(v).strip()][:10])
             )
         params_text = "\n".join([f"- {ln}" for ln in param_lines if ln.strip()])
+        project_type_block = f"【项目类型】{project_type}\n" if project_type else ""
+        global_instruction_block = (
+            f"【系统全局指令（必须无条件执行）】\n{global_instruction}\n" if global_instruction else ""
+        )
+        agent_block = ""
+        if master_agent or specialist_agents or compliance_agent:
+            agent_block += "【多Agent协作】\n"
+            if master_agent:
+                agent_block += f"- 主控：{master_agent}\n"
+            if specialist_agents:
+                agent_block += f"- 专业：{'；'.join(specialist_agents[:6])}\n"
+            if compliance_agent:
+                agent_block += f"- 合规：{compliance_agent}\n"
+        graph_node_block = ""
+        if graph_nodes:
+            graph_node_block += "【图谱逻辑节点（必须绑定）】\n"
+            graph_node_block += "\n".join([f"- {x}" for x in graph_nodes[:8]]) + "\n"
         return f"""你是资深施工组织设计专家，请根据证据生成高分章节内容。
 角色定位：{role}
 章节标题：{title}
 方案版本：v{variant_id}
+{project_type_block}
+{global_instruction_block}
+{agent_block}
 
 【可编辑参数（优先采用；若招标/图纸/清单有明确要求，则以证据为准）】
 {params_text}
 
 {logic_block}
 {bp_block}
+{graph_node_block}
 
 【编制要求】
 {req}
@@ -159,6 +186,8 @@ class SectionWriter:
    - 若涉及“四新/新技术/新工艺/新材料/新设备/信息化/绿色施工”，优先从“候选清单”中选2-4条落地：适用/投入/步骤/验收指标 + 风险→控制→验证 + 记录 + 偏差处置
 10) 全文禁止官话、套话、空话，不得出现“加强、确保、严格、压实责任、形成合力、高质量推进”等词
 11) 清单重点项必须逐项写清：工程量/材料要点/资源配置 + 量化指标 + 风险→控制→验证 + 证据标注
+12) 每节至少绑定1个图谱逻辑节点，正文中以“【图谱节点:xxx】”标注
+13) 当采用经验值补位时，必须写明“【经验值:同类工程】”及“【图谱经验值:来源】”
 """
 
     def _fallback(self, title: str, context: Dict[str, Any]) -> str:
@@ -215,6 +244,8 @@ class SectionWriter:
             pass
 
         role = context.get("agent_role") or "技术负责人"
+        project_type = str(context.get("project_type") or "").strip()
+        global_instruction = str(context.get("global_instruction") or "").strip()
         target_pages = context.get("chapter_target_pages")
         logic = context.get("logic_template") if isinstance(context.get("logic_template"), dict) else {}
         logic_id = str(logic.get("id") or "").strip().upper() or "A"
@@ -226,6 +257,23 @@ class SectionWriter:
 
         lines = []
         lines.append(f"【范围】本章：{title}；负责人：{role}；逻辑模版={logic_id}。")
+        if project_type:
+            lines.append(f"【项目类型】{project_type}。")
+        if global_instruction:
+            lines.append(f"【系统全局指令】{global_instruction}。")
+        master_agent = str(context.get("master_agent") or "").strip()
+        specialist_agents = [str(x).strip() for x in (context.get("specialist_agents") or []) if str(x).strip()]
+        compliance_agent = str(context.get("compliance_agent") or "").strip()
+        if master_agent or specialist_agents or compliance_agent:
+            lines.append(
+                "【多Agent】"
+                + f"主控={master_agent or '主控Agent'}；"
+                + f"专业={'/'.join(specialist_agents[:4]) if specialist_agents else '专业Agent:通用施工'}；"
+                + f"合规={compliance_agent or '合规Agent'}。"
+            )
+        graph_nodes = [str(x).strip() for x in (context.get("graph_nodes") or []) if str(x).strip()]
+        if graph_nodes:
+            lines.append(f"【图谱节点绑定】{';'.join(graph_nodes[:4])}。")
         if bp_name:
             lines.append(f"【章节结构蓝图】{bp_name}。")
         if focus:
@@ -247,6 +295,8 @@ class SectionWriter:
         )
         # Keep a stable heading for downstream checks/tests.
         lines.append("【量化指标】" + metric_line)
+        for exp in [str(x).strip() for x in (context.get("graph_experience_values") or []) if str(x).strip()][:3]:
+            lines.append(f"【经验值:同类工程】{exp}")
 
         # Blueprint anchors (only when matched): ensure chapter follows the user-provided structure.
         # Keep content minimal but executable so dry-run can still pass quality gates.

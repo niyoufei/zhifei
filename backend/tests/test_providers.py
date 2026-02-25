@@ -20,6 +20,7 @@ from backend.zhifei_autoplan.providers.qwen_provider import QwenProvider
 from backend.zhifei_autoplan.providers.baidu_provider import BaiduProvider
 from backend.zhifei_autoplan.providers.iflytek_provider import IflytekProvider
 from backend.zhifei_autoplan.providers.tencent_provider import TencentProvider
+from backend.zhifei_autoplan.providers.grok_provider import GrokProvider
 
 
 # ==============================================================================
@@ -96,6 +97,53 @@ class TestOpenAIProvider:
 
             assert result["provider"] == "openai"
             assert result["text"]  # fallback 到 str(resp)
+
+
+# ==============================================================================
+# GrokProvider tests
+# ==============================================================================
+
+
+class TestGrokProvider:
+    """测试 Grok provider"""
+
+    def test_init_default_base_url(self):
+        """初始化 - 默认 xAI base_url"""
+        with patch("backend.zhifei_autoplan.providers.grok_provider.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            provider = GrokProvider(api_key="test-key", model="grok-4-1-fast-reasoning")
+            assert provider.model == "grok-4-1-fast-reasoning"
+            mock_openai.assert_called_once_with(api_key="test-key", base_url="https://api.x.ai/v1")
+
+    def test_init_custom_base_url(self):
+        """初始化 - 自定义 base_url"""
+        with patch("backend.zhifei_autoplan.providers.grok_provider.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            provider = GrokProvider(api_key="test-key", model="grok-4-1-fast-reasoning", base_url="https://custom.x.ai/v1")
+            assert provider.model == "grok-4-1-fast-reasoning"
+            mock_openai.assert_called_once_with(api_key="test-key", base_url="https://custom.x.ai/v1")
+
+    def test_name_attribute(self):
+        """name 属性"""
+        assert GrokProvider.name == "grok"
+
+    @pytest.mark.asyncio
+    async def test_complete_with_output_text(self):
+        """complete 方法 - 有 output_text 属性"""
+        with patch("backend.zhifei_autoplan.providers.grok_provider.OpenAI") as mock_openai:
+            mock_client = MagicMock()
+            mock_resp = MagicMock()
+            mock_resp.output_text = "Grok response"
+            mock_client.responses.create.return_value = mock_resp
+            mock_openai.return_value = mock_client
+
+            provider = GrokProvider(api_key="test-key", model="grok-4-1-fast-reasoning")
+            result = await provider.complete("test prompt")
+
+            assert result["provider"] == "grok"
+            assert result["model"] == "grok-4-1-fast-reasoning"
+            assert result["text"] == "Grok response"
+            mock_client.responses.create.assert_called_once_with(model="grok-4-1-fast-reasoning", input="test prompt")
 
 
 # ==============================================================================

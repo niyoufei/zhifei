@@ -11,6 +11,16 @@ LOG="logs/webui_control.log"
 mkdir -p logs
 echo "[$(date '+%F %T')] stop requested" >> "$LOG"
 
+# Prefer pid files written by run_web_ui.sh.
+if [ -f logs/streamlit.pid ]; then
+  kill "$(cat logs/streamlit.pid)" >/dev/null 2>&1 || true
+  rm -f logs/streamlit.pid
+fi
+if [ -f logs/webui_backend.pid ]; then
+  kill "$(cat logs/webui_backend.pid)" >/dev/null 2>&1 || true
+  rm -f logs/webui_backend.pid
+fi
+
 # First, kill by process pattern (more robust in app-launch context).
 pkill -f "streamlit run app.py --server.port ${WEB_PORT}" >/dev/null 2>&1 || true
 pkill -f "uvicorn backend.app.main:app --host 127.0.0.1 --port ${BACKEND_PORT}" >/dev/null 2>&1 || true

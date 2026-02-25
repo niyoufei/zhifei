@@ -315,14 +315,9 @@ class TenderParser:
         if not merged.strip():
             return []
 
-        anchor_keywords = (
-            "技术文件详细评审标准",
-            "评审标准",
-            "施工组织设计进行评审",
-            "包括但不限于以下内容",
-            "以下内容：",
-        )
-        anchor_keywords_compact = tuple(k.replace(" ", "").replace("　", "") for k in anchor_keywords)
+        compact_merged = re.sub(r"\s+", "", merged or "")
+        if not compact_merged:
+            return []
         stop_markers = (
             "一般得",
             "良好得",
@@ -334,6 +329,7 @@ class TenderParser:
             "AI“类人”评审",
             "评标委员会",
         )
+        stop_markers_compact = tuple(re.sub(r"\s+", "", s or "") for s in stop_markers)
         noise_keywords = (
             "评分",
             "得分",
@@ -388,14 +384,76 @@ class TenderParser:
                     out.append(title)
             return out
 
+        def _pick_best(items_arr: list[list[str]]) -> list[str]:
+            if not items_arr:
+                return []
+            filtered = [arr for arr in items_arr if 3 <= len(arr) <= 20]
+            pool = filtered if filtered else items_arr
+
+            def _score(arr: list[str]) -> tuple[int, int, int]:
+                bad = 0
+                for t in arr:
+                    if re.search(r"(评标|投标文件|否决|偏差|清标|澄清|报价|得分)", t):
+                        bad += 1
+                score = 0
+                score += len(arr) * 5
+                if 6 <= len(arr) <= 15:
+                    score += 12
+                if arr and ("工程概况" in arr[0] or "项目概况" in arr[0]):
+                    score += 10
+                if any("施工总平面布置图" in t or "总平面布置图" in t for t in arr):
+                    score += 8
+                score -= bad * 6
+                # 次序：总分高优先；坏项少优先；条目少优先（避免吞入长清单）
+                return (score, -bad, -len(arr))
+
+            return max(pool, key=_score)
+
+        def _extract_by_precise_anchor(compact_text: str) -> list[str]:
+            """
+            精确锚点抽取：先定位“施工组织设计...评审...包括但不限于以下内容”，
+            再在该段内抽 1）2）... 清单，避免被评标办法长枚举污染。
+            """
+            anchor_re = re.compile(
+                r"施工组织设计(?:进行)?评审.*?(?:包括但不限于以下内容|以下内容)[：:]"
+            )
+            m = anchor_re.search(compact_text)
+            if not m:
+                return []
+            tail = compact_text[m.end() : m.end() + 2600]
+            if not tail:
+                return []
+            cut = len(tail)
+            for sm in stop_markers_compact:
+                p = tail.find(sm)
+                if p >= 0 and p < cut:
+                    cut = p
+            if cut < len(tail):
+                tail = tail[:cut]
+            return _extract_numbered_items(tail)
+
+        precise = _extract_by_precise_anchor(compact_merged)
+        if len(precise) >= 3:
+            return precise
+
         candidates: list[list[str]] = []
 
         # A) 按行窗口抽取（锚点向后扫描）
         for i, ln in enumerate(lines[:2500]):
             ln_compact = re.sub(r"\s+", "", ln or "")
-            if not any(k in ln or kc in ln_compact for k, kc in zip(anchor_keywords, anchor_keywords_compact)):
+            if "施工组织设计进行评审" in ln_compact or "包括但不限于以下内容" in ln_compact:
+                window = "\n".join(lines[i : i + 180])
+                items = _extract_numbered_items(window)
+                if items:
+                    candidates.append(items)
                 continue
-            window = "\n".join(lines[i : i + 160])
+            if "技术文件详细评审标准" in ln_compact:
+                near = "".join(re.sub(r"\s+", "", x or "") for x in lines[i : i + 40])
+                if "包括但不限于以下内容" not in near and "以下内容" not in near:
+                    continue
+            else:
+                continue
+            window = "\n".join(lines[i : i + 180])
             items = _extract_numbered_items(window)
             if items:
                 candidates.append(items)
@@ -410,8 +468,7 @@ class TenderParser:
         if not candidates:
             return []
 
-        # 选“条目数最多”的候选，避免误取零碎评分说明。
-        best = max(candidates, key=lambda x: (len(x), -sum(len(i) for i in x)))
+        best = _pick_best(candidates)
         return best if len(best) >= 3 else []
 
     def _parse_outline_lines(self, lines: list[str]) -> list[str]:
@@ -473,34 +530,8 @@ class TenderParser:
         if not merged.strip():
             return {}, {"source": "none", "global_requirements": []}
 
-        # 纸张
-        paper = None
-        if re.search(r"\bA4\b", merged, flags=re.IGNORECASE):
-            paper = "A4"
-        elif re.search(r"\bA3\b", merged, flags=re.IGNORECASE):
-            paper = "A3"
+        compact = re.sub(r"\s+", "", merged)
 
-        # 字体
-        font_candidates = [
-            "宋体",
-            "仿宋",
-            "黑体",
-            "楷体",
-            "微软雅黑",
-            "SimSun",
-            "FangSong",
-            "SimHei",
-            "KaiTi",
-            "Times New Roman",
-            "Arial",
-        ]
-        font = None
-        for f in font_candidates:
-            if f in merged:
-                font = f
-                break
-
-        # 字号（中文“号”映射到 pt）
         cn_size_map = {
             "初号": 42.0,
             "小初": 36.0,
@@ -517,48 +548,120 @@ class TenderParser:
             "六号": 7.5,
             "小六": 6.5,
         }
+        size_token_re = r"(初号|小初|一号|小一|二号|小二|三号|小三|四号|小四|五号|小五|六号|小六|\d+(?:\.\d+)?\s*(?:pt|磅)?)"
 
-        size_pt = None
-        m_size = re.search(r"(初号|小初|一号|小一|二号|小二|三号|小三|四号|小四|五号|小五|六号|小六)", merged)
-        if m_size:
-            size_pt = cn_size_map.get(m_size.group(1))
-        if size_pt is None:
-            m_pt = re.search(r"(\d+(?:\.\d+)?)\s*(?:pt|磅)", merged, flags=re.IGNORECASE)
-            if m_pt:
-                try:
-                    size_pt = float(m_pt.group(1))
-                except Exception:
-                    size_pt = None
-        if size_pt is None:
+        def _font_alias(v: str | None) -> str | None:
+            s = str(v or "").strip()
+            if not s:
+                return None
+            if s in {"SimSun", "宋体"}:
+                return "宋体"
+            if s in {"仿宋", "仿宋体", "FangSong"}:
+                return "仿宋体"
+            return s
+
+        def _parse_size_token(token: str | None) -> float | None:
+            s = str(token or "").strip()
+            if not s:
+                return None
+            if s in cn_size_map:
+                return float(cn_size_map[s])
+            m = re.search(r"(\d+(?:\.\d+)?)", s)
+            if not m:
+                return None
+            try:
+                return float(m.group(1))
+            except Exception:
+                return None
+
+        # 纸张
+        paper = None
+        if re.search(r"\bA4\b", merged, flags=re.IGNORECASE) or "A4" in compact:
+            paper = "A4"
+        elif re.search(r"\bA3\b", merged, flags=re.IGNORECASE) or "A3" in compact:
+            paper = "A3"
+
+        # 字体
+        font_candidates = [
+            "宋体",
+            "仿宋体",
+            "仿宋",
+            "黑体",
+            "楷体",
+            "微软雅黑",
+            "SimSun",
+            "FangSong",
+            "SimHei",
+            "KaiTi",
+            "Times New Roman",
+            "Arial",
+        ]
+        body_font = None
+        title_font = None
+        m_body_font = re.search(r"(?:字体(?:图片)?要求|字体要求)?[^。\n]{0,80}?字体[:：]\s*([A-Za-z\u4e00-\u9fff]+)", merged)
+        if m_body_font:
+            body_font = _font_alias(m_body_font.group(1))
+        m_title_font = re.search(r"标题(?:字体)?[:：]\s*([A-Za-z\u4e00-\u9fff]+)", merged)
+        if m_title_font:
+            title_font = _font_alias(m_title_font.group(1))
+        if not body_font:
+            for f in font_candidates:
+                if f in merged:
+                    body_font = _font_alias(f)
+                    break
+        if not title_font and body_font:
+            title_font = body_font
+
+        # 字号：优先抽“标题/其他(正文)”的独立设置
+        body_size = None
+        title_size = None
+        m_title_size = re.search(rf"标题[^。\n]{{0,12}}?[:：]?\s*{size_token_re}", merged)
+        if m_title_size:
+            title_size = _parse_size_token(m_title_size.group(1))
+        m_body_size = re.search(rf"(?:其他(?:为)?|其余(?:为)?|正文)[^。\n]{{0,8}}?[:：]?\s*{size_token_re}", merged)
+        if m_body_size:
+            body_size = _parse_size_token(m_body_size.group(1))
+        if body_size is None:
+            m_size = re.search(r"(初号|小初|一号|小一|二号|小二|三号|小三|四号|小四|五号|小五|六号|小六)", merged)
+            if m_size:
+                body_size = _parse_size_token(m_size.group(1))
+        if body_size is None:
             m_num = re.search(r"字号[:：]?\s*(\d+(?:\.\d+)?)", merged)
             if m_num:
-                try:
-                    size_pt = float(m_num.group(1))
-                except Exception:
-                    size_pt = None
+                body_size = _parse_size_token(m_num.group(1))
+        if title_size is None and body_size is not None:
+            title_size = min(36.0, body_size + 2.0)
 
         # 行距（倍数优先；固定值磅次之）
         line_spacing = None
         line_spacing_pt = None
-        m_ls = re.search(r"行距[:：]?\s*(\d+(?:\.\d+)?)\s*倍", merged)
+        m_ls = re.search(r"行距[^。\n]{0,10}?[:：]?\s*(\d+(?:\.\d+)?)\s*倍", merged)
         if m_ls:
             try:
                 line_spacing = float(m_ls.group(1))
             except Exception:
                 line_spacing = None
         if line_spacing is None:
-            m_lsp = re.search(r"(?:行距|固定值)[:：]?\s*(\d+(?:\.\d+)?)\s*磅", merged)
+            m_lsp = re.search(r"(?:行距[^。\n]{0,8}?固定值|行距|固定值)[：:\s]*?(\d+(?:\.\d+)?)\s*磅", merged)
             if m_lsp:
                 try:
                     line_spacing_pt = float(m_lsp.group(1))
                 except Exception:
                     line_spacing_pt = None
 
-        # 页边距（cm）
-        margins_cm = {}
-        # 常见写法：页边距：上2.5cm 下2.5cm 左3.0cm 右2.5cm
+        # 页边距（cm/厘米）
+        margins_cm: Dict[str, float] = {}
+        side_map = {"上": "top", "下": "bottom", "左": "left", "右": "right"}
+        for zh, key in side_map.items():
+            m_side = re.search(rf"{zh}\s*(\d+(?:\.\d+)?)\s*(?:cm|厘米|㎝)", merged, flags=re.IGNORECASE)
+            if m_side:
+                try:
+                    margins_cm[key] = float(m_side.group(1))
+                except Exception:
+                    pass
+        # 常见写法：页边距：上2.5cm 下2.0cm 左2.0cm 右2.0cm
         m_margins = re.search(
-            r"页边距[:：]?\s*上(?P<top>\d+(?:\.\d+)?)\s*cm\s*下(?P<bottom>\d+(?:\.\d+)?)\s*cm\s*左(?P<left>\d+(?:\.\d+)?)\s*cm\s*右(?P<right>\d+(?:\.\d+)?)\s*cm",
+            r"页边距[:：]?\s*上(?P<top>\d+(?:\.\d+)?)\s*(?:cm|厘米|㎝)\s*下(?P<bottom>\d+(?:\.\d+)?)\s*(?:cm|厘米|㎝)\s*左(?P<left>\d+(?:\.\d+)?)\s*(?:cm|厘米|㎝)\s*右(?P<right>\d+(?:\.\d+)?)\s*(?:cm|厘米|㎝)",
             merged,
             flags=re.IGNORECASE,
         )
@@ -568,25 +671,50 @@ class TenderParser:
                     margins_cm[k] = float(m_margins.group(k))
                 except Exception:
                     pass
+        # 写法：页边距：上2.5厘米，其余均为2.0厘米
+        m_top_other = re.search(
+            r"页边距[^。\n]{0,40}?上\s*(?P<top>\d+(?:\.\d+)?)\s*(?:cm|厘米|㎝)[,，;；、\s]*(?:其余|其他|其它)[^。\n]{0,8}?(?:均为|为)\s*(?P<other>\d+(?:\.\d+)?)\s*(?:cm|厘米|㎝)",
+            merged,
+            flags=re.IGNORECASE,
+        )
+        if m_top_other:
+            try:
+                top = float(m_top_other.group("top"))
+                other = float(m_top_other.group("other"))
+                margins_cm["top"] = top
+                margins_cm.setdefault("right", other)
+                margins_cm.setdefault("bottom", other)
+                margins_cm.setdefault("left", other)
+            except Exception:
+                pass
 
         # 总页数限制（若出现）
-        m_pages = re.search(r"(?:总页数|页数|篇幅).{0,16}?(?:不超过|不得超过|控制在)\s*(\d{1,3})\s*页", merged)
+        max_pages = None
+        m_pages = re.search(r"(?:施工组织设计|总页数|页数|篇幅).{0,18}?(?:不超过|不得超过|控制在|最多)\s*(\d{1,3})\s*页", merged)
         if m_pages:
-            meta["global_requirements"].append(f"总页数不超过{m_pages.group(1)}页。")
+            max_pages = int(m_pages.group(1))
+            meta["global_requirements"].append(f"总页数不超过{max_pages}页。")
 
         style: Dict[str, Any] = {}
         font_cfg: Dict[str, Any] = {}
-        if font:
-            # exporter 默认 SimSun；这里尽量把中文字体写到 eastAsia
-            if font in {"Times New Roman", "Arial"}:
-                font_cfg["latin"] = font
+        if body_font:
+            if body_font in {"Times New Roman", "Arial"}:
+                font_cfg["latin"] = body_font
             else:
-                font_cfg["eastAsia"] = font
-        if size_pt is not None:
-            font_cfg["size_pt"] = size_pt
+                font_cfg["eastAsia"] = body_font
+            style["body_font"] = body_font
+        if title_font:
+            style["title_font"] = title_font
+        if body_size is not None:
+            style["body_size"] = max(9.0, min(24.0, float(body_size)))
+            font_cfg["size_pt"] = style["body_size"]
+        if title_size is not None:
+            style["title_size"] = max(10.0, min(36.0, float(title_size)))
         if line_spacing is not None:
+            style["line_spacing"] = line_spacing
             font_cfg["line_spacing"] = line_spacing
         if line_spacing_pt is not None:
+            style["line_spacing_pt"] = line_spacing_pt
             font_cfg["line_spacing_pt"] = line_spacing_pt
         if font_cfg:
             style["font"] = font_cfg
@@ -594,21 +722,32 @@ class TenderParser:
             style["paper"] = paper
         if margins_cm:
             style["margins_cm"] = margins_cm
+        if max_pages is not None:
+            style["max_pages"] = int(max_pages)
 
         if style:
             summary = []
             if paper:
                 summary.append(f"纸张{paper}")
-            if font and size_pt:
-                summary.append(f"正文{font}{size_pt}pt")
-            elif font:
-                summary.append(f"正文字体{font}")
-            elif size_pt:
-                summary.append(f"正文字号{size_pt}pt")
+            if body_font:
+                summary.append(f"正文字体{body_font}")
+            if body_size is not None:
+                summary.append(f"正文{body_size}pt")
+            if title_size is not None:
+                summary.append(f"标题{title_size}pt")
             if line_spacing is not None:
                 summary.append(f"行距{line_spacing}倍")
             if line_spacing_pt is not None:
                 summary.append(f"行距固定值{line_spacing_pt}磅")
+            if margins_cm:
+                summary.append(
+                    "页边距上{top}cm/右{right}cm/下{bottom}cm/左{left}cm".format(
+                        top=margins_cm.get("top", "-"),
+                        right=margins_cm.get("right", "-"),
+                        bottom=margins_cm.get("bottom", "-"),
+                        left=margins_cm.get("left", "-"),
+                    )
+                )
             if summary:
                 meta["global_requirements"].append("版式要求：" + "，".join(summary) + "。")
         return style, meta

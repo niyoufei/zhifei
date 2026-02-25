@@ -1,7 +1,7 @@
 # clawdbot status
-- last_run: 2026-02-04T06:12
+- last_run: 2026-02-18
 - last_result: **PASS**
-- last_action: 为 rule_engine.py 和 gap_analyzer.py 添加单元测试（25个），覆盖率从 0% 提升到 90%+
+- last_action: Web 控制台脱离终端运行：launchd 服务、后台模式、双击启动器
 - next_step: 继续提升其他低覆盖率模块的测试覆盖
 
 ## DoD 完成状态

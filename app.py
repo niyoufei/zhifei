@@ -48,7 +48,27 @@ def _load_project_types() -> list[str]:
 
 
 PROJECT_TYPES = _load_project_types()
-LATEST_GEMINI_TEXT_MODEL = "gemini-3.1-pro-preview"
+TEXT_PROVIDER_OPTIONS = [
+    "google",
+    "openai",
+    "grok",
+    "anthropic",
+    "deepseek",
+    "zhipu",
+    "qwen",
+    "baidu",
+    "iflytek",
+    "tencent",
+]
+LATEST_TEXT_MODELS = {
+    "google": "gemini-3-pro-preview",
+    "openai": "gpt-5.2-pro",
+    "grok": "grok-4-1-fast-reasoning",
+}
+
+
+def _latest_model_for(provider: str | None) -> str:
+    return str(LATEST_TEXT_MODELS.get(str(provider or "").strip().lower()) or "")
 
 
 def _load_template_library(project_types: list[str]) -> dict[str, dict[str, Any]]:
@@ -152,6 +172,139 @@ def _extract_project_meta_from_tender(matrix: dict[str, Any] | None) -> tuple[st
 def _apply_project_defaults_from_tender(matrix: dict[str, Any] | None) -> tuple[str, str]:
     project_name, project_code = _extract_project_meta_from_tender(matrix)
     return _topic_from_project_name(project_name), project_code
+
+
+def _ui_font_name(v: Any) -> str:
+    s = str(v or "").strip()
+    if s in {"SimSun", "宋体"}:
+        return "宋体"
+    if s in {"仿宋", "仿宋体", "FangSong"}:
+        return "仿宋体"
+    return "宋体" if "宋" in s else ("仿宋体" if "仿宋" in s else "宋体")
+
+
+def _page_target(v: Any) -> int | None:
+    if isinstance(v, dict):
+        v = v.get("target") or v.get("pages") or v.get("page_target") or v.get("max")
+    try:
+        n = int(float(v))
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def _resolve_style_for_ui(user_style: dict[str, Any] | None, tender_style: dict[str, Any] | None) -> dict[str, Any]:
+    try:
+        from backend.zhifei_autoplan.style_policy import resolve_style
+
+        style, _ = resolve_style(user_style=user_style or {}, tender_style=tender_style or {})
+        return style if isinstance(style, dict) else {}
+    except Exception:
+        return {
+            "body_font": "宋体",
+            "title_font": "宋体",
+            "body_size": 14,
+            "title_size": 16,
+            "line_spacing_pt": 22.0,
+            "margins_cm": {"top": 2.5, "right": 2.0, "bottom": 2.0, "left": 2.0},
+            "chart_policy": {"enabled": True, "every_n_chapters": 2, "position": "chapter"},
+        }
+
+
+def _resolve_style_for_ui_with_source(
+    user_style: dict[str, Any] | None,
+    tender_style: dict[str, Any] | None,
+) -> tuple[dict[str, Any], str]:
+    try:
+        from backend.zhifei_autoplan.style_policy import resolve_style
+
+        style, source = resolve_style(user_style=user_style or {}, tender_style=tender_style or {})
+        return (style if isinstance(style, dict) else {}), str(source or "default_or_user")
+    except Exception:
+        return _resolve_style_for_ui(user_style, tender_style), "default_or_user"
+
+
+def _plan_outline_pages_and_chart(
+    outline: list[str],
+    *,
+    project_type: str,
+    chapter_pages: dict[str, Any] | None,
+    tender_matrix: dict[str, Any] | None,
+) -> tuple[list[str], dict[str, int], int]:
+    titles = [str(x).strip() for x in (outline or []) if str(x).strip()]
+    if not titles:
+        return [], {}, 2
+    try:
+        from backend.zhifei_autoplan.outline_planner import (
+            enrich_outline,
+            infer_total_page_limit,
+            plan_chapter_pages,
+            recommend_chart_every_n,
+        )
+
+        tender = tender_matrix if isinstance(tender_matrix, dict) else {}
+        enriched = enrich_outline(titles, project_type=project_type)
+        total_limit = infer_total_page_limit(tender, default=50)
+        planned = plan_chapter_pages(
+            enriched,
+            total_pages=total_limit,
+            chapter_pages=chapter_pages if isinstance(chapter_pages, dict) else {},
+        )
+        chart_n = recommend_chart_every_n(enriched, planned)
+        return enriched, planned, int(chart_n)
+    except Exception:
+        out = {}
+        for t in titles:
+            out[t] = int(_page_target((chapter_pages or {}).get(t)) or 2)
+        return titles, out, 2
+
+
+def _apply_style_to_session(style: dict[str, Any], *, queue_only: bool = True) -> None:
+    if not isinstance(style, dict):
+        return
+
+    font_cfg = style.get("font") if isinstance(style.get("font"), dict) else {}
+
+    def _set(key: str, value: Any) -> None:
+        if queue_only:
+            _queue_widget_update(key, value)
+        else:
+            st.session_state[key] = value
+
+    body_font = _ui_font_name(style.get("body_font") or font_cfg.get("eastAsia"))
+    title_font = _ui_font_name(style.get("title_font") or body_font)
+    _set("body_font", body_font)
+    _set("title_font", title_font)
+    try:
+        _set("body_size", int(round(float(style.get("body_size") or 14))))
+    except Exception:
+        _set("body_size", 14)
+    try:
+        _set("title_size", int(round(float(style.get("title_size") or 16))))
+    except Exception:
+        _set("title_size", 16)
+
+    line_spacing_pt = style.get("line_spacing_pt")
+    if line_spacing_pt is None and font_cfg:
+        line_spacing_pt = font_cfg.get("line_spacing_pt")
+    try:
+        _set("line_spacing_pt", float(line_spacing_pt if line_spacing_pt is not None else 22.0))
+    except Exception:
+        _set("line_spacing_pt", 22.0)
+
+    margins = style.get("margins_cm") if isinstance(style.get("margins_cm"), dict) else {}
+    _set("margin_top_cm", float(margins.get("top") or 2.5))
+    _set("margin_right_cm", float(margins.get("right") or 2.0))
+    _set("margin_bottom_cm", float(margins.get("bottom") or 2.0))
+    _set("margin_left_cm", float(margins.get("left") or 2.0))
+
+    cp = style.get("chart_policy") if isinstance(style.get("chart_policy"), dict) else {}
+    _set("chart_enabled", bool(cp.get("enabled", True)))
+    try:
+        _set("chart_every_n", int(cp.get("every_n_chapters") or 2))
+    except Exception:
+        _set("chart_every_n", 2)
+    _set("chart_position", str(cp.get("position") or "chapter"))
 
 
 def _queue_widget_update(key: str, value: Any) -> None:
@@ -327,17 +480,29 @@ def _init_state() -> None:
         "image_provider": "google",
         "image_model": "banana",
         "provider_text": "google",
-        "model_text": LATEST_GEMINI_TEXT_MODEL,
+        "model_text": _latest_model_for("google"),
         "api_key_text": "",
+        "fallback_1_enabled": True,
+        "fallback_1_provider": "openai",
+        "fallback_1_model": _latest_model_for("openai"),
+        "fallback_1_api_key": "",
+        "fallback_2_enabled": True,
+        "fallback_2_provider": "grok",
+        "fallback_2_model": _latest_model_for("grok"),
+        "fallback_2_api_key": "",
         "chapter_requirements_text": "",
         "params_override_text": "",
         "template_key": PROJECT_TYPES[0] if PROJECT_TYPES else "",
         "strict_tender_outline": True,
         "body_font": "宋体",
         "title_font": "宋体",
-        "body_size": 12,
+        "body_size": 14,
         "title_size": 16,
         "line_spacing_pt": 22.0,
+        "margin_top_cm": 2.5,
+        "margin_right_cm": 2.0,
+        "margin_bottom_cm": 2.0,
+        "margin_left_cm": 2.0,
         "enforce_chapter_pages": False,
         "chapter_start_new_page": False,
         "chart_enabled": True,
@@ -349,6 +514,27 @@ def _init_state() -> None:
         st.session_state.setdefault(k, v)
     if PROJECT_TYPES and st.session_state.get("project_type") not in PROJECT_TYPES:
         st.session_state["project_type"] = PROJECT_TYPES[0]
+    if st.session_state.get("provider_text") not in TEXT_PROVIDER_OPTIONS:
+        st.session_state["provider_text"] = "google"
+    if st.session_state.get("fallback_1_provider") not in TEXT_PROVIDER_OPTIONS:
+        st.session_state["fallback_1_provider"] = "openai"
+    if st.session_state.get("fallback_2_provider") not in TEXT_PROVIDER_OPTIONS:
+        st.session_state["fallback_2_provider"] = "grok"
+    legacy_main_model_map = {
+        "gemini-2.0-flash": _latest_model_for("google"),
+        "gemini-2.5-flash": _latest_model_for("google"),
+        "gemini-3.1-pro-preview": _latest_model_for("google"),
+        "gpt-4": _latest_model_for("openai"),
+    }
+    main_model_now = str(st.session_state.get("model_text") or "").strip()
+    if not main_model_now:
+        st.session_state["model_text"] = _latest_model_for(st.session_state.get("provider_text"))
+    elif main_model_now in legacy_main_model_map:
+        st.session_state["model_text"] = legacy_main_model_map[main_model_now]
+    if not str(st.session_state.get("fallback_1_model") or "").strip():
+        st.session_state["fallback_1_model"] = _latest_model_for(st.session_state.get("fallback_1_provider"))
+    if not str(st.session_state.get("fallback_2_model") or "").strip():
+        st.session_state["fallback_2_model"] = _latest_model_for(st.session_state.get("fallback_2_provider"))
     if st.session_state.get("body_font") not in {"宋体", "仿宋体"}:
         st.session_state["body_font"] = "宋体"
     if st.session_state.get("title_font") not in {"宋体", "仿宋体"}:
@@ -499,6 +685,50 @@ def _cancel_active_job(base_url: str, actions_key: str) -> None:
     st.session_state["active_job"] = None
 
 
+def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[str, Any]:
+    raw_json = _download_bytes(base_url, actions_key, job_id, "json", 1, timeout=600)
+    data = json.loads(raw_json.decode("utf-8", errors="ignore"))
+    variants_data = data.get("variants") or []
+    variants_n = max(1, len(variants_data))
+
+    artifacts: dict[int, dict[str, bytes]] = {}
+    quality_map: dict[int, dict[str, Any]] = {}
+    for v in range(1, variants_n + 1):
+        artifacts[v] = {}
+        artifacts[v]["docx"] = _download_bytes(base_url, actions_key, job_id, "docx", v, timeout=600)
+        artifacts[v]["compare_docx"] = _download_bytes(base_url, actions_key, job_id, "compare_docx", v, timeout=600)
+        try:
+            artifacts[v]["focus_xlsx"] = _download_bytes(base_url, actions_key, job_id, "focus_xlsx", v, timeout=600)
+        except Exception:
+            pass
+        rec = variants_data[v - 1] if v <= len(variants_data) else {}
+        qc = rec.get("quality_checks") or {}
+        quality_map[v] = {
+            "structure": (qc.get("structure") or {}).get("ok"),
+            "officialese": (qc.get("officialese") or {}).get("ok"),
+            "risk_triplet": (qc.get("risk_triplet") or {}).get("ok"),
+            "qse_closed_loop": (qc.get("qse_closed_loop") or {}).get("ok"),
+            "logic_template_adherence": (qc.get("logic_template_adherence") or {}).get("ok"),
+            "chapter_blueprint_adherence": (qc.get("chapter_blueprint_adherence") or {}).get("ok"),
+            "variant_diversity": (qc.get("variant_diversity") or {}).get("ok"),
+            "quantitative": (qc.get("quantitative") or {}).get("ok"),
+            "required_topics_detail": (qc.get("required_topics_detail") or {}).get("ok"),
+            "evidence_traceability": (qc.get("evidence_traceability") or {}).get("ok"),
+            "drawing_evidence": (qc.get("drawing_evidence") or {}).get("ok"),
+            "standard_evidence": (qc.get("standard_evidence") or {}).get("ok"),
+            "boq_focus_item_typed_evidence": (qc.get("boq_focus_item_typed_evidence") or {}).get("ok"),
+            "consistency": (qc.get("consistency") or {}).get("ok"),
+        }
+
+    return {
+        "job_id": job_id,
+        "variants": variants_n,
+        "artifacts": artifacts,
+        "quality_by_variant": quality_map,
+        "result_json": raw_json,
+    }
+
+
 def _poll_active_job(base_url: str, actions_key: str, poll_sec: float) -> None:
     active = st.session_state.get("active_job") or {}
     job_id = str(active.get("job_id") or "").strip()
@@ -532,49 +762,141 @@ def _poll_active_job(base_url: str, actions_key: str, poll_sec: float) -> None:
         return
 
     _append_log("任务完成，开始下载结果")
-    raw_json = _download_bytes(base_url, actions_key, job_id, "json", 1, timeout=600)
-    data = json.loads(raw_json.decode("utf-8", errors="ignore"))
-    variants_data = data.get("variants") or []
-    variants_n = max(1, len(variants_data))
-
-    artifacts: dict[int, dict[str, bytes]] = {}
-    quality_map: dict[int, dict[str, Any]] = {}
-    for v in range(1, variants_n + 1):
-        artifacts[v] = {}
-        artifacts[v]["docx"] = _download_bytes(base_url, actions_key, job_id, "docx", v, timeout=600)
-        artifacts[v]["compare_docx"] = _download_bytes(base_url, actions_key, job_id, "compare_docx", v, timeout=600)
-        try:
-            artifacts[v]["focus_xlsx"] = _download_bytes(base_url, actions_key, job_id, "focus_xlsx", v, timeout=600)
-        except Exception:
-            pass
-        rec = variants_data[v - 1] if v <= len(variants_data) else {}
-        qc = rec.get("quality_checks") or {}
-        quality_map[v] = {
-            "structure": (qc.get("structure") or {}).get("ok"),
-            "officialese": (qc.get("officialese") or {}).get("ok"),
-            "risk_triplet": (qc.get("risk_triplet") or {}).get("ok"),
-            "qse_closed_loop": (qc.get("qse_closed_loop") or {}).get("ok"),
-            "logic_template_adherence": (qc.get("logic_template_adherence") or {}).get("ok"),
-            "chapter_blueprint_adherence": (qc.get("chapter_blueprint_adherence") or {}).get("ok"),
-            "variant_diversity": (qc.get("variant_diversity") or {}).get("ok"),
-            "quantitative": (qc.get("quantitative") or {}).get("ok"),
-            "required_topics_detail": (qc.get("required_topics_detail") or {}).get("ok"),
-            "evidence_traceability": (qc.get("evidence_traceability") or {}).get("ok"),
-            "drawing_evidence": (qc.get("drawing_evidence") or {}).get("ok"),
-            "standard_evidence": (qc.get("standard_evidence") or {}).get("ok"),
-            "boq_focus_item_typed_evidence": (qc.get("boq_focus_item_typed_evidence") or {}).get("ok"),
-        }
-
-    st.session_state["run_result"] = {
-        "job_id": job_id,
-        "project_id": active.get("project_id"),
-        "variants": variants_n,
-        "artifacts": artifacts,
-        "quality_by_variant": quality_map,
-        "result_json": raw_json,
-    }
+    bundle = _collect_job_result(base_url, actions_key, job_id)
+    bundle["project_id"] = active.get("project_id")
+    st.session_state["run_result"] = bundle
     _append_log("结果下载完成")
     st.session_state["active_job"] = None
+
+
+def _review_cache_key(job_id: str, variant: int) -> str:
+    return f"review_items_{job_id}_v{variant}"
+
+
+def _load_review_items(base_url: str, actions_key: str, job_id: str, variant: int) -> list[dict[str, Any]]:
+    resp = _get_json(
+        base_url,
+        "/actions/review/issues",
+        actions_key,
+        params={"job_id": job_id, "variant": int(variant)},
+        timeout=120,
+    )
+    rows = resp.get("items") if isinstance(resp.get("items"), list) else []
+    cleaned: list[dict[str, Any]] = []
+    for it in rows:
+        if not isinstance(it, dict):
+            continue
+        cleaned.append(
+            {
+                "apply": bool(it.get("apply", True)),
+                "issue_id": str(it.get("issue_id") or ""),
+                "title": str(it.get("title") or ""),
+                "type": str(it.get("type") or ""),
+                "severity": str(it.get("severity") or ""),
+                "problem": str(it.get("problem") or ""),
+                "suggestion": str(it.get("suggestion") or ""),
+                "section_excerpt": str(it.get("section_excerpt") or ""),
+                "replacement": str(it.get("replacement") or ""),
+            }
+        )
+    st.session_state[_review_cache_key(job_id, variant)] = cleaned
+    return cleaned
+
+
+def _render_review_workspace(base_url: str, actions_key: str) -> None:
+    result = st.session_state.get("run_result") or {}
+    if not result:
+        return
+    job_id = str(result.get("job_id") or "").strip()
+    variants = int(result.get("variants") or 1)
+    if not job_id:
+        return
+
+    st.subheader("问题清单审核与原文回写")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    variant = c1.selectbox("审核方案", options=list(range(1, variants + 1)), format_func=lambda x: f"v{x}", key=f"review_variant_{job_id}")
+    if c2.button("载入问题清单", key=f"load_review_{job_id}", use_container_width=True):
+        try:
+            if not actions_key.strip():
+                raise ValueError("Actions Key 不能为空")
+            rows = _load_review_items(base_url, actions_key, job_id, int(variant))
+            st.success(f"已载入 {len(rows)} 条问题")
+        except Exception as e:
+            st.error(f"载入失败: {e}")
+
+    rows = st.session_state.get(_review_cache_key(job_id, int(variant))) or []
+    if not rows:
+        st.info("点击“载入问题清单”后可进行审核回写。")
+        return
+
+    edited = st.data_editor(
+        rows,
+        hide_index=True,
+        use_container_width=True,
+        key=f"review_editor_{job_id}_v{variant}",
+        disabled=["issue_id", "title", "type", "severity", "problem", "suggestion", "section_excerpt"],
+        column_config={
+            "apply": st.column_config.CheckboxColumn("应用"),
+            "issue_id": st.column_config.TextColumn("ID", width="small"),
+            "title": st.column_config.TextColumn("章节", width="medium"),
+            "type": st.column_config.TextColumn("类型", width="small"),
+            "severity": st.column_config.TextColumn("级别", width="small"),
+            "problem": st.column_config.TextColumn("问题", width="large"),
+            "suggestion": st.column_config.TextColumn("自动修订建议", width="large"),
+            "section_excerpt": st.column_config.TextColumn("章节摘录", width="large"),
+            "replacement": st.column_config.TextColumn("替换文本（可选）", width="large"),
+        },
+    )
+
+    b1, b2 = st.columns([1, 1])
+    if b1.button("应用勾选项并重写文档", key=f"apply_review_{job_id}_v{variant}", type="primary", use_container_width=True):
+        try:
+            if not actions_key.strip():
+                raise ValueError("Actions Key 不能为空")
+            decisions = []
+            for r in edited or []:
+                if not isinstance(r, dict):
+                    continue
+                decisions.append(
+                    {
+                        "issue_id": str(r.get("issue_id") or ""),
+                        "apply": bool(r.get("apply")),
+                        "replacement": str(r.get("replacement") or ""),
+                    }
+                )
+            resp = _post_json(
+                base_url,
+                "/actions/review/apply",
+                actions_key,
+                {"job_id": job_id, "variant": int(variant), "decisions": decisions, "apply_all": False},
+                timeout=900,
+            )
+            applied = int(resp.get("applied_count") or 0)
+            st.success(f"已回写 {applied} 项，正在刷新产物")
+            st.session_state["run_result"] = _collect_job_result(base_url, actions_key, job_id)
+            _load_review_items(base_url, actions_key, job_id, int(variant))
+            st.rerun()
+        except Exception as e:
+            st.error(f"回写失败: {e}")
+
+    if b2.button("一键应用全部建议", key=f"apply_all_review_{job_id}_v{variant}", use_container_width=True):
+        try:
+            if not actions_key.strip():
+                raise ValueError("Actions Key 不能为空")
+            resp = _post_json(
+                base_url,
+                "/actions/review/apply",
+                actions_key,
+                {"job_id": job_id, "variant": int(variant), "apply_all": True, "decisions": []},
+                timeout=900,
+            )
+            applied = int(resp.get("applied_count") or 0)
+            st.success(f"已自动回写 {applied} 项，正在刷新产物")
+            st.session_state["run_result"] = _collect_job_result(base_url, actions_key, job_id)
+            _load_review_items(base_url, actions_key, job_id, int(variant))
+            st.rerun()
+        except Exception as e:
+            st.error(f"全量回写失败: {e}")
 
 
 _init_state()
@@ -637,6 +959,14 @@ with col_right:
         key="template_key",
     )
     st.caption(TEMPLATE_LIBRARY.get(st.session_state.get("template_key"), {}).get("desc", ""))
+    with st.expander("方案模板库作用与用法", expanded=False):
+        st.markdown(
+            "作用：用于切换“章内逻辑”和行业约束，不替换招标评审目录。\n\n"
+            "用法：\n"
+            "1. 先按项目类型选择模板并点“应用模板”。\n"
+            "2. 系统会保留评审标准目录，只改变每章写法、量化指标和风险闭环表达。\n"
+            "3. 同一项目生成多份时，A/B/C 模板按顺序轮转，避免三份方案只换词。"
+        )
     if st.button("应用模板", use_container_width=True):
         _apply_template(st.session_state.get("template_key") or (PROJECT_TYPES[0] if PROJECT_TYPES else ""))
         st.rerun()
@@ -672,9 +1002,17 @@ if c_load.button("从评审标准载入目录", use_container_width=True):
             timeout=900,
         )
         matrix = tr.get("matrix") or {}
+        outline_source = str(matrix.get("outline_source") or "").strip()
         auto_topic, auto_pid = _apply_project_defaults_from_tender(matrix)
         resolved_pid = str(tr.get("project_id") or auto_pid or pid).strip()
         pending_widget_patch = False
+        # 版式自动策略：招标明确要求优先；无明确要求回落到系统默认值。
+        resolved_style, style_source = _resolve_style_for_ui_with_source(
+            None,
+            matrix.get("style") if isinstance(matrix, dict) else {},
+        )
+        _apply_style_to_session(resolved_style, queue_only=True)
+        pending_widget_patch = True
         if auto_topic:
             _queue_widget_update("topic_text", auto_topic)
             pending_widget_patch = True
@@ -687,9 +1025,32 @@ if c_load.button("从评审标准载入目录", use_container_width=True):
             _append_log(f"已自动识别项目ID：{auto_pid}")
         ol = matrix.get("outline") if isinstance(matrix, dict) else []
         if isinstance(ol, list) and ol:
-            _set_outline_items([str(x) for x in ol if str(x).strip()])
+            parsed_outline = [str(x) for x in ol if str(x).strip()]
+            enriched_outline, planned_pages, chart_n = _plan_outline_pages_and_chart(
+                parsed_outline,
+                project_type=str(st.session_state.get("project_type") or ""),
+                chapter_pages=matrix.get("chapter_pages") if isinstance(matrix, dict) else {},
+                tender_matrix=matrix if isinstance(matrix, dict) else {},
+            )
+            _set_outline_items(enriched_outline)
+            st.session_state["chapter_page_map"] = planned_pages
+            for t, n in planned_pages.items():
+                _queue_widget_update(f"cp_{t}", int(n))
+            _queue_widget_update("chart_every_n", int(chart_n))
+            _append_log(f"已自动规划章页数：总计{sum(planned_pages.values())}页（上限由招标/系统策略控制）")
+            if style_source == "tender_override":
+                _append_log("已自动应用版式：按招标文件要求覆盖")
+            else:
+                _append_log("已自动应用版式：默认22磅、上2.5cm其余2.0cm、宋体三号/四号")
+            if outline_source:
+                _append_log(f"目录来源：{outline_source}")
             _append_log("已从评审标准载入目录")
-            st.success("目录已载入")
+            if outline_source == "review_standard":
+                st.success("目录已载入（来源：评审标准）")
+            elif outline_source:
+                st.warning(f"目录已载入，但来源为：{outline_source}（不是评审标准）")
+            else:
+                st.success("目录已载入")
             st.rerun()
         else:
             st.warning("未提取到目录")
@@ -718,6 +1079,10 @@ with st.expander("精细化排版渲染引擎", expanded=True):
         st.selectbox("标题中文字体", options=["宋体", "仿宋体"], key="title_font")
         st.number_input("标题字号", min_value=10, max_value=36, key="title_size")
         st.checkbox("章节另起新页", key="chapter_start_new_page")
+        st.number_input("页边距上(cm)", min_value=0.5, max_value=6.0, step=0.1, key="margin_top_cm")
+        st.number_input("页边距右(cm)", min_value=0.5, max_value=6.0, step=0.1, key="margin_right_cm")
+        st.number_input("页边距下(cm)", min_value=0.5, max_value=6.0, step=0.1, key="margin_bottom_cm")
+        st.number_input("页边距左(cm)", min_value=0.5, max_value=6.0, step=0.1, key="margin_left_cm")
     with c3:
         st.checkbox("启用图表策略", key="chart_enabled")
         st.number_input("图表分布频率（每N章）", min_value=1, max_value=10, key="chart_every_n")
@@ -742,11 +1107,31 @@ with st.expander("高级参数（可选）", expanded=False):
         st.text_input("图片模型提供商", key="image_provider")
         st.text_input("图片模型", key="image_model")
     with c3:
-        st.text_input("文本模型提供商", key="provider_text")
-        st.text_input("文本模型", key="model_text")
-        if str(st.session_state.get("provider_text") or "").strip().lower() == "google":
-            st.caption(f"建议：使用 {LATEST_GEMINI_TEXT_MODEL}（Gemini 3 系列）")
-        st.text_input("文本模型 API Key", key="api_key_text", type="password")
+        st.selectbox("主文本模型提供商", options=TEXT_PROVIDER_OPTIONS, key="provider_text")
+        st.text_input("主文本模型", key="model_text")
+        main_latest = _latest_model_for(st.session_state.get("provider_text"))
+        if main_latest:
+            st.caption(f"建议最新模型：{main_latest}")
+        st.text_input("主文本模型 API Key", key="api_key_text", type="password")
+
+    st.markdown("**文本模型备选链（主模型失败时自动切换）**")
+    f1, f2 = st.columns(2)
+    with f1:
+        st.checkbox("启用备选1", key="fallback_1_enabled")
+        st.selectbox("备选1提供商", options=TEXT_PROVIDER_OPTIONS, key="fallback_1_provider")
+        st.text_input("备选1模型", key="fallback_1_model")
+        f1_latest = _latest_model_for(st.session_state.get("fallback_1_provider"))
+        if f1_latest:
+            st.caption(f"备选1建议：{f1_latest}")
+        st.text_input("备选1 API Key（可留空走环境变量）", key="fallback_1_api_key", type="password")
+    with f2:
+        st.checkbox("启用备选2", key="fallback_2_enabled")
+        st.selectbox("备选2提供商", options=TEXT_PROVIDER_OPTIONS, key="fallback_2_provider")
+        st.text_input("备选2模型", key="fallback_2_model")
+        f2_latest = _latest_model_for(st.session_state.get("fallback_2_provider"))
+        if f2_latest:
+            st.caption(f"备选2建议：{f2_latest}")
+        st.text_input("备选2 API Key（可留空走环境变量）", key="fallback_2_api_key", type="password")
 
     st.text_area("章级要求 JSON（可选）", key="chapter_requirements_text", height=100)
     st.text_area("参数覆盖 JSON（可选）", key="params_override_text", height=100)
@@ -782,9 +1167,15 @@ if run_btn:
         style = {
             "body_font": st.session_state.get("body_font"),
             "title_font": st.session_state.get("title_font"),
-            "body_size": int(st.session_state.get("body_size") or 12),
+            "body_size": int(st.session_state.get("body_size") or 14),
             "title_size": int(st.session_state.get("title_size") or 16),
             "line_spacing_pt": float(st.session_state.get("line_spacing_pt") or 22.0),
+            "margins_cm": {
+                "top": float(st.session_state.get("margin_top_cm") or 2.5),
+                "right": float(st.session_state.get("margin_right_cm") or 2.0),
+                "bottom": float(st.session_state.get("margin_bottom_cm") or 2.0),
+                "left": float(st.session_state.get("margin_left_cm") or 2.0),
+            },
             "chapter_start_new_page": bool(st.session_state.get("chapter_start_new_page")),
             "enforce_chapter_pages": bool(st.session_state.get("enforce_chapter_pages")),
             "chart_policy": {
@@ -818,16 +1209,45 @@ if run_btn:
             _append_log(f"项目主题已自动对齐：{topic}")
         if auto_pid:
             _append_log(f"项目ID已自动对齐：{project_id}")
+
+        # 版式自动设置：招标明确要求 > 当前输入 > 系统默认值。
+        style, style_source = _resolve_style_for_ui_with_source(
+            style,
+            matrix.get("style") if isinstance(matrix, dict) else {},
+        )
+        if style_source == "tender_override":
+            _append_log("版式已按招标要求自动覆盖（行距/边距/字体字号）")
+        else:
+            _append_log("招标未给出版式硬约束，已采用默认版式（22磅、上2.5cm其余2.0cm、宋体三号/四号）")
+
         auto_outline = matrix.get("outline") if isinstance(matrix, dict) else []
-        if isinstance(auto_outline, list) and auto_outline:
-            parsed_outline = [str(x) for x in auto_outline if str(x).strip()]
-            if bool(st.session_state.get("strict_tender_outline")):
-                _set_outline_items(parsed_outline)
-                outline_now = _current_outline()
-                _append_log("目录已按评审标准强制对标覆盖")
-            elif not outline_now:
-                _set_outline_items(parsed_outline)
-                outline_now = _current_outline()
+        parsed_outline = [str(x) for x in auto_outline if str(x).strip()] if isinstance(auto_outline, list) else []
+        if bool(st.session_state.get("strict_tender_outline")) and parsed_outline:
+            outline_base = parsed_outline
+            _append_log("目录已按评审标准强制对标")
+        elif outline_now:
+            outline_base = outline_now
+        else:
+            outline_base = parsed_outline
+
+        page_seed = dict(matrix.get("chapter_pages") or {}) if isinstance(matrix, dict) else {}
+        for t in outline_now:
+            v = st.session_state.get(f"cp_{t}")
+            if v is not None:
+                page_seed[t] = int(v)
+
+        outline_now, chapter_pages_plan, chart_n = _plan_outline_pages_and_chart(
+            outline_base,
+            project_type=project_type,
+            chapter_pages=page_seed,
+            tender_matrix=matrix if isinstance(matrix, dict) else {},
+        )
+        chapter_pages = dict(chapter_pages_plan)
+        _append_log(f"目录已结合项目类型自动补章：共{len(outline_now)}章")
+        _append_log(f"章页数已自动规划：总计{sum(chapter_pages.values())}页（上限由招标/系统策略控制）")
+        if isinstance(style.get("chart_policy"), dict):
+            style["chart_policy"]["every_n_chapters"] = int(chart_n)
+        _append_log(f"图表分布频率已自动建议：每{int(chart_n)}章")
         pb.progress(20)
 
         _append_log("步骤 2/6: 解析工程量清单")
@@ -889,15 +1309,54 @@ if run_btn:
             "chapter_pages": chapter_pages,
             "chapter_requirements": chapter_requirements or {},
         }
-        provider = str(st.session_state.get("provider_text") or "").strip()
-        model = str(st.session_state.get("model_text") or "").strip()
-        api_key = str(st.session_state.get("api_key_text") or "").strip()
-        if provider:
-            generate_payload["provider"] = provider
-        if model:
-            generate_payload["model"] = model
-        if api_key:
-            generate_payload["api_key"] = api_key
+        provider_chain: list[str] = []
+        model_map: dict[str, str] = {}
+        api_keys_map: dict[str, str] = {}
+
+        def _append_provider(pv: str, md: str, ak: str) -> None:
+            p = str(pv or "").strip().lower()
+            m = str(md or "").strip()
+            k = str(ak or "").strip()
+            if not p or not m:
+                return
+            if p in provider_chain:
+                return
+            provider_chain.append(p)
+            model_map[p] = m
+            if k:
+                api_keys_map[p] = k
+
+        _append_provider(
+            str(st.session_state.get("provider_text") or ""),
+            str(st.session_state.get("model_text") or ""),
+            str(st.session_state.get("api_key_text") or ""),
+        )
+        if bool(st.session_state.get("fallback_1_enabled")):
+            _append_provider(
+                str(st.session_state.get("fallback_1_provider") or ""),
+                str(st.session_state.get("fallback_1_model") or ""),
+                str(st.session_state.get("fallback_1_api_key") or ""),
+            )
+        if bool(st.session_state.get("fallback_2_enabled")):
+            _append_provider(
+                str(st.session_state.get("fallback_2_provider") or ""),
+                str(st.session_state.get("fallback_2_model") or ""),
+                str(st.session_state.get("fallback_2_api_key") or ""),
+            )
+
+        if provider_chain:
+            primary_provider = provider_chain[0]
+            generate_payload["provider"] = primary_provider
+            generate_payload["model"] = model_map.get(primary_provider, "")
+            # Back-end 按 providers 顺序执行章节级轮询重试（主 + 备选）。
+            if len(provider_chain) > 1:
+                generate_payload["providers"] = provider_chain
+                generate_payload["model_map"] = model_map
+            if primary_provider in api_keys_map:
+                generate_payload["api_key"] = api_keys_map[primary_provider]
+            if api_keys_map:
+                generate_payload["api_keys"] = api_keys_map
+            _append_log(f"文本模型链：{' -> '.join(provider_chain)}")
         if params_override:
             generate_payload["params_override"] = params_override
 
@@ -937,6 +1396,7 @@ if st.session_state.get("active_job"):
 
 if st.session_state.get("run_result"):
     _render_downloads()
+    _render_review_workspace(base_url, actions_key)
     with st.expander("JSON结果", expanded=False):
         raw = st.session_state["run_result"].get("result_json") or b"{}"
         try:

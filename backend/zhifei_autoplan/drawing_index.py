@@ -91,11 +91,17 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
         extract_path = str(rec.get("extract_saved_as") or "")
         preview = str(rec.get("preview_saved_as") or "")
         kw = []
+        topo = {}
         try:
             if extract_path and Path(extract_path).exists():
                 kw = _top_keywords(Path(extract_path).read_text(encoding="utf-8", errors="ignore"), limit=10)
         except Exception:
             kw = []
+        try:
+            pm = rec.get("parsed_meta") if isinstance(rec.get("parsed_meta"), dict) else {}
+            topo = pm.get("topology") if isinstance(pm.get("topology"), dict) else {}
+        except Exception:
+            topo = {}
         drawings.append(
             {
                 "filename": fname,
@@ -103,6 +109,17 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
                 "pages": rec.get("pages"),
                 "preview": preview if preview and Path(preview).exists() else None,
                 "keywords": kw,
+                "topology": {
+                    "nodes_count": topo.get("nodes_count"),
+                    "edges_count": topo.get("edges_count"),
+                    "components_count": topo.get("components_count"),
+                    "endpoint_count": topo.get("endpoint_count"),
+                    "trunk_length": topo.get("trunk_length"),
+                    "suggested_flow_segments": topo.get("suggested_flow_segments"),
+                    "topology_confidence": topo.get("topology_confidence"),
+                }
+                if topo
+                else {},
             }
         )
 
@@ -136,4 +153,3 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
         "drawings": drawings[:30],
         "chapter_bindings": bindings[:24],
     }
-

@@ -171,6 +171,61 @@ python3 scripts/smoke_api.py
 python3 scripts/smoke_api.py http://127.0.0.1:8000
 ```
 
+## Web 控制台（不需终端）
+
+施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
+
+### 方式一：桌面快捷方式（推荐）
+
+在桌面双击 **`启动文档生成系统.command`**（首次或重装后运行 `./scripts/create_desktop_shortcut.sh` 创建）：
+- 与系统文件分离，桌面一键启动
+- 自动打开浏览器到 http://localhost:8501
+
+### 方式二：macOS 应用
+
+双击项目内的 **`文档生成系统.app`**：
+- 无终端窗口，直接启动
+- 可拖到桌面或「应用程序」文件夹
+
+### 方式三：命令行脚本
+
+在项目内运行 `./scripts/run_web_ui.sh --background`，系统会：
+- 在后台启动后端和 Streamlit
+- 自动打开浏览器到 http://localhost:8501
+- 可立即关闭弹出的终端窗口，服务继续运行
+
+### 方式四：launchd 常驻（开机自启）
+
+```bash
+chmod +x scripts/install_web_ui_launchd.sh
+ZF_ACTIONS_KEY="your-key" ZF_GOOGLE_API_KEY="your-gemini-key" \
+  ./scripts/install_web_ui_launchd.sh
+```
+
+- 后端 (8010) 和 Web 控制台 (8501) 作为系统服务常驻
+- 登录后自动启动，无需任何终端操作
+- 访问：http://localhost:8501
+
+卸载：`./scripts/uninstall_web_ui_launchd.sh`
+
+### 方式五：命令行后台运行
+
+```bash
+./scripts/run_web_ui.sh --background   # 或 -b
+```
+
+后台启动并自动打开浏览器，可关闭终端。
+
+### 方式六：传统前台运行
+
+```bash
+./scripts/run_web_ui.sh
+```
+
+需保持终端打开。
+
+---
+
 ## 常驻运行（让系统一直跑）
 
 你无法让 ChatGPT 本体“像服务一样常驻运行”，但你可以让本项目后端服务常驻运行，从而做到：

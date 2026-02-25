@@ -60,15 +60,28 @@ def _meta_to_text(parsed_type: str | None, parsed_meta: Any) -> str:
         layers = parsed_meta.get("layers_count")
         entities = parsed_meta.get("entities_count")
         inserts = parsed_meta.get("insert_blocks") or {}
+        topo = parsed_meta.get("topology") if isinstance(parsed_meta.get("topology"), dict) else {}
         top_blocks = []
         if isinstance(inserts, dict):
             for k, v in sorted(inserts.items(), key=lambda x: x[1], reverse=True)[:8]:
                 top_blocks.append(f"{k}:{v}")
+        topo_lines = []
+        if topo:
+            topo_lines.append(f"拓扑节点: {topo.get('nodes_count')}")
+            topo_lines.append(f"拓扑边: {topo.get('edges_count')}")
+            topo_lines.append(f"连通分量: {topo.get('components_count')}")
+            topo_lines.append(f"端点: {topo.get('endpoint_count')}")
+            topo_lines.append(f"主干长度: {topo.get('trunk_length')}")
+            topo_lines.append(f"建议流水段: {topo.get('suggested_flow_segments')}")
+            if topo.get("topology_confidence"):
+                topo_lines.append(f"拓扑置信度: {topo.get('topology_confidence')}")
+        topo_text = ("\n" + "\n".join(topo_lines)) if topo_lines else ""
         return (
             f"图纸类型: CAD(DXF ASCII)\n"
             f"图层数量: {layers}\n"
             f"实体数量: {entities}\n"
             f"块引用: {'; '.join(top_blocks)}"
+            f"{topo_text}"
         )
     if parsed_type == "image" and isinstance(parsed_meta, dict):
         return (

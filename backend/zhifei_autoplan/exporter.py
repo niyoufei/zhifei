@@ -91,21 +91,21 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
         style.get("body_font")
         or (style.get("font") if isinstance(style.get("font"), str) else None)
         or font_cfg.get("eastAsia")
-        or "SimSun"
+        or "宋体"
     )
     body_latin_font = style.get("body_latin_font") or font_cfg.get("latin") or body_font
     body_size = _to_float(
-        style.get("body_size") or style.get("font_size") or font_cfg.get("size_pt") or 12,
-        12.0,
+        style.get("body_size") or style.get("font_size") or font_cfg.get("size_pt") or 14,
+        14.0,
     )
     line_spacing = _to_float(style.get("line_spacing") or font_cfg.get("line_spacing") or 1.5, 1.5)
-    line_spacing_pt = style.get("line_spacing_pt") or font_cfg.get("line_spacing_pt")
+    line_spacing_pt = style.get("line_spacing_pt") or font_cfg.get("line_spacing_pt") or 22.0
     try:
         line_spacing_pt = float(line_spacing_pt) if line_spacing_pt is not None else None
     except Exception:
         line_spacing_pt = None
     if line_spacing_pt is not None and line_spacing_pt <= 0:
-        line_spacing_pt = None
+        line_spacing_pt = 22.0
 
     title_font = style.get("title_font") or headings_cfg.get("eastAsia") or body_font
     title_latin_font = style.get("title_latin_font") or headings_cfg.get("latin") or body_latin_font
@@ -116,10 +116,10 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     margins_list = style.get("margins") if isinstance(style.get("margins"), list) else []
-    top = _to_float(margins_cfg.get("top"), _to_float(margins_list[0] if len(margins_list) > 0 else 2.54, 2.54))
-    right = _to_float(margins_cfg.get("right"), _to_float(margins_list[1] if len(margins_list) > 1 else 2.5, 2.5))
-    bottom = _to_float(margins_cfg.get("bottom"), _to_float(margins_list[2] if len(margins_list) > 2 else 2.54, 2.54))
-    left = _to_float(margins_cfg.get("left"), _to_float(margins_list[3] if len(margins_list) > 3 else 3.0, 3.0))
+    top = _to_float(margins_cfg.get("top"), _to_float(margins_list[0] if len(margins_list) > 0 else 2.5, 2.5))
+    right = _to_float(margins_cfg.get("right"), _to_float(margins_list[1] if len(margins_list) > 1 else 2.0, 2.0))
+    bottom = _to_float(margins_cfg.get("bottom"), _to_float(margins_list[2] if len(margins_list) > 2 else 2.0, 2.0))
+    left = _to_float(margins_cfg.get("left"), _to_float(margins_list[3] if len(margins_list) > 3 else 2.0, 2.0))
 
     return {
         "paper": str(style.get("paper") or style.get("paper_size") or "A4"),
@@ -153,10 +153,10 @@ def _apply_page_setup(doc: Document, style_cfg: Dict[str, Any]):
         if paper == "A4":
             section.page_width = Cm(21.0)
             section.page_height = Cm(29.7)
-        section.top_margin = Cm(_to_float(margins.get("top"), 2.54))
-        section.right_margin = Cm(_to_float(margins.get("right"), 2.5))
-        section.bottom_margin = Cm(_to_float(margins.get("bottom"), 2.54))
-        section.left_margin = Cm(_to_float(margins.get("left"), 3.0))
+        section.top_margin = Cm(_to_float(margins.get("top"), 2.5))
+        section.right_margin = Cm(_to_float(margins.get("right"), 2.0))
+        section.bottom_margin = Cm(_to_float(margins.get("bottom"), 2.0))
+        section.left_margin = Cm(_to_float(margins.get("left"), 2.0))
 
 
 def _set_run_font(run, east_font: str, latin_font: str, size_pt: float):
@@ -219,7 +219,7 @@ def _apply_branding_header(doc: Document, style_cfg: Dict[str, Any], *, topic: s
     if not company and not logo:
         return
 
-    font_east = str(style_cfg.get("body_font") or "SimSun")
+    font_east = str(style_cfg.get("body_font") or "宋体")
     font_latin = str(style_cfg.get("body_latin_font") or font_east)
     size_pt = 9.0
 
@@ -297,7 +297,7 @@ def _extract_chapter_page_target(chapter_pages: Dict[str, Any], title: str) -> i
 
 
 def _estimate_chars_per_page(style_cfg: Dict[str, Any]) -> int:
-    body_size = _to_float(style_cfg.get("body_size"), 12.0)
+    body_size = _to_float(style_cfg.get("body_size"), 14.0)
     line_spacing = _to_float(style_cfg.get("line_spacing"), 1.5)
     line_spacing_pt = style_cfg.get("line_spacing_pt")
     if line_spacing_pt is not None:
@@ -306,10 +306,10 @@ def _estimate_chars_per_page(style_cfg: Dict[str, Any]) -> int:
         except Exception:
             pass
     margins = style_cfg.get("margins_cm") or {}
-    left = _to_float(margins.get("left"), 3.0)
-    right = _to_float(margins.get("right"), 2.5)
-    top = _to_float(margins.get("top"), 2.54)
-    bottom = _to_float(margins.get("bottom"), 2.54)
+    left = _to_float(margins.get("left"), 2.0)
+    right = _to_float(margins.get("right"), 2.0)
+    top = _to_float(margins.get("top"), 2.5)
+    bottom = _to_float(margins.get("bottom"), 2.0)
 
     width_factor = 5.5 / max(2.0, left + right)
     height_factor = 5.0 / max(2.0, top + bottom)
@@ -427,6 +427,46 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
 
     layout_receipts = []
     sections = data.get("sections") or []
+    media_all = data.get("media") or []
+    chart_policy = style_raw.get("chart_policy") if isinstance(style_raw, dict) and isinstance(style_raw.get("chart_policy"), dict) else {}
+    chart_enabled = _to_bool(chart_policy.get("enabled"), True)
+    chart_position = str(chart_policy.get("position") or "end").strip().lower()  # end|chapter
+    chart_every_n = max(1, _to_int(chart_policy.get("every_n_chapters"), 2))
+    media_cursor = 0
+    media_index = 0
+    chapter_media_started = False
+
+    def _append_media_item(item: Any):
+        nonlocal media_index
+        path = item.get("path") if isinstance(item, dict) else item
+        caption = item.get("caption") if isinstance(item, dict) else None
+        try:
+            branded_path = _brand_image_with_logo(str(path))
+            path_to_add = branded_path or str(path)
+            doc.add_picture(str(path_to_add), width=Cm(14))
+            try:
+                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                pass
+            media_index += 1
+            if not caption:
+                try:
+                    name = Path(str(path)).name
+                except Exception:
+                    name = str(path)
+                if "boq_stats_" in str(name):
+                    caption = "BoQ 统计概览"
+                else:
+                    caption = name
+            pc = doc.add_paragraph(f"图{media_index}：{caption}")
+            apply_paragraph(pc)
+            try:
+                pc.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                pass
+        except Exception:
+            pe = doc.add_paragraph(f"图片加载失败：{path}")
+            apply_paragraph(pe)
 
     # 目录/章节内容
     for idx, sec in enumerate(sections):
@@ -469,6 +509,16 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             if style_cfg.get("enforce_chapter_pages") and estimated_pages < target_pages:
                 for _ in range(target_pages - estimated_pages):
                     doc.add_page_break()
+
+        # Chapter-level chart insertion policy (best-effort).
+        if media_all and chart_enabled and chart_position in {"chapter", "per_chapter", "by_chapter"}:
+            if ((idx + 1) % chart_every_n == 0) and media_cursor < len(media_all):
+                if not chapter_media_started:
+                    hmc = doc.add_heading("图表与插图（按章节分布）", level=2)
+                    apply_paragraph(hmc, is_title=True)
+                    chapter_media_started = True
+                _append_media_item(media_all[media_cursor])
+                media_cursor += 1
 
     # 图纸证据索引（可追溯）
     drawing_index = data.get("drawing_index") or {}
@@ -657,45 +707,14 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             row[1].text = val
             row[2].text = chs
 
-    # 图表/图片
-    media = data.get("media") or []
-    if media:
+    # Remaining chart/images (default: append at end, or chapter mode leftover).
+    remaining_media = media_all[media_cursor:] if isinstance(media_all, list) else []
+    if remaining_media:
         doc.add_page_break()
         hm = doc.add_heading("图表与插图", level=1)
         apply_paragraph(hm, is_title=True)
-        img_no = 0
-        for item in media:
-            path = item.get("path") if isinstance(item, dict) else item
-            caption = item.get("caption") if isinstance(item, dict) else None
-            try:
-                # Corner branding for all images (except the logo image itself).
-                branded_path = _brand_image_with_logo(str(path))
-                path_to_add = branded_path or str(path)
-                doc.add_picture(str(path_to_add), width=Cm(14))
-                # Center the picture paragraph (best-effort).
-                try:
-                    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                except Exception:
-                    pass
-                img_no += 1
-                if not caption:
-                    try:
-                        name = Path(str(path)).name
-                    except Exception:
-                        name = str(path)
-                    if "boq_stats_" in str(name):
-                        caption = "BoQ 统计概览"
-                    else:
-                        caption = name
-                pc = doc.add_paragraph(f"图{img_no}：{caption}")
-                apply_paragraph(pc)
-                try:
-                    pc.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                except Exception:
-                    pass
-            except Exception:
-                pe = doc.add_paragraph(f"图片加载失败：{path}")
-                apply_paragraph(pe)
+        for item in remaining_media:
+            _append_media_item(item)
 
     # 章节版式回执
     if layout_receipts:
@@ -1030,6 +1049,7 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
     recs = qc.get("auto_revision_suggestions") if isinstance(qc.get("auto_revision_suggestions"), list) else []
     param_trace = data.get("param_trace") if isinstance(data.get("param_trace"), dict) else {}
     plan_consistency = data.get("plan_consistency") if isinstance(data.get("plan_consistency"), dict) else {}
+    cpm_receipt = plan_consistency.get("cpm") if isinstance(plan_consistency.get("cpm"), dict) else {}
     boq_focus = data.get("boq_focus") if isinstance(data.get("boq_focus"), dict) else {}
     four_new_recs = boq_focus.get("four_new_recommendations") if isinstance(boq_focus.get("four_new_recommendations"), list) else []
     variant_similarity = data.get("variant_similarity") if isinstance(data.get("variant_similarity"), dict) else {}
@@ -1058,6 +1078,7 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
     receipt_keys = receipt.get("keys") if isinstance(receipt.get("keys"), dict) else {}
 
     has_plan_consistency = bool(plan_consistency and (plan_consistency.get("canonical") or plan_consistency.get("changed")))
+    has_cpm_receipt = bool(cpm_receipt and (cpm_receipt.get("computed") or cpm_receipt.get("activities")))
     has_variant_similarity = bool(variant_similarity and int(variant_similarity.get("variant_count") or 0) >= 2)
 
     # Sync variant-similarity findings into issues/revision sheets so reviewers don't need JSON.
@@ -1183,6 +1204,7 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
         or four_new_recs
         or receipt_keys
         or has_plan_consistency
+        or has_cpm_receipt
         or has_variant_similarity
         or has_drawing_index
         or has_standard_index
@@ -1306,6 +1328,19 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
                 ("variant_similarity_relaxed_flagged_count", variant_similarity.get("relaxed_flagged_count")),
             ]
         )
+    if has_cpm_receipt:
+        computed = cpm_receipt.get("computed") if isinstance(cpm_receipt.get("computed"), dict) else {}
+        cpm_conflicts = cpm_receipt.get("conflicts") if isinstance(cpm_receipt.get("conflicts"), list) else []
+        summary_pairs.extend(
+            [
+                ("cpm_ok", bool(cpm_receipt.get("ok"))),
+                ("cpm_algorithm", str(cpm_receipt.get("algorithm") or "")),
+                ("cpm_duration_days", computed.get("project_duration_days")),
+                ("cpm_resource_peak", computed.get("resource_peak")),
+                ("cpm_critical_interval_days", computed.get("critical_interval_days")),
+                ("cpm_conflict_count", len(cpm_conflicts)),
+            ]
+        )
 
     for k, v in summary_pairs:
         _write(ws, row, 1, str(k), header=True)
@@ -1396,18 +1431,39 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
     if has_drawing_index:
         if drawings:
             ws = wb.create_sheet("drawings")
-            headers = ["filename", "sha256", "pages", "keywords", "preview"]
+            headers = [
+                "filename",
+                "sha256",
+                "pages",
+                "keywords",
+                "topology_nodes",
+                "topology_edges",
+                "topology_components",
+                "topology_endpoints",
+                "topology_trunk_length",
+                "topology_suggested_flow_segments",
+                "topology_confidence",
+                "preview",
+            ]
             for c, h in enumerate(headers, start=1):
                 _write(ws, 1, c, h, header=True)
             for r, d in enumerate(drawings[:300], start=2):
                 if not isinstance(d, dict):
                     continue
                 kws = _join_list(d.get("keywords") or [], sep="、", limit=12)
+                topo = d.get("topology") if isinstance(d.get("topology"), dict) else {}
                 vals = [
                     str(d.get("filename") or ""),
                     str(d.get("sha256") or "")[:12],
                     _fmt_num(d.get("pages")),
                     kws,
+                    _fmt_num(topo.get("nodes_count")),
+                    _fmt_num(topo.get("edges_count")),
+                    _fmt_num(topo.get("components_count")),
+                    _fmt_num(topo.get("endpoint_count")),
+                    _fmt_num(topo.get("trunk_length")),
+                    _fmt_num(topo.get("suggested_flow_segments")),
+                    str(topo.get("topology_confidence") or ""),
                     str(d.get("preview") or ""),
                 ]
                 for c, v in enumerate(vals, start=1):
@@ -1416,7 +1472,14 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
             _set_width(ws, 2, 18)
             _set_width(ws, 3, 10)
             _set_width(ws, 4, 48)
-            _set_width(ws, 5, 78)
+            _set_width(ws, 5, 12)
+            _set_width(ws, 6, 12)
+            _set_width(ws, 7, 12)
+            _set_width(ws, 8, 12)
+            _set_width(ws, 9, 14)
+            _set_width(ws, 10, 16)
+            _set_width(ws, 11, 14)
+            _set_width(ws, 12, 78)
 
         if drawing_binds:
             ws = wb.create_sheet("drawing_bindings")
@@ -1563,6 +1626,93 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
         _write(ws, row, 2, "；".join(ch_titles[:60]))
         _set_width(ws, 1, 24)
         _set_width(ws, 2, 90)
+
+    # CPM deterministic schedule receipt (NetworkX DAG + critical path)
+    if has_cpm_receipt:
+        ws = wb.create_sheet("cpm")
+        row = 1
+        computed = cpm_receipt.get("computed") if isinstance(cpm_receipt.get("computed"), dict) else {}
+        mentioned = cpm_receipt.get("mentioned") if isinstance(cpm_receipt.get("mentioned"), dict) else {}
+        graph = cpm_receipt.get("graph") if isinstance(cpm_receipt.get("graph"), dict) else {}
+        critical_path = cpm_receipt.get("critical_path") if isinstance(cpm_receipt.get("critical_path"), list) else []
+        conflict_rows = cpm_receipt.get("conflicts") if isinstance(cpm_receipt.get("conflicts"), list) else []
+        for k, v in [
+            ("ok", bool(cpm_receipt.get("ok"))),
+            ("algorithm", str(cpm_receipt.get("algorithm") or "")),
+            ("mentioned_工期", mentioned.get("工期")),
+            ("mentioned_资源峰值", mentioned.get("资源峰值")),
+            ("mentioned_关键线路间隔", mentioned.get("关键线路间隔")),
+            ("computed_project_duration_days", computed.get("project_duration_days")),
+            ("computed_resource_peak", computed.get("resource_peak")),
+            ("computed_critical_interval_days", computed.get("critical_interval_days")),
+            ("critical_path", " -> ".join([str(x) for x in critical_path[:40]])),
+            ("graph_node_count", graph.get("node_count")),
+            ("graph_edge_count", graph.get("edge_count")),
+            ("cycle_edges_removed", _join_list(graph.get("cycle_edges_removed") or [], sep="；", limit=20)),
+            ("conflict_count", len(conflict_rows)),
+        ]:
+            _write(ws, row, 1, str(k), header=True)
+            _write(ws, row, 2, v if not isinstance(v, (dict, list)) else _join_list(v))
+            row += 1
+        row += 1
+        _write(ws, row, 1, "metric", header=True)
+        _write(ws, row, 2, "mentioned", header=True)
+        _write(ws, row, 3, "computed", header=True)
+        _write(ws, row, 4, "tolerance", header=True)
+        _write(ws, row, 5, "delta", header=True)
+        row += 1
+        for c in conflict_rows[:60]:
+            if not isinstance(c, dict):
+                continue
+            _write(ws, row, 1, str(c.get("metric") or ""))
+            _write(ws, row, 2, _fmt_num(c.get("mentioned")))
+            _write(ws, row, 3, _fmt_num(c.get("computed")))
+            _write(ws, row, 4, _fmt_num(c.get("tolerance")))
+            _write(ws, row, 5, _fmt_num(c.get("delta")))
+            row += 1
+        row += 1
+        _write(ws, row, 1, "activity_id", header=True)
+        _write(ws, row, 2, "name", header=True)
+        _write(ws, row, 3, "deps", header=True)
+        _write(ws, row, 4, "duration_days", header=True)
+        _write(ws, row, 5, "resource_units", header=True)
+        _write(ws, row, 6, "ES", header=True)
+        _write(ws, row, 7, "EF", header=True)
+        _write(ws, row, 8, "LS", header=True)
+        _write(ws, row, 9, "LF", header=True)
+        _write(ws, row, 10, "total_float", header=True)
+        _write(ws, row, 11, "critical", header=True)
+        row += 1
+        for act in (cpm_receipt.get("activities") or [])[:600]:
+            if not isinstance(act, dict):
+                continue
+            vals = [
+                str(act.get("id") or ""),
+                str(act.get("name") or ""),
+                _join_list(act.get("deps") or [], sep="、", limit=20),
+                _fmt_num(act.get("duration_days")),
+                _fmt_num(act.get("resource_units")),
+                _fmt_num(act.get("es")),
+                _fmt_num(act.get("ef")),
+                _fmt_num(act.get("ls")),
+                _fmt_num(act.get("lf")),
+                _fmt_num(act.get("total_float")),
+                "Y" if act.get("critical") else "N",
+            ]
+            for c, v in enumerate(vals, start=1):
+                _write(ws, row, c, v)
+            row += 1
+        _set_width(ws, 1, 18)
+        _set_width(ws, 2, 28)
+        _set_width(ws, 3, 22)
+        _set_width(ws, 4, 12)
+        _set_width(ws, 5, 12)
+        _set_width(ws, 6, 10)
+        _set_width(ws, 7, 10)
+        _set_width(ws, 8, 10)
+        _set_width(ws, 9, 10)
+        _set_width(ws, 10, 12)
+        _set_width(ws, 11, 10)
 
     # Four-new recommendations (editable library + BoQ/process matching)
     if isinstance(four_new_recs, list) and four_new_recs:
