@@ -74,6 +74,8 @@ async def test_multi_agent_pipeline_run(tmp_path: Path) -> None:
     assert len(result["sections"]) == len(result["index_matrix"]["index_matrix"])
     assert result["agents"]["graph_agent"]["report"]["ok"] is True
     assert result["agents"]["audit_agent"]["result"]["ok"] is True
+    assert isinstance(result.get("gemini_context_packets"), list)
+    assert len(result["gemini_context_packets"]) == len(result["index_matrix"]["index_matrix"])
 
 
 @pytest.mark.asyncio
