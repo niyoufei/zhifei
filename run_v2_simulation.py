@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
+from backend.zhifei_autoplan.v2.kg_paths import resolve_default_kg_root
 from backend.zhifei_autoplan.v2.multi_agent_pipeline import MultiAgentDocPipeline
 
 
@@ -89,7 +90,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--kg-root",
-        default="/Users/youfeini/Desktop/文档生成系统/知识图谱",
+        default=str(resolve_default_kg_root()),
         help="Knowledge graph root directory.",
     )
     parser.add_argument(

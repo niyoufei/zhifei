@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
+from backend.zhifei_autoplan.v2.kg_paths import resolve_default_kg_root
 from backend.zhifei_autoplan.v2.multi_agent_pipeline import MultiAgentDocPipeline
 
 
@@ -79,7 +80,7 @@ def _arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--boq", required=True, help="工程量清单路径（Excel/CSV/PDF）。")
     p.add_argument(
         "--kg-root",
-        default="/Users/youfeini/Desktop/文档生成系统/知识图谱",
+        default=str(resolve_default_kg_root()),
         help="知识图谱根目录。",
     )
     p.add_argument(

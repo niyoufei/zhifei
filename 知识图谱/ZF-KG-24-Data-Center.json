@@ -1,0 +1,2613 @@
+{
+  "name": "ZF-KG-24-Data-Center",
+  "meta": {
+    "version": "V20.1 DNA-Lock",
+    "activation_key": "智飞工程"
+  },
+  "knowledge_database": {
+    "02_Resilient_Power_Cooling": {
+      "nodes": [
+        {
+          "node_id": "DC-ENERGY-002-V20.1",
+          "name": "AI极致能效制冷(PUE锁)",
+          "qt_tag": [
+            "14",
+            "Efficiency"
+          ],
+          "content": {
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程'"
+            },
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre",
+            "operation_desc_mediocre": "采用高效冷机，根据负载调节运行。",
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行AI极致能效制冷(PUE锁)安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "trigger_keywords": [
+                  "PUE",
+                  "双碳",
+                  "算力枢纽"
+                ],
+                "response_template": "承诺年均PUE<1.15。AI实时计算万级测温点热场，动态调节风机转速，消除局部热点同时极致节能。"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "argument": "传统BA控制逻辑粗放，PUE难以达标。我方AI算法实现'按需制冷'。",
+                "trap_logic": "建议要求演示'AI热场仿真与控制'闭环逻辑。"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "东数西算",
+                  "绿色数据中心"
+                ],
+                "innovation_score": "Top_5%",
+                "score_weight": "+3_Points"
+              }
+            }
+          },
+          "safety_level": "low",
+          "applicable_conditions": {
+            "climate": "常规施工气候（-10~35℃，风力<=6级）",
+            "geology": "按勘察报告执行，异常地层专项复核",
+            "site_constraints": "临边临电与交叉作业需审批后实施",
+            "construction_window": "按总控计划与作业票执行"
+          },
+          "resource_requirements": {
+            "manpower": {
+              "crew_size": "8-12人/班",
+              "checker_role": "质量员"
+            },
+            "equipment": {
+              "primary": [
+                "标准施工机械1套"
+              ],
+              "backup": [
+                "应急设备1套"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "100%批次进场验收"
+            },
+            "inspection_frequency": "2次/班"
+          },
+          "source_hierarchy": "国标",
+          "reference_standard": [
+            "GB 50300-2013 建筑工程施工质量验收统一标准",
+            "JGJ 59-2011 建筑施工安全检查标准",
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "is_auto_generated": true,
+          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_variables": [
+            "quantity",
+            "productivity_per_day"
+          ],
+          "requires": [],
+          "mitigates": [
+            "DC-ASSET-001-V20.1"
+          ],
+          "conflicts_with": [
+            "DC-ASSET-001-V20.1"
+          ],
+          "numeric_sources": [
+            {
+              "parameter": "formula_result",
+              "formula": "quantity / max(productivity_per_day, 1)",
+              "source_text": "formula_expression"
+            }
+          ],
+          "quantitative_indices": {
+            "duration_index": 0.5,
+            "risk_index": 0.38,
+            "resource_density_index": 0.8333,
+            "complexity_index": 0.558
+          },
+          "schedule_constraints": {
+            "critical_path_hint": [
+              "DC-ENERGY-002-V20.1",
+              "DC-ASSET-001-V20.1"
+            ],
+            "min_process_interval_days": 1,
+            "inference_method": "default_cpm_anchor"
+          },
+          "scoring_points": [
+            {
+              "point_id": "质量-NODE",
+              "dimension": "质量",
+              "description": "质量评分点响应",
+              "required_keywords": [
+                "质量",
+                "验收",
+                "合格",
+                "缺陷",
+                "平整度",
+                "强度"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "安全-NODE",
+              "dimension": "安全",
+              "description": "安全评分点响应",
+              "required_keywords": [
+                "安全",
+                "危险",
+                "防护",
+                "应急",
+                "事故",
+                "临电"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "进度-NODE",
+              "dimension": "进度",
+              "description": "进度评分点响应",
+              "required_keywords": [
+                "工期",
+                "进度",
+                "节点",
+                "里程碑",
+                "关键线路",
+                "计划"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "环保-NODE",
+              "dimension": "环保",
+              "description": "环保评分点响应",
+              "required_keywords": [
+                "环保",
+                "扬尘",
+                "噪声",
+                "污水",
+                "固废",
+                "节能"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "重难点-NODE",
+              "dimension": "重难点",
+              "description": "重难点评分点响应",
+              "required_keywords": [
+                "重难点",
+                "难点",
+                "关键工序",
+                "复杂",
+                "深基坑",
+                "大体积"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            }
+          ],
+          "fail_fast_hooks": {
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行质量控制，参数阈值=95%，检查频次=2次/班，由质量员复核。"
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
+          },
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "professional_domain": "railway",
+          "retrieval_hints": {
+            "must_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急"
+            ],
+            "optional_keywords": [
+              "railway"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "安全",
+            "action": "执行安全参数化控制",
+            "parameter": {
+              "inspection_frequency_per_shift": 2,
+              "emergency_response_minutes": 30,
+              "leakage_protector_ma": 30
+            },
+            "checker": "安全员",
+            "verification": "复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        },
+        {
+          "node_id": "ZF-KG-24-Data-Center-M1-质量",
+          "name": "质量响应控制补强节点",
+          "qt_tag": [
+            "质量",
+            "module1_patch"
+          ],
+          "keywords": [
+            "质量",
+            "质量",
+            "验收",
+            "合格",
+            "缺陷",
+            "平整度",
+            "强度",
+            "检验",
+            "抽检",
+            "试验",
+            "一次验收合格率"
+          ],
+          "source_hierarchy": "国标",
+          "is_auto_generated": true,
+          "reference_standard": [
+            "GB 50300-2013 建筑工程施工质量验收统一标准",
+            "JGJ 59-2011 建筑施工安全检查标准",
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "applicable_conditions": {
+            "climate": "常规施工气候",
+            "site_constraints": "按现场审批流程执行"
+          },
+          "resource_requirements": {
+            "manpower": {
+              "crew_size": "8-12人/班",
+              "checker_role": "质量员"
+            },
+            "inspection_frequency": "2次/班"
+          },
+          "safety_level": "medium",
+          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_variables": [
+            "quantity",
+            "productivity_per_day"
+          ],
+          "numeric_sources": [
+            {
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch"
+            },
+            {
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch"
+            }
+          ],
+          "quantitative_indices": {
+            "duration_index": 0.6,
+            "risk_index": 0.55,
+            "resource_density_index": 0.55,
+            "complexity_index": 0.6
+          },
+          "schedule_constraints": {
+            "critical_path_hint": [
+              "测量放线",
+              "基础工程",
+              "主体结构"
+            ],
+            "min_process_interval_days": 1
+          },
+          "content": {
+            "operation_desc_mediocre": "按常规流程执行质量控制。",
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行质量响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+            },
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+            }
+          },
+          "scoring_points": [
+            {
+              "point_id": "质量-NODE",
+              "dimension": "质量",
+              "description": "质量评分点响应",
+              "required_keywords": [
+                "质量",
+                "验收",
+                "合格",
+                "缺陷",
+                "平整度",
+                "强度"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "安全-NODE",
+              "dimension": "安全",
+              "description": "安全评分点响应",
+              "required_keywords": [
+                "安全",
+                "危险",
+                "防护",
+                "应急",
+                "事故",
+                "临电"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "进度-NODE",
+              "dimension": "进度",
+              "description": "进度评分点响应",
+              "required_keywords": [
+                "工期",
+                "进度",
+                "节点",
+                "里程碑",
+                "关键线路",
+                "计划"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            }
+          ],
+          "fail_fast_hooks": {
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行质量控制，参数阈值=95%，检查频次=2次/班，由质量员复核。"
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
+          },
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "professional_domain": "railway",
+          "retrieval_hints": {
+            "must_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急"
+            ],
+            "optional_keywords": [
+              "质量",
+              "验收",
+              "合格",
+              "缺陷",
+              "平整度",
+              "强度",
+              "railway"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "安全",
+            "action": "执行安全参数化控制",
+            "parameter": {
+              "inspection_frequency_per_shift": 2,
+              "emergency_response_minutes": 30,
+              "leakage_protector_ma": 30
+            },
+            "checker": "安全员",
+            "verification": "复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        },
+        {
+          "node_id": "ZF-KG-24-Data-Center-M1-安全",
+          "name": "安全响应控制补强节点",
+          "qt_tag": [
+            "安全",
+            "module1_patch"
+          ],
+          "keywords": [
+            "安全",
+            "安全",
+            "危险",
+            "防护",
+            "应急",
+            "事故",
+            "临电",
+            "高处",
+            "消防",
+            "培训",
+            "危大工程"
+          ],
+          "source_hierarchy": "国标",
+          "is_auto_generated": true,
+          "reference_standard": [
+            "GB 50300-2013 建筑工程施工质量验收统一标准",
+            "JGJ 59-2011 建筑施工安全检查标准",
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "applicable_conditions": {
+            "climate": "常规施工气候",
+            "site_constraints": "按现场审批流程执行"
+          },
+          "resource_requirements": {
+            "manpower": {
+              "crew_size": "8-12人/班",
+              "checker_role": "安全员"
+            },
+            "inspection_frequency": "2次/班"
+          },
+          "safety_level": "high",
+          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_variables": [
+            "quantity",
+            "productivity_per_day"
+          ],
+          "numeric_sources": [
+            {
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch"
+            },
+            {
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch"
+            }
+          ],
+          "quantitative_indices": {
+            "duration_index": 0.6,
+            "risk_index": 0.7,
+            "resource_density_index": 0.55,
+            "complexity_index": 0.6
+          },
+          "schedule_constraints": {
+            "critical_path_hint": [
+              "测量放线",
+              "基础工程",
+              "主体结构"
+            ],
+            "min_process_interval_days": 1
+          },
+          "content": {
+            "operation_desc_mediocre": "按常规流程执行安全控制。",
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行安全响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+            },
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+            }
+          },
+          "scoring_points": [
+            {
+              "point_id": "安全-NODE",
+              "dimension": "安全",
+              "description": "安全评分点响应",
+              "required_keywords": [
+                "安全",
+                "危险",
+                "防护",
+                "应急",
+                "事故",
+                "临电"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "质量-NODE",
+              "dimension": "质量",
+              "description": "质量评分点响应",
+              "required_keywords": [
+                "质量",
+                "验收",
+                "合格",
+                "缺陷",
+                "平整度",
+                "强度"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "进度-NODE",
+              "dimension": "进度",
+              "description": "进度评分点响应",
+              "required_keywords": [
+                "工期",
+                "进度",
+                "节点",
+                "里程碑",
+                "关键线路",
+                "计划"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            }
+          ],
+          "fail_fast_hooks": {
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行安全控制，参数阈值=95%，检查频次=2次/班，由安全员复核。"
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
+          },
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "professional_domain": "railway",
+          "retrieval_hints": {
+            "must_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急"
+            ],
+            "optional_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急",
+              "事故",
+              "临电",
+              "railway"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "安全",
+            "action": "执行安全参数化控制",
+            "parameter": {
+              "inspection_frequency_per_shift": 2,
+              "emergency_response_minutes": 30,
+              "leakage_protector_ma": 30
+            },
+            "checker": "安全员",
+            "verification": "复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        },
+        {
+          "node_id": "ZF-KG-24-Data-Center-M1-进度",
+          "name": "进度响应控制补强节点",
+          "qt_tag": [
+            "进度",
+            "module1_patch"
+          ],
+          "keywords": [
+            "进度",
+            "工期",
+            "进度",
+            "节点",
+            "里程碑",
+            "关键线路",
+            "计划",
+            "穿插",
+            "延误",
+            "赶工",
+            "总工期"
+          ],
+          "source_hierarchy": "国标",
+          "is_auto_generated": true,
+          "reference_standard": [
+            "GB 50300-2013 建筑工程施工质量验收统一标准",
+            "JGJ 59-2011 建筑施工安全检查标准",
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "applicable_conditions": {
+            "climate": "常规施工气候",
+            "site_constraints": "按现场审批流程执行"
+          },
+          "resource_requirements": {
+            "manpower": {
+              "crew_size": "8-12人/班",
+              "checker_role": "施工员"
+            },
+            "inspection_frequency": "2次/班"
+          },
+          "safety_level": "medium",
+          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_variables": [
+            "quantity",
+            "productivity_per_day"
+          ],
+          "numeric_sources": [
+            {
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch"
+            },
+            {
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch"
+            }
+          ],
+          "quantitative_indices": {
+            "duration_index": 0.6,
+            "risk_index": 0.55,
+            "resource_density_index": 0.55,
+            "complexity_index": 0.6
+          },
+          "schedule_constraints": {
+            "critical_path_hint": [
+              "测量放线",
+              "基础工程",
+              "主体结构"
+            ],
+            "min_process_interval_days": 1
+          },
+          "content": {
+            "operation_desc_mediocre": "按常规流程执行进度控制。",
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行进度响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+            },
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+            }
+          },
+          "scoring_points": [
+            {
+              "point_id": "进度-NODE",
+              "dimension": "进度",
+              "description": "进度评分点响应",
+              "required_keywords": [
+                "工期",
+                "进度",
+                "节点",
+                "里程碑",
+                "关键线路",
+                "计划"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "质量-NODE",
+              "dimension": "质量",
+              "description": "质量评分点响应",
+              "required_keywords": [
+                "质量",
+                "验收",
+                "合格",
+                "缺陷",
+                "平整度",
+                "强度"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "安全-NODE",
+              "dimension": "安全",
+              "description": "安全评分点响应",
+              "required_keywords": [
+                "安全",
+                "危险",
+                "防护",
+                "应急",
+                "事故",
+                "临电"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "重难点-NODE",
+              "dimension": "重难点",
+              "description": "重难点评分点响应",
+              "required_keywords": [
+                "重难点",
+                "难点",
+                "关键工序",
+                "复杂",
+                "深基坑",
+                "大体积"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "扣分点-NODE",
+              "dimension": "扣分点",
+              "description": "扣分点评分点响应",
+              "required_keywords": [
+                "扣分",
+                "否决",
+                "废标",
+                "处罚",
+                "违约",
+                "偏差"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            }
+          ],
+          "fail_fast_hooks": {
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行进度控制，参数阈值=95%，检查频次=2次/班，由施工员复核。"
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
+          },
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "professional_domain": "railway",
+          "retrieval_hints": {
+            "must_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急"
+            ],
+            "optional_keywords": [
+              "进度",
+              "工期",
+              "节点",
+              "里程碑",
+              "关键线路",
+              "计划",
+              "railway"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "安全",
+            "action": "执行安全参数化控制",
+            "parameter": {
+              "inspection_frequency_per_shift": 2,
+              "emergency_response_minutes": 30,
+              "leakage_protector_ma": 30
+            },
+            "checker": "安全员",
+            "verification": "复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        },
+        {
+          "node_id": "ZF-KG-24-Data-Center-M1-重难点",
+          "name": "重难点响应控制补强节点",
+          "qt_tag": [
+            "重难点",
+            "module1_patch"
+          ],
+          "keywords": [
+            "重难点",
+            "重难点",
+            "难点",
+            "关键工序",
+            "复杂",
+            "深基坑",
+            "大体积",
+            "高风险",
+            "控制点",
+            "专项",
+            "高支模"
+          ],
+          "source_hierarchy": "国标",
+          "is_auto_generated": true,
+          "reference_standard": [
+            "GB 50300-2013 建筑工程施工质量验收统一标准",
+            "JGJ 59-2011 建筑施工安全检查标准",
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "applicable_conditions": {
+            "climate": "常规施工气候",
+            "site_constraints": "按现场审批流程执行"
+          },
+          "resource_requirements": {
+            "manpower": {
+              "crew_size": "8-12人/班",
+              "checker_role": "总工"
+            },
+            "inspection_frequency": "2次/班"
+          },
+          "safety_level": "high",
+          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_variables": [
+            "quantity",
+            "productivity_per_day"
+          ],
+          "numeric_sources": [
+            {
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch"
+            },
+            {
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch"
+            }
+          ],
+          "quantitative_indices": {
+            "duration_index": 0.6,
+            "risk_index": 0.7,
+            "resource_density_index": 0.55,
+            "complexity_index": 0.6
+          },
+          "schedule_constraints": {
+            "critical_path_hint": [
+              "测量放线",
+              "基础工程",
+              "主体结构"
+            ],
+            "min_process_interval_days": 1
+          },
+          "content": {
+            "operation_desc_mediocre": "按常规流程执行重难点控制。",
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行重难点响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+            },
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+            }
+          },
+          "scoring_points": [
+            {
+              "point_id": "重难点-NODE",
+              "dimension": "重难点",
+              "description": "重难点评分点响应",
+              "required_keywords": [
+                "重难点",
+                "难点",
+                "关键工序",
+                "复杂",
+                "深基坑",
+                "大体积"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "质量-NODE",
+              "dimension": "质量",
+              "description": "质量评分点响应",
+              "required_keywords": [
+                "质量",
+                "验收",
+                "合格",
+                "缺陷",
+                "平整度",
+                "强度"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "安全-NODE",
+              "dimension": "安全",
+              "description": "安全评分点响应",
+              "required_keywords": [
+                "安全",
+                "危险",
+                "防护",
+                "应急",
+                "事故",
+                "临电"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "进度-NODE",
+              "dimension": "进度",
+              "description": "进度评分点响应",
+              "required_keywords": [
+                "工期",
+                "进度",
+                "节点",
+                "里程碑",
+                "关键线路",
+                "计划"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            }
+          ],
+          "fail_fast_hooks": {
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行重难点控制，参数阈值=95%，检查频次=2次/班，由总工复核。"
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
+          },
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "professional_domain": "railway",
+          "retrieval_hints": {
+            "must_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急"
+            ],
+            "optional_keywords": [
+              "重难点",
+              "难点",
+              "关键工序",
+              "复杂",
+              "深基坑",
+              "大体积",
+              "railway"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "安全",
+            "action": "执行安全参数化控制",
+            "parameter": {
+              "inspection_frequency_per_shift": 2,
+              "emergency_response_minutes": 30,
+              "leakage_protector_ma": 30
+            },
+            "checker": "安全员",
+            "verification": "复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        },
+        {
+          "node_id": "ZF-KG-24-Data-Center-M1-扣分点",
+          "name": "扣分点响应控制补强节点",
+          "qt_tag": [
+            "扣分点",
+            "module1_patch"
+          ],
+          "keywords": [
+            "扣分点",
+            "扣分",
+            "否决",
+            "废标",
+            "处罚",
+            "违约",
+            "偏差",
+            "不响应",
+            "遗漏",
+            "失分",
+            "一票否决"
+          ],
+          "source_hierarchy": "国标",
+          "is_auto_generated": true,
+          "reference_standard": [
+            "GB 50300-2013 建筑工程施工质量验收统一标准",
+            "JGJ 59-2011 建筑施工安全检查标准",
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "applicable_conditions": {
+            "climate": "常规施工气候",
+            "site_constraints": "按现场审批流程执行"
+          },
+          "resource_requirements": {
+            "manpower": {
+              "crew_size": "8-12人/班",
+              "checker_role": "项目经理"
+            },
+            "inspection_frequency": "2次/班"
+          },
+          "safety_level": "medium",
+          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_variables": [
+            "quantity",
+            "productivity_per_day"
+          ],
+          "numeric_sources": [
+            {
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch"
+            },
+            {
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch"
+            }
+          ],
+          "quantitative_indices": {
+            "duration_index": 0.6,
+            "risk_index": 0.55,
+            "resource_density_index": 0.55,
+            "complexity_index": 0.6
+          },
+          "schedule_constraints": {
+            "critical_path_hint": [
+              "测量放线",
+              "基础工程",
+              "主体结构"
+            ],
+            "min_process_interval_days": 1
+          },
+          "content": {
+            "operation_desc_mediocre": "按常规流程执行扣分点控制。",
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行扣分点响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+            },
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+            }
+          },
+          "scoring_points": [
+            {
+              "point_id": "扣分点-NODE",
+              "dimension": "扣分点",
+              "description": "扣分点评分点响应",
+              "required_keywords": [
+                "扣分",
+                "否决",
+                "废标",
+                "处罚",
+                "违约",
+                "偏差"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "质量-NODE",
+              "dimension": "质量",
+              "description": "质量评分点响应",
+              "required_keywords": [
+                "质量",
+                "验收",
+                "合格",
+                "缺陷",
+                "平整度",
+                "强度"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "安全-NODE",
+              "dimension": "安全",
+              "description": "安全评分点响应",
+              "required_keywords": [
+                "安全",
+                "危险",
+                "防护",
+                "应急",
+                "事故",
+                "临电"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "进度-NODE",
+              "dimension": "进度",
+              "description": "进度评分点响应",
+              "required_keywords": [
+                "工期",
+                "进度",
+                "节点",
+                "里程碑",
+                "关键线路",
+                "计划"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            }
+          ],
+          "fail_fast_hooks": {
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行扣分点控制，参数阈值=95%，检查频次=2次/班，由项目经理复核。"
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
+          },
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "professional_domain": "railway",
+          "retrieval_hints": {
+            "must_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急"
+            ],
+            "optional_keywords": [
+              "扣分点",
+              "扣分",
+              "否决",
+              "废标",
+              "处罚",
+              "违约",
+              "railway"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "安全",
+            "action": "执行安全参数化控制",
+            "parameter": {
+              "inspection_frequency_per_shift": 2,
+              "emergency_response_minutes": 30,
+              "leakage_protector_ma": 30
+            },
+            "checker": "安全员",
+            "verification": "复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        },
+        {
+          "node_id": "ZF-KG-24-Data-Center-M2-PROC-MAP",
+          "name": "清单-工序-资源映射补强节点",
+          "qt_tag": [
+            "module2_patch",
+            "process_mapping"
+          ],
+          "keywords": [
+            "测量",
+            "放线",
+            "测量放线",
+            "土方",
+            "开挖",
+            "回填",
+            "土方工程",
+            "桩",
+            "基础",
+            "承台",
+            "垫层",
+            "基础工程",
+            "钢筋",
+            "模板",
+            "混凝土",
+            "主体结构",
+            "砌体",
+            "抹灰",
+            "屋面",
+            "防水",
+            "围护与建筑构造",
+            "管道",
+            "电缆",
+            "桥架",
+            "暖通",
+            "消防",
+            "机电安装",
+            "装修",
+            "涂料",
+            "门窗",
+            "幕墙",
+            "装饰装修",
+            "道路",
+            "绿化",
+            "附属",
+            "场地",
+            "室外附属"
+          ],
+          "process_catalog": [
+            {
+              "process": "测量放线",
+              "keywords": [
+                "测量",
+                "放线"
+              ],
+              "resources": [
+                "专业班组",
+                "关键机械"
+              ],
+              "min_interval_days": 1
+            },
+            {
+              "process": "土方工程",
+              "keywords": [
+                "土方",
+                "开挖",
+                "回填"
+              ],
+              "resources": [
+                "专业班组",
+                "关键机械"
+              ],
+              "min_interval_days": 1
+            },
+            {
+              "process": "基础工程",
+              "keywords": [
+                "桩",
+                "基础",
+                "承台",
+                "垫层"
+              ],
+              "resources": [
+                "专业班组",
+                "关键机械"
+              ],
+              "min_interval_days": 1
+            },
+            {
+              "process": "主体结构",
+              "keywords": [
+                "钢筋",
+                "模板",
+                "混凝土"
+              ],
+              "resources": [
+                "专业班组",
+                "关键机械"
+              ],
+              "min_interval_days": 1
+            },
+            {
+              "process": "围护与建筑构造",
+              "keywords": [
+                "砌体",
+                "抹灰",
+                "屋面",
+                "防水"
+              ],
+              "resources": [
+                "专业班组",
+                "关键机械"
+              ],
+              "min_interval_days": 1
+            },
+            {
+              "process": "机电安装",
+              "keywords": [
+                "管道",
+                "电缆",
+                "桥架",
+                "暖通",
+                "消防"
+              ],
+              "resources": [
+                "专业班组",
+                "关键机械"
+              ],
+              "min_interval_days": 1
+            },
+            {
+              "process": "装饰装修",
+              "keywords": [
+                "装修",
+                "涂料",
+                "门窗",
+                "幕墙"
+              ],
+              "resources": [
+                "专业班组",
+                "关键机械"
+              ],
+              "min_interval_days": 1
+            },
+            {
+              "process": "室外附属",
+              "keywords": [
+                "道路",
+                "绿化",
+                "附属",
+                "场地"
+              ],
+              "resources": [
+                "专业班组",
+                "关键机械"
+              ],
+              "min_interval_days": 1
+            }
+          ],
+          "source_hierarchy": "国标",
+          "is_auto_generated": true,
+          "reference_standard": [
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50202-2018 建筑地基基础工程施工质量验收标准"
+          ],
+          "applicable_conditions": {
+            "construction_window": "按总控网络计划执行"
+          },
+          "resource_requirements": {
+            "manpower": {
+              "crew_size": "10人/班",
+              "checker_role": "施工员"
+            },
+            "equipment": {
+              "primary": [
+                "主机械1套"
+              ],
+              "backup": [
+                "备用机械1套"
+              ]
+            }
+          },
+          "safety_level": "medium",
+          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_variables": [
+            "quantity",
+            "productivity_per_day"
+          ],
+          "numeric_sources": [
+            {
+              "parameter": "min_process_interval_days",
+              "value": "1",
+              "unit": "天",
+              "source_text": "module2_patch"
+            },
+            {
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module2_patch"
+            }
+          ],
+          "quantitative_indices": {
+            "duration_index": 0.62,
+            "risk_index": 0.56,
+            "resource_density_index": 0.6,
+            "complexity_index": 0.59
+          },
+          "schedule_constraints": {
+            "critical_path_hint": [
+              "测量放线",
+              "土方工程",
+              "基础工程",
+              "主体结构",
+              "围护与建筑构造",
+              "机电安装",
+              "装饰装修",
+              "室外附属"
+            ],
+            "min_process_interval_days": 1
+          },
+          "content": {
+            "operation_desc_mediocre": "采用通用工序组织。",
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行清单-工序-资源映射补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+            },
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+            }
+          },
+          "scoring_points": [
+            {
+              "point_id": "质量-NODE",
+              "dimension": "质量",
+              "description": "质量评分点响应",
+              "required_keywords": [
+                "质量",
+                "验收",
+                "合格",
+                "缺陷",
+                "平整度",
+                "强度"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "安全-NODE",
+              "dimension": "安全",
+              "description": "安全评分点响应",
+              "required_keywords": [
+                "安全",
+                "危险",
+                "防护",
+                "应急",
+                "事故",
+                "临电"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "进度-NODE",
+              "dimension": "进度",
+              "description": "进度评分点响应",
+              "required_keywords": [
+                "工期",
+                "进度",
+                "节点",
+                "里程碑",
+                "关键线路",
+                "计划"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            }
+          ],
+          "fail_fast_hooks": {
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行质量控制，参数阈值=95%，检查频次=2次/班，由质量员复核。"
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
+          },
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "professional_domain": "mep",
+          "retrieval_hints": {
+            "must_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急"
+            ],
+            "optional_keywords": [
+              "测量",
+              "放线",
+              "测量放线",
+              "土方",
+              "开挖",
+              "回填",
+              "mep"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "安全",
+            "action": "执行安全参数化控制",
+            "parameter": {
+              "inspection_frequency_per_shift": 2,
+              "emergency_response_minutes": 30,
+              "leakage_protector_ma": 30
+            },
+            "checker": "安全员",
+            "verification": "复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        },
+        {
+          "node_id": "ZF-KG-24-Data-Center-FORM-PROG",
+          "name": "进度动态计算节点",
+          "node_type": "FormulaNode",
+          "qt_tag": [
+            "进度",
+            "gemini_formula"
+          ],
+          "keywords": [
+            "进度",
+            "工期",
+            "节点",
+            "里程碑",
+            "关键线路",
+            "bridge",
+            "公式",
+            "计算"
+          ],
+          "professional_domain": "bridge",
+          "source_hierarchy": "国标",
+          "reference_standard": [
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "formula_expression": "work_volume / max(productivity_per_day * crew_efficiency, 1)",
+          "formula_variables": [
+            "work_volume",
+            "productivity_per_day",
+            "crew_efficiency"
+          ],
+          "applicable_conditions": {
+            "scenario": "进度约束计算"
+          },
+          "resource_requirements": {
+            "critical_path_lag_days": 1,
+            "deviation_correction_hours": 24,
+            "milestone_hit_rate_percent": 100
+          },
+          "numeric_sources": [
+            {
+              "parameter": "critical_path_lag_days",
+              "value": "1",
+              "unit": ""
+            }
+          ],
+          "content": {
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+            },
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行进度动态计算节点进度工序定义，参数critical_path_lag_days=1、deviation_correction_hours=24、milestone_hit_rate_percent=100，施工员每班次核验1次；第二步（分析）：围绕计划偏差与资源冲突识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，施工员每班次检查2次；工序名称->参数->风险->控制->验证"
+            }
+          },
+          "retrieval_hints": {
+            "must_keywords": [
+              "进度",
+              "工期",
+              "节点",
+              "里程碑"
+            ],
+            "optional_keywords": [
+              "bridge",
+              "公式",
+              "计算"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "进度",
+            "action": "执行进度动态计算",
+            "parameter": {
+              "critical_path_lag_days": 1,
+              "deviation_correction_hours": 24,
+              "milestone_hit_rate_percent": 100
+            },
+            "checker": "施工员",
+            "verification": "计算结果复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        },
+        {
+          "node_id": "ZF-KG-24-Data-Center-FORM-RISK",
+          "name": "重难点动态计算节点",
+          "node_type": "FormulaNode",
+          "qt_tag": [
+            "重难点",
+            "gemini_formula"
+          ],
+          "keywords": [
+            "重难点",
+            "难点",
+            "关键工序",
+            "复杂",
+            "高风险",
+            "bridge",
+            "公式",
+            "计算"
+          ],
+          "professional_domain": "bridge",
+          "source_hierarchy": "国标",
+          "reference_standard": [
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "formula_expression": "complexity_index * risk_factor / max(specialist_workers, 1)",
+          "formula_variables": [
+            "complexity_index",
+            "risk_factor",
+            "specialist_workers"
+          ],
+          "applicable_conditions": {
+            "scenario": "重难点约束计算"
+          },
+          "resource_requirements": {
+            "risk_trigger_threshold_percent": 5,
+            "specialist_workers": 12,
+            "acceptance_loop_hours": 12
+          },
+          "numeric_sources": [
+            {
+              "parameter": "risk_trigger_threshold_percent",
+              "value": "5",
+              "unit": ""
+            }
+          ],
+          "content": {
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+            },
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行重难点动态计算节点重难点工序定义，参数risk_trigger_threshold_percent=5、specialist_workers=12、acceptance_loop_hours=12，技术负责人每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，技术负责人每班次检查2次；工序名称->参数->风险->控制->验证"
+            }
+          },
+          "retrieval_hints": {
+            "must_keywords": [
+              "重难点",
+              "难点",
+              "关键工序",
+              "复杂"
+            ],
+            "optional_keywords": [
+              "bridge",
+              "公式",
+              "计算"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "重难点",
+            "action": "执行重难点动态计算",
+            "parameter": {
+              "risk_trigger_threshold_percent": 5,
+              "specialist_workers": 12,
+              "acceptance_loop_hours": 12
+            },
+            "checker": "技术负责人",
+            "verification": "计算结果复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        }
+      ]
+    },
+    "03_Digital_Asset_Cabling": {
+      "nodes": [
+        {
+          "node_id": "DC-ASSET-001-V20.1",
+          "name": "资产RFID/UWB微观管控",
+          "qt_tag": [
+            "03",
+            "Asset"
+          ],
+          "content": {
+            "environment_sensing": {
+              "activation_signal": "Context CONTAINS '智飞工程'"
+            },
+            "operation_desc_premium": {
+              "desc": "第一步（定义）：执行资产RFID/UWB微观管控安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "trigger_keywords": [
+                  "资产盘点",
+                  "账实相符"
+                ],
+                "response_template": "实现服务器'上架即自动入账'，资产盘点耗时从数天缩短至秒级，账实相符率100%。"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "argument": "传统方案在“资产RFID/UWB微观管控”环节易出现参数失控与证据链断点。本方案通过量化阈值和岗位复核实现可审计闭环。",
+                "trap_logic": "核查对方是否提供“动作+参数+检查岗位+闭环证据”的完整链路。"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "质量安全",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
+            },
+            "operation_desc_mediocre": "采用常规工艺执行资产RFID/UWB微观管控，按既有验收条款与班组检查机制落地。"
+          },
+          "safety_level": "medium",
+          "applicable_conditions": {
+            "climate": "常规施工气候（-10~35℃，风力<=6级）",
+            "geology": "按勘察报告执行，异常地层专项复核",
+            "site_constraints": "临边临电与交叉作业需审批后实施",
+            "construction_window": "按总控计划与作业票执行"
+          },
+          "resource_requirements": {
+            "manpower": {
+              "crew_size": "8-12人/班",
+              "checker_role": "质量员"
+            },
+            "equipment": {
+              "primary": [
+                "标准施工机械1套"
+              ],
+              "backup": [
+                "应急设备1套"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "100%批次进场验收"
+            },
+            "inspection_frequency": "2次/班"
+          },
+          "source_hierarchy": "国标",
+          "reference_standard": [
+            "GB 50300-2013 建筑工程施工质量验收统一标准",
+            "JGJ 59-2011 建筑施工安全检查标准",
+            "GB/T 50326-2017 建设工程项目管理规范"
+          ],
+          "is_auto_generated": true,
+          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_variables": [
+            "quantity",
+            "productivity_per_day"
+          ],
+          "requires": [
+            "DC-ENERGY-002-V20.1"
+          ],
+          "mitigates": [
+            "DC-ENERGY-002-V20.1"
+          ],
+          "conflicts_with": [
+            "DC-ENERGY-002-V20.1"
+          ],
+          "numeric_sources": [
+            {
+              "parameter": "formula_result",
+              "formula": "quantity / max(productivity_per_day, 1)",
+              "source_text": "formula_expression"
+            }
+          ],
+          "quantitative_indices": {
+            "duration_index": 0.5,
+            "risk_index": 0.58,
+            "resource_density_index": 0.8333,
+            "complexity_index": 0.628
+          },
+          "schedule_constraints": {
+            "critical_path_hint": [
+              "DC-ENERGY-002-V20.1",
+              "DC-ASSET-001-V20.1"
+            ],
+            "min_process_interval_days": 1,
+            "inference_method": "default_cpm_anchor"
+          },
+          "scoring_points": [
+            {
+              "point_id": "质量-NODE",
+              "dimension": "质量",
+              "description": "质量评分点响应",
+              "required_keywords": [
+                "质量",
+                "验收",
+                "合格",
+                "缺陷",
+                "平整度",
+                "强度"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "安全-NODE",
+              "dimension": "安全",
+              "description": "安全评分点响应",
+              "required_keywords": [
+                "安全",
+                "危险",
+                "防护",
+                "应急",
+                "事故",
+                "临电"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "进度-NODE",
+              "dimension": "进度",
+              "description": "进度评分点响应",
+              "required_keywords": [
+                "工期",
+                "进度",
+                "节点",
+                "里程碑",
+                "关键线路",
+                "计划"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "环保-NODE",
+              "dimension": "环保",
+              "description": "环保评分点响应",
+              "required_keywords": [
+                "环保",
+                "扬尘",
+                "噪声",
+                "污水",
+                "固废",
+                "节能"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            },
+            {
+              "point_id": "重难点-NODE",
+              "dimension": "重难点",
+              "description": "重难点评分点响应",
+              "required_keywords": [
+                "重难点",
+                "难点",
+                "关键工序",
+                "复杂",
+                "深基坑",
+                "大体积"
+              ],
+              "match_mode": "any",
+              "boolean_rule": "any_keyword_hit"
+            }
+          ],
+          "fail_fast_hooks": {
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行质量控制，参数阈值=95%，检查频次=2次/班，由质量员复核。"
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
+          },
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "professional_domain": "railway",
+          "retrieval_hints": {
+            "must_keywords": [
+              "安全",
+              "危险",
+              "防护",
+              "应急"
+            ],
+            "optional_keywords": [
+              "railway"
+            ],
+            "negative_keywords": [
+              "空话",
+              "套话"
+            ]
+          },
+          "gemini_context_block": {
+            "dimension": "安全",
+            "action": "执行安全参数化控制",
+            "parameter": {
+              "inspection_frequency_per_shift": 2,
+              "emergency_response_minutes": 30,
+              "leakage_protector_ma": 30
+            },
+            "checker": "安全员",
+            "verification": "复核并留痕"
+          },
+          "gemini_usefulness_score": 97
+        }
+      ]
+    }
+  },
+  "module4_validation": {
+    "enabled": true,
+    "version": "v2.0",
+    "score_point_matrix": [
+      {
+        "point_id": "质量-SP-01",
+        "dimension": "质量",
+        "description": "质量评分点响应判定",
+        "required_keywords": [
+          "质量",
+          "验收",
+          "合格",
+          "缺陷",
+          "平整度",
+          "强度",
+          "检验",
+          "抽检"
+        ],
+        "match_mode": "any",
+        "boolean_rule": "any_keyword_hit"
+      },
+      {
+        "point_id": "安全-SP-02",
+        "dimension": "安全",
+        "description": "安全评分点响应判定",
+        "required_keywords": [
+          "安全",
+          "危险",
+          "防护",
+          "应急",
+          "事故",
+          "临电",
+          "高处",
+          "消防"
+        ],
+        "match_mode": "any",
+        "boolean_rule": "any_keyword_hit"
+      },
+      {
+        "point_id": "进度-SP-03",
+        "dimension": "进度",
+        "description": "进度评分点响应判定",
+        "required_keywords": [
+          "工期",
+          "进度",
+          "节点",
+          "里程碑",
+          "关键线路",
+          "计划",
+          "穿插",
+          "延误"
+        ],
+        "match_mode": "any",
+        "boolean_rule": "any_keyword_hit"
+      },
+      {
+        "point_id": "环保-SP-04",
+        "dimension": "环保",
+        "description": "环保评分点响应判定",
+        "required_keywords": [
+          "环保",
+          "扬尘",
+          "噪声",
+          "污水",
+          "固废",
+          "节能",
+          "低碳",
+          "绿色"
+        ],
+        "match_mode": "any",
+        "boolean_rule": "any_keyword_hit"
+      },
+      {
+        "point_id": "重难点-SP-05",
+        "dimension": "重难点",
+        "description": "重难点评分点响应判定",
+        "required_keywords": [
+          "重难点",
+          "难点",
+          "关键工序",
+          "复杂",
+          "深基坑",
+          "大体积",
+          "高风险",
+          "控制点"
+        ],
+        "match_mode": "any",
+        "boolean_rule": "any_keyword_hit"
+      },
+      {
+        "point_id": "扣分点-SP-06",
+        "dimension": "扣分点",
+        "description": "扣分点评分点响应判定",
+        "required_keywords": [
+          "扣分",
+          "否决",
+          "废标",
+          "处罚",
+          "违约",
+          "偏差",
+          "不响应",
+          "遗漏"
+        ],
+        "match_mode": "any",
+        "boolean_rule": "any_keyword_hit"
+      }
+    ],
+    "fail_fast_policy": {
+      "enabled": true,
+      "trigger_condition": "any_score_point_false",
+      "action": "raise_exception_and_abort_current_pass",
+      "cache_policy": "clear_failed_dimension_cache",
+      "max_retry": 3
+    },
+    "auto_rewrite_policy": {
+      "enabled": true,
+      "strategy": "targeted_dimension_rewrite",
+      "required_syntax": "Action + Parameter + Checker",
+      "template": "执行{dimension}控制，参数阈值=95%，检查频次=2次/班，由{checker}复核。"
+    }
+  },
+  "module5_guardrails": {
+    "enabled": true,
+    "version": "v2.0",
+    "forbidden_vague_words": [
+      "加强",
+      "提高",
+      "注意",
+      "确保",
+      "严格"
+    ],
+    "required_sentence_structure": [
+      "action",
+      "parameter",
+      "checker"
+    ],
+    "three_step_logic_lock": {
+      "step1_define": "先定义工序与参数(工程量/标号/尺寸)",
+      "step2_analyze": "分析难点与风险(质量通病/安全隐患)",
+      "step3_solve": "给出控制与验证措施",
+      "flow_chain": "工序名称->参数->风险->控制->验证"
+    },
+    "fail_fast_on_violation": true,
+    "rewrite_on_fail": true
+  },
+  "module6_visual_generation": {
+    "enabled": true,
+    "version": "v2.0",
+    "provider_policy": "gemini_imagen_preferred_with_local_fallback",
+    "preferred_provider": "google",
+    "preferred_model": "imagen-3.0-generate-002",
+    "fallback_renderer": "pillow",
+    "auto_embed_to_docx": true,
+    "content_professional": [
+      "样板",
+      "流程",
+      "思维导图",
+      "智慧绿色四新"
+    ],
+    "drawing_standard": "GB/T 50104 建筑制图标准",
+    "visual_standard": "CSCEC VI 蓝/绿/灰",
+    "text_standard": "中文仿宋",
+    "required_graphics_min_count": 4,
+    "quality_gate": {
+      "must_include_visual_types": [
+        "样板",
+        "流程",
+        "思维导图",
+        "智慧绿色四新"
+      ],
+      "must_bind_index_matrix": true,
+      "must_follow_action_parameter_checker": true
+    }
+  },
+  "gemini_kg_enablement": {
+    "enabled": true,
+    "version": "v1",
+    "goal": "make_kg_assist_gemini_generation",
+    "retrieval_policy": {
+      "professional_domain_filter": true,
+      "min_gemini_usefulness_score": 30,
+      "authority_resolution": true
+    },
+    "generation_policy": {
+      "must_have_action_parameter_checker": true,
+      "bind_numeric_sources": true,
+      "bind_formula_nodes": true
+    }
+  }
+}

@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .dxf_parser import parse_dxf_payload
+from .kg_paths import resolve_default_kg_root
 
 SUPPORTED_EXTENSIONS = {".json", ".md", ".markdown", ".xml", ".csv", ".dxf"}
-DEFAULT_KG_ROOT = Path("/Users/youfeini/Desktop/文档生成系统/知识图谱")
+DEFAULT_KG_ROOT = resolve_default_kg_root()
 DEFAULT_DB_PATH = Path("backend/data/autoplan/v2/knowledge_graph.sqlite3")
 
 EDGE_REQUIRES = "REQUIRES"
