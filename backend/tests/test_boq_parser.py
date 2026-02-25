@@ -203,6 +203,34 @@ class TestBoQParserCalcStats:
         assert stats["item_count"] == 2.0
         assert stats["density"] == 50.0
 
+    def test_calc_stats_contains_chapter_structure_and_complexity(self):
+        """Stats include chapter tree and complexity/density indexes"""
+        item1 = BoQItem(boq_code="01.01.001", name="桥梁下部结构", quantity=120.0)
+        item2 = BoQItem(boq_code="01.02.001", name="桥梁上部结构", quantity=80.0)
+        item3 = BoQItem(boq_code="02.01.001", name="隧道衬砌", quantity=200.0)
+        item1.process = ConstructionProcess(name="主体结构")
+        item2.process = ConstructionProcess(name="主体结构")
+        item3.process = ConstructionProcess(name="围护与建筑构造")
+        item1.resources = [Resource(name="钢筋工"), Resource(name="模板工")]
+        item2.resources = [Resource(name="混凝土工")]
+        item3.resources = [Resource(name="防水工"), Resource(name="抹灰工"), Resource(name="测量工")]
+
+        stats = self.parser._calc_stats([item1, item2, item3])
+
+        assert "chapter_structure" in stats
+        assert stats["chapter_structure"]["chapter_count"] >= 2
+        assert isinstance(stats["chapter_structure"]["chapters"], list)
+
+        for key in (
+            "complexity_index",
+            "resource_density_index",
+            "quantity_scale_index",
+            "construction_density_index",
+            "process_diversity",
+        ):
+            assert key in stats
+            assert 0.0 <= float(stats[key]) <= 1.0
+
 
 class TestBoQParserRowToItem:
     """Tests for _row_to_item method"""
