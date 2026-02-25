@@ -69,12 +69,14 @@ class MultiAgentDocPipeline:
         self_healing_provider: Optional[str] = None,
         self_healing_model: Optional[str] = None,
         self_healing_api_key: Optional[str] = None,
+        min_gemini_usefulness_score: float = 30.0,
     ):
         self.kg_db_path = Path(kg_db_path)
         self.quant_engine = QuantitativeBoQEngine()
         self.self_healing_provider = self_healing_provider
         self.self_healing_model = self_healing_model
         self.self_healing_api_key = self_healing_api_key
+        self.min_gemini_usefulness_score = max(0.0, min(100.0, float(min_gemini_usefulness_score)))
 
     def _read_tender_text(self, path: str) -> str:
         p = Path(path)
@@ -224,10 +226,13 @@ class MultiAgentDocPipeline:
         has_resources = isinstance(resources, dict) and len(resources) > 0
         return bool(node_ok and has_conditions and has_resources and safety_level != "unknown")
 
-    def _select_graph_hit(self, query: str) -> Dict[str, Any]:
+    def _select_graph_hit(self, query: str, *, professional_domain: str | None = None) -> Dict[str, Any]:
+        domains = [str(professional_domain).strip()] if str(professional_domain or "").strip() else None
         graph_search = search_graph_index(
             query=query,
             top_k=8,
+            professional_domains=domains,
+            min_gemini_usefulness_score=self.min_gemini_usefulness_score,
             db_path=self.kg_db_path,
         )
         candidates = graph_search.get("results") or []
@@ -239,17 +244,21 @@ class MultiAgentDocPipeline:
             key=lambda item: (
                 1 if self._hit_parameter_ok(item) else 0,
                 1 if self._is_auto_generated_hit(item) else 0,
+                float(item.get("gemini_usefulness_score") or 0.0),
                 float(item.get("score") or 0.0),
             ),
             reverse=True,
         )
         return ranked[0] if ranked else {}
 
-    def _select_formula_hit(self, query: str) -> Dict[str, Any]:
+    def _select_formula_hit(self, query: str, *, professional_domain: str | None = None) -> Dict[str, Any]:
+        domains = [str(professional_domain).strip()] if str(professional_domain or "").strip() else None
         search = search_graph_index(
             query=query,
             node_types=["FormulaNode"],
             top_k=8,
+            professional_domains=domains,
+            min_gemini_usefulness_score=self.min_gemini_usefulness_score,
             db_path=self.kg_db_path,
         )
         candidates = search.get("results") or []
@@ -260,6 +269,7 @@ class MultiAgentDocPipeline:
             key=lambda item: (
                 1 if str(item.get("formula_expression") or "").strip() else 0,
                 1 if self._is_auto_generated_hit(item) else 0,
+                float(item.get("gemini_usefulness_score") or 0.0),
                 float(item.get("score") or 0.0),
             ),
             reverse=True,
@@ -384,10 +394,12 @@ class MultiAgentDocPipeline:
                 query = (
                     f"{domain} {item.get('dimension', '')} {' '.join(item.get('keywords') or [])} {' '.join(rewrite_keywords)}"
                 ).strip()
-                selected_graph = self._select_graph_hit(query)
+                selected_graph = self._select_graph_hit(query, professional_domain=domain)
                 graph_hits = search_graph_index(
                     query=query,
                     top_k=8,
+                    professional_domains=[domain],
+                    min_gemini_usefulness_score=self.min_gemini_usefulness_score,
                     db_path=self.kg_db_path,
                 )
                 text = self._make_section_text(
@@ -499,6 +511,7 @@ class MultiAgentDocPipeline:
                         query=formula_query,
                         node_types=["FormulaNode"],
                         top_k=1,
+                        min_gemini_usefulness_score=self.min_gemini_usefulness_score,
                         db_path=self.kg_db_path,
                     ).get("total")
                     or 0
@@ -539,6 +552,53 @@ class MultiAgentDocPipeline:
             "checks": checks,
             "missing": missing,
         }
+
+    def _build_gemini_context_packets(
+        self,
+        *,
+        index_matrix: Dict[str, Any],
+        sections: List[Dict[str, Any]],
+        specialist_plan: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        by_title: Dict[str, Dict[str, Any]] = {}
+        for sec in sections:
+            title = str(sec.get("title") or "").strip()
+            if title and title not in by_title:
+                by_title[title] = sec
+
+        dimension_to_domain = specialist_plan.get("dimension_to_domain") or {}
+        packets: List[Dict[str, Any]] = []
+        for item in index_matrix.get("index_matrix") or []:
+            dim = str(item.get("dimension") or "").strip()
+            if not dim:
+                continue
+            sec = by_title.get(dim) or {}
+            hit = sec.get("graph_hit") if isinstance(sec.get("graph_hit"), dict) else {}
+            domain = str(dimension_to_domain.get(dim) or sec.get("specialist_domain") or "general")
+            packets.append(
+                {
+                    "dimension": dim,
+                    "domain": domain,
+                    "keywords": item.get("keywords") or [],
+                    "graph_query": sec.get("graph_query"),
+                    "node_id": hit.get("node_id"),
+                    "title": hit.get("title"),
+                    "source_hierarchy": hit.get("source_hierarchy"),
+                    "source_file": hit.get("source_file"),
+                    "gemini_usefulness_score": hit.get("gemini_usefulness_score"),
+                    "formula_expression": hit.get("formula_expression"),
+                    "applicable_conditions": hit.get("applicable_conditions") or {},
+                    "resource_requirements": hit.get("resource_requirements") or {},
+                    "numeric_sources": hit.get("numeric_sources") or [],
+                    "retrieval_hints": (hit.get("payload") or {}).get("retrieval_hints")
+                    if isinstance(hit.get("payload"), dict)
+                    else {},
+                    "gemini_context_block": (hit.get("payload") or {}).get("gemini_context_block")
+                    if isinstance(hit.get("payload"), dict)
+                    else {},
+                }
+            )
+        return packets
 
     def _collect_knowledge_gaps(
         self,
@@ -1009,6 +1069,7 @@ class MultiAgentDocPipeline:
                 "compliance_agent": {"status": "done", "result": final_pass.get("compliance_audit") or {}},
                 "guardrail_agent": {"status": "done"},
                 "self_healing_agent": {"status": "done" if self_healing_result.get("triggered") else "skipped"},
+                "gemini_context_agent": {"status": "done"},
                 "visual_agent": {
                     "status": "done" if visual_meta.get("generated") else "skipped",
                     "meta": visual_meta,
@@ -1022,6 +1083,11 @@ class MultiAgentDocPipeline:
             "knowledge_gaps": final_pass.get("gaps") or [],
             "missing_knowledge_report": missing_report_saved,
             "fail_fast_error": final_pass.get("fail_fast_error"),
+            "gemini_context_packets": self._build_gemini_context_packets(
+                index_matrix=ctx.index_matrix,
+                sections=final_pass.get("sections") or [],
+                specialist_plan=specialist_plan,
+            ),
             "self_healing": self_healing_result,
             "docx_output": docx_saved,
             "visual_output": visual_meta,

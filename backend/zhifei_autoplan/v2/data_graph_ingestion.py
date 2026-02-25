@@ -35,6 +35,20 @@ SOURCE_HIERARCHY_WEIGHTS: Dict[str, int] = {
     "未知": 0,
 }
 
+DEFAULT_FORMULA_EXPRESSION = "quantity / max(productivity_per_day, 1)"
+
+PROFESSIONAL_DOMAIN_SEEDS: Dict[str, Tuple[str, ...]] = {
+    "bridge": ("bridge", "桥梁", "箱梁", "桥面", "挂篮", "盖梁", "桥墩"),
+    "tunnel": ("tunnel", "隧道", "盾构", "衬砌", "洞门", "暗挖"),
+    "railway": ("railway", "rail", "铁路", "轨道", "高铁", "接触网", "营业线"),
+    "hydraulic": ("hydraulic", "hydro", "water", "水利", "泵站", "闸门", "河道", "堤防", "引水"),
+    "mep": ("mep", "机电", "电气", "暖通", "消防", "管道", "桥架", "弱电", "智能化"),
+    "earthwork": ("earthwork", "土石方", "土方", "开挖", "回填", "基坑", "边坡"),
+    "road": ("road", "道路", "路基", "路面", "沥青", "交通导改", "市政道路"),
+    "building": ("building", "房建", "主体结构", "砌体", "装修", "幕墙", "钢结构", "装配式"),
+    "general": ("general", "综合", "通用"),
+}
+
 DNA_CONTEXT_ENV_KEYS = ("ZHIFEI_DNA_CONTEXT", "ZF_DNA_CONTEXT", "TACTICAL_DNA_CONTEXT")
 
 RELATION_KEYS: Dict[str, Tuple[str, ...]] = {
@@ -167,6 +181,86 @@ def _tokenize(text: str) -> List[str]:
         seen.add(term)
         out.append(term)
     return out
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _normalize_domain(value: str) -> str:
+    return re.sub(r"[^a-z0-9_]+", "", str(value or "").strip().lower())
+
+
+def _domain_match(
+    *,
+    professional_domains: List[str],
+    title: str,
+    body: str,
+    tags: List[str],
+    keywords: List[str],
+    source_file: str,
+) -> Tuple[float, List[str]]:
+    if not professional_domains:
+        return 0.0, []
+    if "general" in professional_domains:
+        return 0.0, ["general"]
+    merged = " ".join(
+        [str(title or ""), str(body or ""), str(source_file or "")]
+        + [str(x) for x in tags]
+        + [str(x) for x in keywords]
+    ).lower()
+    matched: List[str] = []
+    for domain in professional_domains:
+        norm = _normalize_domain(domain)
+        seeds = PROFESSIONAL_DOMAIN_SEEDS.get(norm, tuple([norm]))
+        if any(str(seed).lower() in merged for seed in seeds):
+            matched.append(norm)
+    return float(len(matched) * 9.0), matched
+
+
+def _estimate_gemini_usefulness(
+    *,
+    payload: Dict[str, Any],
+    source_hierarchy: str,
+    formula_expression: str,
+    resource_requirements: Dict[str, Any],
+    numeric_sources: List[Any],
+    activation_signal: str,
+    body: str,
+    tags: List[str],
+    keywords: List[str],
+) -> float:
+    score = 35.0
+    score += float(SOURCE_HIERARCHY_WEIGHTS.get(str(source_hierarchy or "未知"), 0) * 5.0)
+    if resource_requirements:
+        score += 15.0
+    if numeric_sources:
+        score += 12.0
+    if formula_expression:
+        score += 8.0
+    if formula_expression and formula_expression != DEFAULT_FORMULA_EXPRESSION:
+        score += 12.0
+    if activation_signal:
+        score += 8.0
+
+    template_like = (
+        ("第一步（定义）" in body and "第二步（分析）" in body and "第三步（解决）" in body)
+        or ("工序名称->参数->风险->控制->验证" in body)
+    )
+    if template_like:
+        score -= 12.0
+    if formula_expression == DEFAULT_FORMULA_EXPRESSION:
+        score -= 8.0
+    if len(tags) + len(keywords) < 6:
+        score -= 4.0
+
+    payload_score = _safe_float(payload.get("gemini_usefulness_score"), default=-1.0)
+    if payload_score >= 0:
+        score = max(score, payload_score)
+    return round(max(0.0, min(100.0, score)), 4)
 
 
 def _ensure_ascii_json(obj: Any) -> str:
@@ -2120,12 +2214,20 @@ class KnowledgeGraphIndex:
         keywords: Optional[List[str]] = None,
         top_k: int = 12,
         node_types: Optional[List[str]] = None,
+        professional_domains: Optional[List[str]] = None,
+        min_gemini_usefulness_score: float = 0.0,
         resolve_authority: bool = True,
     ) -> Dict[str, Any]:
         top_k = max(1, min(int(top_k or 12), 200))
         norm_tags = _dedupe_terms(tags or [])
         norm_keywords = _dedupe_terms(keywords or [])
         norm_node_types = [str(x).strip() for x in (node_types or []) if str(x).strip()]
+        norm_domains = []
+        for item in professional_domains or []:
+            term = _normalize_domain(item)
+            if term and term not in norm_domains:
+                norm_domains.append(term)
+        min_gemini_score = max(0.0, min(100.0, _safe_float(min_gemini_usefulness_score, 0.0)))
 
         with self._connect() as conn:
             candidates = self._candidate_ids_by_terms(conn, tags=norm_tags, keywords=norm_keywords)
@@ -2204,6 +2306,11 @@ class KnowledgeGraphIndex:
             title = str(row["title"] or "")
             tags_row = [t for t in str(row["tags_csv"] or "").split(",") if t]
             keywords_row = [k for k in str(row["keywords_csv"] or "").split(",") if k]
+            payload = _safe_json_load(row["payload_json"], {})
+            numeric_sources = _safe_json_load(row["numeric_sources_json"], [])
+            resource_requirements = _safe_json_load(row["resource_requirements_json"], {})
+            formula_expression = str(row["formula_expression"] or "").strip()
+            activation_signal = str(row["activation_signal"] or "").strip()
 
             score = 0.0
             for tag in norm_tags:
@@ -2221,6 +2328,33 @@ class KnowledgeGraphIndex:
             if row_id in rank_map:
                 score += max(0.0, 20.0 - min(20.0, abs(rank_map[row_id]) * 4.0))
 
+            domain_score, domain_matches = _domain_match(
+                professional_domains=norm_domains,
+                title=title,
+                body=body,
+                tags=tags_row,
+                keywords=keywords_row,
+                source_file=str(row["file_name"] or ""),
+            )
+            if norm_domains and not domain_matches:
+                continue
+            score += domain_score
+
+            gemini_usefulness_score = _estimate_gemini_usefulness(
+                payload=payload,
+                source_hierarchy=str(row["source_hierarchy"] or ""),
+                formula_expression=formula_expression,
+                resource_requirements=resource_requirements if isinstance(resource_requirements, dict) else {},
+                numeric_sources=numeric_sources if isinstance(numeric_sources, list) else [],
+                activation_signal=activation_signal,
+                body=body,
+                tags=tags_row,
+                keywords=keywords_row,
+            )
+            if gemini_usefulness_score < min_gemini_score:
+                continue
+            score += min(8.0, gemini_usefulness_score * 0.08)
+
             if (norm_tags or norm_keywords or query_tokens) and score <= 0:
                 continue
 
@@ -2236,23 +2370,25 @@ class KnowledgeGraphIndex:
                 "node_type": row["node_type"],
                 "object_key": row["object_key"],
                 "applicable_conditions": _safe_json_load(row["applicable_conditions_json"], {}),
-                "resource_requirements": _safe_json_load(row["resource_requirements_json"], {}),
+                "resource_requirements": resource_requirements,
                 "safety_level": row["safety_level"],
-                "formula_expression": row["formula_expression"],
+                "formula_expression": formula_expression,
                 "formula_variables": _safe_json_load(row["formula_variables_json"], []),
                 "data_source_type": row["data_source_type"],
                 "spatial_context": _safe_json_load(row["spatial_context_json"], {}),
-                "activation_signal": row["activation_signal"],
+                "activation_signal": activation_signal,
                 "dna_verified": bool(int(row["dna_verified"] or 0)),
                 "tactical_mode": row["tactical_mode"],
                 "bid_response_strategy": _safe_json_load(row["bid_response_strategy_json"], {}),
                 "competitor_shield": _safe_json_load(row["competitor_shield_json"], {}),
                 "qt_score_booster": _safe_json_load(row["qt_score_booster_json"], {}),
                 "quantitative_indices": _safe_json_load(row["quantitative_indices_json"], {}),
-                "numeric_sources": _safe_json_load(row["numeric_sources_json"], []),
+                "numeric_sources": numeric_sources,
                 "schedule_constraints": _safe_json_load(row["schedule_constraints_json"], {}),
+                "professional_domain_matches": domain_matches,
+                "gemini_usefulness_score": gemini_usefulness_score,
                 "score": round(score, 4),
-                "payload": _safe_json_load(row["payload_json"], {}),
+                "payload": payload,
                 "source_provenance": {
                     "source_file": row["file_name"],
                     "source_path": row["source_path"],
@@ -2273,6 +2409,8 @@ class KnowledgeGraphIndex:
             "tags": norm_tags,
             "keywords": norm_keywords,
             "node_types": norm_node_types,
+            "professional_domains": norm_domains,
+            "min_gemini_usefulness_score": min_gemini_score,
             "total": len(results),
             "results": results[:top_k],
             "db_path": str(self.db_path),
@@ -2292,6 +2430,8 @@ class KnowledgeGraphIndex:
         tags: Optional[List[str]] = None,
         keywords: Optional[List[str]] = None,
         top_k: int = 12,
+        professional_domains: Optional[List[str]] = None,
+        min_gemini_usefulness_score: float = 0.0,
         resolve_authority: bool = True,
     ) -> Dict[str, Any]:
         search_result = self.search(
@@ -2300,6 +2440,8 @@ class KnowledgeGraphIndex:
             keywords=keywords,
             top_k=top_k,
             node_types=["FormulaNode"],
+            professional_domains=professional_domains,
+            min_gemini_usefulness_score=min_gemini_usefulness_score,
             resolve_authority=resolve_authority,
         )
 
@@ -2467,6 +2609,8 @@ def search_graph_index(
     keywords: Optional[List[str]] = None,
     top_k: int = 12,
     node_types: Optional[List[str]] = None,
+    professional_domains: Optional[List[str]] = None,
+    min_gemini_usefulness_score: float = 0.0,
     resolve_authority: bool = True,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> Dict[str, Any]:
@@ -2477,6 +2621,8 @@ def search_graph_index(
         keywords=keywords,
         top_k=top_k,
         node_types=node_types,
+        professional_domains=professional_domains,
+        min_gemini_usefulness_score=min_gemini_usefulness_score,
         resolve_authority=resolve_authority,
     )
 
@@ -2488,6 +2634,8 @@ def evaluate_formula_nodes_in_graph(
     tags: Optional[List[str]] = None,
     keywords: Optional[List[str]] = None,
     top_k: int = 12,
+    professional_domains: Optional[List[str]] = None,
+    min_gemini_usefulness_score: float = 0.0,
     resolve_authority: bool = True,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> Dict[str, Any]:
@@ -2498,6 +2646,8 @@ def evaluate_formula_nodes_in_graph(
         tags=tags,
         keywords=keywords,
         top_k=top_k,
+        professional_domains=professional_domains,
+        min_gemini_usefulness_score=min_gemini_usefulness_score,
         resolve_authority=resolve_authority,
     )
 

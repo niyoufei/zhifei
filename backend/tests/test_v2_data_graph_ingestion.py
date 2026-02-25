@@ -304,3 +304,69 @@ def test_quantitative_fields_are_mapped_from_json(tmp_path: Path) -> None:
     assert isinstance(node.get("schedule_constraints"), dict)
     assert node["quantitative_indices"]["risk_index"] == pytest.approx(0.77, rel=1e-6)
     assert node["schedule_constraints"]["min_process_interval_days"] == 2
+
+
+def test_search_supports_professional_domain_filter_and_gemini_score(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "domain.json").write_text(
+        json.dumps(
+            {
+                "name": "ZF-KG-DOMAIN",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "MEP-001",
+                                "name": "机电综合管线深化",
+                                "keywords": ["机电", "管线", "综合支吊架"],
+                                "source_hierarchy": "国标",
+                                "formula_expression": "work_volume / max(productivity_per_day * crew_efficiency, 1)",
+                                "formula_variables": ["work_volume", "productivity_per_day", "crew_efficiency"],
+                                "resource_requirements": {"crew_size": "12人/班"},
+                                "numeric_sources": [{"parameter": "inspection_frequency", "value": "2", "unit": "次/班"}],
+                                "content": {
+                                    "environment_sensing": {"activation_signal": "Context CONTAINS '智飞工程'"},
+                                    "operation_desc_premium": {"desc": "机电管线综合排布，BIM复核。"},
+                                },
+                            },
+                            {
+                                "node_id": "ROAD-001",
+                                "name": "道路路基压实",
+                                "keywords": ["道路", "路基", "压实度"],
+                                "source_hierarchy": "企标",
+                                "content": {"operation_desc_premium": {"desc": "常规压实施工。"}},
+                            },
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    mep_result = search_graph_index(
+        query="管线 深化",
+        professional_domains=["mep"],
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=10,
+    )
+    assert mep_result["total"] >= 1
+    assert all("mep" in (item.get("professional_domain_matches") or []) for item in mep_result["results"])
+
+    high_score_result = search_graph_index(
+        query="压实 管线",
+        min_gemini_usefulness_score=55,
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=10,
+    )
+    assert high_score_result["total"] >= 1
+    assert all(float(item.get("gemini_usefulness_score") or 0.0) >= 55 for item in high_score_result["results"])
