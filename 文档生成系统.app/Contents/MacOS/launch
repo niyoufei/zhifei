@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# 文档生成系统 - 双击启动（统一委托 run_web_ui.sh）
+set -euo pipefail
+
+export PATH="/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:${PATH:-}"
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
+BUNDLE="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(dirname "$BUNDLE")"
+cd "$ROOT"
+
+if [ ! -x "$ROOT/scripts/run_web_ui.sh" ]; then
+  osascript -e "display alert \"文档生成系统\" message \"缺少启动脚本 scripts/run_web_ui.sh\" as critical"
+  exit 1
+fi
+
+/bin/zsh -lc "cd '$ROOT' && ./scripts/run_web_ui.sh --background >/tmp/zhifei_launcher.out 2>/tmp/zhifei_launcher.err"
+osascript -e 'display notification "施组专家系统已启动" with title "文档生成系统"' 2>/dev/null || true
