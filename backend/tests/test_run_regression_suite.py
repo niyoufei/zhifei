@@ -45,3 +45,35 @@ def test_discover_projects_filters_non_project_dirs(tmp_path: Path) -> None:
     projects = mod.discover_projects(tmp_path)
     assert len(projects) == 1
     assert projects[0]["project_name"] == "02_项目回归样本"
+
+
+def test_project_gate_rejects_low_sentence_coverage() -> None:
+    mod = _load_module()
+    row = {
+        "project_name": "P1",
+        "passed": True,
+        "knowledge_gap_count": 0,
+        "sentence_trace_coverage": 0.7,
+        "boq_failed_file_count": 0,
+    }
+    gate = {
+        "min_sentence_coverage": 0.9,
+        "max_gaps_per_project": 0,
+        "max_boq_failed_files": 1,
+    }
+    out = mod._evaluate_project_gate(row, gate)
+    assert out["passed"] is False
+    assert "sentence_coverage_below_threshold" in (out.get("gate_reasons") or [])
+
+
+def test_overall_gate_by_pass_rate() -> None:
+    mod = _load_module()
+    rows = [
+        {"gate_passed": True},
+        {"gate_passed": False},
+        {"gate_passed": True},
+    ]
+    ok = mod._evaluate_overall_gate(rows, {"min_pass_rate": 0.66})
+    bad = mod._evaluate_overall_gate(rows, {"min_pass_rate": 0.67})
+    assert ok["ok"] is True
+    assert bad["ok"] is False

@@ -34,6 +34,12 @@ EXCLUDED_PROJECT_DIR_NAMES = {
     "api",
     "app",
 }
+DEFAULT_GATE_CONFIG = {
+    "min_pass_rate": 1.0,
+    "min_sentence_coverage": 0.95,
+    "max_gaps_per_project": 0,
+    "max_boq_failed_files": 1,
+}
 
 
 def _slugify(name: str) -> str:
@@ -226,6 +232,48 @@ def _run_one_project(
     }
 
 
+def _evaluate_project_gate(row: Dict[str, Any], gate: Dict[str, Any]) -> Dict[str, Any]:
+    reasons: List[str] = []
+    base_ok = bool(row.get("passed"))
+    if not base_ok:
+        reasons.append("base_pipeline_failed")
+
+    min_sentence = float(gate.get("min_sentence_coverage") or 0.0)
+    if float(row.get("sentence_trace_coverage") or 0.0) < min_sentence:
+        reasons.append("sentence_coverage_below_threshold")
+
+    max_gaps = int(gate.get("max_gaps_per_project") or 0)
+    if int(row.get("knowledge_gap_count") or 0) > max_gaps:
+        reasons.append("knowledge_gaps_exceed_threshold")
+
+    max_boq_failed = int(gate.get("max_boq_failed_files") or 0)
+    if int(row.get("boq_failed_file_count") or 0) > max_boq_failed:
+        reasons.append("boq_failed_files_exceed_threshold")
+
+    gate_passed = len(reasons) == 0
+    out = dict(row)
+    out["gate_passed"] = gate_passed
+    out["gate_reasons"] = reasons
+    out["passed"] = gate_passed
+    return out
+
+
+def _evaluate_overall_gate(rows: List[Dict[str, Any]], gate: Dict[str, Any]) -> Dict[str, Any]:
+    total = len(rows)
+    passed = sum(1 for r in rows if r.get("gate_passed"))
+    rate = round(passed / total, 4) if total else 0.0
+    min_rate = float(gate.get("min_pass_rate") or 0.0)
+    ok = bool(total > 0 and rate >= min_rate)
+    return {
+        "ok": ok,
+        "pass_rate": rate,
+        "min_pass_rate": min_rate,
+        "passed_count": passed,
+        "failed_count": max(total - passed, 0),
+        "projects_total": total,
+    }
+
+
 def _render_report(summary: Dict[str, Any], *, out_json: Path, out_md: Path) -> None:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_md.parent.mkdir(parents=True, exist_ok=True)
@@ -239,12 +287,25 @@ def _render_report(summary: Dict[str, Any], *, out_json: Path, out_md: Path) -> 
     lines.append(f"- Passed: {summary.get('passed_count')}")
     lines.append(f"- Failed: {summary.get('failed_count')}")
     lines.append(f"- Pass Rate: {summary.get('pass_rate')}")
-    lines.append("")
-    lines.append("| Project | Passed | Intercepted | Gaps | ScoreOK | GraphOK | SentenceCoverage | BOQFailFiles | Elapsed(s) |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
-    for row in summary.get("projects") or []:
+    gate = summary.get("quality_gate") if isinstance(summary.get("quality_gate"), dict) else {}
+    if gate:
+        lines.append(f"- Quality Gate OK: {bool(gate.get('ok'))}")
         lines.append(
-            "| {project} | {passed} | {intercepted} | {gaps} | {score_ok} | {graph_ok} | {cov:.4f} | {boq_failed} | {elapsed:.2f} |".format(
+            "- Gate Config: "
+            f"min_pass_rate={gate.get('min_pass_rate')}, "
+            f"min_sentence_coverage={gate.get('min_sentence_coverage')}, "
+            f"max_gaps_per_project={gate.get('max_gaps_per_project')}, "
+            f"max_boq_failed_files={gate.get('max_boq_failed_files')}"
+        )
+    lines.append("")
+    lines.append(
+        "| Project | Passed | Intercepted | Gaps | ScoreOK | GraphOK | SentenceCoverage | BOQFailFiles | Elapsed(s) | GateReasons |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    for row in summary.get("projects") or []:
+        reasons = ",".join([str(x) for x in (row.get("gate_reasons") or [])]) or "-"
+        lines.append(
+            "| {project} | {passed} | {intercepted} | {gaps} | {score_ok} | {graph_ok} | {cov:.4f} | {boq_failed} | {elapsed:.2f} | {reasons} |".format(
                 project=row.get("project_name"),
                 passed=1 if row.get("passed") else 0,
                 intercepted=1 if row.get("intercepted") else 0,
@@ -254,6 +315,7 @@ def _render_report(summary: Dict[str, Any], *, out_json: Path, out_md: Path) -> 
                 cov=float(row.get("sentence_trace_coverage") or 0.0),
                 boq_failed=int(row.get("boq_failed_file_count") or 0),
                 elapsed=float(row.get("elapsed_seconds") or 0.0),
+                reasons=reasons,
             )
         )
     lines.append("")
@@ -270,6 +332,30 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--workdir", default=".", help="执行工作目录。")
     p.add_argument("--max-projects", type=int, default=20, help="最多执行项目数量。")
     p.add_argument("--self-heal", action=argparse.BooleanOptionalAction, default=True, help="是否开启自愈。")
+    p.add_argument(
+        "--min-pass-rate",
+        type=float,
+        default=float(DEFAULT_GATE_CONFIG["min_pass_rate"]),
+        help="回归通过率下限（0-1）。",
+    )
+    p.add_argument(
+        "--min-sentence-coverage",
+        type=float,
+        default=float(DEFAULT_GATE_CONFIG["min_sentence_coverage"]),
+        help="句级证据链覆盖率下限（0-1）。",
+    )
+    p.add_argument(
+        "--max-gaps-per-project",
+        type=int,
+        default=int(DEFAULT_GATE_CONFIG["max_gaps_per_project"]),
+        help="单项目允许的最大知识缺口数。",
+    )
+    p.add_argument(
+        "--max-boq-failed-files",
+        type=int,
+        default=int(DEFAULT_GATE_CONFIG["max_boq_failed_files"]),
+        help="单项目允许的 BOQ 解析失败文件数上限。",
+    )
     return p.parse_args()
 
 
@@ -299,35 +385,47 @@ def main() -> int:
         return 1
 
     projects = projects[: max(1, int(args.max_projects or 1))]
+    gate_cfg = {
+        "min_pass_rate": max(0.0, min(1.0, float(args.min_pass_rate))),
+        "min_sentence_coverage": max(0.0, min(1.0, float(args.min_sentence_coverage))),
+        "max_gaps_per_project": max(0, int(args.max_gaps_per_project)),
+        "max_boq_failed_files": max(0, int(args.max_boq_failed_files)),
+    }
     rows: List[Dict[str, Any]] = []
     for project in projects:
-        row = _run_one_project(
+        raw_row = _run_one_project(
             project=project,
             runner=runner,
             workdir=workdir,
             out_root=out_root,
             self_heal=bool(args.self_heal),
         )
+        row = _evaluate_project_gate(raw_row, gate_cfg)
         rows.append(row)
         print(
             f"[PROJECT] {row['project_name']} passed={row['passed']} gaps={row['knowledge_gap_count']} "
             f"intercepted={row['intercepted']} coverage={row['sentence_trace_coverage']:.4f} "
-            f"elapsed={row['elapsed_seconds']:.2f}s"
+            f"boq_fail={row['boq_failed_file_count']} elapsed={row['elapsed_seconds']:.2f}s"
         )
 
-    passed_count = sum(1 for r in rows if r.get("passed"))
+    gate_result = _evaluate_overall_gate(rows, gate_cfg)
+    passed_count = int(gate_result.get("passed_count") or 0)
     summary = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-        "projects_total": len(rows),
+        "projects_total": int(gate_result.get("projects_total") or len(rows)),
         "passed_count": passed_count,
-        "failed_count": len(rows) - passed_count,
-        "pass_rate": round(passed_count / len(rows), 4) if rows else 0.0,
+        "failed_count": int(gate_result.get("failed_count") or (len(rows) - passed_count)),
+        "pass_rate": float(gate_result.get("pass_rate") or 0.0),
+        "quality_gate": {
+            "ok": bool(gate_result.get("ok")),
+            **gate_cfg,
+        },
         "projects": rows,
     }
     _render_report(summary, out_json=out_json, out_md=out_md)
     print(f"summary_json={out_json}")
     print(f"summary_md={out_md}")
-    return 0
+    return 0 if bool(gate_result.get("ok")) else 2
 
 
 if __name__ == "__main__":
