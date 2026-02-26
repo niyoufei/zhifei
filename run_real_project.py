@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
+from backend.zhifei_autoplan.v2.kg_retrieval_benchmark import DEFAULT_DATASET_PATH as DEFAULT_BENCHMARK_DATASET_PATH
 from backend.zhifei_autoplan.v2.kg_paths import resolve_default_kg_root
 from backend.zhifei_autoplan.v2.multi_agent_pipeline import MultiAgentDocPipeline
 
@@ -254,6 +255,46 @@ def _arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="自愈Agent模型名称（默认自动选择）。",
     )
+    p.add_argument(
+        "--standard-auto-update",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否在运行前执行标准自动更新检查。",
+    )
+    p.add_argument(
+        "--retrieval-benchmark-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否执行检索评测集门禁。",
+    )
+    p.add_argument(
+        "--benchmark-dataset",
+        default=str(DEFAULT_BENCHMARK_DATASET_PATH),
+        help="检索评测集JSON路径。",
+    )
+    p.add_argument(
+        "--enforce-retrieval-gate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="检索门禁失败时是否拦截发布。",
+    )
+    p.add_argument(
+        "--feedback-learning",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否启用真实项目回灌学习。",
+    )
+    p.add_argument(
+        "--release-freeze",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="通过后是否创建知识图谱冻结快照。",
+    )
+    p.add_argument(
+        "--release-approver",
+        default="system",
+        help="审批与冻结签署人。",
+    )
     return p
 
 
@@ -290,6 +331,14 @@ async def _run(args: argparse.Namespace) -> int:
         enable_self_healing=bool(args.self_heal),
         enable_docx_export=bool(args.docx_export),
         docx_output_path=docx_out_path,
+        enable_standard_auto_update=bool(args.standard_auto_update),
+        run_retrieval_benchmark_gate=bool(args.retrieval_benchmark_gate),
+        benchmark_dataset_path=Path(args.benchmark_dataset).expanduser().resolve(),
+        enforce_retrieval_gate=bool(args.enforce_retrieval_gate),
+        enable_feedback_learning=bool(args.feedback_learning),
+        create_release_freeze=bool(args.release_freeze),
+        release_approver=str(args.release_approver),
+        release_signature=f"{args.release_approver}-auto-sign",
     )
     if output_path.exists():
         try:
@@ -328,6 +377,38 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"Score Coverage OK: {bool(score_audit.get('ok'))}")
     print(f"Graph Support OK: {bool(graph_audit.get('ok'))}")
     print(f"Knowledge Gaps: {len(gaps)}")
+    benchmark = result.get("retrieval_benchmark") if isinstance(result.get("retrieval_benchmark"), dict) else {}
+    if benchmark.get("triggered"):
+        print(
+            "Retrieval Benchmark: "
+            f"ok={bool(benchmark.get('ok'))}, "
+            f"pass_rate={float(benchmark.get('pass_rate') or 0.0):.4f}, "
+            f"avg_mrr={float(benchmark.get('avg_mrr') or 0.0):.4f}"
+        )
+    std_upd = result.get("standard_auto_update") if isinstance(result.get("standard_auto_update"), dict) else {}
+    if std_upd.get("triggered"):
+        print(
+            "Standard Auto-Update: "
+            f"files_changed={int(std_upd.get('files_changed') or 0)}, "
+            f"nodes_updated={int(std_upd.get('nodes_updated') or 0)}"
+        )
+    feedback = result.get("feedback_learning") if isinstance(result.get("feedback_learning"), dict) else {}
+    if feedback.get("triggered"):
+        print(
+            "Feedback Learning: "
+            f"projects_total={int(feedback.get('projects_total') or 0)}, "
+            f"node_updates={int(feedback.get('node_updates') or 0)}"
+        )
+    chapter_plan = result.get("chapter_response_plan") if isinstance(result.get("chapter_response_plan"), dict) else {}
+    if chapter_plan:
+        print(
+            "Chapter Plan: "
+            f"ok={bool(chapter_plan.get('ok'))}, "
+            f"chapters={int(chapter_plan.get('chapter_count') or 0)}"
+        )
+    release = result.get("release_snapshot") if isinstance(result.get("release_snapshot"), dict) else {}
+    if release.get("triggered"):
+        print(f"Release Snapshot: {release.get('release_id')} | {release.get('release_dir')}")
     evidence_stats = result.get("sentence_evidence_stats") or {}
     if evidence_stats:
         print(

@@ -1,0 +1,30 @@
+{
+  "version": "v1",
+  "cases": [
+    {
+      "case_id": "bm-001",
+      "query": "质量 抽检 频次",
+      "expected_keywords": ["质量", "抽检"],
+      "expected_domain": "building"
+    },
+    {
+      "case_id": "bm-002",
+      "query": "安全 隐患 应急 响应时限",
+      "expected_keywords": ["安全", "应急"],
+      "expected_domain": "management"
+    },
+    {
+      "case_id": "bm-003",
+      "query": "进度 关键线路 工序间隔",
+      "expected_keywords": ["进度", "关键线路"],
+      "expected_domain": "road"
+    },
+    {
+      "case_id": "bm-004",
+      "query": "环保 PM10 噪声 阈值",
+      "expected_keywords": ["环保", "PM10"],
+      "expected_domain": "management"
+    }
+  ]
+}
+

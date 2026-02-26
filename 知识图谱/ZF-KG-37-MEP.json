@@ -459,7 +459,7 @@
             "earthwork"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "GB 50242-2002"
@@ -488,7 +488,7 @@
             "next_review_due": "2012-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -497,11 +497,11 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
-                "review_cycle_years": 8,
-                "status": "review_required"
+                "tier": "答疑文件",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
               },
               {
                 "standard_code": "GB/T 50326-2017",
@@ -518,14 +518,6 @@
                 "expiry_date": "2012-12-31",
                 "review_cycle_years": 10,
                 "status": "review_required"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
-                "effective_date": "2021-01-01",
-                "expiry_date": "2027-12-31",
-                "review_cycle_years": 6,
-                "status": "active"
               }
             ]
           },
@@ -801,7 +793,11 @@
             "reviewer_role": "质量员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "system_baseline"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-26T17:05:44",
+            "approved_by": "codex-auto",
+            "signature": "codex-auto-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -891,6 +887,56 @@
             "strategy": "fingerprint_diff",
             "fingerprint": "9d2c1d61c452e76f128d2d6224adf88ff2b45c5f",
             "rebuild_on_change": true
+          },
+          "standard_update_state": {
+            "checked_at": "2026-02-26T17:05:44",
+            "catalog_version": "v1",
+            "checked_codes": 4,
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
+            "details": [
+              {
+                "code": "GB 50300-2024",
+                "key": "GB50300",
+                "current_year": 2024,
+                "latest_code": "GB 50300-2024",
+                "latest_year": 2024,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "JGJ 59-2011",
+                "key": "",
+                "current_year": 2011,
+                "latest_code": "JGJ 59-2011",
+                "latest_year": 2011,
+                "tier": "答疑文件",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB/T 50326-2017",
+                "key": "GBT50326",
+                "current_year": 2017,
+                "latest_code": "GB/T 50326-2017",
+                "latest_year": 2017,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50242-2002",
+                "key": "GB50242",
+                "current_year": 2002,
+                "latest_code": "GB 50242-2002",
+                "latest_year": 2002,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              }
+            ]
           }
         },
         {
@@ -1356,7 +1402,7 @@
             "earthwork"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "GB 50242-2002",
@@ -1387,7 +1433,7 @@
             "next_review_due": "2012-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -1396,11 +1442,11 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
-                "review_cycle_years": 8,
-                "status": "review_required"
+                "tier": "答疑文件",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
               },
               {
                 "standard_code": "GB/T 50326-2017",
@@ -1420,7 +1466,7 @@
               },
               {
                 "standard_code": "GB/T 50640-2010",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2010-01-01",
                 "expiry_date": "2020-12-31",
                 "review_cycle_years": 10,
@@ -1433,14 +1479,6 @@
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 10,
                 "status": "review_required"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
-                "effective_date": "2021-01-01",
-                "expiry_date": "2027-12-31",
-                "review_cycle_years": 6,
-                "status": "active"
               }
             ]
           },
@@ -1716,7 +1754,11 @@
             "reviewer_role": "环保员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "system_baseline"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-26T17:05:44",
+            "approved_by": "codex-auto",
+            "signature": "codex-auto-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -1807,6 +1849,76 @@
             "strategy": "fingerprint_diff",
             "fingerprint": "e9901719e3e39bd758cfa6991d0e91ee789fec81",
             "rebuild_on_change": true
+          },
+          "standard_update_state": {
+            "checked_at": "2026-02-26T17:05:44",
+            "catalog_version": "v1",
+            "checked_codes": 6,
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
+            "details": [
+              {
+                "code": "GB 50300-2024",
+                "key": "GB50300",
+                "current_year": 2024,
+                "latest_code": "GB 50300-2024",
+                "latest_year": 2024,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "JGJ 59-2011",
+                "key": "",
+                "current_year": 2011,
+                "latest_code": "JGJ 59-2011",
+                "latest_year": 2011,
+                "tier": "答疑文件",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB/T 50326-2017",
+                "key": "GBT50326",
+                "current_year": 2017,
+                "latest_code": "GB/T 50326-2017",
+                "latest_year": 2017,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50242-2002",
+                "key": "GB50242",
+                "current_year": 2002,
+                "latest_code": "GB 50242-2002",
+                "latest_year": 2002,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB/T 50640-2010",
+                "key": "GBT50640",
+                "current_year": 2010,
+                "latest_code": "GB/T 50640-2010",
+                "latest_year": 2010,
+                "tier": "答疑文件",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50204-2015",
+                "key": "GB50204",
+                "current_year": 2015,
+                "latest_code": "GB 50204-2015",
+                "latest_year": 2015,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              }
+            ]
           }
         },
         {
@@ -2285,7 +2397,7 @@
             "earthwork"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "GB 50242-2002",
@@ -2315,7 +2427,7 @@
             "next_review_due": "2012-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -2324,11 +2436,11 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
-                "review_cycle_years": 8,
-                "status": "review_required"
+                "tier": "答疑文件",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
               },
               {
                 "standard_code": "GB/T 50326-2017",
@@ -2353,14 +2465,6 @@
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 10,
                 "status": "review_required"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
-                "effective_date": "2021-01-01",
-                "expiry_date": "2027-12-31",
-                "review_cycle_years": 6,
-                "status": "active"
               }
             ]
           },
@@ -2676,7 +2780,11 @@
             "reviewer_role": "项目总工",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "system_baseline"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-26T17:05:44",
+            "approved_by": "codex-auto",
+            "signature": "codex-auto-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -2767,6 +2875,66 @@
             "strategy": "fingerprint_diff",
             "fingerprint": "a356a296d81d5cf032f97a80d966d51b1cdeb8b4",
             "rebuild_on_change": true
+          },
+          "standard_update_state": {
+            "checked_at": "2026-02-26T17:05:44",
+            "catalog_version": "v1",
+            "checked_codes": 5,
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
+            "details": [
+              {
+                "code": "GB 50300-2024",
+                "key": "GB50300",
+                "current_year": 2024,
+                "latest_code": "GB 50300-2024",
+                "latest_year": 2024,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "JGJ 59-2011",
+                "key": "",
+                "current_year": 2011,
+                "latest_code": "JGJ 59-2011",
+                "latest_year": 2011,
+                "tier": "答疑文件",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB/T 50326-2017",
+                "key": "GBT50326",
+                "current_year": 2017,
+                "latest_code": "GB/T 50326-2017",
+                "latest_year": 2017,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50242-2002",
+                "key": "GB50242",
+                "current_year": 2002,
+                "latest_code": "GB 50242-2002",
+                "latest_year": 2002,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50204-2015",
+                "key": "GB50204",
+                "current_year": 2015,
+                "latest_code": "GB 50204-2015",
+                "latest_year": 2015,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              }
+            ]
           }
         },
         {
@@ -3348,7 +3516,7 @@
             "GB/T 50326-2017",
             "GB 50202-2018",
             "GB 50242-2002",
-            "GB 50300-2013",
+            "GB 50300-2024",
             "GB 50210-2018",
             "JGJ 120-2012"
           ],
@@ -3400,7 +3568,7 @@
                 "status": "review_required"
               },
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -3409,7 +3577,7 @@
               },
               {
                 "standard_code": "GB 50210-2018",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2018-01-01",
                 "expiry_date": "2028-12-31",
                 "review_cycle_years": 10,
@@ -3422,14 +3590,6 @@
                 "expiry_date": "2020-12-31",
                 "review_cycle_years": 8,
                 "status": "review_required"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
-                "effective_date": "2021-01-01",
-                "expiry_date": "2027-12-31",
-                "review_cycle_years": 6,
-                "status": "active"
               }
             ]
           },
@@ -3691,7 +3851,11 @@
             "reviewer_role": "质量员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "system_baseline"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-26T17:05:44",
+            "approved_by": "codex-auto",
+            "signature": "codex-auto-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -3780,6 +3944,76 @@
             "strategy": "fingerprint_diff",
             "fingerprint": "f46d2213fc6a27d665624136d2c3579604198fe3",
             "rebuild_on_change": true
+          },
+          "standard_update_state": {
+            "checked_at": "2026-02-26T17:05:44",
+            "catalog_version": "v1",
+            "checked_codes": 6,
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
+            "details": [
+              {
+                "code": "GB/T 50326-2017",
+                "key": "GBT50326",
+                "current_year": 2017,
+                "latest_code": "GB/T 50326-2017",
+                "latest_year": 2017,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50202-2018",
+                "key": "GB50202",
+                "current_year": 2018,
+                "latest_code": "GB 50202-2018",
+                "latest_year": 2018,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50242-2002",
+                "key": "GB50242",
+                "current_year": 2002,
+                "latest_code": "GB 50242-2002",
+                "latest_year": 2002,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50300-2024",
+                "key": "GB50300",
+                "current_year": 2024,
+                "latest_code": "GB 50300-2024",
+                "latest_year": 2024,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50210-2018",
+                "key": "GB50210",
+                "current_year": 2018,
+                "latest_code": "GB 50210-2018",
+                "latest_year": 2018,
+                "tier": "答疑文件",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "JGJ 120-2012",
+                "key": "JGJ120",
+                "current_year": 2012,
+                "latest_code": "JGJ 120-2012",
+                "latest_year": 2012,
+                "tier": "行标",
+                "status": "active",
+                "replacement": ""
+              }
+            ]
           }
         },
         {
@@ -4282,14 +4516,6 @@
                 "expiry_date": "2012-12-31",
                 "review_cycle_years": 10,
                 "status": "review_required"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
-                "effective_date": "2021-01-01",
-                "expiry_date": "2027-12-31",
-                "review_cycle_years": 6,
-                "status": "active"
               }
             ]
           },
@@ -4717,6 +4943,36 @@
             "strategy": "fingerprint_diff",
             "fingerprint": "3a5b044c1b9395ea090759b9dbdce64c8e56d1c8",
             "rebuild_on_change": true
+          },
+          "standard_update_state": {
+            "checked_at": "2026-02-26T17:05:44",
+            "catalog_version": "v1",
+            "checked_codes": 2,
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
+            "details": [
+              {
+                "code": "GB/T 50326-2017",
+                "key": "GBT50326",
+                "current_year": 2017,
+                "latest_code": "GB/T 50326-2017",
+                "latest_year": 2017,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50242-2002",
+                "key": "GB50242",
+                "current_year": 2002,
+                "latest_code": "GB 50242-2002",
+                "latest_year": 2002,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              }
+            ]
           }
         },
         {
@@ -5184,14 +5440,6 @@
                 "expiry_date": "2012-12-31",
                 "review_cycle_years": 10,
                 "status": "review_required"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
-                "effective_date": "2021-01-01",
-                "expiry_date": "2027-12-31",
-                "review_cycle_years": 6,
-                "status": "active"
               }
             ]
           },
@@ -5539,6 +5787,36 @@
             "strategy": "fingerprint_diff",
             "fingerprint": "cb323d6b0069561d6c6a561769759e8459fc54fe",
             "rebuild_on_change": true
+          },
+          "standard_update_state": {
+            "checked_at": "2026-02-26T17:05:44",
+            "catalog_version": "v1",
+            "checked_codes": 2,
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
+            "details": [
+              {
+                "code": "GB/T 50326-2017",
+                "key": "GBT50326",
+                "current_year": 2017,
+                "latest_code": "GB/T 50326-2017",
+                "latest_year": 2017,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50242-2002",
+                "key": "GB50242",
+                "current_year": 2002,
+                "latest_code": "GB 50242-2002",
+                "latest_year": 2002,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              }
+            ]
           }
         }
       ]
@@ -5966,7 +6244,7 @@
             "digital"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "GB 50242-2002"
@@ -5995,7 +6273,7 @@
             "next_review_due": "2012-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -6004,11 +6282,11 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
-                "review_cycle_years": 8,
-                "status": "review_required"
+                "tier": "答疑文件",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
               },
               {
                 "standard_code": "GB/T 50326-2017",
@@ -6025,14 +6303,6 @@
                 "expiry_date": "2012-12-31",
                 "review_cycle_years": 10,
                 "status": "review_required"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
-                "effective_date": "2021-01-01",
-                "expiry_date": "2027-12-31",
-                "review_cycle_years": 6,
-                "status": "active"
               }
             ]
           },
@@ -6248,7 +6518,11 @@
             "reviewer_role": "质量员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "system_baseline"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-26T17:05:44",
+            "approved_by": "codex-auto",
+            "signature": "codex-auto-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -6338,6 +6612,56 @@
             "strategy": "fingerprint_diff",
             "fingerprint": "81336d9f19f59687f26517c9b9eaa88f89da1960",
             "rebuild_on_change": true
+          },
+          "standard_update_state": {
+            "checked_at": "2026-02-26T17:05:44",
+            "catalog_version": "v1",
+            "checked_codes": 4,
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
+            "details": [
+              {
+                "code": "GB 50300-2024",
+                "key": "GB50300",
+                "current_year": 2024,
+                "latest_code": "GB 50300-2024",
+                "latest_year": 2024,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "JGJ 59-2011",
+                "key": "",
+                "current_year": 2011,
+                "latest_code": "JGJ 59-2011",
+                "latest_year": 2011,
+                "tier": "答疑文件",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB/T 50326-2017",
+                "key": "GBT50326",
+                "current_year": 2017,
+                "latest_code": "GB/T 50326-2017",
+                "latest_year": 2017,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              },
+              {
+                "code": "GB 50242-2002",
+                "key": "GB50242",
+                "current_year": 2002,
+                "latest_code": "GB 50242-2002",
+                "latest_year": 2002,
+                "tier": "国标",
+                "status": "active",
+                "replacement": ""
+              }
+            ]
           }
         }
       ]

@@ -24,6 +24,15 @@ from backend.zhifei_autoplan.v2.quantitative_boq_engine import (
 from backend.zhifei_autoplan.v2.docx_generator import generate_v2_docx
 from backend.zhifei_autoplan.v2.visual_generation import generate_document_visual_assets
 from backend.zhifei_autoplan.v2.self_healing_agent import SelfHealingAgent
+from backend.zhifei_autoplan.v2.project_rule_extractor import build_project_rule_matrix
+from backend.zhifei_autoplan.v2.standards_update_engine import refresh_kg_standards
+from backend.zhifei_autoplan.v2.project_feedback_learning import update_feedback_memory
+from backend.zhifei_autoplan.v2.kg_retrieval_benchmark import (
+    DEFAULT_DATASET_PATH as DEFAULT_BENCHMARK_DATASET_PATH,
+    run_retrieval_benchmark,
+)
+from backend.zhifei_autoplan.v2.cross_discipline_solver import solve_cross_discipline_constraints
+from backend.zhifei_autoplan.v2.kg_release_manager import approve_auto_generated_nodes, create_release_snapshot
 
 DEFAULT_PIPELINE_OUTPUT = Path("build/v2_multi_agent_output.json")
 DEFAULT_MISSING_REPORT = Path("build/Missing_Knowledge_Report.md")
@@ -79,6 +88,7 @@ class MultiAgentDocPipeline:
         self.self_healing_model = self_healing_model
         self.self_healing_api_key = self_healing_api_key
         self.min_gemini_usefulness_score = max(0.0, min(100.0, float(min_gemini_usefulness_score)))
+        self.project_rule_matrix: Dict[str, Any] = {}
 
     def _read_tender_text(self, path: str) -> str:
         p = Path(path)
@@ -198,6 +208,64 @@ class MultiAgentDocPipeline:
             },
         }
 
+    def _project_rule_override(self, dimension: str) -> Dict[str, Any]:
+        if not isinstance(self.project_rule_matrix, dict):
+            return {}
+        overrides = self.project_rule_matrix.get("dimension_overrides")
+        if not isinstance(overrides, dict):
+            return {}
+        item = overrides.get(dimension)
+        return dict(item) if isinstance(item, dict) else {}
+
+    def _build_chapter_response_plan(
+        self,
+        *,
+        index_matrix: Dict[str, Any],
+        sections: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        by_title: Dict[str, Dict[str, Any]] = {}
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            title = str(sec.get("title") or "").strip()
+            if title and title not in by_title:
+                by_title[title] = sec
+
+        chapters: List[Dict[str, Any]] = []
+        for item in index_matrix.get("index_matrix") or []:
+            if not isinstance(item, dict):
+                continue
+            dim = str(item.get("dimension") or "").strip()
+            if not dim:
+                continue
+            sec = by_title.get(dim) or {}
+            hit = sec.get("graph_hit") if isinstance(sec.get("graph_hit"), dict) else {}
+            checkpoints = item.get("response_points")
+            if not isinstance(checkpoints, list):
+                checkpoints = []
+            keywords = [str(x).strip() for x in (item.get("keywords") or []) if str(x).strip()]
+            evidence_anchors = hit.get("evidence_anchors") if isinstance(hit.get("evidence_anchors"), list) else []
+            anchor_ids = [str(x.get("anchor_id") or "").strip() for x in evidence_anchors if isinstance(x, dict)]
+            bound_node_id = str(hit.get("node_id") or "").strip()
+            coverage_ok = bool(bound_node_id) and (bool(anchor_ids) or not checkpoints)
+            chapters.append(
+                {
+                    "chapter": dim,
+                    "required_checkpoints": checkpoints,
+                    "required_keywords": keywords,
+                    "bound_node_id": bound_node_id,
+                    "bound_source_hierarchy": hit.get("source_hierarchy"),
+                    "evidence_anchor_ids": [x for x in anchor_ids if x],
+                    "coverage_ok": coverage_ok,
+                }
+            )
+
+        return {
+            "ok": all(bool(x.get("coverage_ok")) for x in chapters) if chapters else False,
+            "chapter_count": len(chapters),
+            "chapters": chapters,
+        }
+
     def _is_auto_generated_hit(self, hit: Dict[str, Any] | None) -> bool:
         if not isinstance(hit, dict):
             return False
@@ -309,10 +377,24 @@ class MultiAgentDocPipeline:
         if auto_support and graph_param_text:
             graph_param_text = f"AI自动补全参数{graph_param_text}"
 
+        override = self._project_rule_override(dimension)
+        override_text = ""
+        if override:
+            subj = str(override.get("subject") or "项目约束")
+            cmp_text = str(override.get("comparator") or "")
+            val = override.get("value")
+            unit = str(override.get("unit") or "")
+            src = str(override.get("source_type") or "项目文件")
+            if val not in (None, ""):
+                override_text = f"项目专用约束:{subj}{cmp_text}{val}{unit}（来源:{src}）。"
+            else:
+                override_text = f"项目专用约束:{subj}（来源:{src}）。"
+
         text = (
             f"执行{process}{kw_text}控制，持续{duration}天，每班次检查2次，"
             f"投入{resources}，由{quality_checker}复核并记录；"
             f"关键参数阈值=95%，偏差处置时限=4h。"
+            f"{override_text}"
             f"{graph_param_text}"
             f"【证据:{graph_title}】"
         )
@@ -393,8 +475,14 @@ class MultiAgentDocPipeline:
                 title = str(item.get("dimension") or f"section_{idx + 1}")
                 domain = str(dimension_to_domain.get(title) or "general")
                 rewrite_keywords = failed_point_map.get(title) or []
+                override = self._project_rule_override(title)
+                override_terms: List[str] = []
+                if override:
+                    override_terms.extend(
+                        [str(override.get("subject") or ""), str(override.get("value") or ""), str(override.get("unit") or "")]
+                    )
                 query = (
-                    f"{domain} {item.get('dimension', '')} {' '.join(item.get('keywords') or [])} {' '.join(rewrite_keywords)}"
+                    f"{domain} {item.get('dimension', '')} {' '.join(item.get('keywords') or [])} {' '.join(rewrite_keywords)} {' '.join(override_terms)}"
                 ).strip()
                 selected_graph = self._select_graph_hit(query, professional_domain=domain)
                 graph_hits = search_graph_index(
@@ -814,6 +902,7 @@ class MultiAgentDocPipeline:
         sections: List[Dict[str, Any]],
         quant_index: Dict[str, Any],
         specialist_plan: Dict[str, Any],
+        chapter_response_plan: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         key_values: Dict[str, List[Dict[str, Any]]] = {}
         missing_graph_bindings: List[Dict[str, Any]] = []
@@ -869,6 +958,24 @@ class MultiAgentDocPipeline:
                         }
                     )
 
+        solver = solve_cross_discipline_constraints(
+            sections=sections,
+            quant_index=quant_index,
+            chapter_response_plan=chapter_response_plan or {},
+        )
+        if isinstance(solver, dict):
+            for item in solver.get("conflicts") or []:
+                if not isinstance(item, dict):
+                    continue
+                inconsistencies.append(
+                    {
+                        "key": str(item.get("type") or "cross_conflict"),
+                        "values": item.get("values") or [],
+                        "refs": item.get("refs") or [],
+                        "severity": item.get("severity") or "medium",
+                    }
+                )
+
         hard_fail = bool(inconsistencies or missing_graph_bindings)
         return {
             "ok": not hard_fail,
@@ -879,6 +986,7 @@ class MultiAgentDocPipeline:
             "inconsistencies": inconsistencies,
             "inconsistency_count": len(inconsistencies),
             "cpm_project_duration_days": project_duration,
+            "constraint_solver": solver,
         }
 
     def _collect_compliance_gaps(self, compliance_audit: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1019,20 +1127,40 @@ class MultiAgentDocPipeline:
             }
 
         guarded_sections = self._apply_guardrails(writing.get("sections") or [])
+        chapter_response_plan = self._build_chapter_response_plan(
+            index_matrix=index_matrix,
+            sections=guarded_sections,
+        )
         graph_audit = self._audit_graph_support(index_matrix=index_matrix, sections=guarded_sections)
         compliance_audit = self._run_compliance_audit(
             sections=guarded_sections,
             quant_index=quant_index,
             specialist_plan=specialist_plan,
+            chapter_response_plan=chapter_response_plan,
         )
         gaps = self._collect_knowledge_gaps(
             graph_audit=graph_audit,
             audit_result=writing.get("audit_result") or {},
         )
         gaps.extend(self._collect_compliance_gaps(compliance_audit))
+        for row in chapter_response_plan.get("chapters") or []:
+            if not isinstance(row, dict):
+                continue
+            if bool(row.get("coverage_ok")):
+                continue
+            gaps.append(
+                {
+                    "type": "chapter_response_plan_missing",
+                    "dimension": str(row.get("chapter") or "章节"),
+                    "required_keywords": row.get("required_keywords") or [],
+                    "query": f"{row.get('chapter') or ''} 评分点 证据锚点".strip(),
+                    "suggested_parameters": ["补齐章节评分点映射与证据锚点绑定"],
+                }
+            )
         return {
             "writing": writing,
             "sections": guarded_sections,
+            "chapter_response_plan": chapter_response_plan,
             "graph_audit": graph_audit,
             "compliance_audit": compliance_audit,
             "gaps": gaps,
@@ -1086,12 +1214,72 @@ class MultiAgentDocPipeline:
         visual_model: str = "imagen-3.0-generate-002",
         visual_api_key: str | None = None,
         activation_context: str | None = None,
+        enable_standard_auto_update: bool = True,
+        standard_catalog_path: Path | str | None = None,
+        enable_project_rule_extraction: bool = True,
+        run_retrieval_benchmark_gate: bool = True,
+        benchmark_dataset_path: Path | str = DEFAULT_BENCHMARK_DATASET_PATH,
+        enforce_retrieval_gate: bool = False,
+        enable_feedback_learning: bool = True,
+        feedback_output_path: Path | str = "build/kg_project_feedback_memory.json",
+        auto_approve_generated: bool = True,
+        release_approver: str = "system",
+        release_signature: str = "system-sign",
+        create_release_freeze: bool = False,
+        release_root: Path | str = "build/kg_releases",
     ) -> Dict[str, Any]:
+        standard_update_report: Dict[str, Any] = {"triggered": False, "files_changed": 0}
+        approval_report: Dict[str, Any] = {"triggered": False, "nodes_approved": 0}
+        if enable_standard_auto_update:
+            try:
+                standard_update_report = {
+                    "triggered": True,
+                    **refresh_kg_standards(
+                        kg_root=graph_root,
+                        catalog_path=standard_catalog_path,
+                        dry_run=False,
+                    ),
+                }
+            except Exception as exc:
+                standard_update_report = {"triggered": True, "ok": False, "error": str(exc)}
+
+        if auto_approve_generated:
+            try:
+                approval_report = {
+                    "triggered": True,
+                    **approve_auto_generated_nodes(
+                        kg_root=graph_root,
+                        approver=release_approver,
+                        signature=release_signature,
+                        note="auto_approval_from_pipeline",
+                    ),
+                }
+            except Exception as exc:
+                approval_report = {"triggered": True, "ok": False, "error": str(exc)}
+
         graph_report = ingest_knowledge_graph(
             graph_root,
             db_path=self.kg_db_path,
             activation_context=activation_context,
         )
+        if enable_project_rule_extraction:
+            self.project_rule_matrix = build_project_rule_matrix(tender_paths)
+        else:
+            self.project_rule_matrix = {"ok": True, "rules_total": 0, "rules": [], "dimension_overrides": {}}
+
+        retrieval_benchmark: Dict[str, Any] = {"triggered": False}
+        if run_retrieval_benchmark_gate:
+            try:
+                retrieval_benchmark = {
+                    "triggered": True,
+                    **run_retrieval_benchmark(
+                        db_path=self.kg_db_path,
+                        dataset_path=benchmark_dataset_path,
+                    ),
+                }
+            except Exception as exc:
+                retrieval_benchmark = {"triggered": True, "ok": False, "error": str(exc)}
+
         matrix_result = await build_index_matrix(tender_paths)
         index_matrix = matrix_result["matrix"]
         quant_index = self.quant_engine.build_quantitative_index(boq_payload)
@@ -1122,6 +1310,25 @@ class MultiAgentDocPipeline:
                 quant_index=ctx.quant_index,
                 specialist_plan=specialist_plan,
             )
+
+        benchmark_warning: Dict[str, Any] = {}
+        if bool(retrieval_benchmark.get("triggered")) and not bool(retrieval_benchmark.get("ok")):
+            benchmark_warning = {
+                "type": "retrieval_benchmark_gate_failed",
+                "query": "kg_retrieval_benchmark",
+                "message": "检索评测门禁未达标，建议补强后发布。",
+            }
+            if enforce_retrieval_gate:
+                gap = {
+                    "type": "retrieval_benchmark_gate_failed",
+                    "dimension": "检索门禁",
+                    "required_keywords": [],
+                    "query": "kg_retrieval_benchmark",
+                    "suggested_parameters": ["提升图谱检索精度与MRR后再发布"],
+                }
+                if gap not in final_pass.get("gaps", []):
+                    final_pass.setdefault("gaps", []).append(gap)
+                final_pass["intercepted"] = True
 
         sentence_evidence_chain = self._build_sentence_evidence_chain(
             index_matrix=ctx.index_matrix,
@@ -1188,6 +1395,20 @@ class MultiAgentDocPipeline:
                 "visual_assets_missing": int(docx_result.get("visual_assets_missing") or 0),
             }
 
+        release_meta: Dict[str, Any] = {"triggered": False}
+        if create_release_freeze and not intercepted:
+            try:
+                release_meta = {
+                    "triggered": True,
+                    **create_release_snapshot(
+                        kg_root=graph_root,
+                        release_root=release_root,
+                        approver=release_approver,
+                    ),
+                }
+            except Exception as exc:
+                release_meta = {"triggered": True, "ok": False, "error": str(exc)}
+
         output = {
             "ok": True,
             "intercepted": intercepted,
@@ -1214,8 +1435,19 @@ class MultiAgentDocPipeline:
                 "compliance_agent": {"status": "done", "result": final_pass.get("compliance_audit") or {}},
                 "guardrail_agent": {"status": "done"},
                 "trace_agent": {"status": "done", "result": sentence_evidence_stats},
+                "chapter_planner_agent": {
+                    "status": "done",
+                    "result": final_pass.get("chapter_response_plan") or {},
+                },
                 "self_healing_agent": {"status": "done" if self_healing_result.get("triggered") else "skipped"},
                 "gemini_context_agent": {"status": "done"},
+                "standard_update_agent": {"status": "done" if standard_update_report.get("triggered") else "skipped"},
+                "project_rule_agent": {"status": "done" if enable_project_rule_extraction else "skipped"},
+                "benchmark_gate_agent": {
+                    "status": "done" if retrieval_benchmark.get("triggered") else "skipped",
+                    "result": retrieval_benchmark,
+                },
+                "feedback_agent": {"status": "done" if enable_feedback_learning else "skipped"},
                 "visual_agent": {
                     "status": "done" if visual_meta.get("generated") else "skipped",
                     "meta": visual_meta,
@@ -1223,9 +1455,11 @@ class MultiAgentDocPipeline:
                 "document_assembler": {"status": "done" if docx_meta.get("exported") else "skipped", "meta": docx_meta},
             },
             "specialist_plan": specialist_plan,
+            "project_rule_matrix": self.project_rule_matrix,
             "index_matrix": ctx.index_matrix,
             "quant_index": ctx.quant_index,
             "sections": final_pass.get("sections") or [],
+            "chapter_response_plan": final_pass.get("chapter_response_plan") or {},
             "knowledge_gaps": final_pass.get("gaps") or [],
             "missing_knowledge_report": missing_report_saved,
             "fail_fast_error": final_pass.get("fail_fast_error"),
@@ -1237,8 +1471,13 @@ class MultiAgentDocPipeline:
                 specialist_plan=specialist_plan,
             ),
             "self_healing": self_healing_result,
+            "standard_auto_update": standard_update_report,
+            "approval_report": approval_report,
+            "retrieval_benchmark": retrieval_benchmark,
+            "retrieval_benchmark_warning": benchmark_warning,
             "docx_output": docx_saved,
             "visual_output": visual_meta,
+            "release_snapshot": release_meta,
             "pre_healing": {
                 "intercepted": bool(first_pass.get("intercepted")),
                 "knowledge_gaps": first_pass.get("gaps") or [],
@@ -1246,8 +1485,23 @@ class MultiAgentDocPipeline:
             },
         }
 
+        feedback_report: Dict[str, Any] = {"triggered": False}
+        if enable_feedback_learning:
+            try:
+                feedback_report = {
+                    "triggered": True,
+                    **update_feedback_memory(
+                        result_payload=output,
+                        output_path=feedback_output_path,
+                    ),
+                }
+            except Exception as exc:
+                feedback_report = {"triggered": True, "ok": False, "error": str(exc)}
+        output["feedback_learning"] = feedback_report
+
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
         output["saved_at"] = str(out)
+        out.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
         return output

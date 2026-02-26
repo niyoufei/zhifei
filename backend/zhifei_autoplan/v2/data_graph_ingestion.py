@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .dxf_parser import parse_dxf_payload
+from .ifc_parser import parse_ifc_payload
 from .kg_paths import resolve_default_kg_root
+from .revit_parser import parse_revit_payload
 
-SUPPORTED_EXTENSIONS = {".json", ".md", ".markdown", ".xml", ".csv", ".dxf"}
+SUPPORTED_EXTENSIONS = {".json", ".md", ".markdown", ".xml", ".csv", ".dxf", ".ifc", ".ifcxml", ".rvt"}
 DEFAULT_KG_ROOT = resolve_default_kg_root()
 DEFAULT_DB_PATH = Path("backend/data/autoplan/v2/knowledge_graph.sqlite3")
 
@@ -1938,6 +1940,203 @@ def _parse_dxf(path: Path) -> List[ParsedNode]:
     return nodes
 
 
+def _parse_ifc(path: Path) -> List[ParsedNode]:
+    payload = parse_ifc_payload(path)
+    source_hierarchy = _normalize_source_hierarchy("设计图纸", source_path=str(path))
+    nodes: List[ParsedNode] = []
+
+    model_id = f"{path.stem}:ifc:model"
+    project_name = str(payload.get("project_name") or "").strip() or path.stem
+    top_entities = payload.get("top_entities") if isinstance(payload.get("top_entities"), list) else []
+    body_lines = [
+        f"IFC模型: {path.name}",
+        f"项目名称: {project_name}",
+        f"实体类型数量: {len(payload.get('entity_counts') or {})}",
+        "Top实体: " + ", ".join([f"{str(x.get('entity'))}:{int(x.get('count') or 0)}" for x in top_entities[:12]]),
+    ]
+    model_node = _build_parsed_node(
+        path=path,
+        node_id=model_id,
+        title="IFC模型摘要",
+        body="\n".join(body_lines),
+        tags=["ifc", "bim", "model_summary"],
+        keywords=_tokenize(" ".join(body_lines)),
+        payload={"type": "ifc_model_summary", "raw": payload},
+        node_type="EngineeringNode",
+        object_key=_normalize_alias(f"{path.stem}-ifc-model"),
+        applicable_conditions={},
+        resource_requirements={},
+        safety_level="unknown",
+        source_hierarchy=source_hierarchy,
+        formula_expression="",
+        formula_variables=[],
+        data_source_type="IFC",
+        spatial_context={"model_file": path.name, "context_type": "ifc_model"},
+        reference_keys=[model_id, project_name, path.name],
+        edge_drafts=[],
+    )
+    nodes.append(model_node)
+
+    for idx, item in enumerate(top_entities[:40], start=1):
+        entity = str(item.get("entity") or "").strip()
+        if not entity:
+            continue
+        count = int(item.get("count") or 0)
+        node_id = f"{path.stem}:ifc:entity:{idx}:{entity}"
+        edge_drafts = [
+            ParsedEdgeDraft(from_ref=node_id, to_ref=model_id, edge_type=EDGE_BELONGS_TO, edge_label="ifc_entity_model")
+        ]
+        nodes.append(
+            _build_parsed_node(
+                path=path,
+                node_id=node_id,
+                title=f"IFC实体 {entity}",
+                body=f"实体类型: {entity}\n数量: {count}",
+                tags=["ifc", "entity", entity],
+                keywords=_tokenize(f"{entity} {count}"),
+                payload={"type": "ifc_entity_count", "entity": entity, "count": count},
+                node_type="EngineeringNode",
+                object_key=_normalize_alias(f"{entity}-{path.stem}"),
+                applicable_conditions={},
+                resource_requirements={"entity_count": count},
+                safety_level="unknown",
+                source_hierarchy=source_hierarchy,
+                formula_expression="",
+                formula_variables=[],
+                data_source_type="IFC",
+                spatial_context={"model_file": path.name, "ifc_entity": entity, "context_type": "ifc_entity"},
+                reference_keys=[node_id, entity],
+                edge_drafts=edge_drafts,
+            )
+        )
+
+    properties = payload.get("properties") if isinstance(payload.get("properties"), list) else []
+    for idx, item in enumerate(properties[:80], start=1):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if not name:
+            continue
+        node_id = f"{path.stem}:ifc:property:{idx}"
+        edge_drafts = [
+            ParsedEdgeDraft(
+                from_ref=node_id,
+                to_ref=model_id,
+                edge_type=EDGE_BELONGS_TO,
+                edge_label="ifc_property_model",
+            )
+        ]
+        nodes.append(
+            _build_parsed_node(
+                path=path,
+                node_id=node_id,
+                title=f"IFC属性 {name}",
+                body=f"属性名称: {name}\n属性值: {value}",
+                tags=["ifc", "property", name],
+                keywords=_tokenize(f"{name} {value}"),
+                payload={"type": "ifc_property", "name": name, "value": value},
+                node_type="EngineeringNode",
+                object_key=_normalize_alias(f"{name}-{idx}-{path.stem}"),
+                applicable_conditions={},
+                resource_requirements={},
+                safety_level="unknown",
+                source_hierarchy=source_hierarchy,
+                formula_expression="",
+                formula_variables=[],
+                data_source_type="IFC",
+                spatial_context={"model_file": path.name, "context_type": "ifc_property"},
+                reference_keys=[node_id, name],
+                edge_drafts=edge_drafts,
+            )
+        )
+    return nodes
+
+
+def _parse_rvt(path: Path) -> List[ParsedNode]:
+    payload = parse_revit_payload(path)
+    source_hierarchy = _normalize_source_hierarchy("设计图纸", source_path=str(path))
+    nodes: List[ParsedNode] = []
+
+    model_id = f"{path.stem}:rvt:model"
+    body_lines = [
+        f"Revit模型: {path.name}",
+        f"原生解析支持: {bool(payload.get('native_supported'))}",
+        f"解析模式: {payload.get('parse_mode')}",
+        f"文件大小(bytes): {int(payload.get('size_bytes') or 0)}",
+        f"SHA256: {payload.get('sha256')}",
+    ]
+    if payload.get("revit_version_hint"):
+        body_lines.append(f"版本提示: {payload.get('revit_version_hint')}")
+
+    nodes.append(
+        _build_parsed_node(
+            path=path,
+            node_id=model_id,
+            title="Revit模型摘要",
+            body="\n".join(body_lines),
+            tags=["revit", "bim", "model_summary"],
+            keywords=_tokenize(" ".join(body_lines)),
+            payload={"type": "revit_model_summary", "raw": payload},
+            node_type="EngineeringNode",
+            object_key=_normalize_alias(f"{path.stem}-rvt-model"),
+            applicable_conditions={},
+            resource_requirements={},
+            safety_level="unknown",
+            source_hierarchy=source_hierarchy,
+            formula_expression="",
+            formula_variables=[],
+            data_source_type="RVT",
+            spatial_context={"model_file": path.name, "context_type": "revit_model"},
+            reference_keys=[model_id, path.name],
+            edge_drafts=[],
+        )
+    )
+
+    companions = payload.get("companion_exports") if isinstance(payload.get("companion_exports"), list) else []
+    for idx, item in enumerate(companions[:40], start=1):
+        if not isinstance(item, dict):
+            continue
+        file_name = str(item.get("file") or "").strip()
+        if not file_name:
+            continue
+        snippet = str(item.get("snippet") or "").strip()
+        node_id = f"{path.stem}:rvt:companion:{idx}"
+        edge_drafts = [
+            ParsedEdgeDraft(
+                from_ref=node_id,
+                to_ref=model_id,
+                edge_type=EDGE_BELONGS_TO,
+                edge_label="revit_companion_binding",
+            )
+        ]
+        nodes.append(
+            _build_parsed_node(
+                path=path,
+                node_id=node_id,
+                title=f"Revit伴随数据 {file_name}",
+                body=f"伴随文件: {file_name}\n摘要: {snippet}",
+                tags=["revit", "companion", str(item.get("suffix") or "")],
+                keywords=_tokenize(f"{file_name} {snippet}"),
+                payload={"type": "revit_companion_export", "raw": item},
+                node_type="EngineeringNode",
+                object_key=_normalize_alias(f"{path.stem}-{file_name}-{idx}"),
+                applicable_conditions={},
+                resource_requirements={},
+                safety_level="unknown",
+                source_hierarchy=source_hierarchy,
+                formula_expression="",
+                formula_variables=[],
+                data_source_type="RVT",
+                spatial_context={"model_file": path.name, "context_type": "revit_companion"},
+                reference_keys=[node_id, file_name],
+                edge_drafts=edge_drafts,
+            )
+        )
+
+    return nodes
+
+
 def _safe_eval_formula(expression: str, variables: Dict[str, Any]) -> Any:
     text = str(expression or "").strip()
     if not text:
@@ -2170,6 +2369,10 @@ class KnowledgeGraphIndex:
             return _parse_csv(path)
         if ext == ".dxf":
             return _parse_dxf(path)
+        if ext in {".ifc", ".ifcxml"}:
+            return _parse_ifc(path)
+        if ext == ".rvt":
+            return _parse_rvt(path)
         return []
 
     def _resolve_node_id(self, conn: sqlite3.Connection, ref: str, local_alias_map: Dict[str, int]) -> Optional[int]:
