@@ -783,6 +783,10 @@ def _ensure_tactical(node: Dict[str, Any], dim: str, node_domain: str) -> int:
         env["activation_signal"] = signal
         changed += 1
 
+    if str(content.get("logic_execution") or "").strip() != "IF Active THEN Premium ELSE Mediocre":
+        content["logic_execution"] = "IF Active THEN Premium ELSE Mediocre"
+        changed += 1
+
     premium = content.get("operation_desc_premium")
     if not isinstance(premium, dict):
         premium = {}

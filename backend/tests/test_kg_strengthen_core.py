@@ -80,6 +80,8 @@ def test_strengthen_file_repairs_core_fields(tmp_path: Path) -> None:
     assert isinstance(n1["content"]["operation_desc_premium"]["bid_response_strategy"], dict)
     assert isinstance(n1["content"]["operation_desc_premium"]["competitor_shield"], dict)
     assert isinstance(n1["content"]["operation_desc_premium"]["qt_score_booster"], dict)
+    assert n1["content"]["logic_execution"] == "IF Active THEN Premium ELSE Mediocre"
+    assert n2["content"]["logic_execution"] == "IF Active THEN Premium ELSE Mediocre"
 
     assert "N1" in n2["requires"]
     assert isinstance(n1["relations"], list) and n1["relations"]

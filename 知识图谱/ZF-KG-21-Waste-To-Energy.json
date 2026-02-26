@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-26T12:28:16",
+    "updated_at": "2026-02-26T13:31:31",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -91,7 +91,8 @@
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
             "GB/T 50326-2017 建设工程项目管理规范",
-            "GB 50303-2015 建筑电气工程施工质量验收规范"
+            "GB 50303-2015 建筑电气工程施工质量验收规范",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "is_auto_generated": true,
           "formula_expression": "100 - defect_count * 100 / max(sample_count, 1)",
@@ -345,7 +346,7 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "mep",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -423,8 +424,10 @@
             }
           ],
           "source_candidates": [
+            "答疑文件",
             "国标",
-            "行标"
+            "行标",
+            "企标"
           ],
           "kg_dimension": "质量",
           "professional_domain_aliases": [
@@ -459,7 +462,8 @@
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
             "GB/T 50326-2017 建设工程项目管理规范",
-            "GB 50210-2018 建筑装饰装修工程质量验收标准"
+            "GB 50210-2018 建筑装饰装修工程质量验收标准",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -599,7 +603,8 @@
             },
             "environment_sensing": {
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(质量) AND domain_hint == 'building' AND node_hint CONTAINS '质量响应控制补强'"
-            }
+            },
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "scoring_points": {
             "checkpoints": [
@@ -784,7 +789,7 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -874,12 +879,15 @@
             }
           ],
           "source_candidates": [
+            "答疑文件",
             "国标",
-            "行标"
+            "行标",
+            "企标"
           ],
           "kg_dimension": "质量",
           "professional_domain_aliases": [
-            "management"
+            "management",
+            "earthwork"
           ]
         },
         {
@@ -908,7 +916,8 @@
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
             "GB/T 50326-2017 建设工程项目管理规范",
-            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范"
+            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -1048,7 +1057,8 @@
             },
             "environment_sensing": {
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(安全) AND domain_hint == 'mep' AND node_hint CONTAINS '安全响应控制补强'"
-            }
+            },
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "scoring_points": {
             "checkpoints": [
@@ -1233,7 +1243,7 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "mep",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -1328,13 +1338,16 @@
             }
           ],
           "source_candidates": [
+            "答疑文件",
+            "国标",
             "行标",
-            "国标"
+            "企标"
           ],
           "kg_dimension": "安全",
           "professional_domain_aliases": [
             "building",
-            "management"
+            "management",
+            "earthwork"
           ]
         },
         {
@@ -1363,7 +1376,8 @@
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
             "GB/T 50326-2017 建设工程项目管理规范",
-            "GB 50204-2015 混凝土结构工程施工质量验收规范"
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -1503,7 +1517,8 @@
             },
             "environment_sensing": {
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(进度) AND domain_hint == 'building' AND node_hint CONTAINS '进度响应控制补强'"
-            }
+            },
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "scoring_points": {
             "checkpoints": [
@@ -1688,7 +1703,7 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -1784,8 +1799,10 @@
             }
           ],
           "source_candidates": [
+            "答疑文件",
             "国标",
-            "行标"
+            "行标",
+            "企标"
           ],
           "kg_dimension": "进度",
           "professional_domain_aliases": [
@@ -1819,7 +1836,8 @@
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
             "GB/T 50326-2017 建设工程项目管理规范",
-            "GB 50210-2018 建筑装饰装修工程质量验收标准"
+            "GB 50210-2018 建筑装饰装修工程质量验收标准",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -1966,7 +1984,8 @@
             },
             "environment_sensing": {
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(重难点) AND domain_hint == 'building' AND node_hint CONTAINS '重难点响应控制补'"
-            }
+            },
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "scoring_points": {
             "checkpoints": [
@@ -2151,7 +2170,7 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -2247,8 +2266,10 @@
             }
           ],
           "source_candidates": [
+            "答疑文件",
             "国标",
-            "行标"
+            "行标",
+            "企标"
           ],
           "kg_dimension": "重难点",
           "professional_domain_aliases": [
@@ -2411,7 +2432,8 @@
             },
             "environment_sensing": {
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(扣分点) AND domain_hint == 'building' AND node_hint CONTAINS '扣分点响应控制补'"
-            }
+            },
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "scoring_points": {
             "checkpoints": [
@@ -2596,7 +2618,7 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -2699,7 +2721,8 @@
           ],
           "kg_dimension": "扣分点",
           "professional_domain_aliases": [
-            "management"
+            "management",
+            "earthwork"
           ]
         },
         {
@@ -2865,7 +2888,8 @@
             "GB/T 50326-2017 建设工程项目管理规范",
             "GB 50202-2018 建筑地基基础工程施工质量验收标准",
             "GB 50300-2013 建筑工程施工质量验收统一标准",
-            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范"
+            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "applicable_conditions": {
             "construction_window": "按总控网络计划执行"
@@ -3015,7 +3039,8 @@
             },
             "environment_sensing": {
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(质量) AND domain_hint == 'mep' AND node_hint CONTAINS '清单-工序-资源'"
-            }
+            },
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "scoring_points": {
             "checkpoints": [
@@ -3297,12 +3322,14 @@
             }
           ],
           "source_candidates": [
-            "国标"
+            "答疑文件",
+            "国标",
+            "企标"
           ],
           "kg_dimension": "质量",
           "professional_domain_aliases": [
-            "building",
             "earthwork",
+            "building",
             "management"
           ]
         },
@@ -3324,17 +3351,17 @@
             "公式",
             "计算"
           ],
-          "professional_domain": "bridge",
+          "professional_domain": "management",
           "source_hierarchy": "答疑文件",
           "reference_standard": [
             "GB/T 50326-2017 建设工程项目管理规范",
-            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范"
+            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
-          "formula_expression": "work_volume / max(productivity_per_day * crew_efficiency, 1)",
+          "formula_expression": "delay_hours * 100 / max(planned_hours, 1)",
           "formula_variables": [
-            "crew_efficiency",
-            "productivity_per_day",
-            "work_volume"
+            "delay_hours",
+            "planned_hours"
           ],
           "applicable_conditions": {
             "scenario": "进度约束计算"
@@ -3409,7 +3436,7 @@
           ],
           "content": {
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(进度) AND domain_hint == 'mep' AND node_hint CONTAINS '进度动态计算节点'"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(进度) AND domain_hint == 'management' AND node_hint CONTAINS '进度动态计算节点'"
             },
             "operation_desc_premium": {
               "desc": "第一步（定义）：执行进度动态计算节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
@@ -3433,7 +3460,8 @@
                 "score_weight": "+3_Points"
               }
             },
-            "operation_desc_mediocre": "执行进度动态计算节点常规作业，按参数阈值与检查岗位完成闭环复核。"
+            "operation_desc_mediocre": "执行进度动态计算节点常规作业，按参数阈值与检查岗位完成闭环复核。",
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "retrieval_hints": {
             "must_keywords": [
@@ -3442,7 +3470,8 @@
               "节点",
               "里程碑",
               "mep",
-              "进度动态计算节点"
+              "进度动态计算节点",
+              "management"
             ],
             "optional_keywords": [
               "bridge",
@@ -3571,7 +3600,9 @@
             }
           ],
           "source_candidates": [
-            "国标"
+            "答疑文件",
+            "国标",
+            "企标"
           ],
           "kg_dimension": "进度",
           "schedule_constraints": {
@@ -3703,7 +3734,7 @@
           },
           "professional_domain_aliases": [
             "building",
-            "management"
+            "earthwork"
           ],
           "visual_specs": {
             "enabled": true,
@@ -3853,7 +3884,8 @@
                 "score_weight": "+3_Points"
               }
             },
-            "operation_desc_mediocre": "执行重难点动态计算节点常规作业，按参数阈值与检查岗位完成闭环复核。"
+            "operation_desc_mediocre": "执行重难点动态计算节点常规作业，按参数阈值与检查岗位完成闭环复核。",
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "retrieval_hints": {
             "must_keywords": [
@@ -4113,8 +4145,8 @@
             "max_retry": 3
           },
           "professional_domain_aliases": [
-            "building",
-            "management"
+            "management",
+            "building"
           ],
           "visual_specs": {
             "enabled": true,
@@ -4185,7 +4217,8 @@
                 "score_weight": "+3_Points"
               }
             },
-            "operation_desc_mediocre": "采用常规工艺执行ACC自动燃烧(AI增强版)，按既有验收条款与班组检查机制落地。"
+            "operation_desc_mediocre": "采用常规工艺执行ACC自动燃烧(AI增强版)，按既有验收条款与班组检查机制落地。",
+            "logic_execution": "IF Active THEN Premium ELSE Mediocre"
           },
           "safety_level": "medium",
           "applicable_conditions": {
@@ -4226,7 +4259,8 @@
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
             "GB/T 50326-2017 建设工程项目管理规范",
-            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范"
+            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "is_auto_generated": true,
           "formula_expression": "rework_volume * 100 / max(total_work_volume, 1)",
@@ -4493,7 +4527,7 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "management",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -4571,8 +4605,10 @@
             }
           ],
           "source_candidates": [
+            "答疑文件",
             "国标",
-            "行标"
+            "行标",
+            "企标"
           ],
           "kg_dimension": "质量",
           "professional_domain_aliases": [
