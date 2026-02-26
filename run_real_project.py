@@ -6,11 +6,13 @@ import asyncio
 import csv
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
 from backend.zhifei_autoplan.v2.kg_paths import resolve_default_kg_root
 from backend.zhifei_autoplan.v2.multi_agent_pipeline import MultiAgentDocPipeline
+
+BOQ_FILE_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
 
 
 def _to_float(value: Any) -> float | None:
@@ -58,7 +60,31 @@ def _load_boq_csv(path: Path) -> Dict[str, Any]:
     return {"items": items, "stats": stats}
 
 
-async def _load_boq_payload(path: Path) -> Dict[str, Any]:
+def _boq_candidates(path: Path) -> List[Path]:
+    if path.is_file():
+        return [path]
+    if not path.is_dir():
+        return []
+    files = [p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in BOQ_FILE_EXTENSIONS]
+    return sorted(files, key=lambda p: str(p))
+
+
+def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dict[str, Any]:
+    name = str(raw.get("name") or "").strip()
+    if not name:
+        return {}
+    return {
+        "boq_code": str(raw.get("boq_code") or raw.get("code") or f"AUTO-{seq}"),
+        "name": name,
+        "quantity": _to_float(raw.get("quantity")),
+        "unit": str(raw.get("unit") or "").strip() or None,
+        "unit_price": _to_float(raw.get("unit_price")),
+        "total_price": _to_float(raw.get("total_price")),
+        "source_file": str(source_file),
+    }
+
+
+async def _load_single_boq(path: Path) -> Dict[str, Any]:
     suffix = path.suffix.lower()
     if suffix == ".csv":
         payload = _load_boq_csv(path)
@@ -69,15 +95,91 @@ async def _load_boq_payload(path: Path) -> Dict[str, Any]:
             "items": [it.model_dump() for it in items],
             "stats": stats,
         }
+    normalized_items: List[Dict[str, Any]] = []
+    for idx, item in enumerate(payload.get("items") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalize_boq_item(item, path, idx)
+        if normalized:
+            normalized_items.append(normalized)
+    payload["items"] = normalized_items
+    payload["source_file"] = str(path)
+    payload["stats"] = dict(payload.get("stats") or {})
+    payload["stats"]["item_count"] = len(normalized_items)
+    payload["stats"]["total_quantity"] = sum(float(it.get("quantity") or 0.0) for it in normalized_items)
     if not payload.get("items"):
         raise ValueError(f"BOQ parsing returned empty items: {path}")
     return payload
 
 
+def _dedupe_boq_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for item in items:
+        key = (
+            str(item.get("boq_code") or "").strip().lower(),
+            str(item.get("name") or "").strip().lower(),
+            float(item.get("quantity") or 0.0),
+            str(item.get("unit") or "").strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+async def _load_boq_payload(path: Path) -> Dict[str, Any]:
+    candidates = _boq_candidates(path)
+    if not candidates:
+        raise ValueError(f"No BOQ files found under: {path}")
+
+    merged_items: List[Dict[str, Any]] = []
+    parse_errors: List[Dict[str, str]] = []
+    file_item_count: Dict[str, int] = {}
+    source_stats: Dict[str, Any] = {}
+
+    for file_path in candidates:
+        try:
+            payload = await _load_single_boq(file_path)
+            items = payload.get("items") or []
+            merged_items.extend(items)
+            file_item_count[str(file_path)] = len(items)
+            source_stats[str(file_path)] = payload.get("stats") or {}
+        except Exception as exc:
+            parse_errors.append({"file": str(file_path), "error": str(exc)})
+
+    merged_items = _dedupe_boq_items(merged_items)
+    if not merged_items:
+        raise ValueError(f"BOQ parsing returned empty items for all candidates: {path}; errors={parse_errors}")
+
+    top_quantity_items = sorted(
+        merged_items,
+        key=lambda it: float(it.get("quantity") or 0.0),
+        reverse=True,
+    )[:10]
+
+    return {
+        "items": merged_items,
+        "stats": {
+            "item_count": len(merged_items),
+            "total_quantity": sum(float(it.get("quantity") or 0.0) for it in merged_items),
+            "source_file_count": len(candidates),
+            "parsed_file_count": len(file_item_count),
+            "failed_file_count": len(parse_errors),
+            "file_item_count": file_item_count,
+            "source_stats": source_stats,
+            "top_quantity_items": top_quantity_items,
+        },
+        "source_files": [str(p) for p in candidates],
+        "parse_errors": parse_errors,
+    }
+
+
 def _arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run V2 engine on a real project (production mode).")
     p.add_argument("--tender", nargs="+", required=True, help="招标文件路径（PDF/Word/TXT等）。")
-    p.add_argument("--boq", required=True, help="工程量清单路径（Excel/CSV/PDF）。")
+    p.add_argument("--boq", required=True, help="工程量清单路径（Excel/CSV/PDF 文件，或目录自动合并解析）。")
     p.add_argument(
         "--kg-root",
         default=str(resolve_default_kg_root()),
@@ -171,6 +273,14 @@ async def _run(args: argparse.Namespace) -> int:
     print("=== Real Project Penetration Run Completed ===")
     print(f"Tender: {', '.join(tender_paths)}")
     print(f"BOQ: {boq_path}")
+    boq_stats = boq_payload.get("stats") or {}
+    print(
+        "BOQ Parse: "
+        f"source_files={int(boq_stats.get('source_file_count') or 0)}, "
+        f"parsed={int(boq_stats.get('parsed_file_count') or 0)}, "
+        f"failed={int(boq_stats.get('failed_file_count') or 0)}, "
+        f"items={int(boq_stats.get('item_count') or 0)}"
+    )
     print(f"Diagnosis JSON: {result.get('saved_at')}")
     print(f"Missing_Knowledge_Report: {result.get('missing_knowledge_report')}")
     print(f"Production DOCX: {result.get('docx_output')}")
@@ -178,6 +288,14 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"Score Coverage OK: {bool(score_audit.get('ok'))}")
     print(f"Graph Support OK: {bool(graph_audit.get('ok'))}")
     print(f"Knowledge Gaps: {len(gaps)}")
+    evidence_stats = result.get("sentence_evidence_stats") or {}
+    if evidence_stats:
+        print(
+            "Sentence Trace: "
+            f"total={int(evidence_stats.get('total_sentences') or 0)}, "
+            f"traceable={int(evidence_stats.get('traceable_sentences') or 0)}, "
+            f"coverage={float(evidence_stats.get('trace_coverage_ratio') or 0.0):.4f}"
+        )
     self_heal = result.get("self_healing") or {}
     if self_heal.get("triggered"):
         print(
@@ -194,6 +312,10 @@ async def _run(args: argparse.Namespace) -> int:
         kw = "、".join([str(x) for x in (gap.get("required_keywords") or [])[:6]])
         q = str(gap.get("query") or "")
         print(f"GAP[{i}] {gtype} | {dim} | {kw} | query={q}")
+
+    parse_errors = boq_payload.get("parse_errors") or []
+    for i, err in enumerate(parse_errors[:10], start=1):
+        print(f"BOQ_PARSE_ERROR[{i}] {err.get('file')} | {err.get('error')}")
 
     return 0
 

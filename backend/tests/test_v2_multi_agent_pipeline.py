@@ -76,6 +76,19 @@ async def test_multi_agent_pipeline_run(tmp_path: Path) -> None:
     assert result["agents"]["audit_agent"]["result"]["ok"] is True
     assert isinstance(result.get("gemini_context_packets"), list)
     assert len(result["gemini_context_packets"]) == len(result["index_matrix"]["index_matrix"])
+    assert isinstance(result.get("sentence_evidence_chain"), list)
+    assert isinstance(result.get("sentence_evidence_stats"), dict)
+    assert int(result["sentence_evidence_stats"].get("total_sentences") or 0) >= len(result["sections"])
+    assert float(result["sentence_evidence_stats"].get("trace_coverage_ratio") or 0.0) > 0.0
+    first_trace = result["sentence_evidence_chain"][0]
+    assert first_trace.get("sentence_text")
+    assert isinstance(first_trace.get("evidence"), dict)
+    assert (
+        str((first_trace.get("evidence") or {}).get("node_id") or "").strip()
+        or str((first_trace.get("evidence") or {}).get("source_path") or "").strip()
+        or str((first_trace.get("evidence") or {}).get("retrieval_query") or "").strip()
+        or str((first_trace.get("evidence") or {}).get("index_source_path") or "").strip()
+    )
 
 
 @pytest.mark.asyncio

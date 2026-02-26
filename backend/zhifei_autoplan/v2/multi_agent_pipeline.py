@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -50,6 +51,7 @@ PROFESSIONAL_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
 }
 
 CONSISTENCY_KEYWORDS = ("标高", "高程", "坐标", "坐标X", "坐标Y", "工期", "里程碑", "关键线路")
+SENTENCE_SPLIT_RE = re.compile(r"[。；;!?！？]\s*")
 
 
 @dataclass
@@ -432,7 +434,22 @@ class MultiAgentDocPipeline:
                         "source_trace": {
                             "node_id": selected_graph.get("node_id") if isinstance(selected_graph, dict) else None,
                             "title": selected_graph.get("title") if isinstance(selected_graph, dict) else None,
+                            "source_file": selected_graph.get("source_file") if isinstance(selected_graph, dict) else None,
                             "source_path": selected_graph.get("source_path") if isinstance(selected_graph, dict) else None,
+                            "source_hierarchy": selected_graph.get("source_hierarchy")
+                            if isinstance(selected_graph, dict)
+                            else None,
+                            "reference_standard": (
+                                (selected_graph.get("payload") or {}).get("reference_standard")
+                                if isinstance((selected_graph or {}).get("payload"), dict)
+                                else []
+                            ),
+                            "formula_expression": selected_graph.get("formula_expression")
+                            if isinstance(selected_graph, dict)
+                            else None,
+                            "formula_variables": selected_graph.get("formula_variables")
+                            if isinstance(selected_graph, dict)
+                            else [],
                             "is_auto_generated": self._is_auto_generated_hit(selected_graph),
                         },
                     }
@@ -599,6 +616,118 @@ class MultiAgentDocPipeline:
                 }
             )
         return packets
+
+    def _split_sentences(self, text: str) -> List[str]:
+        lines = [str(x).strip() for x in SENTENCE_SPLIT_RE.split(text or "") if str(x).strip()]
+        return [line for line in lines if len(line) >= 4]
+
+    def _build_sentence_evidence_chain(
+        self,
+        *,
+        index_matrix: Dict[str, Any],
+        sections: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        item_by_dim: Dict[str, Dict[str, Any]] = {}
+        for item in index_matrix.get("index_matrix") or []:
+            dim = str(item.get("dimension") or "").strip()
+            if dim and dim not in item_by_dim:
+                item_by_dim[dim] = item
+
+        chain: List[Dict[str, Any]] = []
+        for sec in sections:
+            title = str(sec.get("title") or "").strip() or "untitled"
+            content = str(sec.get("content") or "")
+            source_trace = sec.get("source_trace") if isinstance(sec.get("source_trace"), dict) else {}
+            graph_hit = sec.get("graph_hit") if isinstance(sec.get("graph_hit"), dict) else {}
+            item = item_by_dim.get(title) or {}
+            support_chunks = item.get("support_chunks") if isinstance(item.get("support_chunks"), list) else []
+            reference_standard = (
+                source_trace.get("reference_standard")
+                if isinstance(source_trace.get("reference_standard"), list)
+                else []
+            )
+            if not reference_standard:
+                payload = graph_hit.get("payload")
+                if isinstance(payload, dict):
+                    refs = payload.get("reference_standard")
+                    if isinstance(refs, list):
+                        reference_standard = refs
+            formula_variables = source_trace.get("formula_variables")
+            if not isinstance(formula_variables, list):
+                formula_variables = graph_hit.get("formula_variables") if isinstance(graph_hit.get("formula_variables"), list) else []
+
+            for idx, sentence in enumerate(self._split_sentences(content), start=1):
+                sentence_id_seed = f"{title}|{idx}|{sentence}"
+                sentence_id = hashlib.md5(sentence_id_seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+                chain.append(
+                    {
+                        "sentence_id": sentence_id,
+                        "section_title": title,
+                        "sentence_index": idx,
+                        "sentence_text": sentence,
+                        "specialist_domain": sec.get("specialist_domain"),
+                        "specialist_agent": sec.get("specialist_agent"),
+                        "boq_binding": {
+                            "source_boq_item": sec.get("source_boq_item"),
+                        },
+                        "index_matrix_binding": {
+                            "dimension": item.get("dimension") or title,
+                            "keywords": item.get("keywords") or [],
+                            "source_type": item.get("source_type"),
+                            "support_chunks": [
+                                {
+                                    "path": chunk.get("path"),
+                                    "chunk_id": chunk.get("chunk_id"),
+                                    "section_title": chunk.get("section_title"),
+                                }
+                                for chunk in support_chunks[:3]
+                                if isinstance(chunk, dict)
+                            ],
+                        },
+                        "evidence": {
+                            "node_id": source_trace.get("node_id") or graph_hit.get("node_id"),
+                            "node_title": source_trace.get("title") or graph_hit.get("title"),
+                            "source_file": source_trace.get("source_file") or graph_hit.get("source_file"),
+                            "source_path": source_trace.get("source_path") or graph_hit.get("source_path"),
+                            "source_hierarchy": source_trace.get("source_hierarchy")
+                            or graph_hit.get("source_hierarchy"),
+                            "reference_standard": reference_standard[:6],
+                            "formula_expression": source_trace.get("formula_expression")
+                            or graph_hit.get("formula_expression"),
+                            "formula_variables": formula_variables[:8],
+                            "retrieval_query": sec.get("graph_query"),
+                            "index_source_path": (
+                                support_chunks[0].get("path")
+                                if support_chunks and isinstance(support_chunks[0], dict)
+                                else None
+                            ),
+                            "is_auto_generated": bool(
+                                source_trace.get("is_auto_generated") or self._is_auto_generated_hit(graph_hit)
+                            ),
+                        },
+                    }
+                )
+        return chain
+
+    def _compute_sentence_evidence_stats(self, chain: List[Dict[str, Any]]) -> Dict[str, Any]:
+        total = len(chain)
+        traceable = 0
+        for row in chain:
+            evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+            if (
+                str(evidence.get("node_id") or "").strip()
+                or str(evidence.get("source_path") or "").strip()
+                or str(evidence.get("index_source_path") or "").strip()
+                or str(evidence.get("retrieval_query") or "").strip()
+            ):
+                traceable += 1
+        ratio = round(traceable / total, 4) if total > 0 else 0.0
+        return {
+            "total_sentences": total,
+            "traceable_sentences": traceable,
+            "trace_coverage_ratio": ratio,
+            "missing_trace_sentences": max(total - traceable, 0),
+        }
 
     def _collect_knowledge_gaps(
         self,
@@ -787,6 +916,7 @@ class MultiAgentDocPipeline:
         graph_audit: Dict[str, Any],
         compliance_audit: Optional[Dict[str, Any]],
         fail_fast_error: str | None,
+        sentence_evidence_stats: Optional[Dict[str, Any]] = None,
         self_healing: Optional[Dict[str, Any]] = None,
         path: Path | str = DEFAULT_MISSING_REPORT,
     ) -> str:
@@ -806,6 +936,14 @@ class MultiAgentDocPipeline:
             lines.append(f"- Compliance Inconsistencies: {int(compliance_audit.get('inconsistency_count') or 0)}")
             lines.append(
                 f"- Missing Graph Bindings: {int(compliance_audit.get('missing_graph_bindings_count') or 0)}"
+            )
+        if isinstance(sentence_evidence_stats, dict):
+            lines.append(f"- Sentence Trace Total: {int(sentence_evidence_stats.get('total_sentences') or 0)}")
+            lines.append(
+                f"- Sentence Trace Coverage: {float(sentence_evidence_stats.get('trace_coverage_ratio') or 0.0):.4f}"
+            )
+            lines.append(
+                f"- Sentence Missing Trace: {int(sentence_evidence_stats.get('missing_trace_sentences') or 0)}"
             )
         lines.append(f"- Intercepted: {bool(gaps or fail_fast_error)}")
         if fail_fast_error:
@@ -985,6 +1123,12 @@ class MultiAgentDocPipeline:
                 specialist_plan=specialist_plan,
             )
 
+        sentence_evidence_chain = self._build_sentence_evidence_chain(
+            index_matrix=ctx.index_matrix,
+            sections=final_pass.get("sections") or [],
+        )
+        sentence_evidence_stats = self._compute_sentence_evidence_stats(sentence_evidence_chain)
+
         missing_report_saved = self._write_missing_knowledge_report(
             gaps=final_pass.get("gaps") or [],
             graph_report=ctx.graph_report,
@@ -992,6 +1136,7 @@ class MultiAgentDocPipeline:
             graph_audit=final_pass.get("graph_audit") or {},
             compliance_audit=final_pass.get("compliance_audit") or {},
             fail_fast_error=final_pass.get("fail_fast_error"),
+            sentence_evidence_stats=sentence_evidence_stats,
             self_healing=self_healing_result,
             path=missing_report_path,
         )
@@ -1068,6 +1213,7 @@ class MultiAgentDocPipeline:
                 },
                 "compliance_agent": {"status": "done", "result": final_pass.get("compliance_audit") or {}},
                 "guardrail_agent": {"status": "done"},
+                "trace_agent": {"status": "done", "result": sentence_evidence_stats},
                 "self_healing_agent": {"status": "done" if self_healing_result.get("triggered") else "skipped"},
                 "gemini_context_agent": {"status": "done"},
                 "visual_agent": {
@@ -1083,6 +1229,8 @@ class MultiAgentDocPipeline:
             "knowledge_gaps": final_pass.get("gaps") or [],
             "missing_knowledge_report": missing_report_saved,
             "fail_fast_error": final_pass.get("fail_fast_error"),
+            "sentence_evidence_stats": sentence_evidence_stats,
+            "sentence_evidence_chain": sentence_evidence_chain,
             "gemini_context_packets": self._build_gemini_context_packets(
                 index_matrix=ctx.index_matrix,
                 sections=final_pass.get("sections") or [],
