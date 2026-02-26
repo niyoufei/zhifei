@@ -2,7 +2,15 @@
   "name": "ZF-KG-45-Curtain-Wall",
   "meta": {
     "version": "V20.1 DNA-Lock",
-    "activation_key": "智飞工程"
+    "activation_key": "智飞工程",
+    "updated_at": "2026-02-26T10:54:25",
+    "authority_chain": [
+      "答疑文件",
+      "设计图纸",
+      "国标",
+      "行标",
+      "企标"
+    ]
   },
   "knowledge_database": {
     "01_Advanced_Technology": {
@@ -16,7 +24,7 @@
           ],
           "content": {
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程'"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(质量) AND domain_hint == 'building' AND node_hint CONTAINS '异形曲面幕墙参数'"
             },
             "logic_execution": "IF Active THEN Premium ELSE Mediocre",
             "operation_desc_mediocre": "传统CAD放样，误差大，废料多。",
@@ -64,25 +72,38 @@
               ]
             },
             "material": {
-              "acceptance_rule": "100%批次进场验收"
+              "acceptance_rule": "100%批次进场验收",
+              "wastage_rate_percent": 2.0
             },
-            "inspection_frequency": "2次/班"
+            "inspection_frequency": "2次/班",
+            "productivity_model": {
+              "formula_variables": [
+                "measured_strength",
+                "target_strength"
+              ],
+              "calibration_source": "设计图纸",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "source_hierarchy": "设计图纸",
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "GB 50210-2018 建筑装饰装修工程质量验收标准",
+            "设计图纸-施工图版本(以最新设计变更为准)"
           ],
           "is_auto_generated": true,
-          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_expression": "rework_volume * 100 / max(total_work_volume, 1)",
           "formula_variables": [
-            "quantity",
-            "productivity_per_day"
+            "rework_volume",
+            "total_work_volume"
           ],
           "requires": [],
           "mitigates": [
-            "CURT-FN-002-V20.1"
+            "CURT-FN-002-V20.1",
+            "ZF-KG-45-Curtain-Wall-M1-安全"
           ],
           "conflicts_with": [
             "CURT-FN-002-V20.1"
@@ -92,13 +113,56 @@
               "parameter": "formula_result",
               "formula": "quantity / max(productivity_per_day, 1)",
               "source_text": "formula_expression"
+            },
+            {
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "target_strength",
+              "value": "40",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "rework_volume",
+              "value": "25",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "total_work_volume",
+              "value": "1200",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "quantitative_indices": {
             "duration_index": 0.5,
             "risk_index": 0.38,
             "resource_density_index": 0.8333,
-            "complexity_index": 0.558
+            "complexity_index": 0.558,
+            "source_confidence_index": 0.92
           },
           "schedule_constraints": {
             "critical_path_hint": [
@@ -106,76 +170,28 @@
               "CURT-FN-002-V20.1"
             ],
             "min_process_interval_days": 1,
-            "inference_method": "default_cpm_anchor"
+            "inference_method": "default_cpm_anchor",
+            "max_recovery_hours": 24,
+            "risk_trigger_threshold_percent": 5,
+            "source_hierarchy": "设计图纸"
           },
-          "scoring_points": [
-            {
-              "point_id": "质量-NODE",
-              "dimension": "质量",
-              "description": "质量评分点响应",
-              "required_keywords": [
-                "质量",
-                "验收",
-                "合格",
-                "缺陷",
-                "平整度",
-                "强度"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "安全-NODE",
-              "dimension": "安全",
-              "description": "安全评分点响应",
-              "required_keywords": [
-                "安全",
-                "危险",
-                "防护",
-                "应急",
-                "事故",
-                "临电"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "进度-NODE",
-              "dimension": "进度",
-              "description": "进度评分点响应",
-              "required_keywords": [
-                "工期",
-                "进度",
-                "节点",
-                "里程碑",
-                "关键线路",
-                "计划"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "重难点-NODE",
-              "dimension": "重难点",
-              "description": "重难点评分点响应",
-              "required_keywords": [
-                "重难点",
-                "难点",
-                "关键工序",
-                "复杂",
-                "深基坑",
-                "大体积"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            }
+          "scoring_points": {
+            "checkpoints": [
+              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '重难点-NODE', 'dimension': '重难点', 'description': '重难点评分点响应', 'required_keywords': ['重难点', '难点', '关键工序', '复杂', '深基坑', '大体积'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+            ],
+            "dimension": "质量",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
           ],
-          "fail_fast_hooks": {
-            "enabled": true,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3
-          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -250,20 +266,27 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
               "危险",
               "防护",
-              "应急"
+              "应急",
+              "质量",
+              "building",
+              "异形曲面幕墙参数"
             ],
             "optional_keywords": [
-              "railway"
+              "railway",
+              "14",
+              "Design"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -277,7 +300,59 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 100
+          "gemini_usefulness_score": 100,
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "trigger_keywords": [
+              "双曲面",
+              "加工精度"
+            ],
+            "response_template": "利用参数化算法优化面板分割，将双曲面拟合为单曲或平板，降低加工难度与成本。直接输出数控加工代码，实现'设计-加工'无缝衔接。"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "argument": "传统工艺难以实现复杂造型且成本高昂。我方参数化方案实现'所见即所得'且经济高效。",
+            "trap_logic": "建议考察'异形幕墙参数化优化'案例。"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "建筑美学",
+              "精细化施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "relations": [
+            {
+              "type": "MITIGATES",
+              "target": "CURT-FN-002-V20.1"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "CURT-FN-002-V20.1"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-安全",
+              "edge_label": "risk_control"
+            }
+          ],
+          "source_candidates": [
+            "设计图纸",
+            "国标",
+            "行标"
+          ],
+          "kg_dimension": "质量",
+          "professional_domain_aliases": [
+            "digital",
+            "earthwork",
+            "management"
+          ]
         },
         {
           "node_id": "ZF-KG-45-Curtain-Wall-M1-质量",
@@ -304,7 +379,8 @@
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -315,13 +391,34 @@
               "crew_size": "8-12人/班",
               "checker_role": "质量员"
             },
-            "inspection_frequency": "2次/班"
+            "inspection_frequency": "2次/班",
+            "equipment": {
+              "primary": [
+                "塔吊1台",
+                "施工升降机1台"
+              ],
+              "backup": [
+                "发电机1台"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "100%批次进场验收",
+              "wastage_rate_percent": 2.0
+            },
+            "productivity_model": {
+              "formula_variables": [
+                "defect_count",
+                "sample_count"
+              ],
+              "calibration_source": "国标",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "safety_level": "medium",
-          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_expression": "max(target_strength - measured_strength, 0) / max(target_strength, 1) * 100",
           "formula_variables": [
-            "quantity",
-            "productivity_per_day"
+            "measured_strength",
+            "target_strength"
           ],
           "numeric_sources": [
             {
@@ -335,13 +432,56 @@
               "value": "4",
               "unit": "h",
               "source_text": "module1_patch"
+            },
+            {
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "defect_count",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "sample_count",
+              "value": "100",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "target_strength",
+              "value": "40",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "quantitative_indices": {
             "duration_index": 0.6,
             "risk_index": 0.55,
             "resource_density_index": 0.55,
-            "complexity_index": 0.6
+            "complexity_index": 0.6,
+            "source_confidence_index": 0.86
           },
           "schedule_constraints": {
             "critical_path_hint": [
@@ -349,70 +489,55 @@
               "基础工程",
               "主体结构"
             ],
-            "min_process_interval_days": 1
+            "min_process_interval_days": 1,
+            "max_recovery_hours": 24,
+            "risk_trigger_threshold_percent": 5,
+            "source_hierarchy": "国标"
           },
           "content": {
             "operation_desc_mediocre": "按常规流程执行质量控制。",
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行质量响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+              "desc": "第一步（定义）：执行质量响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "response_template": "围绕质量响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应质量评分点。",
+                "dimension": "质量",
+                "domain": "building",
+                "evidence_binding": "numeric_sources + formula_expression"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "trap_logic": "若质量响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+                "defense_action": "参数化证据链锁定"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "质量",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
             },
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(质量) AND domain_hint == 'building' AND node_hint CONTAINS '质量响应控制补强'"
             }
           },
-          "scoring_points": [
-            {
-              "point_id": "质量-NODE",
-              "dimension": "质量",
-              "description": "质量评分点响应",
-              "required_keywords": [
-                "质量",
-                "验收",
-                "合格",
-                "缺陷",
-                "平整度",
-                "强度"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "安全-NODE",
-              "dimension": "安全",
-              "description": "安全评分点响应",
-              "required_keywords": [
-                "安全",
-                "危险",
-                "防护",
-                "应急",
-                "事故",
-                "临电"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "进度-NODE",
-              "dimension": "进度",
-              "description": "进度评分点响应",
-              "required_keywords": [
-                "工期",
-                "进度",
-                "节点",
-                "里程碑",
-                "关键线路",
-                "计划"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            }
+          "scoring_points": {
+            "checkpoints": [
+              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+            ],
+            "dimension": "质量",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
           ],
-          "fail_fast_hooks": {
-            "enabled": true,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3
-          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -487,13 +612,16 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
               "危险",
               "防护",
-              "应急"
+              "应急",
+              "质量",
+              "building",
+              "质量响应控制补强"
             ],
             "optional_keywords": [
               "质量",
@@ -502,11 +630,14 @@
               "缺陷",
               "平整度",
               "强度",
-              "railway"
+              "railway",
+              "module1_patch"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -520,7 +651,64 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "response_template": "围绕质量响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应质量评分点。",
+            "dimension": "质量",
+            "domain": "building",
+            "evidence_binding": "numeric_sources + formula_expression"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "trap_logic": "若质量响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+            "defense_action": "参数化证据链锁定"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "质量",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "requires": [
+            "CURT-FN-001-V20.1"
+          ],
+          "mitigates": [
+            "ZF-KG-45-Curtain-Wall-M1-安全"
+          ],
+          "conflicts_with": [
+            "ZF-KG-45-Curtain-Wall-M1-安全"
+          ],
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "CURT-FN-001-V20.1"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-安全"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "ZF-KG-45-Curtain-Wall-M1-安全"
+            }
+          ],
+          "source_candidates": [
+            "国标",
+            "行标"
+          ],
+          "kg_dimension": "质量",
+          "professional_domain_aliases": [
+            "management"
+          ]
         },
         {
           "node_id": "ZF-KG-45-Curtain-Wall-M1-安全",
@@ -542,12 +730,14 @@
             "培训",
             "危大工程"
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "行标",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "GB 50210-2018 建筑装饰装修工程质量验收标准"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -558,13 +748,35 @@
               "crew_size": "8-12人/班",
               "checker_role": "安全员"
             },
-            "inspection_frequency": "2次/班"
+            "inspection_frequency": "2次/班",
+            "equipment": {
+              "primary": [
+                "塔吊1台",
+                "施工升降机1台"
+              ],
+              "backup": [
+                "发电机1台"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "危大材料专项验收",
+              "wastage_rate_percent": 1.0
+            },
+            "productivity_model": {
+              "formula_variables": [
+                "hazard_count",
+                "inspection_frequency_per_shift",
+                "risk_factor"
+              ],
+              "calibration_source": "行标",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "safety_level": "high",
-          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_expression": "near_miss_count * 100 / max(total_workers, 1)",
           "formula_variables": [
-            "quantity",
-            "productivity_per_day"
+            "near_miss_count",
+            "total_workers"
           ],
           "numeric_sources": [
             {
@@ -578,13 +790,44 @@
               "value": "4",
               "unit": "h",
               "source_text": "module1_patch"
+            },
+            {
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "near_miss_count",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "total_workers",
+              "value": "80",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "quantitative_indices": {
             "duration_index": 0.6,
             "risk_index": 0.7,
             "resource_density_index": 0.55,
-            "complexity_index": 0.6
+            "complexity_index": 0.6,
+            "source_confidence_index": 0.82
           },
           "schedule_constraints": {
             "critical_path_hint": [
@@ -592,70 +835,55 @@
               "基础工程",
               "主体结构"
             ],
-            "min_process_interval_days": 1
+            "min_process_interval_days": 1,
+            "max_recovery_hours": 12,
+            "risk_trigger_threshold_percent": 5,
+            "source_hierarchy": "行标"
           },
           "content": {
             "operation_desc_mediocre": "按常规流程执行安全控制。",
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行安全响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+              "desc": "第一步（定义）：执行安全响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "response_template": "围绕安全响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应安全评分点。",
+                "dimension": "安全",
+                "domain": "building",
+                "evidence_binding": "numeric_sources + formula_expression"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "trap_logic": "若安全响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+                "defense_action": "参数化证据链锁定"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "安全",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
             },
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(安全) AND domain_hint == 'building' AND node_hint CONTAINS '安全响应控制补强'"
             }
           },
-          "scoring_points": [
-            {
-              "point_id": "安全-NODE",
-              "dimension": "安全",
-              "description": "安全评分点响应",
-              "required_keywords": [
-                "安全",
-                "危险",
-                "防护",
-                "应急",
-                "事故",
-                "临电"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "质量-NODE",
-              "dimension": "质量",
-              "description": "质量评分点响应",
-              "required_keywords": [
-                "质量",
-                "验收",
-                "合格",
-                "缺陷",
-                "平整度",
-                "强度"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "进度-NODE",
-              "dimension": "进度",
-              "description": "进度评分点响应",
-              "required_keywords": [
-                "工期",
-                "进度",
-                "节点",
-                "里程碑",
-                "关键线路",
-                "计划"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            }
+          "scoring_points": {
+            "checkpoints": [
+              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+            ],
+            "dimension": "安全",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
           ],
-          "fail_fast_hooks": {
-            "enabled": true,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3
-          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -730,13 +958,15 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
               "危险",
               "防护",
-              "应急"
+              "应急",
+              "building",
+              "安全响应控制补强"
             ],
             "optional_keywords": [
               "安全",
@@ -745,11 +975,14 @@
               "应急",
               "事故",
               "临电",
-              "railway"
+              "railway",
+              "module1_patch"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -763,7 +996,71 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "response_template": "围绕安全响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应安全评分点。",
+            "dimension": "安全",
+            "domain": "building",
+            "evidence_binding": "numeric_sources + formula_expression"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "trap_logic": "若安全响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+            "defense_action": "参数化证据链锁定"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "安全",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "requires": [
+            "ZF-KG-45-Curtain-Wall-M1-质量"
+          ],
+          "mitigates": [
+            "ZF-KG-45-Curtain-Wall-M1-进度",
+            "ZF-KG-45-Curtain-Wall-M1-质量"
+          ],
+          "conflicts_with": [
+            "ZF-KG-45-Curtain-Wall-M1-进度"
+          ],
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-质量"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-进度"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "ZF-KG-45-Curtain-Wall-M1-进度"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-质量",
+              "edge_label": "risk_control"
+            }
+          ],
+          "source_candidates": [
+            "行标",
+            "国标"
+          ],
+          "kg_dimension": "安全",
+          "professional_domain_aliases": [
+            "management",
+            "mep"
+          ]
         },
         {
           "node_id": "ZF-KG-45-Curtain-Wall-M1-进度",
@@ -790,7 +1087,9 @@
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "GB 50210-2018 建筑装饰装修工程质量验收标准"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -801,13 +1100,34 @@
               "crew_size": "8-12人/班",
               "checker_role": "施工员"
             },
-            "inspection_frequency": "2次/班"
+            "inspection_frequency": "2次/班",
+            "equipment": {
+              "primary": [
+                "塔吊1台",
+                "施工升降机1台"
+              ],
+              "backup": [
+                "发电机1台"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "关键材料提前锁定",
+              "wastage_rate_percent": 2.5
+            },
+            "productivity_model": {
+              "formula_variables": [
+                "daily_output",
+                "remaining_work"
+              ],
+              "calibration_source": "国标",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "safety_level": "medium",
-          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_expression": "delay_hours * 100 / max(planned_hours, 1)",
           "formula_variables": [
-            "quantity",
-            "productivity_per_day"
+            "delay_hours",
+            "planned_hours"
           ],
           "numeric_sources": [
             {
@@ -821,13 +1141,56 @@
               "value": "4",
               "unit": "h",
               "source_text": "module1_patch"
+            },
+            {
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "daily_output",
+              "value": "60",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "remaining_work",
+              "value": "300",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "delay_hours",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "planned_hours",
+              "value": "12",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "quantitative_indices": {
             "duration_index": 0.6,
             "risk_index": 0.55,
             "resource_density_index": 0.55,
-            "complexity_index": 0.6
+            "complexity_index": 0.6,
+            "source_confidence_index": 0.86
           },
           "schedule_constraints": {
             "critical_path_hint": [
@@ -835,100 +1198,57 @@
               "基础工程",
               "主体结构"
             ],
-            "min_process_interval_days": 1
+            "min_process_interval_days": 1,
+            "max_recovery_hours": 24,
+            "risk_trigger_threshold_percent": 8,
+            "source_hierarchy": "国标"
           },
           "content": {
             "operation_desc_mediocre": "按常规流程执行进度控制。",
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行进度响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+              "desc": "第一步（定义）：执行进度响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "response_template": "围绕进度响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应质量评分点。",
+                "dimension": "质量",
+                "domain": "building",
+                "evidence_binding": "numeric_sources + formula_expression"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "trap_logic": "若进度响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+                "defense_action": "参数化证据链锁定"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "质量",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
             },
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(进度) AND domain_hint == 'building' AND node_hint CONTAINS '进度响应控制补强'"
             }
           },
-          "scoring_points": [
-            {
-              "point_id": "进度-NODE",
-              "dimension": "进度",
-              "description": "进度评分点响应",
-              "required_keywords": [
-                "工期",
-                "进度",
-                "节点",
-                "里程碑",
-                "关键线路",
-                "计划"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "质量-NODE",
-              "dimension": "质量",
-              "description": "质量评分点响应",
-              "required_keywords": [
-                "质量",
-                "验收",
-                "合格",
-                "缺陷",
-                "平整度",
-                "强度"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "安全-NODE",
-              "dimension": "安全",
-              "description": "安全评分点响应",
-              "required_keywords": [
-                "安全",
-                "危险",
-                "防护",
-                "应急",
-                "事故",
-                "临电"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "重难点-NODE",
-              "dimension": "重难点",
-              "description": "重难点评分点响应",
-              "required_keywords": [
-                "重难点",
-                "难点",
-                "关键工序",
-                "复杂",
-                "深基坑",
-                "大体积"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "扣分点-NODE",
-              "dimension": "扣分点",
-              "description": "扣分点评分点响应",
-              "required_keywords": [
-                "扣分",
-                "否决",
-                "废标",
-                "处罚",
-                "违约",
-                "偏差"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            }
+          "scoring_points": {
+            "checkpoints": [
+              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '重难点-NODE', 'dimension': '重难点', 'description': '重难点评分点响应', 'required_keywords': ['重难点', '难点', '关键工序', '复杂', '深基坑', '大体积'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '扣分点-NODE', 'dimension': '扣分点', 'description': '扣分点评分点响应', 'required_keywords': ['扣分', '否决', '废标', '处罚', '违约', '偏差'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+            ],
+            "dimension": "进度",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
           ],
-          "fail_fast_hooks": {
-            "enabled": true,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3
-          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -1003,13 +1323,16 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
               "危险",
               "防护",
-              "应急"
+              "应急",
+              "进度",
+              "building",
+              "进度响应控制补强"
             ],
             "optional_keywords": [
               "进度",
@@ -1018,11 +1341,14 @@
               "里程碑",
               "关键线路",
               "计划",
-              "railway"
+              "railway",
+              "module1_patch"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -1036,7 +1362,71 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "response_template": "围绕进度响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应质量评分点。",
+            "dimension": "质量",
+            "domain": "building",
+            "evidence_binding": "numeric_sources + formula_expression"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "trap_logic": "若进度响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+            "defense_action": "参数化证据链锁定"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "质量",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "requires": [
+            "ZF-KG-45-Curtain-Wall-M1-安全"
+          ],
+          "mitigates": [
+            "ZF-KG-45-Curtain-Wall-M1-环保",
+            "ZF-KG-45-Curtain-Wall-M1-安全"
+          ],
+          "conflicts_with": [
+            "ZF-KG-45-Curtain-Wall-M1-环保"
+          ],
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-安全"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-环保"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "ZF-KG-45-Curtain-Wall-M1-环保"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-安全",
+              "edge_label": "risk_control"
+            }
+          ],
+          "source_candidates": [
+            "国标",
+            "行标"
+          ],
+          "kg_dimension": "进度",
+          "professional_domain_aliases": [
+            "management",
+            "earthwork"
+          ]
         },
         {
           "node_id": "ZF-KG-45-Curtain-Wall-M1-环保",
@@ -1058,12 +1448,14 @@
             "排放",
             "PM10"
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "行标",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "GB/T 50640-2010 建筑工程绿色施工评价标准"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -1074,13 +1466,34 @@
               "crew_size": "8-12人/班",
               "checker_role": "环保员"
             },
-            "inspection_frequency": "2次/班"
+            "inspection_frequency": "2次/班",
+            "equipment": {
+              "primary": [
+                "塔吊1台",
+                "施工升降机1台"
+              ],
+              "backup": [
+                "发电机1台"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "环保材料优先",
+              "wastage_rate_percent": 1.5
+            },
+            "productivity_model": {
+              "formula_variables": [
+                "recycle_percent",
+                "target_recycle_percent"
+              ],
+              "calibration_source": "行标",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "safety_level": "medium",
-          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_expression": "max(pm10_value - pm10_limit, 0) / max(pm10_limit, 1) * 100",
           "formula_variables": [
-            "quantity",
-            "productivity_per_day"
+            "pm10_limit",
+            "pm10_value"
           ],
           "numeric_sources": [
             {
@@ -1094,13 +1507,56 @@
               "value": "4",
               "unit": "h",
               "source_text": "module1_patch"
+            },
+            {
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "recycle_percent",
+              "value": "75",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "target_recycle_percent",
+              "value": "80",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "pm10_limit",
+              "value": "150",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "pm10_value",
+              "value": "120",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "quantitative_indices": {
             "duration_index": 0.6,
             "risk_index": 0.55,
             "resource_density_index": 0.55,
-            "complexity_index": 0.6
+            "complexity_index": 0.6,
+            "source_confidence_index": 0.82
           },
           "schedule_constraints": {
             "critical_path_hint": [
@@ -1108,85 +1564,56 @@
               "基础工程",
               "主体结构"
             ],
-            "min_process_interval_days": 1
+            "min_process_interval_days": 1,
+            "max_recovery_hours": 12,
+            "risk_trigger_threshold_percent": 8,
+            "source_hierarchy": "行标"
           },
           "content": {
             "operation_desc_mediocre": "按常规流程执行环保控制。",
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行环保响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+              "desc": "第一步（定义）：执行环保响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "response_template": "围绕环保响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应环保评分点。",
+                "dimension": "环保",
+                "domain": "building",
+                "evidence_binding": "numeric_sources + formula_expression"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "trap_logic": "若环保响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+                "defense_action": "参数化证据链锁定"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "环保",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
             },
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(环保) AND domain_hint == 'building' AND node_hint CONTAINS '环保响应控制补强'"
             }
           },
-          "scoring_points": [
-            {
-              "point_id": "环保-NODE",
-              "dimension": "环保",
-              "description": "环保评分点响应",
-              "required_keywords": [
-                "环保",
-                "扬尘",
-                "噪声",
-                "污水",
-                "固废",
-                "节能"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "质量-NODE",
-              "dimension": "质量",
-              "description": "质量评分点响应",
-              "required_keywords": [
-                "质量",
-                "验收",
-                "合格",
-                "缺陷",
-                "平整度",
-                "强度"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "安全-NODE",
-              "dimension": "安全",
-              "description": "安全评分点响应",
-              "required_keywords": [
-                "安全",
-                "危险",
-                "防护",
-                "应急",
-                "事故",
-                "临电"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "进度-NODE",
-              "dimension": "进度",
-              "description": "进度评分点响应",
-              "required_keywords": [
-                "工期",
-                "进度",
-                "节点",
-                "里程碑",
-                "关键线路",
-                "计划"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            }
+          "scoring_points": {
+            "checkpoints": [
+              "{'point_id': '环保-NODE', 'dimension': '环保', 'description': '环保评分点响应', 'required_keywords': ['环保', '扬尘', '噪声', '污水', '固废', '节能'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+            ],
+            "dimension": "环保",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
           ],
-          "fail_fast_hooks": {
-            "enabled": true,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3
-          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -1261,13 +1688,16 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
               "危险",
               "防护",
-              "应急"
+              "应急",
+              "环保",
+              "building",
+              "环保响应控制补强"
             ],
             "optional_keywords": [
               "环保",
@@ -1276,11 +1706,14 @@
               "污水",
               "固废",
               "节能",
-              "railway"
+              "railway",
+              "module1_patch"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -1294,7 +1727,70 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "response_template": "围绕环保响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应环保评分点。",
+            "dimension": "环保",
+            "domain": "building",
+            "evidence_binding": "numeric_sources + formula_expression"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "trap_logic": "若环保响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+            "defense_action": "参数化证据链锁定"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "环保",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "requires": [
+            "ZF-KG-45-Curtain-Wall-M1-进度"
+          ],
+          "mitigates": [
+            "ZF-KG-45-Curtain-Wall-M1-扣分点",
+            "ZF-KG-45-Curtain-Wall-M1-进度"
+          ],
+          "conflicts_with": [
+            "ZF-KG-45-Curtain-Wall-M1-扣分点"
+          ],
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-进度"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-扣分点"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "ZF-KG-45-Curtain-Wall-M1-扣分点"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-进度",
+              "edge_label": "risk_control"
+            }
+          ],
+          "source_candidates": [
+            "行标",
+            "国标"
+          ],
+          "kg_dimension": "环保",
+          "professional_domain_aliases": [
+            "management"
+          ]
         },
         {
           "node_id": "ZF-KG-45-Curtain-Wall-M1-扣分点",
@@ -1316,12 +1812,14 @@
             "失分",
             "一票否决"
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "applicable_conditions": {
             "climate": "常规施工气候",
@@ -1332,13 +1830,34 @@
               "crew_size": "8-12人/班",
               "checker_role": "项目经理"
             },
-            "inspection_frequency": "2次/班"
+            "inspection_frequency": "2次/班",
+            "equipment": {
+              "primary": [
+                "塔吊1台",
+                "施工升降机1台"
+              ],
+              "backup": [
+                "发电机1台"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "证据材料闭环归档",
+              "wastage_rate_percent": 1.0
+            },
+            "productivity_model": {
+              "formula_variables": [
+                "missing_evidence_items",
+                "penalty_weight"
+              ],
+              "calibration_source": "答疑文件",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "safety_level": "medium",
-          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_expression": "missing_evidence_items * penalty_weight",
           "formula_variables": [
-            "quantity",
-            "productivity_per_day"
+            "missing_evidence_items",
+            "penalty_weight"
           ],
           "numeric_sources": [
             {
@@ -1352,13 +1871,44 @@
               "value": "4",
               "unit": "h",
               "source_text": "module1_patch"
+            },
+            {
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "missing_evidence_items",
+              "value": "1",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "penalty_weight",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "quantitative_indices": {
             "duration_index": 0.6,
             "risk_index": 0.55,
             "resource_density_index": 0.55,
-            "complexity_index": 0.6
+            "complexity_index": 0.6,
+            "source_confidence_index": 1.0
           },
           "schedule_constraints": {
             "critical_path_hint": [
@@ -1366,85 +1916,56 @@
               "基础工程",
               "主体结构"
             ],
-            "min_process_interval_days": 1
+            "min_process_interval_days": 1,
+            "max_recovery_hours": 8,
+            "risk_trigger_threshold_percent": 8,
+            "source_hierarchy": "答疑文件"
           },
           "content": {
             "operation_desc_mediocre": "按常规流程执行扣分点控制。",
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行扣分点响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+              "desc": "第一步（定义）：执行扣分点响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "response_template": "围绕扣分点响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应扣分点评分点。",
+                "dimension": "扣分点",
+                "domain": "building",
+                "evidence_binding": "numeric_sources + formula_expression"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "trap_logic": "若扣分点响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+                "defense_action": "参数化证据链锁定"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "扣分点",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
             },
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(扣分点) AND domain_hint == 'building' AND node_hint CONTAINS '扣分点响应控制补'"
             }
           },
-          "scoring_points": [
-            {
-              "point_id": "扣分点-NODE",
-              "dimension": "扣分点",
-              "description": "扣分点评分点响应",
-              "required_keywords": [
-                "扣分",
-                "否决",
-                "废标",
-                "处罚",
-                "违约",
-                "偏差"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "质量-NODE",
-              "dimension": "质量",
-              "description": "质量评分点响应",
-              "required_keywords": [
-                "质量",
-                "验收",
-                "合格",
-                "缺陷",
-                "平整度",
-                "强度"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "安全-NODE",
-              "dimension": "安全",
-              "description": "安全评分点响应",
-              "required_keywords": [
-                "安全",
-                "危险",
-                "防护",
-                "应急",
-                "事故",
-                "临电"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "进度-NODE",
-              "dimension": "进度",
-              "description": "进度评分点响应",
-              "required_keywords": [
-                "工期",
-                "进度",
-                "节点",
-                "里程碑",
-                "关键线路",
-                "计划"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            }
+          "scoring_points": {
+            "checkpoints": [
+              "{'point_id': '扣分点-NODE', 'dimension': '扣分点', 'description': '扣分点评分点响应', 'required_keywords': ['扣分', '否决', '废标', '处罚', '违约', '偏差'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+            ],
+            "dimension": "扣分点",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
           ],
-          "fail_fast_hooks": {
-            "enabled": true,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3
-          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -1519,13 +2040,16 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
               "危险",
               "防护",
-              "应急"
+              "应急",
+              "扣分点",
+              "building",
+              "扣分点响应控制补"
             ],
             "optional_keywords": [
               "扣分点",
@@ -1534,11 +2058,14 @@
               "废标",
               "处罚",
               "违约",
-              "railway"
+              "railway",
+              "module1_patch"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -1552,7 +2079,72 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "response_template": "围绕扣分点响应控制补强节点执行 Action+Parameter+Checker 闭环，优先响应扣分点评分点。",
+            "dimension": "扣分点",
+            "domain": "building",
+            "evidence_binding": "numeric_sources + formula_expression"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "trap_logic": "若扣分点响应控制补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+            "defense_action": "参数化证据链锁定"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "扣分点",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "requires": [
+            "ZF-KG-45-Curtain-Wall-M1-环保"
+          ],
+          "mitigates": [
+            "ZF-KG-45-Curtain-Wall-M2-PROC-MAP",
+            "ZF-KG-45-Curtain-Wall-M1-环保"
+          ],
+          "conflicts_with": [
+            "ZF-KG-45-Curtain-Wall-M2-PROC-MAP"
+          ],
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-环保"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M2-PROC-MAP"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "ZF-KG-45-Curtain-Wall-M2-PROC-MAP"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-环保",
+              "edge_label": "risk_control"
+            }
+          ],
+          "source_candidates": [
+            "答疑文件",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "kg_dimension": "扣分点",
+          "professional_domain_aliases": [
+            "management"
+          ]
         },
         {
           "node_id": "ZF-KG-45-Curtain-Wall-M2-PROC-MAP",
@@ -1696,7 +2288,10 @@
           "is_auto_generated": true,
           "reference_standard": [
             "GB/T 50326-2017 建设工程项目管理规范",
-            "GB 50202-2018 建筑地基基础工程施工质量验收标准"
+            "GB 50202-2018 建筑地基基础工程施工质量验收标准",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "GB 50300-2013 建筑工程施工质量验收统一标准",
+            "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范"
           ],
           "applicable_conditions": {
             "construction_window": "按总控网络计划执行"
@@ -1713,13 +2308,26 @@
               "backup": [
                 "备用机械1套"
               ]
+            },
+            "material": {
+              "acceptance_rule": "100%批次进场验收",
+              "wastage_rate_percent": 2.0
+            },
+            "inspection_frequency": "2次/班",
+            "productivity_model": {
+              "formula_variables": [
+                "pass_count",
+                "total_check_count"
+              ],
+              "calibration_source": "国标",
+              "assumption": "资源随工序强度动态调整"
             }
           },
           "safety_level": "medium",
-          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_expression": "max(target_strength - measured_strength, 0) / max(target_strength, 1) * 100",
           "formula_variables": [
-            "quantity",
-            "productivity_per_day"
+            "measured_strength",
+            "target_strength"
           ],
           "numeric_sources": [
             {
@@ -1733,13 +2341,56 @@
               "value": "2",
               "unit": "次/班",
               "source_text": "module2_patch"
+            },
+            {
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "pass_count",
+              "value": "95",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "total_check_count",
+              "value": "100",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "target_strength",
+              "value": "40",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "quantitative_indices": {
             "duration_index": 0.62,
             "risk_index": 0.56,
             "resource_density_index": 0.6,
-            "complexity_index": 0.59
+            "complexity_index": 0.59,
+            "source_confidence_index": 0.86
           },
           "schedule_constraints": {
             "critical_path_hint": [
@@ -1751,70 +2402,55 @@
               "机电安装",
               "室外附属"
             ],
-            "min_process_interval_days": 1
+            "min_process_interval_days": 1,
+            "max_recovery_hours": 24,
+            "risk_trigger_threshold_percent": 5,
+            "source_hierarchy": "国标"
           },
           "content": {
             "operation_desc_mediocre": "采用通用工序组织。",
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行清单-工序-资源映射补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证"
+              "desc": "第一步（定义）：执行清单-工序-资源映射补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "response_template": "围绕清单-工序-资源映射补强节点执行 Action+Parameter+Checker 闭环，优先响应质量评分点。",
+                "dimension": "质量",
+                "domain": "building",
+                "evidence_binding": "numeric_sources + formula_expression"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "trap_logic": "若清单-工序-资源映射补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+                "defense_action": "参数化证据链锁定"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "质量",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
             },
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(质量) AND domain_hint == 'mep' AND node_hint CONTAINS '清单-工序-资源'"
             }
           },
-          "scoring_points": [
-            {
-              "point_id": "质量-NODE",
-              "dimension": "质量",
-              "description": "质量评分点响应",
-              "required_keywords": [
-                "质量",
-                "验收",
-                "合格",
-                "缺陷",
-                "平整度",
-                "强度"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "安全-NODE",
-              "dimension": "安全",
-              "description": "安全评分点响应",
-              "required_keywords": [
-                "安全",
-                "危险",
-                "防护",
-                "应急",
-                "事故",
-                "临电"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "进度-NODE",
-              "dimension": "进度",
-              "description": "进度评分点响应",
-              "required_keywords": [
-                "工期",
-                "进度",
-                "节点",
-                "里程碑",
-                "关键线路",
-                "计划"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            }
+          "scoring_points": {
+            "checkpoints": [
+              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+            ],
+            "dimension": "质量",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
           ],
-          "fail_fast_hooks": {
-            "enabled": true,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3
-          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -1895,7 +2531,10 @@
               "安全",
               "危险",
               "防护",
-              "应急"
+              "应急",
+              "质量",
+              "mep",
+              "清单-工序-资源"
             ],
             "optional_keywords": [
               "测量",
@@ -1904,11 +2543,15 @@
               "土方",
               "开挖",
               "回填",
-              "mep"
+              "mep",
+              "module2_patch",
+              "process_mapping"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -1922,7 +2565,71 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "response_template": "围绕清单-工序-资源映射补强节点执行 Action+Parameter+Checker 闭环，优先响应质量评分点。",
+            "dimension": "质量",
+            "domain": "building",
+            "evidence_binding": "numeric_sources + formula_expression"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "trap_logic": "若清单-工序-资源映射补强节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+            "defense_action": "参数化证据链锁定"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "质量",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "requires": [
+            "ZF-KG-45-Curtain-Wall-M1-扣分点"
+          ],
+          "mitigates": [
+            "ZF-KG-45-Curtain-Wall-FORM-PROG",
+            "ZF-KG-45-Curtain-Wall-M1-环保"
+          ],
+          "conflicts_with": [
+            "ZF-KG-45-Curtain-Wall-FORM-PROG"
+          ],
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-扣分点"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-FORM-PROG"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "ZF-KG-45-Curtain-Wall-FORM-PROG"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-环保",
+              "edge_label": "risk_control"
+            }
+          ],
+          "source_candidates": [
+            "国标"
+          ],
+          "kg_dimension": "质量",
+          "professional_domain_aliases": [
+            "earthwork",
+            "building",
+            "management"
+          ]
         },
         {
           "node_id": "ZF-KG-45-Curtain-Wall-FORM-PROG",
@@ -1942,16 +2649,17 @@
             "公式",
             "计算"
           ],
-          "professional_domain": "bridge",
+          "professional_domain": "building",
           "source_hierarchy": "国标",
           "reference_standard": [
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "GB 50210-2018 建筑装饰装修工程质量验收标准"
           ],
-          "formula_expression": "work_volume / max(productivity_per_day * crew_efficiency, 1)",
+          "formula_expression": "remaining_work / max(daily_output, 1)",
           "formula_variables": [
-            "work_volume",
-            "productivity_per_day",
-            "crew_efficiency"
+            "daily_output",
+            "remaining_work"
           ],
           "applicable_conditions": {
             "scenario": "进度约束计算"
@@ -1959,38 +2667,132 @@
           "resource_requirements": {
             "critical_path_lag_days": 1,
             "deviation_correction_hours": 24,
-            "milestone_hit_rate_percent": 100
+            "milestone_hit_rate_percent": 100,
+            "manpower": {
+              "checker_role": "施工员",
+              "crew_size": "10-16人/班"
+            },
+            "equipment": {
+              "primary": [
+                "塔吊1台",
+                "施工升降机1台"
+              ],
+              "backup": [
+                "发电机1台"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "关键材料提前锁定",
+              "wastage_rate_percent": 2.5
+            },
+            "inspection_frequency": "1次/班",
+            "productivity_model": {
+              "formula_variables": [
+                "delay_hours",
+                "planned_hours"
+              ],
+              "calibration_source": "国标",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "numeric_sources": [
             {
               "parameter": "critical_path_lag_days",
               "value": "1",
               "unit": ""
+            },
+            {
+              "parameter": "crew_efficiency",
+              "value": "0.9",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "productivity_per_day",
+              "value": "240",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "work_volume",
+              "value": "1200",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "delay_hours",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "planned_hours",
+              "value": "12",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "daily_output",
+              "value": "60",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "remaining_work",
+              "value": "300",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "content": {
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(进度) AND domain_hint == 'building' AND node_hint CONTAINS '进度动态计算节点'"
             },
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行进度动态计算节点进度工序定义，参数critical_path_lag_days=1、deviation_correction_hours=24、milestone_hit_rate_percent=100，施工员每班次核验1次；第二步（分析）：围绕计划偏差与资源冲突识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，施工员每班次检查2次；工序名称->参数->风险->控制->验证"
-            }
+              "desc": "第一步（定义）：执行进度动态计算节点进度工序定义，参数critical_path_lag_days=1、deviation_correction_hours=24、milestone_hit_rate_percent=100，施工员每班次核验1次；第二步（分析）：围绕计划偏差与资源冲突识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，施工员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "response_template": "围绕进度动态计算节点执行 Action+Parameter+Checker 闭环，优先响应进度评分点。",
+                "dimension": "进度",
+                "domain": "building",
+                "evidence_binding": "numeric_sources + formula_expression"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "trap_logic": "若进度动态计算节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+                "defense_action": "参数化证据链锁定"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "进度",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
+            },
+            "operation_desc_mediocre": "执行进度动态计算节点常规作业，按参数阈值与检查岗位完成闭环复核。"
           },
           "retrieval_hints": {
             "must_keywords": [
               "进度",
               "工期",
               "节点",
-              "里程碑"
+              "里程碑",
+              "building",
+              "进度动态计算节点"
             ],
             "optional_keywords": [
               "bridge",
               "公式",
-              "计算"
+              "计算",
+              "进度",
+              "gemini_formula"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -2004,7 +2806,144 @@
             "checker": "施工员",
             "verification": "计算结果复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "safety_level": "medium",
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "response_template": "围绕进度动态计算节点执行 Action+Parameter+Checker 闭环，优先响应进度评分点。",
+            "dimension": "进度",
+            "domain": "building",
+            "evidence_binding": "numeric_sources + formula_expression"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "trap_logic": "若进度动态计算节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+            "defense_action": "参数化证据链锁定"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "进度",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            }
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "is_auto_generated": false,
+          "requires": [
+            "ZF-KG-45-Curtain-Wall-M2-PROC-MAP"
+          ],
+          "mitigates": [
+            "ZF-KG-45-Curtain-Wall-FORM-RISK",
+            "ZF-KG-45-Curtain-Wall-M1-环保"
+          ],
+          "conflicts_with": [
+            "ZF-KG-45-Curtain-Wall-FORM-RISK"
+          ],
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "ZF-KG-45-Curtain-Wall-M2-PROC-MAP"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-FORM-RISK"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "ZF-KG-45-Curtain-Wall-FORM-RISK"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-环保",
+              "edge_label": "risk_control"
+            }
+          ],
+          "source_candidates": [
+            "国标"
+          ],
+          "kg_dimension": "进度",
+          "schedule_constraints": {
+            "min_process_interval_days": 2,
+            "max_recovery_hours": 24,
+            "critical_path_hint": [
+              "基础施工",
+              "主体结构",
+              "机电安装",
+              "竣工验收"
+            ],
+            "risk_trigger_threshold_percent": 8,
+            "source_hierarchy": "国标"
+          },
+          "quantitative_indices": {
+            "duration_index": 0.92,
+            "risk_index": 0.45,
+            "resource_density_index": 0.66,
+            "source_confidence_index": 0.86
+          },
+          "scoring_points": {
+            "dimension": "进度",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
+          ],
+          "professional_domain_aliases": [
+            "management",
+            "mep"
+          ]
         },
         {
           "node_id": "ZF-KG-45-Curtain-Wall-FORM-RISK",
@@ -2024,16 +2963,18 @@
             "公式",
             "计算"
           ],
-          "professional_domain": "bridge",
-          "source_hierarchy": "国标",
+          "professional_domain": "building",
+          "source_hierarchy": "答疑文件",
           "reference_standard": [
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范",
+            "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
-          "formula_expression": "complexity_index * risk_factor / max(specialist_workers, 1)",
+          "formula_expression": "interface_points * coordination_factor / max(team_count, 1)",
           "formula_variables": [
-            "complexity_index",
-            "risk_factor",
-            "specialist_workers"
+            "coordination_factor",
+            "interface_points",
+            "team_count"
           ],
           "applicable_conditions": {
             "scenario": "重难点约束计算"
@@ -2041,38 +2982,138 @@
           "resource_requirements": {
             "risk_trigger_threshold_percent": 5,
             "specialist_workers": 12,
-            "acceptance_loop_hours": 12
+            "acceptance_loop_hours": 12,
+            "manpower": {
+              "checker_role": "技术负责人",
+              "crew_size": "10-14人/班"
+            },
+            "equipment": {
+              "primary": [
+                "塔吊1台",
+                "施工升降机1台"
+              ],
+              "backup": [
+                "发电机1台"
+              ]
+            },
+            "material": {
+              "acceptance_rule": "专项样板先行",
+              "wastage_rate_percent": 2.0
+            },
+            "inspection_frequency": "2次/班",
+            "productivity_model": {
+              "formula_variables": [
+                "control_measures",
+                "risk_items"
+              ],
+              "calibration_source": "国标",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "numeric_sources": [
             {
               "parameter": "risk_trigger_threshold_percent",
               "value": "5",
               "unit": ""
+            },
+            {
+              "parameter": "complexity_index",
+              "value": "1.4",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "specialist_workers",
+              "value": "12",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "control_measures",
+              "value": "8",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "risk_items",
+              "value": "5",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "coordination_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "interface_points",
+              "value": "8",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "team_count",
+              "value": "4",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "content": {
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' OR query_keywords_hit >= 2"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(重难点) AND domain_hint == 'building' AND node_hint CONTAINS '重难点动态计算节'"
             },
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行重难点动态计算节点重难点工序定义，参数risk_trigger_threshold_percent=5、specialist_workers=12、acceptance_loop_hours=12，技术负责人每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，技术负责人每班次检查2次；工序名称->参数->风险->控制->验证"
-            }
+              "desc": "第一步（定义）：执行重难点动态计算节点重难点工序定义，参数risk_trigger_threshold_percent=5、specialist_workers=12、acceptance_loop_hours=12，技术负责人每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，技术负责人每班次检查2次；工序名称->参数->风险->控制->验证",
+              "bid_response_strategy": {
+                "response_template": "围绕重难点动态计算节点执行 Action+Parameter+Checker 闭环，优先响应重难点评分点。",
+                "dimension": "重难点",
+                "domain": "building",
+                "evidence_binding": "numeric_sources + formula_expression"
+              },
+              "competitor_shield": {
+                "target_rival": "Competitor_Generic",
+                "trap_logic": "若重难点动态计算节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+                "defense_action": "参数化证据链锁定"
+              },
+              "qt_score_booster": {
+                "policy_alignment": [
+                  "重难点",
+                  "数字建造",
+                  "绿色施工"
+                ],
+                "score_weight": "+3_Points"
+              }
+            },
+            "operation_desc_mediocre": "执行重难点动态计算节点常规作业，按参数阈值与检查岗位完成闭环复核。"
           },
           "retrieval_hints": {
             "must_keywords": [
               "重难点",
               "难点",
               "关键工序",
-              "复杂"
+              "复杂",
+              "building",
+              "重难点动态计算节"
             ],
             "optional_keywords": [
               "bridge",
               "公式",
-              "计算"
+              "计算",
+              "重难点",
+              "gemini_formula"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -2086,7 +3127,135 @@
             "checker": "技术负责人",
             "verification": "计算结果复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "safety_level": "medium",
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "response_template": "围绕重难点动态计算节点执行 Action+Parameter+Checker 闭环，优先响应重难点评分点。",
+            "dimension": "重难点",
+            "domain": "building",
+            "evidence_binding": "numeric_sources + formula_expression"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "trap_logic": "若重难点动态计算节点缺少参数来源或检查岗位将触发失分；本节点通过量化阈值+复核闭环进行防御。",
+            "defense_action": "参数化证据链锁定"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "重难点",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "language_guardrails": {
+            "enabled": true,
+            "forbidden_vague_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_structure": [
+              "action",
+              "parameter",
+              "checker"
+            ],
+            "three_step_logic_lock": {
+              "enabled": true,
+              "step1": "定义工序与参数",
+              "step2": "分析风险与难点",
+              "step3": "控制措施与验证",
+              "flow_chain": "工序名称->参数->风险->控制->验证"
+            },
+            "dry_content_density_lock": {
+              "enabled": true,
+              "min_numeric_parameters": 3,
+              "must_include_checker": true
+            }
+          },
+          "response_assertions": [
+            "must_have_action",
+            "must_have_checker",
+            "must_have_parameter"
+          ],
+          "dry_content_lock": {
+            "enabled": true,
+            "forbidden_words": [
+              "加强",
+              "提高",
+              "注意",
+              "确保",
+              "严格"
+            ],
+            "required_triplet": "Action+Parameter+Checker"
+          },
+          "is_auto_generated": false,
+          "requires": [
+            "ZF-KG-45-Curtain-Wall-FORM-PROG"
+          ],
+          "mitigates": [
+            "ZF-KG-45-Curtain-Wall-M1-环保"
+          ],
+          "conflicts_with": [],
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "ZF-KG-45-Curtain-Wall-FORM-PROG"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "ZF-KG-45-Curtain-Wall-M1-环保",
+              "edge_label": "risk_control"
+            }
+          ],
+          "source_candidates": [
+            "答疑文件",
+            "国标",
+            "企标"
+          ],
+          "kg_dimension": "重难点",
+          "schedule_constraints": {
+            "min_process_interval_days": 2,
+            "max_recovery_hours": 12,
+            "critical_path_hint": [
+              "基础施工",
+              "主体结构",
+              "机电安装",
+              "竣工验收"
+            ],
+            "risk_trigger_threshold_percent": 5,
+            "source_hierarchy": "国标"
+          },
+          "quantitative_indices": {
+            "duration_index": 0.8,
+            "risk_index": 0.68,
+            "resource_density_index": 0.72,
+            "source_confidence_index": 0.86
+          },
+          "scoring_points": {
+            "dimension": "重难点",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
+          ],
+          "professional_domain_aliases": [
+            "management",
+            "mep"
+          ]
         }
       ]
     },
@@ -2101,7 +3270,7 @@
           ],
           "content": {
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程'"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(质量) AND domain_hint == 'building' AND node_hint CONTAINS '高层幕墙安装机器'"
             },
             "operation_desc_premium": {
               "desc": "第一步（定义）：执行高层幕墙安装机器人安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
@@ -2149,21 +3318,31 @@
               ]
             },
             "material": {
-              "acceptance_rule": "100%批次进场验收"
+              "acceptance_rule": "100%批次进场验收",
+              "wastage_rate_percent": 2.0
             },
-            "inspection_frequency": "2次/班"
+            "inspection_frequency": "2次/班",
+            "productivity_model": {
+              "formula_variables": [
+                "measured_strength",
+                "target_strength"
+              ],
+              "calibration_source": "国标",
+              "assumption": "资源随工序强度动态调整"
+            }
           },
           "source_hierarchy": "国标",
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
-            "GB/T 50326-2017 建设工程项目管理规范"
+            "GB/T 50326-2017 建设工程项目管理规范",
+            "GB 50204-2015 混凝土结构工程施工质量验收规范"
           ],
           "is_auto_generated": true,
-          "formula_expression": "hazard_count * risk_factor / max(inspection_frequency_per_shift, 1)",
+          "formula_expression": "100 - defect_count * 100 / max(sample_count, 1)",
           "formula_variables": [
-            "quantity",
-            "productivity_per_day"
+            "defect_count",
+            "sample_count"
           ],
           "requires": [
             "CURT-FN-001-V20.1"
@@ -2179,13 +3358,56 @@
               "parameter": "formula_result",
               "formula": "quantity / max(productivity_per_day, 1)",
               "source_text": "formula_expression"
+            },
+            {
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default"
+            },
+            {
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "target_strength",
+              "value": "40",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "defect_count",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "sample_count",
+              "value": "100",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
             }
           ],
           "quantitative_indices": {
             "duration_index": 0.5,
             "risk_index": 0.58,
             "resource_density_index": 0.8333,
-            "complexity_index": 0.628
+            "complexity_index": 0.628,
+            "source_confidence_index": 0.86
           },
           "schedule_constraints": {
             "critical_path_hint": [
@@ -2193,91 +3415,29 @@
               "CURT-FN-002-V20.1"
             ],
             "min_process_interval_days": 1,
-            "inference_method": "default_cpm_anchor"
+            "inference_method": "default_cpm_anchor",
+            "max_recovery_hours": 24,
+            "risk_trigger_threshold_percent": 5,
+            "source_hierarchy": "国标"
           },
-          "scoring_points": [
-            {
-              "point_id": "质量-NODE",
-              "dimension": "质量",
-              "description": "质量评分点响应",
-              "required_keywords": [
-                "质量",
-                "验收",
-                "合格",
-                "缺陷",
-                "平整度",
-                "强度"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "安全-NODE",
-              "dimension": "安全",
-              "description": "安全评分点响应",
-              "required_keywords": [
-                "安全",
-                "危险",
-                "防护",
-                "应急",
-                "事故",
-                "临电"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "进度-NODE",
-              "dimension": "进度",
-              "description": "进度评分点响应",
-              "required_keywords": [
-                "工期",
-                "进度",
-                "节点",
-                "里程碑",
-                "关键线路",
-                "计划"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "环保-NODE",
-              "dimension": "环保",
-              "description": "环保评分点响应",
-              "required_keywords": [
-                "环保",
-                "扬尘",
-                "噪声",
-                "污水",
-                "固废",
-                "节能"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            },
-            {
-              "point_id": "重难点-NODE",
-              "dimension": "重难点",
-              "description": "重难点评分点响应",
-              "required_keywords": [
-                "重难点",
-                "难点",
-                "关键工序",
-                "复杂",
-                "深基坑",
-                "大体积"
-              ],
-              "match_mode": "any",
-              "boolean_rule": "any_keyword_hit"
-            }
+          "scoring_points": {
+            "checkpoints": [
+              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '环保-NODE', 'dimension': '环保', 'description': '环保评分点响应', 'required_keywords': ['环保', '扬尘', '噪声', '污水', '固废', '节能'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
+              "{'point_id': '重难点-NODE', 'dimension': '重难点', 'description': '重难点评分点响应', 'required_keywords': ['重难点', '难点', '关键工序', '复杂', '深基坑', '大体积'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+            ],
+            "dimension": "质量",
+            "expected_gain": "+2~+5",
+            "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+            "score_path": "工序名称->参数->风险->控制->验证"
+          },
+          "fail_fast_hooks": [
+            "missing_numeric_source",
+            "missing_formula_expression",
+            "missing_checker"
           ],
-          "fail_fast_hooks": {
-            "enabled": true,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3
-          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -2352,20 +3512,27 @@
               "checker"
             ]
           },
-          "professional_domain": "railway",
+          "professional_domain": "building",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
               "危险",
               "防护",
-              "应急"
+              "应急",
+              "质量",
+              "building",
+              "高层幕墙安装机器"
             ],
             "optional_keywords": [
-              "railway"
+              "railway",
+              "03",
+              "Robot"
             ],
             "negative_keywords": [
               "空话",
-              "套话"
+              "套话",
+              "无参数",
+              "泛化描述"
             ]
           },
           "gemini_context_block": {
@@ -2379,7 +3546,57 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97
+          "gemini_usefulness_score": 97,
+          "source_hierarchy_chain": [
+            "答疑文件",
+            "设计图纸",
+            "国标",
+            "行标",
+            "企标"
+          ],
+          "bid_response_strategy": {
+            "trigger_keywords": [
+              "高空作业",
+              "安装效率"
+            ],
+            "response_template": "引入幕墙安装机器人，替代人工进行高风险的临边与悬空作业。机械臂自动抓取、定位、微调，安装精度控制在1mm以内，大幅提升安全性与效率。"
+          },
+          "competitor_shield": {
+            "target_rival": "Competitor_Generic",
+            "argument": "传统方案在“高层幕墙安装机器人”环节易出现参数失控与证据链断点。本方案通过量化阈值和岗位复核实现可审计闭环。",
+            "trap_logic": "核查对方是否提供“动作+参数+检查岗位+闭环证据”的完整链路。"
+          },
+          "qt_score_booster": {
+            "policy_alignment": [
+              "质量安全",
+              "数字建造",
+              "绿色施工"
+            ],
+            "score_weight": "+3_Points"
+          },
+          "relations": [
+            {
+              "type": "REQUIRES",
+              "target": "CURT-FN-001-V20.1"
+            },
+            {
+              "type": "MITIGATES",
+              "target": "CURT-FN-001-V20.1"
+            },
+            {
+              "type": "CONFLICTS_WITH",
+              "target": "CURT-FN-001-V20.1"
+            }
+          ],
+          "source_candidates": [
+            "国标",
+            "行标"
+          ],
+          "kg_dimension": "质量",
+          "professional_domain_aliases": [
+            "management",
+            "earthwork"
+          ]
         }
       ]
     }
