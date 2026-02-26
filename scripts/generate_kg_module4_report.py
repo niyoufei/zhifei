@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import sys
 import time
@@ -80,15 +81,91 @@ def _check_root(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _coerce_point(item: Any, *, index: int, fallback_dim: str = "质量") -> Dict[str, Any] | None:
+    point = item
+    if isinstance(item, str):
+        text = item.strip()
+        if not text:
+            return None
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                point = parsed
+            else:
+                point = {"description": text}
+        else:
+            point = {"description": text}
+
+    if not isinstance(point, dict):
+        return None
+
+    dim = str(point.get("dimension") or fallback_dim).strip()
+    if dim not in DIMENSION_RULES:
+        dim = fallback_dim
+
+    req = point.get("required_keywords")
+    if not isinstance(req, list):
+        req = point.get("keywords")
+    req_keywords = [str(k).strip() for k in (req or []) if str(k).strip()]
+    if not req_keywords:
+        req_keywords = list(DIMENSION_RULES.get(dim, DIMENSION_RULES["质量"])[:6])
+
+    return {
+        "point_id": str(point.get("point_id") or f"{dim}-NODE-{index}"),
+        "dimension": dim,
+        "description": str(point.get("description") or f"{dim}评分点响应"),
+        "required_keywords": req_keywords,
+        "match_mode": str(point.get("match_mode") or "any"),
+        "boolean_rule": str(point.get("boolean_rule") or "any_keyword_hit"),
+    }
+
+
+def _extract_scoring_points(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = node.get("scoring_points")
+    fallback_dim = "质量"
+    if isinstance(raw, dict):
+        dim = str(raw.get("dimension") or "").strip()
+        if dim in DIMENSION_RULES:
+            fallback_dim = dim
+        raw_points = raw.get("checkpoints")
+        if not isinstance(raw_points, list):
+            raw_points = raw.get("points")
+    elif isinstance(raw, list):
+        raw_points = raw
+    else:
+        raw_points = []
+
+    out: List[Dict[str, Any]] = []
+    for idx, item in enumerate(raw_points, start=1):
+        point = _coerce_point(item, index=idx, fallback_dim=fallback_dim)
+        if point is not None:
+            out.append(point)
+    return out
+
+
+def _hooks_enabled(node: Dict[str, Any]) -> bool:
+    hooks = node.get("fail_fast_hooks")
+    if isinstance(hooks, dict):
+        return bool(hooks.get("enabled"))
+    if isinstance(hooks, list):
+        return any(str(item or "").strip() for item in hooks)
+    return False
+
+
 def _check_node(node: Dict[str, Any]) -> bool:
-    scoring_points = node.get("scoring_points")
-    if not isinstance(scoring_points, list) or not scoring_points:
+    scoring_points = _extract_scoring_points(node)
+    if not scoring_points:
         return False
-    if not all(isinstance(p, dict) and isinstance(p.get("required_keywords"), list) and (p.get("required_keywords") or []) for p in scoring_points):
+    if not all(
+        isinstance(p, dict) and isinstance(p.get("required_keywords"), list) and (p.get("required_keywords") or [])
+        for p in scoring_points
+    ):
         return False
 
-    hooks = node.get("fail_fast_hooks")
-    if not isinstance(hooks, dict) or not bool(hooks.get("enabled")):
+    if not _hooks_enabled(node):
         return False
 
     rewrite = node.get("auto_rewrite")

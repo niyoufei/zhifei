@@ -1007,27 +1007,98 @@ def _ensure_schedule_indices_and_scoring(
     sp_raw = node.get("scoring_points")
     if isinstance(sp_raw, dict):
         sp = dict(sp_raw)
+        raw_checkpoints = sp.get("checkpoints")
+        if not isinstance(raw_checkpoints, list):
+            raw_checkpoints = []
     elif isinstance(sp_raw, list):
-        sp = {"checkpoints": [str(x) for x in sp_raw if str(x).strip()]}
+        sp = {}
+        raw_checkpoints = list(sp_raw)
     else:
         sp = {}
+        raw_checkpoints = []
     before_sp = json.dumps(sp, ensure_ascii=False, sort_keys=True)
+    checkpoints: List[Dict[str, Any]] = []
+    for idx, cp in enumerate(raw_checkpoints, start=1):
+        item = cp
+        if isinstance(cp, str):
+            raw = cp.strip()
+            if not raw:
+                continue
+            if raw.startswith("{") and raw.endswith("}"):
+                try:
+                    parsed = ast.literal_eval(raw)
+                except (SyntaxError, ValueError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    item = parsed
+                else:
+                    item = {"description": raw}
+            else:
+                item = {"description": raw}
+        if not isinstance(item, dict):
+            continue
+        point_dim = str(item.get("dimension") or dim).strip()
+        if point_dim not in DIMENSION_KEYWORDS:
+            point_dim = dim
+        req_keywords = item.get("required_keywords")
+        if not isinstance(req_keywords, list):
+            req_keywords = item.get("keywords")
+        req_keywords = [str(k).strip() for k in (req_keywords or []) if str(k).strip()]
+        if not req_keywords:
+            req_keywords = list(DIMENSION_KEYWORDS.get(point_dim, DIMENSION_KEYWORDS["质量"])[:6])
+        checkpoints.append(
+            {
+                "point_id": str(item.get("point_id") or f"{point_dim}-NODE-{idx}"),
+                "dimension": point_dim,
+                "description": str(item.get("description") or f"{point_dim}评分点响应"),
+                "required_keywords": req_keywords,
+                "match_mode": str(item.get("match_mode") or "any"),
+                "boolean_rule": str(item.get("boolean_rule") or "any_keyword_hit"),
+            }
+        )
+    if not checkpoints:
+        checkpoints.append(
+            {
+                "point_id": f"{dim}-NODE",
+                "dimension": dim,
+                "description": f"{dim}评分点响应",
+                "required_keywords": list(DIMENSION_KEYWORDS.get(dim, DIMENSION_KEYWORDS["质量"])[:6]),
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit",
+            }
+        )
+    sp["checkpoints"] = checkpoints
     sp.setdefault("dimension", dim)
     sp.setdefault("expected_gain", "+2~+5")
     sp.setdefault("deduction_risk", "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分")
     sp.setdefault("score_path", "工序名称->参数->风险->控制->验证")
     after_sp = json.dumps(sp, ensure_ascii=False, sort_keys=True)
-    if before_sp != after_sp or not isinstance(sp_raw, (dict, list)):
+    if before_sp != after_sp or not isinstance(sp_raw, dict):
         node["scoring_points"] = sp
         changed += 1
 
     hooks_raw = node.get("fail_fast_hooks")
-    hooks = [str(x).strip() for x in hooks_raw if str(x).strip()] if isinstance(hooks_raw, list) else []
-    before_hooks = list(hooks)
+    if isinstance(hooks_raw, dict):
+        hooks = dict(hooks_raw)
+        events_raw = hooks.get("events")
+    elif isinstance(hooks_raw, list):
+        hooks = {}
+        events_raw = hooks_raw
+    else:
+        hooks = {}
+        events_raw = []
+    events = [str(x).strip() for x in (events_raw or []) if str(x).strip()]
+    before_hooks = json.dumps(hooks, ensure_ascii=False, sort_keys=True)
     for hook in ("missing_numeric_source", "missing_formula_expression", "missing_checker"):
-        if hook not in hooks:
-            hooks.append(hook)
-    if hooks != before_hooks or not isinstance(hooks_raw, list):
+        if hook not in events:
+            events.append(hook)
+    hooks["events"] = events
+    hooks.setdefault("enabled", True)
+    hooks.setdefault("on_missing_response", "raise_exception_and_retry")
+    hooks.setdefault("cache_policy", "clear_failed_dimension_cache")
+    hooks.setdefault("max_retry", 3)
+    after_hooks = json.dumps(hooks, ensure_ascii=False, sort_keys=True)
+    if before_hooks != after_hooks or not isinstance(hooks_raw, dict):
         node["fail_fast_hooks"] = hooks
         changed += 1
 

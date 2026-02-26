@@ -65,6 +65,8 @@ DOMAIN_KEYWORDS: Dict[str, List[str]] = {
 
 SOURCE_LEVELS = ("答疑文件", "设计图纸", "国标", "行标", "企标")
 GENERIC_VAGUE_WORDS = ("加强", "提高", "注意", "确保", "严格")
+VISUAL_TYPES = ["样板", "流程", "思维导图", "智慧绿色四新"]
+REQUIRED_ASSERTIONS = ["must_have_action", "must_have_parameter", "must_have_checker"]
 
 
 def _iter_sections(raw: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
@@ -276,9 +278,49 @@ def _ensure_formula_nodes(
             "applicable_conditions": {"scenario": f"{dim}约束计算"},
             "resource_requirements": params,
             "numeric_sources": [{"parameter": list(params.keys())[0], "value": str(list(params.values())[0]), "unit": ""}],
+            "scoring_points": {
+                "checkpoints": [
+                    {
+                        "point_id": f"{dim}-NODE",
+                        "dimension": dim,
+                        "description": f"{dim}评分点响应",
+                        "required_keywords": list(DIMENSION_SEEDS[dim][:6]),
+                        "match_mode": "any",
+                        "boolean_rule": "any_keyword_hit",
+                    }
+                ],
+                "dimension": dim,
+                "expected_gain": "+2~+5",
+                "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
+                "score_path": "工序名称->参数->风险->控制->验证",
+            },
+            "fail_fast_hooks": {
+                "enabled": True,
+                "on_missing_response": "raise_exception_and_retry",
+                "cache_policy": "clear_failed_dimension_cache",
+                "max_retry": 3,
+                "events": ["missing_numeric_source", "missing_formula_expression", "missing_checker"],
+            },
+            "auto_rewrite": {
+                "enabled": True,
+                "strategy": "targeted_dimension_rewrite",
+                "template": f"执行{dim}控制，参数阈值=95%，检查频次=2次/班，由{checker}复核。",
+            },
+            "response_assertions": list(REQUIRED_ASSERTIONS),
             "content": {
                 "environment_sensing": {"activation_signal": ACTIVATION_SIGNAL},
                 "operation_desc_premium": {"desc": _build_desc(node_name=f"{dim}计算", dim=dim, checker=checker, params=params)},
+            },
+            "visual_specs": {
+                "enabled": True,
+                "visual_types": list(VISUAL_TYPES),
+                "content_professional": list(VISUAL_TYPES),
+                "drawing_standard": "GB/T 50104 建筑制图标准",
+                "visual_standard": "CSCEC VI 蓝/绿/灰",
+                "text_standard": "中文仿宋",
+                "docx_embed": True,
+                "prompt_policy": "bind_index_matrix_and_node_parameters",
+                "data_binding_fields": ["action", "parameter", "checker"],
             },
             "retrieval_hints": {
                 "must_keywords": DIMENSION_SEEDS[dim][:4],

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -125,6 +126,46 @@ def _build_root_module4() -> Dict[str, Any]:
     }
 
 
+def _normalize_scoring_checkpoint(value: Any, *, index: int, fallback_dim: str) -> Dict[str, Any] | None:
+    item = value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                parsed = ast.literal_eval(raw)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                item = parsed
+            else:
+                item = {"description": raw}
+        else:
+            item = {"description": raw}
+    if not isinstance(item, dict):
+        return None
+
+    dim = str(item.get("dimension") or fallback_dim).strip()
+    if dim not in DIMENSION_RULES:
+        dim = fallback_dim
+    req_keywords = item.get("required_keywords")
+    if not isinstance(req_keywords, list):
+        req_keywords = item.get("keywords")
+    req_keywords = [str(k).strip() for k in (req_keywords or []) if str(k).strip()]
+    if not req_keywords:
+        req_keywords = list(DIMENSION_RULES[dim][:6])
+
+    return {
+        "point_id": str(item.get("point_id") or f"{dim}-NODE-{index}"),
+        "dimension": dim,
+        "description": str(item.get("description") or f"{dim}评分点响应"),
+        "required_keywords": req_keywords,
+        "match_mode": str(item.get("match_mode") or "any"),
+        "boolean_rule": str(item.get("boolean_rule") or "any_keyword_hit"),
+    }
+
+
 def _merge_root_module4(target: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
     changed = False
     if not isinstance(target.get("module4_validation"), dict):
@@ -152,31 +193,32 @@ def _ensure_node_module4(node: Dict[str, Any]) -> bool:
     changed = False
     dims = _detect_dimensions(node)
 
-    scoring_points = node.get("scoring_points")
-    if not isinstance(scoring_points, list):
-        scoring_points = []
+    raw_scoring = node.get("scoring_points")
+    if isinstance(raw_scoring, dict):
+        scoring_profile = dict(raw_scoring)
+        raw_checkpoints = scoring_profile.get("checkpoints")
+        if not isinstance(raw_checkpoints, list):
+            raw_checkpoints = []
+    elif isinstance(raw_scoring, list):
+        scoring_profile = {"checkpoints": list(raw_scoring)}
+        raw_checkpoints = list(raw_scoring)
+    else:
+        scoring_profile = {"checkpoints": []}
+        raw_checkpoints = []
+
     existing_dim_points: Set[str] = set()
-    for point in scoring_points:
-        if not isinstance(point, dict):
+    normalized_checkpoints: List[Dict[str, Any]] = []
+    for idx, point in enumerate(raw_checkpoints, start=1):
+        normalized = _normalize_scoring_checkpoint(point, index=idx, fallback_dim=dims[0])
+        if normalized is None:
             continue
-        dim = str(point.get("dimension") or "").strip()
-        if dim:
-            existing_dim_points.add(dim)
-        if "match_mode" not in point:
-            point["match_mode"] = "any"
-            changed = True
-        if "boolean_rule" not in point:
-            point["boolean_rule"] = "any_keyword_hit"
-            changed = True
-        if "required_keywords" not in point or not isinstance(point.get("required_keywords"), list):
-            dim_infer = dim if dim in DIMENSION_RULES else "质量"
-            point["required_keywords"] = list(DIMENSION_RULES[dim_infer][:6])
-            changed = True
+        existing_dim_points.add(str(normalized.get("dimension") or "").strip())
+        normalized_checkpoints.append(normalized)
 
     for dim in dims:
         if dim in existing_dim_points:
             continue
-        scoring_points.append(
+        normalized_checkpoints.append(
             {
                 "point_id": f"{dim}-NODE",
                 "dimension": dim,
@@ -188,32 +230,74 @@ def _ensure_node_module4(node: Dict[str, Any]) -> bool:
         )
         changed = True
 
-    if node.get("scoring_points") != scoring_points:
-        node["scoring_points"] = scoring_points
+    if not normalized_checkpoints:
+        fallback_dim = dims[0]
+        normalized_checkpoints.append(
+            {
+                "point_id": f"{fallback_dim}-NODE",
+                "dimension": fallback_dim,
+                "description": f"{fallback_dim}评分点响应",
+                "required_keywords": list(DIMENSION_RULES[fallback_dim][:6]),
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit",
+            }
+        )
         changed = True
 
-    if not isinstance(node.get("fail_fast_hooks"), dict):
-        node["fail_fast_hooks"] = {
-            "enabled": True,
-            "on_missing_response": "raise_exception_and_retry",
-            "cache_policy": "clear_failed_dimension_cache",
-            "max_retry": 3,
-        }
+    scoring_profile["checkpoints"] = normalized_checkpoints
+    if "dimension" not in scoring_profile:
+        scoring_profile["dimension"] = dims[0]
         changed = True
+    if "expected_gain" not in scoring_profile:
+        scoring_profile["expected_gain"] = "+2~+5"
+        changed = True
+    if "deduction_risk" not in scoring_profile:
+        scoring_profile["deduction_risk"] = "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分"
+        changed = True
+    if "score_path" not in scoring_profile:
+        scoring_profile["score_path"] = "工序名称->参数->风险->控制->验证"
+        changed = True
+
+    if node.get("scoring_points") != scoring_profile:
+        node["scoring_points"] = scoring_profile
+        changed = True
+
+    hooks_raw = node.get("fail_fast_hooks")
+    if isinstance(hooks_raw, dict):
+        hooks = dict(hooks_raw)
+        events_raw = hooks.get("events")
+    elif isinstance(hooks_raw, list):
+        hooks = {}
+        events_raw = hooks_raw
     else:
-        hooks = node["fail_fast_hooks"]
-        if "enabled" not in hooks:
-            hooks["enabled"] = True
+        hooks = {}
+        events_raw = []
+
+    events = [str(item).strip() for item in (events_raw or []) if str(item).strip()]
+    for req_event in ("missing_numeric_source", "missing_formula_expression", "missing_checker"):
+        if req_event not in events:
+            events.append(req_event)
             changed = True
-        if "on_missing_response" not in hooks:
-            hooks["on_missing_response"] = "raise_exception_and_retry"
-            changed = True
-        if "cache_policy" not in hooks:
-            hooks["cache_policy"] = "clear_failed_dimension_cache"
-            changed = True
-        if "max_retry" not in hooks:
-            hooks["max_retry"] = 3
-            changed = True
+
+    if hooks.get("enabled") is not True:
+        hooks["enabled"] = True
+        changed = True
+    if "on_missing_response" not in hooks:
+        hooks["on_missing_response"] = "raise_exception_and_retry"
+        changed = True
+    if "cache_policy" not in hooks:
+        hooks["cache_policy"] = "clear_failed_dimension_cache"
+        changed = True
+    if int(hooks.get("max_retry") or 0) <= 0:
+        hooks["max_retry"] = 3
+        changed = True
+    if hooks.get("events") != events:
+        hooks["events"] = events
+        changed = True
+
+    if node.get("fail_fast_hooks") != hooks:
+        node["fail_fast_hooks"] = hooks
+        changed = True
 
     if not isinstance(node.get("auto_rewrite"), dict):
         checker = DIMENSION_CHECKER.get(dims[0], "专业工程师")
@@ -225,7 +309,7 @@ def _ensure_node_module4(node: Dict[str, Any]) -> bool:
         changed = True
     else:
         rewrite = node["auto_rewrite"]
-        if "enabled" not in rewrite:
+        if rewrite.get("enabled") is not True:
             rewrite["enabled"] = True
             changed = True
         if "strategy" not in rewrite:

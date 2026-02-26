@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-26T10:54:25",
+    "updated_at": "2026-02-26T12:28:17",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -85,7 +85,7 @@
               "assumption": "资源随工序强度动态调整"
             }
           },
-          "source_hierarchy": "行标",
+          "source_hierarchy": "答疑文件",
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
@@ -163,21 +163,113 @@
           },
           "scoring_points": {
             "checkpoints": [
-              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '重难点-NODE', 'dimension': '重难点', 'description': '重难点评分点响应', 'required_keywords': ['重难点', '难点', '关键工序', '复杂', '深基坑', '大体积'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
             ],
             "dimension": "质量",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
             "score_path": "工序名称->参数->风险->控制->验证"
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -286,7 +378,7 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "source_hierarchy_chain": [
             "答疑文件",
             "设计图纸",
@@ -359,7 +451,7 @@
             "试验",
             "一次验收合格率"
           ],
-          "source_hierarchy": "行标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
@@ -498,20 +590,113 @@
           },
           "scoring_points": {
             "checkpoints": [
-              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
             ],
             "dimension": "质量",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
             "score_path": "工序名称->参数->风险->控制->验证"
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -586,7 +771,7 @@
               "checker"
             ]
           },
-          "professional_domain": "tunnel",
+          "professional_domain": "railway",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -625,7 +810,7 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "source_hierarchy_chain": [
             "答疑文件",
             "设计图纸",
@@ -712,7 +897,7 @@
             "赶工",
             "总工期"
           ],
-          "source_hierarchy": "行标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
@@ -850,22 +1035,113 @@
           },
           "scoring_points": {
             "checkpoints": [
-              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '重难点-NODE', 'dimension': '重难点', 'description': '重难点评分点响应', 'required_keywords': ['重难点', '难点', '关键工序', '复杂', '深基坑', '大体积'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '扣分点-NODE', 'dimension': '扣分点', 'description': '扣分点评分点响应', 'required_keywords': ['扣分', '否决', '废标', '处罚', '违约', '偏差'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
             ],
             "dimension": "进度",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
             "score_path": "工序名称->参数->风险->控制->验证"
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -979,7 +1255,7 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "source_hierarchy_chain": [
             "答疑文件",
             "设计图纸",
@@ -1060,7 +1336,7 @@
             "排放",
             "PM10"
           ],
-          "source_hierarchy": "行标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
@@ -1212,21 +1488,113 @@
           },
           "scoring_points": {
             "checkpoints": [
-              "{'point_id': '环保-NODE', 'dimension': '环保', 'description': '环保评分点响应', 'required_keywords': ['环保', '扬尘', '噪声', '污水', '固废', '节能'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
             ],
             "dimension": "环保",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
             "score_path": "工序名称->参数->风险->控制->验证"
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -1301,7 +1669,7 @@
               "checker"
             ]
           },
-          "professional_domain": "tunnel",
+          "professional_domain": "railway",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -1340,7 +1708,7 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "source_hierarchy_chain": [
             "答疑文件",
             "设计图纸",
@@ -1427,7 +1795,7 @@
             "专项",
             "高支模"
           ],
-          "source_hierarchy": "行标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
@@ -1578,21 +1946,113 @@
           },
           "scoring_points": {
             "checkpoints": [
-              "{'point_id': '重难点-NODE', 'dimension': '重难点', 'description': '重难点评分点响应', 'required_keywords': ['重难点', '难点', '关键工序', '复杂', '深基坑', '大体积'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
             ],
             "dimension": "重难点",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
             "score_path": "工序名称->参数->风险->控制->验证"
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -1706,7 +2166,7 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "source_hierarchy_chain": [
             "答疑文件",
             "设计图纸",
@@ -1945,21 +2405,113 @@
           },
           "scoring_points": {
             "checkpoints": [
-              "{'point_id': '扣分点-NODE', 'dimension': '扣分点', 'description': '扣分点评分点响应', 'required_keywords': ['扣分', '否决', '废标', '处罚', '违约', '偏差'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
             ],
             "dimension": "扣分点",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
             "score_path": "工序名称->参数->风险->控制->验证"
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -2034,7 +2586,7 @@
               "checker"
             ]
           },
-          "professional_domain": "tunnel",
+          "professional_domain": "railway",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -2073,7 +2625,7 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "source_hierarchy_chain": [
             "答疑文件",
             "设计图纸",
@@ -2299,7 +2851,7 @@
               "min_interval_days": 1
             }
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB/T 50326-2017 建设工程项目管理规范",
@@ -2441,20 +2993,113 @@
           },
           "scoring_points": {
             "checkpoints": [
-              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
             ],
             "dimension": "质量",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
             "score_path": "工序名称->参数->风险->控制->验证"
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -2569,7 +3214,7 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "source_hierarchy_chain": [
             "答疑文件",
             "设计图纸",
@@ -2654,8 +3299,8 @@
             "公式",
             "计算"
           ],
-          "professional_domain": "tunnel",
-          "source_hierarchy": "行标",
+          "professional_domain": "earthwork",
+          "source_hierarchy": "答疑文件",
           "reference_standard": [
             "GB/T 50326-2017 建设工程项目管理规范",
             "JTG/T 3660-2020 公路隧道施工技术规范"
@@ -2742,7 +3387,7 @@
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(进度) AND domain_hint == 'tunnel' AND node_hint CONTAINS '进度动态计算节点'"
             },
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行进度动态计算节点进度工序定义，参数critical_path_lag_days=1、deviation_correction_hours=24、milestone_hit_rate_percent=100，施工员每班次核验1次；第二步（分析）：围绕计划偏差与资源冲突识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，施工员每班次检查2次；工序名称->参数->风险->控制->验证",
+              "desc": "第一步（定义）：执行进度动态计算节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
               "bid_response_strategy": {
                 "response_template": "围绕进度动态计算节点执行 Action+Parameter+Checker 闭环，优先响应进度评分点。",
                 "dimension": "进度",
@@ -2799,7 +3444,7 @@
             "checker": "施工员",
             "verification": "计算结果复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "safety_level": "medium",
           "source_hierarchy_chain": [
             "答疑文件",
@@ -2927,17 +3572,145 @@
             "dimension": "进度",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
-            "score_path": "工序名称->参数->风险->控制->验证"
+            "score_path": "工序名称->参数->风险->控制->验证",
+            "checkpoints": [
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "进度",
+                  "工期",
+                  "里程碑",
+                  "节点",
+                  "关键线路",
+                  "穿插"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
+            ]
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "professional_domain_aliases": [
             "earthwork",
             "management"
-          ]
+          ],
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行进度控制，参数阈值=95%，检查频次=2次/班，由施工员复核。"
+          }
         },
         {
           "node_id": "ZF-KG-30-Utility-Tunnel-FORM-RISK",
@@ -2957,8 +3730,8 @@
             "公式",
             "计算"
           ],
-          "professional_domain": "tunnel",
-          "source_hierarchy": "行标",
+          "professional_domain": "railway",
+          "source_hierarchy": "答疑文件",
           "reference_standard": [
             "GB/T 50326-2017 建设工程项目管理规范",
             "JTG/T 3660-2020 公路隧道施工技术规范",
@@ -3046,7 +3819,7 @@
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(重难点) AND domain_hint == 'tunnel' AND node_hint CONTAINS '重难点动态计算节'"
             },
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行重难点动态计算节点重难点工序定义，参数risk_trigger_threshold_percent=5、specialist_workers=12、acceptance_loop_hours=12，技术负责人每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，技术负责人每班次检查2次；工序名称->参数->风险->控制->验证",
+              "desc": "第一步（定义）：执行重难点动态计算节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
               "bid_response_strategy": {
                 "response_template": "围绕重难点动态计算节点执行 Action+Parameter+Checker 闭环，优先响应重难点评分点。",
                 "dimension": "重难点",
@@ -3103,7 +3876,7 @@
             "checker": "技术负责人",
             "verification": "计算结果复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "safety_level": "medium",
           "source_hierarchy_chain": [
             "答疑文件",
@@ -3220,18 +3993,146 @@
             "dimension": "重难点",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
-            "score_path": "工序名称->参数->风险->控制->验证"
+            "score_path": "工序名称->参数->风险->控制->验证",
+            "checkpoints": [
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "复杂",
+                  "关键工序",
+                  "高风险",
+                  "异形"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
+            ]
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "professional_domain_aliases": [
             "earthwork",
             "management",
             "railway"
-          ]
+          ],
+          "visual_specs": {
+            "enabled": true,
+            "visual_types": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "content_professional": [
+              "样板",
+              "流程",
+              "思维导图",
+              "智慧绿色四新"
+            ],
+            "drawing_standard": "GB/T 50104 建筑制图标准",
+            "visual_standard": "CSCEC VI 蓝/绿/灰",
+            "text_standard": "中文仿宋",
+            "docx_embed": true,
+            "prompt_policy": "bind_index_matrix_and_node_parameters",
+            "data_binding_fields": [
+              "action",
+              "parameter",
+              "checker"
+            ]
+          },
+          "auto_rewrite": {
+            "enabled": true,
+            "strategy": "targeted_dimension_rewrite",
+            "template": "执行重难点控制，参数阈值=95%，检查频次=2次/班，由总工复核。"
+          }
         }
       ]
     },
@@ -3307,7 +4208,7 @@
               "assumption": "资源随工序强度动态调整"
             }
           },
-          "source_hierarchy": "行标",
+          "source_hierarchy": "答疑文件",
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
@@ -3405,22 +4306,113 @@
           },
           "scoring_points": {
             "checkpoints": [
-              "{'point_id': '质量-NODE', 'dimension': '质量', 'description': '质量评分点响应', 'required_keywords': ['质量', '验收', '合格', '缺陷', '平整度', '强度'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '安全-NODE', 'dimension': '安全', 'description': '安全评分点响应', 'required_keywords': ['安全', '危险', '防护', '应急', '事故', '临电'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '进度-NODE', 'dimension': '进度', 'description': '进度评分点响应', 'required_keywords': ['工期', '进度', '节点', '里程碑', '关键线路', '计划'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '环保-NODE', 'dimension': '环保', 'description': '环保评分点响应', 'required_keywords': ['环保', '扬尘', '噪声', '污水', '固废', '节能'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}",
-              "{'point_id': '重难点-NODE', 'dimension': '重难点', 'description': '重难点评分点响应', 'required_keywords': ['重难点', '难点', '关键工序', '复杂', '深基坑', '大体积'], 'match_mode': 'any', 'boolean_rule': 'any_keyword_hit'}"
+              {
+                "point_id": "质量-NODE",
+                "dimension": "质量",
+                "description": "质量评分点响应",
+                "required_keywords": [
+                  "质量",
+                  "验收",
+                  "合格",
+                  "缺陷",
+                  "平整度",
+                  "强度"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "进度-NODE",
+                "dimension": "进度",
+                "description": "进度评分点响应",
+                "required_keywords": [
+                  "工期",
+                  "进度",
+                  "节点",
+                  "里程碑",
+                  "关键线路",
+                  "计划"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "环保-NODE",
+                "dimension": "环保",
+                "description": "环保评分点响应",
+                "required_keywords": [
+                  "环保",
+                  "扬尘",
+                  "噪声",
+                  "污水",
+                  "固废",
+                  "节能"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "重难点-NODE",
+                "dimension": "重难点",
+                "description": "重难点评分点响应",
+                "required_keywords": [
+                  "重难点",
+                  "难点",
+                  "关键工序",
+                  "复杂",
+                  "深基坑",
+                  "大体积"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "扣分点-NODE",
+                "dimension": "扣分点",
+                "description": "扣分点评分点响应",
+                "required_keywords": [
+                  "扣分",
+                  "否决",
+                  "废标",
+                  "处罚",
+                  "违约",
+                  "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              }
             ],
             "dimension": "质量",
             "expected_gain": "+2~+5",
             "deduction_risk": "缺少参数来源、缺少检查岗位或缺少响应闭环将触发扣分",
             "score_path": "工序名称->参数->风险->控制->验证"
           },
-          "fail_fast_hooks": [
-            "missing_numeric_source",
-            "missing_formula_expression",
-            "missing_checker"
-          ],
+          "fail_fast_hooks": {
+            "events": [
+              "missing_numeric_source",
+              "missing_formula_expression",
+              "missing_checker"
+            ],
+            "enabled": true,
+            "on_missing_response": "raise_exception_and_retry",
+            "cache_policy": "clear_failed_dimension_cache",
+            "max_retry": 3
+          },
           "auto_rewrite": {
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
@@ -3529,7 +4521,7 @@
             "checker": "安全员",
             "verification": "复核并留痕"
           },
-          "gemini_usefulness_score": 97,
+          "gemini_usefulness_score": 100,
           "source_hierarchy_chain": [
             "答疑文件",
             "设计图纸",
