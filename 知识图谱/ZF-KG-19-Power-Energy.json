@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-26T15:14:00",
+    "updated_at": "2026-02-26T15:25:14",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -3186,7 +3186,8 @@
               "enabled": true,
               "min_numeric_parameters": 3,
               "must_include_checker": true
-            }
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
           },
           "response_assertions": [
             "must_have_action",
@@ -3640,7 +3641,8 @@
               "enabled": true,
               "min_numeric_parameters": 3,
               "must_include_checker": true
-            }
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
           },
           "response_assertions": [
             "must_have_action",

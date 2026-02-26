@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-26T15:14:00",
+    "updated_at": "2026-02-26T15:25:14",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -3605,7 +3605,7 @@
               "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(进度) AND domain_hint == 'hydraulic' AND node_hint CONTAINS '进度动态计算节点'"
             },
             "operation_desc_premium": {
-              "desc": "第一步（定义）：执行进度动态计算节点扣分点工序定义，参数response_deadline_hours=4、recheck_frequency_per_day=2、coverage_rate_percent=100，项目总工每班次核验1次；第二步（分析）：围绕计划偏差与资源冲突识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，项目总工每班次检查2次；工序名称->参数->风险->控制->验证",
+              "desc": "第一步（定义）：执行进度动态计算节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质量通病与安全隐患识别触发条件，风险阈值5%，技术负责人复核；第三步（解决）：实施参数闭环+旁站复核+数据留痕，偏差处置时限4h，安全员每班次检查2次；工序名称->参数->风险->控制->验证",
               "bid_response_strategy": {
                 "response_template": "围绕进度动态计算节点执行 Action+Parameter+Checker 闭环，优先响应进度评分点。",
                 "dimension": "进度",
@@ -3716,7 +3716,8 @@
               "enabled": true,
               "min_numeric_parameters": 3,
               "must_include_checker": true
-            }
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
           },
           "response_assertions": [
             "must_have_action",
@@ -3866,6 +3867,21 @@
                   "处罚",
                   "违约",
                   "偏差"
+                ],
+                "match_mode": "any",
+                "boolean_rule": "any_keyword_hit"
+              },
+              {
+                "point_id": "安全-NODE",
+                "dimension": "安全",
+                "description": "安全评分点响应",
+                "required_keywords": [
+                  "安全",
+                  "危险",
+                  "防护",
+                  "应急",
+                  "事故",
+                  "临电"
                 ],
                 "match_mode": "any",
                 "boolean_rule": "any_keyword_hit"
@@ -4165,7 +4181,8 @@
               "enabled": true,
               "min_numeric_parameters": 3,
               "must_include_checker": true
-            }
+            },
+            "rewrite_template": "第一步（定义）：执行质量工序定义，工程量1200m3、标号C30、尺寸900mm，施工员每班次核验1次；第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；第三步（解决）：执行质量控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；工序名称->参数->风险->控制->验证"
           },
           "response_assertions": [
             "must_have_action",

@@ -149,3 +149,32 @@ def test_gemini_fix_new_formula_nodes_include_guardrail_fields(tmp_path: Path) -
         spec = node.get("visual_specs")
         assert isinstance(spec, dict) and spec.get("docx_embed") is True
         assert "样板" in (spec.get("visual_types") or [])
+
+
+def test_gemini_fix_file_is_idempotent_on_second_run(tmp_path: Path) -> None:
+    mod = _load_script("fix_kg_gemini_enablement.py")
+    kg_file = tmp_path / "ZF-KG-96-Test.json"
+    payload = {
+        "knowledge_database": {
+            "sec": {
+                "nodes": [
+                    {
+                        "node_id": "N1",
+                        "name": "质量节点",
+                        "qt_tag": ["质量"],
+                        "content": {"operation_desc_premium": {"desc": "注意质量，确保达标。"}},
+                    }
+                ]
+            }
+        }
+    }
+    kg_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    first = mod.fix_file(kg_file)
+    assert first["changed"] is True
+    first_payload = kg_file.read_text(encoding="utf-8")
+
+    second = mod.fix_file(kg_file)
+    assert second["changed"] is False
+    second_payload = kg_file.read_text(encoding="utf-8")
+    assert first_payload == second_payload

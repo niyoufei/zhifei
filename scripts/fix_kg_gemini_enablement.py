@@ -183,14 +183,17 @@ def _ensure_operation_desc(node: Dict[str, Any], *, dim: str, checker: str, para
         ("第一步（定义）" in desc and "第二步（分析）" in desc and "第三步（解决）" in desc)
         or ("工序名称->参数->风险->控制->验证" in desc)
     )
-    if (not desc) or any(word in desc for word in GENERIC_VAGUE_WORDS) or generic_template:
-        premium["desc"] = _build_desc(
+    rewrite_needed = (not desc) or any(word in desc for word in GENERIC_VAGUE_WORDS) or generic_template
+    if rewrite_needed:
+        expected = _build_desc(
             node_name=node_name,
             dim=dim,
             checker=checker,
             params=params,
         )
-        changed = True
+        if desc != expected:
+            premium["desc"] = expected
+            changed = True
     return changed
 
 
@@ -264,9 +267,10 @@ def _ensure_formula_nodes(
         expr, vars_ = DIMENSION_FORMULAS[dim]
         params = DIMENSION_PARAMS[dim]
         checker = DIMENSION_CHECKER[dim]
+        node_name = f"{dim}动态计算节点"
         new_node = {
             "node_id": node_id,
-            "name": f"{dim}动态计算节点",
+            "name": node_name,
             "node_type": "FormulaNode",
             "qt_tag": [dim, "gemini_formula"],
             "keywords": DIMENSION_SEEDS[dim] + [domain, "公式", "计算"],
@@ -309,7 +313,7 @@ def _ensure_formula_nodes(
             "response_assertions": list(REQUIRED_ASSERTIONS),
             "content": {
                 "environment_sensing": {"activation_signal": ACTIVATION_SIGNAL},
-                "operation_desc_premium": {"desc": _build_desc(node_name=f"{dim}计算", dim=dim, checker=checker, params=params)},
+                "operation_desc_premium": {"desc": _build_desc(node_name=node_name, dim=dim, checker=checker, params=params)},
             },
             "visual_specs": {
                 "enabled": True,
@@ -334,8 +338,8 @@ def _ensure_formula_nodes(
                 "checker": checker,
                 "verification": "计算结果复核并留痕",
             },
-            "gemini_usefulness_score": 88,
         }
+        new_node["gemini_usefulness_score"] = _calc_usefulness(new_node)
         section_nodes.append(new_node)
         existing_ids.add(node_id)
         add_count += 1
