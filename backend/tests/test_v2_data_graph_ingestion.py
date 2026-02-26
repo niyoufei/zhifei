@@ -446,3 +446,222 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
     assert node["approval_workflow"]["status"] == "approved"
     assert isinstance(node["bim_ifc_context"]["ifc_entities"], list)
     assert str(node["incremental_fingerprint"]).strip()
+
+
+def test_search_supports_bid_date_timeline_effective_filter(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "timeline.json").write_text(
+        json.dumps(
+            {
+                "name": "ZF-KG-TIMELINE",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "TIME-OLD",
+                                "name": "旧版质量条款",
+                                "keywords": ["质量", "抽检"],
+                                "source_hierarchy": "国标",
+                                "standard_validity_timeline": {
+                                    "timeline_status": "review_required",
+                                    "records": [
+                                        {
+                                            "standard_code": "GB 50300-2010",
+                                            "effective_date": "2010-01-01",
+                                            "expiry_date": "2034-12-31",
+                                            "status": "superseded",
+                                            "superseded_by": "GB 50300-2024",
+                                        }
+                                    ],
+                                },
+                                "content": {"operation_desc_premium": {"desc": "旧版抽检条款"}},
+                            },
+                            {
+                                "node_id": "TIME-NEW",
+                                "name": "新版质量条款",
+                                "keywords": ["质量", "抽检"],
+                                "source_hierarchy": "国标",
+                                "standard_validity_timeline": {
+                                    "timeline_status": "active",
+                                    "records": [
+                                        {
+                                            "standard_code": "GB 50300-2024",
+                                            "effective_date": "2024-01-01",
+                                            "expiry_date": "2034-12-31",
+                                            "status": "active",
+                                        }
+                                    ],
+                                },
+                                "content": {"operation_desc_premium": {"desc": "新版抽检条款"}},
+                            },
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    current = search_graph_index(
+        query="质量 抽检",
+        bid_date="2026-06-01",
+        allow_superseded=False,
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=10,
+    )
+    titles = [str(item.get("title") or "") for item in current.get("results") or []]
+    assert "新版质量条款" in titles
+    assert "旧版质量条款" not in titles
+
+    allowed = search_graph_index(
+        query="质量 抽检",
+        bid_date="2026-06-01",
+        allow_superseded=True,
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=10,
+    )
+    titles_allowed = [str(item.get("title") or "") for item in allowed.get("results") or []]
+    assert "旧版质量条款" in titles_allowed
+
+
+def test_search_supports_regional_policy_plugins(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "shanghai.json").write_text(
+        json.dumps(
+            {
+                "plugin_name": "ShanghaiPolicyPlugin",
+                "region_code": "SH",
+                "aliases": ["上海", "31"],
+                "region_bonus": 1.2,
+                "require_any_policy_codes": ["DB31"],
+                "prefer_policy_codes": ["DB31/T"],
+                "source_hierarchy_min": "行标",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "regional.json").write_text(
+        json.dumps(
+            {
+                "name": "ZF-KG-REGIONAL",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "REGION-SH-OK",
+                                "name": "上海地区节点",
+                                "keywords": ["环保", "噪声"],
+                                "source_hierarchy": "行标",
+                                "regional_policy_layers": {
+                                    "default_region": "SH",
+                                    "layers": [{"level": "city", "policy_code": "DB31/T 1234-2024"}],
+                                },
+                                "reference_standard_codes": ["DB31/T 1234-2024"],
+                                "content": {"operation_desc_premium": {"desc": "按上海地标控制噪声。"}},
+                            },
+                            {
+                                "node_id": "REGION-SH-BAD",
+                                "name": "非上海地标节点",
+                                "keywords": ["环保", "噪声"],
+                                "source_hierarchy": "行标",
+                                "regional_policy_layers": {
+                                    "default_region": "SH",
+                                    "layers": [{"level": "city", "policy_code": "Q/ABC 01-2020"}],
+                                },
+                                "content": {"operation_desc_premium": {"desc": "非地标条款。"}},
+                            },
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(
+        query="环保 噪声",
+        region_context="SH",
+        regional_plugin_dir=plugin_dir,
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=10,
+    )
+    titles = [str(item.get("title") or "") for item in result.get("results") or []]
+    assert "上海地区节点" in titles
+    assert "非上海地标节点" not in titles
+    plugin_item = next(item for item in result["results"] if str(item.get("title") or "") == "上海地区节点")
+    assert float((plugin_item.get("regional_policy_plugin") or {}).get("bonus") or 0.0) >= 1.2
+
+
+def test_search_can_load_retrieval_weight_profile(tmp_path: Path) -> None:
+    profile = tmp_path / "weight_profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "version": "v1",
+                "weights": {"query_token_weight": 1.7, "keyword_exact_weight": 1.3},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "simple.json").write_text(
+        json.dumps(
+            {
+                "name": "ZF-KG-SIMPLE",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "W-001",
+                                "name": "质量抽检节点",
+                                "keywords": ["质量", "抽检"],
+                                "content": {"operation_desc_premium": {"desc": "每班次检查2次。"}},
+                            }
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(
+        query="质量 抽检",
+        retrieval_weight_profile_path=profile,
+        db_path=db_path,
+        resolve_authority=False,
+    )
+    assert result["total"] >= 1
+    weights = result.get("retrieval_score_weights") or {}
+    assert float(weights.get("query_token_weight") or 0.0) == 1.7
+    assert float(weights.get("keyword_exact_weight") or 0.0) == 1.3

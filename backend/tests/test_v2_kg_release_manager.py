@@ -6,6 +6,8 @@ from pathlib import Path
 from backend.zhifei_autoplan.v2.kg_release_manager import (
     approve_auto_generated_nodes,
     create_release_snapshot,
+    get_release_environment_state,
+    promote_release_snapshot,
     rollback_release_snapshot,
 )
 
@@ -58,3 +60,26 @@ def test_release_snapshot_approve_and_rollback(tmp_path: Path) -> None:
     rolled = json.loads(kg_file.read_text(encoding="utf-8"))
     assert rolled["knowledge_database"]["sec"]["nodes"][0]["name"] == "测试"
 
+    promoted = promote_release_snapshot(
+        release_root=tmp_path / "releases",
+        release_id=release["release_id"],
+        environment="staging",
+        approver="tester",
+    )
+    assert promoted["ok"] is True
+    assert promoted["state"]["environments"]["staging"]["release_id"] == release["release_id"]
+
+    canary = promote_release_snapshot(
+        release_root=tmp_path / "releases",
+        release_id=release["release_id"],
+        environment="prod",
+        approver="tester",
+        canary_ratio=0.2,
+    )
+    assert canary["ok"] is True
+    assert canary["mode"] == "canary"
+    assert float(canary["state"]["environments"]["prod"]["canary_ratio"]) == 0.2
+
+    state = get_release_environment_state(release_root=tmp_path / "releases")
+    assert state["ok"] is True
+    assert state["state"]["environments"]["staging"]["release_id"] == release["release_id"]

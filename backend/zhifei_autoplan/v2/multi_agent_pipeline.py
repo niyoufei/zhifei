@@ -31,6 +31,10 @@ from backend.zhifei_autoplan.v2.kg_retrieval_benchmark import (
     DEFAULT_DATASET_PATH as DEFAULT_BENCHMARK_DATASET_PATH,
     run_retrieval_benchmark,
 )
+from backend.zhifei_autoplan.v2.retrieval_weight_trainer import (
+    DEFAULT_WEIGHT_PROFILE_PATH,
+    train_retrieval_weight_profile,
+)
 from backend.zhifei_autoplan.v2.cross_discipline_solver import solve_cross_discipline_constraints
 from backend.zhifei_autoplan.v2.kg_release_manager import approve_auto_generated_nodes, create_release_snapshot
 
@@ -89,6 +93,11 @@ class MultiAgentDocPipeline:
         self.self_healing_api_key = self_healing_api_key
         self.min_gemini_usefulness_score = max(0.0, min(100.0, float(min_gemini_usefulness_score)))
         self.project_rule_matrix: Dict[str, Any] = {}
+        self.retrieval_weight_profile_path: str | None = None
+        self.region_context: str | None = None
+        self.bid_date: str | None = None
+        self.allow_superseded: bool = False
+        self.regional_plugin_dir: str | None = None
 
     def _read_tender_text(self, path: str) -> str:
         p = Path(path)
@@ -244,6 +253,16 @@ class MultiAgentDocPipeline:
             if not isinstance(checkpoints, list):
                 checkpoints = []
             keywords = [str(x).strip() for x in (item.get("keywords") or []) if str(x).strip()]
+            clause_refs = [str(x).strip() for x in (item.get("clause_refs") or []) if str(x).strip()]
+            support_chunks = item.get("support_chunks")
+            if isinstance(support_chunks, list):
+                for chunk in support_chunks:
+                    if not isinstance(chunk, dict):
+                        continue
+                    for cref in (chunk.get("clause_refs") or []):
+                        term = str(cref).strip()
+                        if term and term not in clause_refs:
+                            clause_refs.append(term)
             evidence_anchors = hit.get("evidence_anchors") if isinstance(hit.get("evidence_anchors"), list) else []
             anchor_ids = [str(x.get("anchor_id") or "").strip() for x in evidence_anchors if isinstance(x, dict)]
             bound_node_id = str(hit.get("node_id") or "").strip()
@@ -253,6 +272,7 @@ class MultiAgentDocPipeline:
                     "chapter": dim,
                     "required_checkpoints": checkpoints,
                     "required_keywords": keywords,
+                    "required_clause_refs": clause_refs[:18],
                     "bound_node_id": bound_node_id,
                     "bound_source_hierarchy": hit.get("source_hierarchy"),
                     "evidence_anchor_ids": [x for x in anchor_ids if x],
@@ -303,6 +323,11 @@ class MultiAgentDocPipeline:
             top_k=8,
             professional_domains=domains,
             min_gemini_usefulness_score=self.min_gemini_usefulness_score,
+            region_context=self.region_context,
+            bid_date=self.bid_date,
+            allow_superseded=self.allow_superseded,
+            regional_plugin_dir=self.regional_plugin_dir,
+            retrieval_weight_profile_path=self.retrieval_weight_profile_path,
             db_path=self.kg_db_path,
         )
         candidates = graph_search.get("results") or []
@@ -329,6 +354,11 @@ class MultiAgentDocPipeline:
             top_k=8,
             professional_domains=domains,
             min_gemini_usefulness_score=self.min_gemini_usefulness_score,
+            region_context=self.region_context,
+            bid_date=self.bid_date,
+            allow_superseded=self.allow_superseded,
+            regional_plugin_dir=self.regional_plugin_dir,
+            retrieval_weight_profile_path=self.retrieval_weight_profile_path,
             db_path=self.kg_db_path,
         )
         candidates = search.get("results") or []
@@ -1220,14 +1250,26 @@ class MultiAgentDocPipeline:
         run_retrieval_benchmark_gate: bool = True,
         benchmark_dataset_path: Path | str = DEFAULT_BENCHMARK_DATASET_PATH,
         enforce_retrieval_gate: bool = False,
+        enable_retrieval_weight_training: bool = True,
+        retrieval_weight_profile_path: Path | str = DEFAULT_WEIGHT_PROFILE_PATH,
         enable_feedback_learning: bool = True,
         feedback_output_path: Path | str = "build/kg_project_feedback_memory.json",
+        region_context: str | None = None,
+        bid_date: str | None = None,
+        allow_superseded: bool = False,
+        regional_plugin_dir: Path | str | None = None,
         auto_approve_generated: bool = True,
         release_approver: str = "system",
         release_signature: str = "system-sign",
         create_release_freeze: bool = False,
         release_root: Path | str = "build/kg_releases",
     ) -> Dict[str, Any]:
+        self.region_context = str(region_context or "").strip().upper() or None
+        self.bid_date = str(bid_date or "").strip() or None
+        self.allow_superseded = bool(allow_superseded)
+        self.regional_plugin_dir = (
+            str(Path(regional_plugin_dir).expanduser().resolve()) if regional_plugin_dir not in (None, "") else None
+        )
         standard_update_report: Dict[str, Any] = {"triggered": False, "files_changed": 0}
         approval_report: Dict[str, Any] = {"triggered": False, "nodes_approved": 0}
         if enable_standard_auto_update:
@@ -1279,6 +1321,25 @@ class MultiAgentDocPipeline:
                 }
             except Exception as exc:
                 retrieval_benchmark = {"triggered": True, "ok": False, "error": str(exc)}
+
+        retrieval_weight_profile: Dict[str, Any] = {"triggered": False}
+        if enable_retrieval_weight_training:
+            try:
+                retrieval_weight_profile = {
+                    "triggered": True,
+                    **train_retrieval_weight_profile(
+                        benchmark_report=retrieval_benchmark if retrieval_benchmark.get("triggered") else {},
+                        feedback_memory=feedback_output_path,
+                        output_path=retrieval_weight_profile_path,
+                    ),
+                }
+            except Exception as exc:
+                retrieval_weight_profile = {"triggered": True, "ok": False, "error": str(exc)}
+        if bool(retrieval_weight_profile.get("ok")) and str(retrieval_weight_profile.get("saved_at") or "").strip():
+            self.retrieval_weight_profile_path = str(retrieval_weight_profile.get("saved_at"))
+        else:
+            profile_path = Path(retrieval_weight_profile_path).expanduser().resolve()
+            self.retrieval_weight_profile_path = str(profile_path) if profile_path.exists() else None
 
         matrix_result = await build_index_matrix(tender_paths)
         index_matrix = matrix_result["matrix"]
@@ -1447,6 +1508,10 @@ class MultiAgentDocPipeline:
                     "status": "done" if retrieval_benchmark.get("triggered") else "skipped",
                     "result": retrieval_benchmark,
                 },
+                "retrieval_tuning_agent": {
+                    "status": "done" if retrieval_weight_profile.get("triggered") else "skipped",
+                    "result": retrieval_weight_profile,
+                },
                 "feedback_agent": {"status": "done" if enable_feedback_learning else "skipped"},
                 "visual_agent": {
                     "status": "done" if visual_meta.get("generated") else "skipped",
@@ -1474,6 +1539,7 @@ class MultiAgentDocPipeline:
             "standard_auto_update": standard_update_report,
             "approval_report": approval_report,
             "retrieval_benchmark": retrieval_benchmark,
+            "retrieval_weight_profile": retrieval_weight_profile,
             "retrieval_benchmark_warning": benchmark_warning,
             "docx_output": docx_saved,
             "visual_output": visual_meta,

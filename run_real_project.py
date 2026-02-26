@@ -285,6 +285,38 @@ def _arg_parser() -> argparse.ArgumentParser:
         help="是否启用真实项目回灌学习。",
     )
     p.add_argument(
+        "--retrieval-weight-training",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否启用检索权重训练闭环。",
+    )
+    p.add_argument(
+        "--retrieval-weight-profile",
+        default="build/kg_retrieval_weight_profile.json",
+        help="检索权重配置文件输出路径。",
+    )
+    p.add_argument(
+        "--region-context",
+        default=None,
+        help="区域上下文（如 CN/SH/BJ），用于地域法规策略筛选。",
+    )
+    p.add_argument(
+        "--bid-date",
+        default=None,
+        help="投标日期（YYYY-MM-DD），用于标准时间窗生效过滤。",
+    )
+    p.add_argument(
+        "--allow-superseded",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否允许检索命中已被替代的标准节点。",
+    )
+    p.add_argument(
+        "--regional-plugin-dir",
+        default=None,
+        help="地域法规插件目录（JSON）。",
+    )
+    p.add_argument(
         "--release-freeze",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -335,7 +367,15 @@ async def _run(args: argparse.Namespace) -> int:
         run_retrieval_benchmark_gate=bool(args.retrieval_benchmark_gate),
         benchmark_dataset_path=Path(args.benchmark_dataset).expanduser().resolve(),
         enforce_retrieval_gate=bool(args.enforce_retrieval_gate),
+        enable_retrieval_weight_training=bool(args.retrieval_weight_training),
+        retrieval_weight_profile_path=Path(args.retrieval_weight_profile).expanduser().resolve(),
         enable_feedback_learning=bool(args.feedback_learning),
+        region_context=args.region_context,
+        bid_date=args.bid_date,
+        allow_superseded=bool(args.allow_superseded),
+        regional_plugin_dir=(
+            Path(args.regional_plugin_dir).expanduser().resolve() if args.regional_plugin_dir else None
+        ),
         create_release_freeze=bool(args.release_freeze),
         release_approver=str(args.release_approver),
         release_signature=f"{args.release_approver}-auto-sign",
@@ -384,6 +424,15 @@ async def _run(args: argparse.Namespace) -> int:
             f"ok={bool(benchmark.get('ok'))}, "
             f"pass_rate={float(benchmark.get('pass_rate') or 0.0):.4f}, "
             f"avg_mrr={float(benchmark.get('avg_mrr') or 0.0):.4f}"
+        )
+    retrieval_weight = (
+        result.get("retrieval_weight_profile") if isinstance(result.get("retrieval_weight_profile"), dict) else {}
+    )
+    if retrieval_weight.get("triggered"):
+        print(
+            "Retrieval Weight Profile: "
+            f"ok={bool(retrieval_weight.get('ok'))}, "
+            f"saved_at={retrieval_weight.get('saved_at')}"
         )
     std_upd = result.get("standard_auto_update") if isinstance(result.get("standard_auto_update"), dict) else {}
     if std_upd.get("triggered"):

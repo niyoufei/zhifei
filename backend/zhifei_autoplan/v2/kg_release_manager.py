@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 DEFAULT_RELEASE_ROOT = Path("build/kg_releases")
+DEFAULT_ENV_STATE_FILE = "environments.json"
+ENVIRONMENTS = ("dev", "staging", "prod")
 
 
 def _iter_kg_files(kg_root: Path, pattern: str = "ZF-KG-*.json") -> List[Path]:
@@ -156,3 +158,110 @@ def rollback_release_snapshot(
         "manifest": str(manifest_path),
     }
 
+
+def _state_path(release_root: Path | str = DEFAULT_RELEASE_ROOT) -> Path:
+    rel_root = Path(release_root).expanduser().resolve()
+    rel_root.mkdir(parents=True, exist_ok=True)
+    return rel_root / DEFAULT_ENV_STATE_FILE
+
+
+def _load_env_state(release_root: Path | str = DEFAULT_RELEASE_ROOT) -> Dict[str, Any]:
+    path = _state_path(release_root)
+    if not path.exists():
+        return {
+            "version": "v1",
+            "updated_at": "",
+            "environments": {env: {"release_id": "", "mode": "idle", "updated_at": "", "approver": ""} for env in ENVIRONMENTS},
+            "canary": {},
+        }
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return {
+            "version": "v1",
+            "updated_at": "",
+            "environments": {env: {"release_id": "", "mode": "idle", "updated_at": "", "approver": ""} for env in ENVIRONMENTS},
+            "canary": {},
+        }
+    envs = payload.get("environments")
+    if not isinstance(envs, dict):
+        envs = {}
+    for env in ENVIRONMENTS:
+        row = envs.get(env)
+        if not isinstance(row, dict):
+            envs[env] = {"release_id": "", "mode": "idle", "updated_at": "", "approver": ""}
+    payload["environments"] = envs
+    payload.setdefault("version", "v1")
+    payload.setdefault("updated_at", "")
+    payload.setdefault("canary", {})
+    return payload
+
+
+def get_release_environment_state(
+    *,
+    release_root: Path | str = DEFAULT_RELEASE_ROOT,
+) -> Dict[str, Any]:
+    state = _load_env_state(release_root)
+    return {
+        "ok": True,
+        "release_root": str(Path(release_root).expanduser().resolve()),
+        "state_path": str(_state_path(release_root)),
+        "state": state,
+    }
+
+
+def promote_release_snapshot(
+    *,
+    release_root: Path | str = DEFAULT_RELEASE_ROOT,
+    release_id: str,
+    environment: str,
+    approver: str,
+    canary_ratio: float = 1.0,
+    note: str = "",
+) -> Dict[str, Any]:
+    rel_root = Path(release_root).expanduser().resolve()
+    env = str(environment or "").strip().lower()
+    if env not in ENVIRONMENTS:
+        raise ValueError(f"unsupported environment: {environment}")
+
+    snapshot_dir = rel_root / str(release_id)
+    manifest_path = snapshot_dir / "manifest.json"
+    if not snapshot_dir.exists() or not manifest_path.exists():
+        raise FileNotFoundError(f"release snapshot not found: {snapshot_dir}")
+
+    state = _load_env_state(rel_root)
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+    ratio = max(0.0, min(1.0, float(canary_ratio)))
+    mode = "full"
+    if env == "prod" and 0.0 < ratio < 1.0:
+        mode = "canary"
+    state["environments"][env] = {
+        "release_id": str(release_id),
+        "mode": mode,
+        "canary_ratio": ratio if mode == "canary" else 1.0,
+        "updated_at": ts,
+        "approver": approver,
+        "note": note,
+    }
+    if mode == "canary":
+        state["canary"] = {
+            "environment": env,
+            "release_id": str(release_id),
+            "ratio": ratio,
+            "updated_at": ts,
+            "approver": approver,
+        }
+    elif env == "prod":
+        state["canary"] = {}
+    state["updated_at"] = ts
+
+    path = _state_path(rel_root)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "ok": True,
+        "release_root": str(rel_root),
+        "release_id": str(release_id),
+        "environment": env,
+        "mode": mode,
+        "state_path": str(path),
+        "state": state,
+    }

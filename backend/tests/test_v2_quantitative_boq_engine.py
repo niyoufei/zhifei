@@ -58,6 +58,27 @@ def test_build_quantitative_index_contains_mapping_and_cpm() -> None:
         assert key in indices
         assert 0.0 <= float(indices[key]) <= 1.0
 
+    optimization = result.get("optimization") or {}
+    assert optimization.get("enabled") is True
+    assert int(optimization.get("scenario_total") or 0) >= 2
+    assert isinstance(optimization.get("pareto_front_ids"), list)
+    best = optimization.get("best_scenario") or {}
+    assert str(best.get("scenario_id") or "").strip()
+    assert "composite_score" in best
+
+
+def test_optimize_execution_plan_respects_objective_weights() -> None:
+    engine = QuantitativeBoQEngine()
+    payload = _sample_boq_payload()
+    result = engine.optimize_execution_plan(payload, objective_weights={"duration": 0.7, "risk": 0.2, "resource_density": 0.1})
+    assert result["enabled"] is True
+    assert int(result["scenario_total"]) >= 2
+    weights = result["objective_weights"]
+    assert pytest.approx(sum(float(weights[k]) for k in ("duration", "risk", "resource_density")), rel=1e-6) == 1.0
+    best = result["best_scenario"]
+    assert float(best["composite_score"]) <= 1.0
+    assert float(best["composite_score"]) >= 0.0
+
 
 def test_assert_paragraph_quantitative_support_passes() -> None:
     paragraph = "混凝土浇筑厚度30cm，每天2次检查，由质量员验收。"

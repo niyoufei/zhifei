@@ -130,6 +130,26 @@ async def test_build_index_matrix_saves_json(tmp_path: Path) -> None:
     assert "index_matrix" in loaded
 
 
+@pytest.mark.asyncio
+async def test_index_matrix_extracts_clause_level_refs(tmp_path: Path) -> None:
+    tender = tmp_path / "招标文件.txt"
+    tender.write_text(
+        """
+        第三章 质量管理
+        第12条 质量抽检频次不得低于2次/班。
+        按 3.2.1 条款执行首件验收，合格率不低于98%。
+        """,
+        encoding="utf-8",
+    )
+    matrix = await IndexMatrixEngine().parse_files([str(tender)])
+    quality = next(item for item in matrix["index_matrix"] if item["dimension"] == "质量")
+    refs = [str(x) for x in (quality.get("clause_refs") or [])]
+    assert any("第12条" in x for x in refs)
+    assert any("3.2.1" in x for x in refs)
+    support = quality.get("support_chunks") or []
+    assert any(chunk.get("clause_refs") for chunk in support if isinstance(chunk, dict))
+
+
 def test_save_index_matrix(tmp_path: Path) -> None:
     path = tmp_path / "index.json"
     saved = save_index_matrix({"index_matrix": []}, path=path)

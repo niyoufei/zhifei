@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from .dxf_parser import parse_dxf_payload
 from .ifc_parser import parse_ifc_payload
 from .kg_paths import resolve_default_kg_root
+from .regional_policy_plugins import resolve_regional_policy_plugin
 from .revit_parser import parse_revit_payload
 
 SUPPORTED_EXTENSIONS = {".json", ".md", ".markdown", ".xml", ".csv", ".dxf", ".ifc", ".ifcxml", ".rvt"}
@@ -36,6 +37,20 @@ SOURCE_HIERARCHY_WEIGHTS: Dict[str, int] = {
     "行标": 2,
     "企标": 1,
     "未知": 0,
+}
+
+DEFAULT_RETRIEVAL_SCORE_WEIGHTS: Dict[str, float] = {
+    "tag_weight": 1.0,
+    "keyword_exact_weight": 1.0,
+    "keyword_fuzzy_weight": 1.0,
+    "query_token_weight": 1.0,
+    "fts_rank_weight": 1.0,
+    "domain_weight": 1.0,
+    "gemini_weight_scale": 1.0,
+    "retrieval_quality_weight_scale": 1.0,
+    "approval_bonus_weight": 1.0,
+    "timeline_weight": 1.0,
+    "region_weight": 1.0,
 }
 
 DEFAULT_FORMULA_EXPRESSION = "quantity / max(productivity_per_day, 1)"
@@ -202,6 +217,180 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+def _load_retrieval_score_weights(profile_path: Path | str | None) -> Dict[str, float]:
+    out = dict(DEFAULT_RETRIEVAL_SCORE_WEIGHTS)
+    if profile_path in (None, ""):
+        return out
+    p = Path(profile_path).expanduser().resolve()
+    if not p.exists():
+        return out
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return out
+    weights = payload.get("weights") if isinstance(payload, dict) else {}
+    if not isinstance(weights, dict):
+        return out
+    for key in out.keys():
+        if key not in weights:
+            continue
+        value = _safe_float(weights.get(key), out[key])
+        out[key] = max(0.2, min(3.0, value))
+    return out
+
+
+def _safe_date_key(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    m = re.search(r"((?:19|20)\d{2})[-/.年]?(\d{1,2})?[-/.月]?(\d{1,2})?", text)
+    if not m:
+        return 0
+    year = int(m.group(1))
+    month = int(m.group(2) or 1)
+    day = int(m.group(3) or 1)
+    if month < 1 or month > 12:
+        month = 1
+    if day < 1 or day > 31:
+        day = 1
+    return year * 10000 + month * 100 + day
+
+
+def _timeline_match_for_bid(
+    timeline: Dict[str, Any],
+    *,
+    bid_date_key: int,
+    allow_superseded: bool,
+) -> Dict[str, Any]:
+    if bid_date_key <= 0:
+        return {"allow": True, "state": "not_checked", "matched_record": {}}
+    if not isinstance(timeline, dict):
+        return {"allow": True, "state": "no_timeline", "matched_record": {}}
+    records = timeline.get("records")
+    if not isinstance(records, list) or not records:
+        return {"allow": True, "state": "no_timeline_records", "matched_record": {}}
+
+    parsed: List[Tuple[int, int, Dict[str, Any]]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        eff = _safe_date_key(rec.get("effective_date"))
+        exp = _safe_date_key(rec.get("expiry_date"))
+        if eff <= 0:
+            eff = 19000101
+        if exp <= 0:
+            exp = 29991231
+        parsed.append((eff, exp, rec))
+    if not parsed:
+        return {"allow": True, "state": "invalid_timeline_records", "matched_record": {}}
+
+    parsed.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    matched = None
+    for eff, exp, rec in parsed:
+        if bid_date_key >= eff:
+            matched = (eff, exp, rec)
+            break
+    if matched is None:
+        matched = parsed[-1]
+
+    eff, exp, rec = matched
+    status = str(rec.get("status") or "").strip().lower()
+    superseded = bool(str(rec.get("superseded_by") or "").strip() or status == "superseded")
+
+    if bid_date_key < eff:
+        return {
+            "allow": False,
+            "state": "pre_effective",
+            "matched_record": rec,
+            "effective_date": rec.get("effective_date"),
+            "expiry_date": rec.get("expiry_date"),
+        }
+    if bid_date_key > exp:
+        return {
+            "allow": False,
+            "state": "expired",
+            "matched_record": rec,
+            "effective_date": rec.get("effective_date"),
+            "expiry_date": rec.get("expiry_date"),
+        }
+    if superseded and not allow_superseded:
+        return {
+            "allow": False,
+            "state": "superseded",
+            "matched_record": rec,
+            "effective_date": rec.get("effective_date"),
+            "expiry_date": rec.get("expiry_date"),
+            "superseded_by": rec.get("superseded_by"),
+        }
+    return {
+        "allow": True,
+        "state": "active" if not superseded else "superseded_allowed",
+        "matched_record": rec,
+        "effective_date": rec.get("effective_date"),
+        "expiry_date": rec.get("expiry_date"),
+        "superseded_by": rec.get("superseded_by"),
+    }
+
+
+def _contains_any_token(blob: str, values: List[str]) -> bool:
+    if not values:
+        return False
+    upper_blob = str(blob or "").upper()
+    for val in values:
+        token = str(val or "").strip().upper()
+        if token and token in upper_blob:
+            return True
+    return False
+
+
+def _evaluate_region_plugin(
+    *,
+    plugin: Dict[str, Any],
+    regional_policy_layers: Dict[str, Any],
+    payload: Dict[str, Any],
+    source_hierarchy: str,
+) -> Dict[str, Any]:
+    if not isinstance(plugin, dict):
+        return {"allow": True, "bonus": 0.0, "reasons": []}
+
+    blob = json.dumps(regional_policy_layers, ensure_ascii=False).upper()
+    refs = payload.get("reference_standard_codes")
+    if not isinstance(refs, list):
+        refs = payload.get("reference_standard")
+    if isinstance(refs, list):
+        refs_blob = " ".join(str(x) for x in refs)
+    else:
+        refs_blob = str(refs or "")
+    policy_blob = f"{blob}\n{refs_blob.upper()}"
+
+    require_codes = [str(x).strip() for x in (plugin.get("require_any_policy_codes") or []) if str(x).strip()]
+    if require_codes and not _contains_any_token(policy_blob, require_codes):
+        return {"allow": False, "bonus": 0.0, "reasons": ["missing_required_policy_code"]}
+
+    exclude_codes = [str(x).strip() for x in (plugin.get("exclude_policy_codes") or []) if str(x).strip()]
+    if exclude_codes and _contains_any_token(policy_blob, exclude_codes):
+        return {"allow": False, "bonus": 0.0, "reasons": ["hit_excluded_policy_code"]}
+
+    reasons: List[str] = []
+    bonus = float(plugin.get("region_bonus") or 0.0)
+    prefer_codes = [str(x).strip() for x in (plugin.get("prefer_policy_codes") or []) if str(x).strip()]
+    if prefer_codes:
+        hit_prefer = [code for code in prefer_codes if code.upper() in policy_blob]
+        if hit_prefer:
+            bonus += min(2.0, len(hit_prefer) * 0.3)
+            reasons.append("prefer_policy_code_matched")
+
+    min_source = str(plugin.get("source_hierarchy_min") or "").strip()
+    if min_source:
+        cur_w = int(SOURCE_HIERARCHY_WEIGHTS.get(str(source_hierarchy or "未知"), 0))
+        min_w = int(SOURCE_HIERARCHY_WEIGHTS.get(min_source, 0))
+        if cur_w < min_w:
+            return {"allow": False, "bonus": 0.0, "reasons": ["source_hierarchy_below_min"]}
+        reasons.append("source_hierarchy_meets_min")
+
+    return {"allow": True, "bonus": round(bonus, 4), "reasons": reasons}
 
 
 def _normalize_domain(value: str) -> str:
@@ -2713,6 +2902,10 @@ class KnowledgeGraphIndex:
         min_gemini_usefulness_score: float = 0.0,
         min_retrieval_quality_score: float = 0.0,
         region_context: str | None = None,
+        bid_date: str | None = None,
+        allow_superseded: bool = False,
+        regional_plugin_dir: Path | str | None = None,
+        retrieval_weight_profile_path: Path | str | None = None,
         require_approved_auto: bool = False,
         resolve_authority: bool = True,
     ) -> Dict[str, Any]:
@@ -2728,6 +2921,13 @@ class KnowledgeGraphIndex:
         min_gemini_score = max(0.0, min(100.0, _safe_float(min_gemini_usefulness_score, 0.0)))
         min_retrieval_quality = max(0.0, min(100.0, _safe_float(min_retrieval_quality_score, 0.0)))
         norm_region = str(region_context or "").strip().upper()
+        bid_date_text = str(bid_date or "").strip()
+        bid_date_key = _safe_date_key(bid_date_text)
+        score_weights = _load_retrieval_score_weights(retrieval_weight_profile_path)
+        if regional_plugin_dir is None:
+            region_plugin = resolve_regional_policy_plugin(norm_region)
+        else:
+            region_plugin = resolve_regional_policy_plugin(norm_region, plugin_dir=regional_plugin_dir)
 
         with self._connect() as conn:
             candidates = self._candidate_ids_by_terms(conn, tags=norm_tags, keywords=norm_keywords)
@@ -2837,18 +3037,22 @@ class KnowledgeGraphIndex:
             score = 0.0
             for tag in norm_tags:
                 if tag in tags_row:
-                    score += 10.0
+                    score += 10.0 * float(score_weights.get("tag_weight") or 1.0)
             for keyword in norm_keywords:
                 if keyword in keywords_row:
-                    score += 8.0
+                    score += 8.0 * float(score_weights.get("keyword_exact_weight") or 1.0)
                 elif keyword in _normalize_term(title) or keyword in _normalize_term(body):
-                    score += 5.0
+                    score += 5.0 * float(score_weights.get("keyword_fuzzy_weight") or 1.0)
             if query_tokens:
                 merged = f"{title}\n{body}".lower()
-                score += sum(1.5 for token in query_tokens if token in merged)
+                score += sum(1.5 for token in query_tokens if token in merged) * float(
+                    score_weights.get("query_token_weight") or 1.0
+                )
             row_id = int(row["id"])
             if row_id in rank_map:
-                score += max(0.0, 20.0 - min(20.0, abs(rank_map[row_id]) * 4.0))
+                score += max(0.0, 20.0 - min(20.0, abs(rank_map[row_id]) * 4.0)) * float(
+                    score_weights.get("fts_rank_weight") or 1.0
+                )
 
             domain_score, domain_matches = _domain_match(
                 professional_domains=norm_domains,
@@ -2860,7 +3064,7 @@ class KnowledgeGraphIndex:
             )
             if norm_domains and not domain_matches:
                 continue
-            score += domain_score
+            score += domain_score * float(score_weights.get("domain_weight") or 1.0)
 
             gemini_usefulness_score = _estimate_gemini_usefulness(
                 payload=payload,
@@ -2875,7 +3079,9 @@ class KnowledgeGraphIndex:
             )
             if gemini_usefulness_score < min_gemini_score:
                 continue
-            score += min(8.0, gemini_usefulness_score * 0.08)
+            score += min(8.0, gemini_usefulness_score * 0.08) * float(
+                score_weights.get("gemini_weight_scale") or 1.0
+            )
 
             retrieval_quality_score = _safe_float(
                 retrieval_benchmark.get("quality_score") if isinstance(retrieval_benchmark, dict) else 0.0,
@@ -2883,7 +3089,9 @@ class KnowledgeGraphIndex:
             )
             if retrieval_quality_score < min_retrieval_quality:
                 continue
-            score += min(6.0, retrieval_quality_score * 0.06)
+            score += min(6.0, retrieval_quality_score * 0.06) * float(
+                score_weights.get("retrieval_quality_weight_scale") or 1.0
+            )
 
             if isinstance(approval_workflow, dict):
                 is_required = bool(approval_workflow.get("required"))
@@ -2891,14 +3099,27 @@ class KnowledgeGraphIndex:
                 if require_approved_auto and is_required and wf_status != "approved":
                     continue
                 if wf_status == "approved":
-                    score += 1.5
+                    score += 1.5 * float(score_weights.get("approval_bonus_weight") or 1.0)
 
             if isinstance(standard_validity_timeline, dict):
                 status = str(standard_validity_timeline.get("timeline_status") or "").strip().lower()
                 if status == "active":
-                    score += 1.5
+                    score += 1.5 * float(score_weights.get("timeline_weight") or 1.0)
                 elif status == "review_required":
-                    score -= 1.5
+                    score -= 1.5 * float(score_weights.get("timeline_weight") or 1.0)
+
+            timeline_match = _timeline_match_for_bid(
+                standard_validity_timeline if isinstance(standard_validity_timeline, dict) else {},
+                bid_date_key=bid_date_key,
+                allow_superseded=bool(allow_superseded),
+            )
+            if bid_date_key > 0 and not bool(timeline_match.get("allow")):
+                continue
+            t_state = str(timeline_match.get("state") or "")
+            if t_state == "active":
+                score += 0.9 * float(score_weights.get("timeline_weight") or 1.0)
+            elif t_state in {"superseded_allowed", "expired"}:
+                score -= 0.6 * float(score_weights.get("timeline_weight") or 1.0)
 
             if norm_region:
                 region_blob = json.dumps(regional_policy_layers, ensure_ascii=False).upper()
@@ -2909,7 +3130,17 @@ class KnowledgeGraphIndex:
                 ).upper()
                 if norm_region not in region_blob and norm_region not in {default_region, "CN"}:
                     continue
-                score += 1.0
+                score += 1.0 * float(score_weights.get("region_weight") or 1.0)
+
+            region_plugin_match = _evaluate_region_plugin(
+                plugin=region_plugin,
+                regional_policy_layers=regional_policy_layers if isinstance(regional_policy_layers, dict) else {},
+                payload=payload,
+                source_hierarchy=str(row["source_hierarchy"] or ""),
+            )
+            if norm_region and region_plugin and not bool(region_plugin_match.get("allow")):
+                continue
+            score += float(region_plugin_match.get("bonus") or 0.0) * float(score_weights.get("region_weight") or 1.0)
 
             if (norm_tags or norm_keywords or query_tokens) and score <= 0:
                 continue
@@ -2942,7 +3173,9 @@ class KnowledgeGraphIndex:
                 "numeric_sources": numeric_sources,
                 "schedule_constraints": _safe_json_load(row["schedule_constraints_json"], {}),
                 "standard_validity_timeline": standard_validity_timeline,
+                "timeline_match": timeline_match,
                 "regional_policy_layers": regional_policy_layers,
+                "regional_policy_plugin": region_plugin_match,
                 "unit_dimension_model": unit_dimension_model,
                 "evidence_anchors": evidence_anchors,
                 "cross_discipline_constraints": cross_discipline_constraints,
@@ -2964,6 +3197,7 @@ class KnowledgeGraphIndex:
                     "timeline_status": standard_validity_timeline.get("timeline_status")
                     if isinstance(standard_validity_timeline, dict)
                     else "",
+                    "timeline_match_state": timeline_match.get("state"),
                 },
             }
             results.append(result_item)
@@ -2984,10 +3218,27 @@ class KnowledgeGraphIndex:
             "min_gemini_usefulness_score": min_gemini_score,
             "min_retrieval_quality_score": min_retrieval_quality,
             "region_context": norm_region,
+            "bid_date": bid_date_text,
+            "allow_superseded": bool(allow_superseded),
             "require_approved_auto": bool(require_approved_auto),
             "total": len(results),
             "results": results[:top_k],
             "db_path": str(self.db_path),
+            "retrieval_score_weights": score_weights,
+            "retrieval_weight_profile_path": (
+                str(Path(retrieval_weight_profile_path).expanduser().resolve())
+                if retrieval_weight_profile_path not in (None, "")
+                else ""
+            ),
+            "regional_policy_plugin": {
+                "applied": bool(norm_region and region_plugin),
+                "region_code": region_plugin.get("region_code") if isinstance(region_plugin, dict) else "",
+                "plugin_name": (
+                    (region_plugin.get("metadata") or {}).get("plugin_name")
+                    if isinstance(region_plugin, dict)
+                    else ""
+                ),
+            },
             "authority_resolution": {
                 "applied": bool(resolve_authority),
                 "rule": SOURCE_HIERARCHY_RULE,
@@ -3187,6 +3438,10 @@ def search_graph_index(
     min_gemini_usefulness_score: float = 0.0,
     min_retrieval_quality_score: float = 0.0,
     region_context: str | None = None,
+    bid_date: str | None = None,
+    allow_superseded: bool = False,
+    regional_plugin_dir: Path | str | None = None,
+    retrieval_weight_profile_path: Path | str | None = None,
     require_approved_auto: bool = False,
     resolve_authority: bool = True,
     db_path: Path | str = DEFAULT_DB_PATH,
@@ -3202,6 +3457,10 @@ def search_graph_index(
         min_gemini_usefulness_score=min_gemini_usefulness_score,
         min_retrieval_quality_score=min_retrieval_quality_score,
         region_context=region_context,
+        bid_date=bid_date,
+        allow_superseded=allow_superseded,
+        regional_plugin_dir=regional_plugin_dir,
+        retrieval_weight_profile_path=retrieval_weight_profile_path,
         require_approved_auto=require_approved_auto,
         resolve_authority=resolve_authority,
     )

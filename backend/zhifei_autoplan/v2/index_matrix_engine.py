@@ -171,6 +171,8 @@ MIXED_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-./%]{1,24}")
 NUMERIC_TERM_RE = re.compile(
     r"\d+(?:\.\d+)?(?:%|‰|dB|MPa|kPa|mm|cm|m|km|天|h|小时|分钟|min|次/日|次/班|次|m3|m²|m2|t|kg|ug/m3|μg/m3)?"
 )
+CLAUSE_CN_RE = re.compile(r"第[一二三四五六七八九十百千零\d]+条")
+CLAUSE_NUM_RE = re.compile(r"\b\d+(?:\.\d+){1,3}\b")
 
 
 def _normalize_keywords(values: List[str]) -> List[str]:
@@ -203,6 +205,17 @@ def _candidate_terms(sentence: str) -> List[str]:
                 continue
             terms.append(term)
     return _normalize_keywords(terms)
+
+
+def _extract_clause_refs(text: str, *, max_refs: int = 8) -> List[str]:
+    refs: List[str] = []
+    for pattern in (CLAUSE_CN_RE, CLAUSE_NUM_RE):
+        for match in pattern.finditer(str(text or "")):
+            value = _normalize_term(match.group(0))
+            if not value:
+                continue
+            refs.append(value)
+    return _normalize_keywords(refs)[: max(1, int(max_refs))]
 
 
 def _chunk_semantic_tags(text: str) -> List[str]:
@@ -396,6 +409,7 @@ class IndexMatrixEngine:
                             "mandatory_hits": 0,
                             "keyword_count": min(6, len(seeds)),
                         },
+                        "clause_refs": [],
                         "support_chunks": [],
                     }
                 )
@@ -417,6 +431,7 @@ class IndexMatrixEngine:
         keyword_candidates_total = 0
         for dim, seeds in DIMENSION_RULES.items():
             hit_keywords: List[str] = []
+            clause_refs: List[str] = []
             support_chunks: List[Dict[str, Any]] = []
             raw_score = 0.0
             hit_chunk_count = 0
@@ -433,6 +448,10 @@ class IndexMatrixEngine:
                 sentence_terms = _dimension_sentence_terms(ctext, dim)
                 numeric_terms = [term for term in sentence_terms if any(ch.isdigit() for ch in term)]
                 mandatory_terms = [mk for mk in MANDATORY_MARKERS if mk in ctext]
+                chunk_clause_refs = _extract_clause_refs(
+                    f"{chunk.get('section_title') or ''}\n{ctext}",
+                    max_refs=8,
+                )
 
                 mandatory_hits += len(mandatory_terms)
                 keyword_candidates_total += len(sentence_terms)
@@ -440,6 +459,9 @@ class IndexMatrixEngine:
                 for kw in matched + sentence_terms:
                     if kw not in hit_keywords:
                         hit_keywords.append(kw)
+                for cref in chunk_clause_refs:
+                    if cref not in clause_refs:
+                        clause_refs.append(cref)
 
                 chunk_score = (
                     len(matched) * 1.6
@@ -455,6 +477,12 @@ class IndexMatrixEngine:
                         "chunk_id": chunk.get("id"),
                         "source_path": chunk.get("path"),
                         "section_title": chunk.get("section_title"),
+                        "clause_refs": chunk_clause_refs,
+                        "clause_anchor": (
+                            chunk_clause_refs[0]
+                            if chunk_clause_refs
+                            else str(chunk.get("section_title") or "正文")
+                        ),
                         "semantic_tags": semantic_tags,
                         "matched_keywords": matched,
                         "extracted_terms": sentence_terms[:12],
@@ -483,6 +511,7 @@ class IndexMatrixEngine:
                     "weight": weight,
                     "score": round(raw_score, 3),
                     "source_type": source_type,
+                    "clause_refs": clause_refs[:18],
                     "signals": {
                         "hit_chunks": hit_chunk_count,
                         "coverage": round(hit_chunk_count / max(1, len(all_chunks)), 4),

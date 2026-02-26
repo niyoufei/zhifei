@@ -336,12 +336,153 @@ class QuantitativeBoQEngine:
             "total_quantity": round(float(total_quantity), 6),
         }
 
+    def _normalize_objective_weights(self, objective_weights: Dict[str, Any] | None = None) -> Dict[str, float]:
+        base = {
+            "duration": 0.40,
+            "risk": 0.35,
+            "resource_density": 0.25,
+        }
+        if isinstance(objective_weights, dict):
+            for key in base.keys():
+                if key in objective_weights:
+                    try:
+                        value = float(objective_weights[key])
+                    except Exception:
+                        continue
+                    if value > 0:
+                        base[key] = value
+        s = sum(base.values())
+        if s <= 0:
+            return {"duration": 0.40, "risk": 0.35, "resource_density": 0.25}
+        return {k: round(v / s, 6) for k, v in base.items()}
+
+    def _pareto_front(self, scenarios: List[Dict[str, Any]]) -> List[str]:
+        if not scenarios:
+            return []
+
+        def dominates(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+            keys = ("duration_days", "risk_index", "resource_density_index")
+            not_worse = all(float(a.get(k) or 0.0) <= float(b.get(k) or 0.0) for k in keys)
+            strictly_better = any(float(a.get(k) or 0.0) < float(b.get(k) or 0.0) for k in keys)
+            return bool(not_worse and strictly_better)
+
+        out: List[str] = []
+        for i, a in enumerate(scenarios):
+            dominated = False
+            for j, b in enumerate(scenarios):
+                if i == j:
+                    continue
+                if dominates(b, a):
+                    dominated = True
+                    break
+            if not dominated:
+                out.append(str(a.get("scenario_id") or f"S{i + 1}"))
+        return out
+
+    def optimize_execution_plan(
+        self,
+        boq_payload: Dict[str, Any],
+        *,
+        objective_weights: Dict[str, Any] | None = None,
+        scenario_count: int = 6,
+    ) -> Dict[str, Any]:
+        items = boq_payload.get("items") if isinstance(boq_payload.get("items"), list) else []
+        mapping = self.build_mapping(items)
+        base_cpm = self._compute_cpm(mapping["process_nodes"], mapping["process_edges"])
+        base_indices = self._compute_quant_indices(boq_items=items, mapping=mapping, cpm=base_cpm)
+        weights = self._normalize_objective_weights(objective_weights)
+
+        candidate_factors = [
+            (1.00, 1.00),
+            (1.10, 1.00),
+            (1.00, 1.10),
+            (1.15, 1.05),
+            (0.95, 0.90),
+            (1.20, 1.15),
+            (0.90, 1.20),
+            (1.05, 0.95),
+        ]
+        count = max(2, min(int(scenario_count or 6), len(candidate_factors)))
+        scenarios: List[Dict[str, Any]] = []
+        for idx, (productivity_factor, resource_factor) in enumerate(candidate_factors[:count], start=1):
+            adjusted_nodes: List[Dict[str, Any]] = []
+            for node in mapping["process_nodes"]:
+                base_duration = int(node.get("duration_days") or 1)
+                effective = max(0.25, float(productivity_factor) * float(resource_factor))
+                duration = max(1, int(math.ceil(base_duration / effective)))
+                adjusted_nodes.append({**node, "duration_days": duration})
+
+            cpm = self._compute_cpm(adjusted_nodes, mapping["process_edges"])
+            duration_days = int(cpm.get("project_duration_days") or 0)
+            risk_index = min(
+                1.0,
+                float(cpm.get("risk_index") or 0.0)
+                + (0.05 if float(resource_factor) < 1.0 else 0.0)
+                + (0.02 if float(productivity_factor) < 1.0 else 0.0),
+            )
+            resource_density = min(
+                1.0,
+                max(0.0, float(base_indices.get("resource_density_index") or 0.0) * float(resource_factor)),
+            )
+            scenarios.append(
+                {
+                    "scenario_id": f"S{idx}",
+                    "name": f"scenario_{idx}",
+                    "productivity_factor": round(float(productivity_factor), 4),
+                    "resource_factor": round(float(resource_factor), 4),
+                    "duration_days": duration_days,
+                    "risk_index": round(risk_index, 6),
+                    "resource_density_index": round(resource_density, 6),
+                    "critical_path": cpm.get("critical_path") or [],
+                }
+            )
+
+        max_duration = max((int(s.get("duration_days") or 0) for s in scenarios), default=1)
+        max_risk = max((float(s.get("risk_index") or 0.0) for s in scenarios), default=1.0)
+        max_density = max((float(s.get("resource_density_index") or 0.0) for s in scenarios), default=1.0)
+        max_duration = max(max_duration, 1)
+        max_risk = max(max_risk, 1e-6)
+        max_density = max(max_density, 1e-6)
+
+        for scenario in scenarios:
+            duration_cost = float(scenario.get("duration_days") or 0.0) / float(max_duration)
+            risk_cost = float(scenario.get("risk_index") or 0.0) / float(max_risk)
+            density_cost = float(scenario.get("resource_density_index") or 0.0) / float(max_density)
+            composite_score = (
+                weights["duration"] * (1.0 - duration_cost)
+                + weights["risk"] * (1.0 - risk_cost)
+                + weights["resource_density"] * (1.0 - density_cost)
+            )
+            scenario["objective_vector"] = {
+                "duration_cost": round(duration_cost, 6),
+                "risk_cost": round(risk_cost, 6),
+                "resource_density_cost": round(density_cost, 6),
+            }
+            scenario["composite_score"] = round(composite_score, 6)
+
+        scenarios.sort(key=lambda x: float(x.get("composite_score") or 0.0), reverse=True)
+        best = scenarios[0] if scenarios else {}
+        pareto_ids = self._pareto_front(scenarios)
+
+        return {
+            "enabled": True,
+            "objective_weights": weights,
+            "scenario_total": len(scenarios),
+            "best_scenario": best,
+            "pareto_front_ids": pareto_ids,
+            "scenarios": scenarios,
+            "base_duration_days": int(base_cpm.get("project_duration_days") or 0),
+            "base_risk_index": float(base_cpm.get("risk_index") or 0.0),
+            "base_resource_density_index": float(base_indices.get("resource_density_index") or 0.0),
+        }
+
     def build_quantitative_index(self, boq_payload: Dict[str, Any]) -> Dict[str, Any]:
         items = boq_payload.get("items") if isinstance(boq_payload.get("items"), list) else []
         mapping = self.build_mapping(items)
         cpm = self._compute_cpm(mapping["process_nodes"], mapping["process_edges"])
         chapter_structure = self._build_chapter_structure(items)
         indices = self._compute_quant_indices(boq_items=items, mapping=mapping, cpm=cpm)
+        optimization = self.optimize_execution_plan(boq_payload)
 
         return {
             "mapping_3d": mapping["items"],
@@ -352,6 +493,7 @@ class QuantitativeBoQEngine:
             },
             "cpm": cpm,
             "indices": indices,
+            "optimization": optimization,
         }
 
 

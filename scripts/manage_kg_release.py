@@ -13,6 +13,8 @@ if str(ROOT_DIR) not in sys.path:
 from backend.zhifei_autoplan.v2.kg_release_manager import (
     approve_auto_generated_nodes,
     create_release_snapshot,
+    get_release_environment_state,
+    promote_release_snapshot,
     rollback_release_snapshot,
 )
 
@@ -38,6 +40,17 @@ def main() -> int:
     r.add_argument("--release-root", default="build/kg_releases")
     r.add_argument("--release-id", required=True)
 
+    pr = sub.add_parser("promote")
+    pr.add_argument("--release-root", default="build/kg_releases")
+    pr.add_argument("--release-id", required=True)
+    pr.add_argument("--environment", choices=["dev", "staging", "prod"], required=True)
+    pr.add_argument("--approver", default="system")
+    pr.add_argument("--canary-ratio", type=float, default=1.0)
+    pr.add_argument("--note", default="")
+
+    st = sub.add_parser("state")
+    st.add_argument("--release-root", default="build/kg_releases")
+
     p.add_argument("--out-json", default="build/KG_Release_Manager_Result.json")
     args = p.parse_args()
 
@@ -54,6 +67,19 @@ def main() -> int:
             approver=args.approver,
             signature=args.signature,
             note=args.note,
+        )
+    elif args.cmd == "promote":
+        result = promote_release_snapshot(
+            release_root=Path(args.release_root).expanduser().resolve(),
+            release_id=args.release_id,
+            environment=args.environment,
+            approver=args.approver,
+            canary_ratio=float(args.canary_ratio),
+            note=args.note,
+        )
+    elif args.cmd == "state":
+        result = get_release_environment_state(
+            release_root=Path(args.release_root).expanduser().resolve(),
         )
     else:
         result = rollback_release_snapshot(
