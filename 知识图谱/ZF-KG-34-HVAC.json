@@ -3,14 +3,19 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-26T15:25:15",
+    "updated_at": "2026-02-26T16:01:25",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
       "国标",
       "行标",
       "企标"
-    ]
+    ],
+    "incremental_update": {
+      "strategy": "fingerprint_diff",
+      "node_fingerprint_count": 10,
+      "file_fingerprint": "26c83c6cfe13350bba6f0cc0b966025a725b986c"
+    }
   },
   "knowledge_database": {
     "01_Advanced_Technology": {
@@ -24,7 +29,7 @@
           ],
           "content": {
             "environment_sensing": {
-              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(质量) AND domain_hint == 'mep' AND node_hint CONTAINS '中央空调全局能效'"
+              "activation_signal": "Context CONTAINS '智飞工程' AND query_keywords_hit >= 2 AND keyword_any(质量) AND domain_hint == 'digital' AND node_hint CONTAINS '中央空调全局能效'"
             },
             "logic_execution": "IF Active THEN Premium ELSE Mediocre",
             "operation_desc_mediocre": "各设备独立控制，冷机恒温出水。",
@@ -92,14 +97,14 @@
             "JGJ 59-2011 建筑施工安全检查标准",
             "GB/T 50326-2017 建设工程项目管理规范",
             "GB 50242-2002 建筑给水排水及采暖工程施工质量验收规范",
+            "GB/T 51212-2016 建筑信息模型应用统一标准",
             "Q&A-项目答疑纪要(以最新答疑为准)"
           ],
           "is_auto_generated": true,
-          "formula_expression": "inspection_batches * pass_rate_percent / max(total_batches, 1)",
+          "formula_expression": "max(target_strength - measured_strength, 0) / max(target_strength, 1) * 100",
           "formula_variables": [
-            "inspection_batches",
-            "pass_rate_percent",
-            "total_batches"
+            "measured_strength",
+            "target_strength"
           ],
           "requires": [],
           "mitigates": [
@@ -160,6 +165,18 @@
             {
               "parameter": "total_batches",
               "value": "6",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default"
+            },
+            {
+              "parameter": "target_strength",
+              "value": "40",
               "unit": "",
               "source_text": "kg_strengthen_v2_default"
             }
@@ -365,7 +382,7 @@
               "checker"
             ]
           },
-          "professional_domain": "mep",
+          "professional_domain": "digital",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -374,7 +391,8 @@
               "应急",
               "质量",
               "mep",
-              "中央空调全局能效"
+              "中央空调全局能效",
+              "digital"
             ],
             "optional_keywords": [
               "railway",
@@ -451,16 +469,17 @@
           "kg_dimension": "质量",
           "professional_domain_aliases": [
             "building",
-            "digital",
-            "earthwork"
+            "earthwork",
+            "management"
           ],
           "reference_standard_codes": [
             "GB 50300-2013",
             "JGJ 59-2011",
             "GB/T 50326-2017",
-            "GB 50242-2002"
+            "GB 50242-2002",
+            "GB/T 51212-2016"
           ],
-          "reference_standard_count": 5,
+          "reference_standard_count": 6,
           "reference_standard_primary": "GB 50300-2013 建筑工程施工质量验收统一标准",
           "source_hierarchy_weight": 5,
           "authority_rank": 1,
@@ -475,6 +494,471 @@
               "行标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB 50300-2013",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB 50300-2013",
+                "tier": "国标",
+                "effective_date": "2013-01-01",
+                "expiry_date": "2023-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "JGJ 59-2011",
+                "tier": "行标",
+                "effective_date": "2011-01-01",
+                "expiry_date": "2019-12-31",
+                "review_cycle_years": 8,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB/T 51212-2016",
+                "tier": "国标",
+                "effective_date": "2016-01-01",
+                "expiry_date": "2026-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB 50300-2013",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "DIGITAL-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "DIGITAL-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "DIGITAL-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "formula_result",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": null,
+                "source": "formula_expression"
+              },
+              {
+                "parameter": "hazard_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 3.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "defect_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "sample_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 100.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "inspection_batches",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 6.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "pass_rate_percent",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 96.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "total_batches",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 6.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "measured_strength",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 38.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "target_strength",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 40.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.4545,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-3A26927181",
+              "evidence_type": "numeric_source",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "formula_expression",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-4088543715",
+              "evidence_type": "numeric_source",
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-DBE7AAAA09",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-6BAB49B36B",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-6B930AD018",
+              "evidence_type": "numeric_source",
+              "parameter": "defect_count",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-F0C13D0077",
+              "evidence_type": "numeric_source",
+              "parameter": "sample_count",
+              "value": "100",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-C45BC44341",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_batches",
+              "value": "6",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-57DC23C5A8",
+              "evidence_type": "numeric_source",
+              "parameter": "pass_rate_percent",
+              "value": "96",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-4E44CB3917",
+              "evidence_type": "numeric_source",
+              "parameter": "total_batches",
+              "value": "6",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-05990014A3",
+              "evidence_type": "numeric_source",
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-58CFEE6070",
+              "evidence_type": "numeric_source",
+              "parameter": "target_strength",
+              "value": "40",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-A2A97754FF",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "max(target_strength - measured_strength, 0) / max(target_strength, 1) * 100",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "digital",
+            "dimension": "质量",
+            "requires_domains": [
+              "building",
+              "mep",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": true,
+            "status": "approved",
+            "reviewer_role": "质量员",
+            "release_gate": "manual_or_system_approval_for_auto_generated",
+            "reference_required": true,
+            "approval_source": "system_baseline"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "max(target_strength - measured_strength, 0) / max(target_strength, 1) * 100",
+            "baseline_result": 5.0,
+            "sensitivity": [
+              {
+                "variable": "measured_strength",
+                "baseline": 38.0,
+                "delta": 3.8,
+                "elasticity": -14.5
+              },
+              {
+                "variable": "target_strength",
+                "baseline": 40.0,
+                "delta": 4.0,
+                "elasticity": 13.636364
+              }
+            ],
+            "sensitivity_risk": "high"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcProject",
+              "IfcDocumentInformation"
+            ],
+            "lod": "LOD300",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "formula_result",
+                "ifc_property": "Pset_Zhifei.formula_result",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "hazard_count",
+                "ifc_property": "Pset_Zhifei.hazard_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
+                "dimension": "count"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "defect_count",
+                "ifc_property": "Pset_Zhifei.defect_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "sample_count",
+                "ifc_property": "Pset_Zhifei.sample_count",
+                "dimension": "count"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 100.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 12,
+              "numeric_count": 11,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "07e3f0c5f7fc9c513ba6deccb5f932dc9e5a8794",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "07e3f0c5f7fc9c513ba6deccb5f932dc9e5a8794",
+            "rebuild_on_change": true
           }
         },
         {
@@ -929,6 +1413,7 @@
           "kg_dimension": "质量",
           "professional_domain_aliases": [
             "management",
+            "digital",
             "earthwork"
           ],
           "reference_standard_codes": [
@@ -953,6 +1438,427 @@
               "行标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB 50300-2013",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB 50300-2013",
+                "tier": "国标",
+                "effective_date": "2013-01-01",
+                "expiry_date": "2023-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "JGJ 59-2011",
+                "tier": "行标",
+                "effective_date": "2011-01-01",
+                "expiry_date": "2019-12-31",
+                "review_cycle_years": 8,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB 50204-2015",
+                "tier": "国标",
+                "effective_date": "2015-01-01",
+                "expiry_date": "2025-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB 50300-2013",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "BUILDING-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "BUILDING-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "BUILDING-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "inspection_frequency",
+                "unit": "次/班",
+                "dimension": "frequency",
+                "canonical_unit": "次/班",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "response_limit",
+                "unit": "h",
+                "dimension": "time",
+                "canonical_unit": "h",
+                "si_factor": 1.0,
+                "parsed_value": 4.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "hazard_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 3.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "measured_strength",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 38.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "target_strength",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 40.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "rework_volume",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 25.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "total_work_volume",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 1200.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.5556,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-B67D13A669",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-08EFC086ED",
+              "evidence_type": "numeric_source",
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-8D32A15082",
+              "evidence_type": "numeric_source",
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-CDC2B738D6",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-3CB51D38EE",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-8B5DD0081C",
+              "evidence_type": "numeric_source",
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-8DAAA1AAA9",
+              "evidence_type": "numeric_source",
+              "parameter": "target_strength",
+              "value": "40",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-7F19F0FE18",
+              "evidence_type": "numeric_source",
+              "parameter": "rework_volume",
+              "value": "25",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-75BF41E1F4",
+              "evidence_type": "numeric_source",
+              "parameter": "total_work_volume",
+              "value": "1200",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-0D112746C4",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "rework_volume * 100 / max(total_work_volume, 1)",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "building",
+            "dimension": "质量",
+            "requires_domains": [
+              "mep",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "mep",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": true,
+            "status": "approved",
+            "reviewer_role": "质量员",
+            "release_gate": "manual_or_system_approval_for_auto_generated",
+            "reference_required": true,
+            "approval_source": "system_baseline"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "rework_volume * 100 / max(total_work_volume, 1)",
+            "baseline_result": 2.083333,
+            "sensitivity": [
+              {
+                "variable": "total_work_volume",
+                "baseline": 1200.0,
+                "delta": 120.0,
+                "elasticity": -1.010101
+              },
+              {
+                "variable": "rework_volume",
+                "baseline": 25.0,
+                "delta": 2.5,
+                "elasticity": 1.0
+              }
+            ],
+            "sensitivity_risk": "medium"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcBuilding",
+              "IfcWall",
+              "IfcSlab",
+              "IfcColumn"
+            ],
+            "lod": "LOD300",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "inspection_frequency",
+                "ifc_property": "Pset_Zhifei.inspection_frequency",
+                "dimension": "frequency"
+              },
+              {
+                "parameter": "response_limit",
+                "ifc_property": "Pset_Zhifei.response_limit",
+                "dimension": "time"
+              },
+              {
+                "parameter": "hazard_count",
+                "ifc_property": "Pset_Zhifei.hazard_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
+                "dimension": "count"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "measured_strength",
+                "ifc_property": "Pset_Zhifei.measured_strength",
+                "dimension": "dimensionless"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 100.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 10,
+              "numeric_count": 9,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "5ee4ac2db4e4037015dab54b4f47cf3c20492899",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "5ee4ac2db4e4037015dab54b4f47cf3c20492899",
+            "rebuild_on_change": true
           }
         },
         {
@@ -1412,7 +2318,7 @@
           "professional_domain_aliases": [
             "building",
             "management",
-            "earthwork"
+            "digital"
           ],
           "reference_standard_codes": [
             "GB 50300-2013",
@@ -1435,6 +2341,418 @@
               "行标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB 50300-2013",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB 50300-2013",
+                "tier": "国标",
+                "effective_date": "2013-01-01",
+                "expiry_date": "2023-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "JGJ 59-2011",
+                "tier": "行标",
+                "effective_date": "2011-01-01",
+                "expiry_date": "2019-12-31",
+                "review_cycle_years": 8,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB 50300-2013",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "MEP-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "MEP-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "MEP-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "inspection_frequency",
+                "unit": "次/班",
+                "dimension": "frequency",
+                "canonical_unit": "次/班",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "response_limit",
+                "unit": "h",
+                "dimension": "time",
+                "canonical_unit": "h",
+                "si_factor": 1.0,
+                "parsed_value": 4.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "hazard_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 3.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "high_risk_tasks",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "total_tasks",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 20.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "near_miss_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "total_workers",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 80.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.7778,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-0344474C99",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-E06BD92215",
+              "evidence_type": "numeric_source",
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-74B6734A8E",
+              "evidence_type": "numeric_source",
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-E85BC8A30E",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-85B33364D4",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-1B9FB06D9D",
+              "evidence_type": "numeric_source",
+              "parameter": "high_risk_tasks",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-6BDF966D26",
+              "evidence_type": "numeric_source",
+              "parameter": "total_tasks",
+              "value": "20",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-7999DCC8D9",
+              "evidence_type": "numeric_source",
+              "parameter": "near_miss_count",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-02577FAF94",
+              "evidence_type": "numeric_source",
+              "parameter": "total_workers",
+              "value": "80",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-59774F7042",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "near_miss_count * 100 / max(total_workers, 1)",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "mep",
+            "dimension": "安全",
+            "requires_domains": [
+              "building",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": true,
+            "status": "approved",
+            "reviewer_role": "安全员",
+            "release_gate": "manual_or_system_approval_for_auto_generated",
+            "reference_required": true,
+            "approval_source": "system_baseline"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "near_miss_count * 100 / max(total_workers, 1)",
+            "baseline_result": 2.5,
+            "sensitivity": [
+              {
+                "variable": "total_workers",
+                "baseline": 80.0,
+                "delta": 8.0,
+                "elasticity": -1.010101
+              },
+              {
+                "variable": "near_miss_count",
+                "baseline": 2.0,
+                "delta": 0.2,
+                "elasticity": 1.0
+              }
+            ],
+            "sensitivity_risk": "medium"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcFlowSegment",
+              "IfcFlowController",
+              "IfcDistributionSystem"
+            ],
+            "lod": "LOD350",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "inspection_frequency",
+                "ifc_property": "Pset_Zhifei.inspection_frequency",
+                "dimension": "frequency"
+              },
+              {
+                "parameter": "response_limit",
+                "ifc_property": "Pset_Zhifei.response_limit",
+                "dimension": "time"
+              },
+              {
+                "parameter": "hazard_count",
+                "ifc_property": "Pset_Zhifei.hazard_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
+                "dimension": "count"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "high_risk_tasks",
+                "ifc_property": "Pset_Zhifei.high_risk_tasks",
+                "dimension": "ratio"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 100.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 10,
+              "numeric_count": 9,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "89c7420dfc5481eac85d569ce092c10bd1e36c15",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "89c7420dfc5481eac85d569ce092c10bd1e36c15",
+            "rebuild_on_change": true
           }
         },
         {
@@ -1902,6 +3220,7 @@
           "kg_dimension": "进度",
           "professional_domain_aliases": [
             "management",
+            "digital",
             "earthwork"
           ],
           "reference_standard_codes": [
@@ -1926,6 +3245,447 @@
               "行标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB 50300-2013",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB 50300-2013",
+                "tier": "国标",
+                "effective_date": "2013-01-01",
+                "expiry_date": "2023-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "JGJ 59-2011",
+                "tier": "行标",
+                "effective_date": "2011-01-01",
+                "expiry_date": "2019-12-31",
+                "review_cycle_years": 8,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB 50204-2015",
+                "tier": "国标",
+                "effective_date": "2015-01-01",
+                "expiry_date": "2025-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB 50300-2013",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "BUILDING-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "BUILDING-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "BUILDING-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "inspection_frequency",
+                "unit": "次/班",
+                "dimension": "frequency",
+                "canonical_unit": "次/班",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "response_limit",
+                "unit": "h",
+                "dimension": "time",
+                "canonical_unit": "h",
+                "si_factor": 1.0,
+                "parsed_value": 4.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "hazard_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 3.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "crew_efficiency",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 0.9,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "productivity_per_day",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 240.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "work_volume",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 1200.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "planned_resource_hours",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 120.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "resource_gap_hours",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 6.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.5,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-5DA4F4BE26",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-AA286EEE26",
+              "evidence_type": "numeric_source",
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-AF7F905DA0",
+              "evidence_type": "numeric_source",
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-AA1D945E85",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-265267510C",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-D590C0A3E3",
+              "evidence_type": "numeric_source",
+              "parameter": "crew_efficiency",
+              "value": "0.9",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-E94298EDE2",
+              "evidence_type": "numeric_source",
+              "parameter": "productivity_per_day",
+              "value": "240",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-C5B5D1F424",
+              "evidence_type": "numeric_source",
+              "parameter": "work_volume",
+              "value": "1200",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-C577D857F0",
+              "evidence_type": "numeric_source",
+              "parameter": "planned_resource_hours",
+              "value": "120",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-4412CB12D3",
+              "evidence_type": "numeric_source",
+              "parameter": "resource_gap_hours",
+              "value": "6",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-1EBA3D345A",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "resource_gap_hours / max(planned_resource_hours, 1)",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "building",
+            "dimension": "进度",
+            "requires_domains": [
+              "mep",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "mep",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": true,
+            "status": "approved",
+            "reviewer_role": "施工员",
+            "release_gate": "manual_or_system_approval_for_auto_generated",
+            "reference_required": true,
+            "approval_source": "system_baseline"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "resource_gap_hours / max(planned_resource_hours, 1)",
+            "baseline_result": 0.05,
+            "sensitivity": [
+              {
+                "variable": "planned_resource_hours",
+                "baseline": 120.0,
+                "delta": 12.0,
+                "elasticity": -1.010101
+              },
+              {
+                "variable": "resource_gap_hours",
+                "baseline": 6.0,
+                "delta": 0.6,
+                "elasticity": 1.0
+              }
+            ],
+            "sensitivity_risk": "medium"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcBuilding",
+              "IfcWall",
+              "IfcSlab",
+              "IfcColumn"
+            ],
+            "lod": "LOD300",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "inspection_frequency",
+                "ifc_property": "Pset_Zhifei.inspection_frequency",
+                "dimension": "frequency"
+              },
+              {
+                "parameter": "response_limit",
+                "ifc_property": "Pset_Zhifei.response_limit",
+                "dimension": "time"
+              },
+              {
+                "parameter": "hazard_count",
+                "ifc_property": "Pset_Zhifei.hazard_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
+                "dimension": "count"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "crew_efficiency",
+                "ifc_property": "Pset_Zhifei.crew_efficiency",
+                "dimension": "dimensionless"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 100.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 11,
+              "numeric_count": 10,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "d42507b9fb1ef512ed5a2705e01063022e0fc8c3",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "d42507b9fb1ef512ed5a2705e01063022e0fc8c3",
+            "rebuild_on_change": true
           }
         },
         {
@@ -2387,6 +4147,7 @@
           "kg_dimension": "重难点",
           "professional_domain_aliases": [
             "management",
+            "digital",
             "earthwork"
           ],
           "reference_standard_codes": [
@@ -2411,6 +4172,433 @@
               "行标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB 50300-2013",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB 50300-2013",
+                "tier": "国标",
+                "effective_date": "2013-01-01",
+                "expiry_date": "2023-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "JGJ 59-2011",
+                "tier": "行标",
+                "effective_date": "2011-01-01",
+                "expiry_date": "2019-12-31",
+                "review_cycle_years": 8,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB 50204-2015",
+                "tier": "国标",
+                "effective_date": "2015-01-01",
+                "expiry_date": "2025-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB 50300-2013",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "BUILDING-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "BUILDING-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "BUILDING-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "inspection_frequency",
+                "unit": "次/班",
+                "dimension": "frequency",
+                "canonical_unit": "次/班",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "response_limit",
+                "unit": "h",
+                "dimension": "time",
+                "canonical_unit": "h",
+                "si_factor": 1.0,
+                "parsed_value": 4.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "hazard_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 3.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "defect_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "sample_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 100.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "complexity_index",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.4,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "specialist_workers",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 12.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.8889,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-73AFA2B6C4",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-47A1AC2F0C",
+              "evidence_type": "numeric_source",
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-A396257FD0",
+              "evidence_type": "numeric_source",
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-A9F000C2B0",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-B31C367031",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-196F9167F8",
+              "evidence_type": "numeric_source",
+              "parameter": "defect_count",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-F3309EEAC9",
+              "evidence_type": "numeric_source",
+              "parameter": "sample_count",
+              "value": "100",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-336B3DEF9B",
+              "evidence_type": "numeric_source",
+              "parameter": "complexity_index",
+              "value": "1.4",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-2261974A50",
+              "evidence_type": "numeric_source",
+              "parameter": "specialist_workers",
+              "value": "12",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-6E5DF0022B",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "complexity_index * risk_factor / max(specialist_workers, 1)",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "building",
+            "dimension": "重难点",
+            "requires_domains": [
+              "mep",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "mep",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": true,
+            "status": "approved",
+            "reviewer_role": "技术负责人",
+            "release_gate": "manual_or_system_approval_for_auto_generated",
+            "reference_required": true,
+            "approval_source": "system_baseline"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "complexity_index * risk_factor / max(specialist_workers, 1)",
+            "baseline_result": 0.14,
+            "sensitivity": [
+              {
+                "variable": "specialist_workers",
+                "baseline": 12.0,
+                "delta": 1.2,
+                "elasticity": -1.010101
+              },
+              {
+                "variable": "risk_factor",
+                "baseline": 1.2,
+                "delta": 0.12,
+                "elasticity": 1.0
+              },
+              {
+                "variable": "complexity_index",
+                "baseline": 1.4,
+                "delta": 0.14,
+                "elasticity": 1.0
+              }
+            ],
+            "sensitivity_risk": "medium"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcBuilding",
+              "IfcWall",
+              "IfcSlab",
+              "IfcColumn"
+            ],
+            "lod": "LOD300",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "inspection_frequency",
+                "ifc_property": "Pset_Zhifei.inspection_frequency",
+                "dimension": "frequency"
+              },
+              {
+                "parameter": "response_limit",
+                "ifc_property": "Pset_Zhifei.response_limit",
+                "dimension": "time"
+              },
+              {
+                "parameter": "hazard_count",
+                "ifc_property": "Pset_Zhifei.hazard_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
+                "dimension": "count"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "defect_count",
+                "ifc_property": "Pset_Zhifei.defect_count",
+                "dimension": "count"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 100.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 10,
+              "numeric_count": 9,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "a2f1b4f8e27e6a7d05a017669b4c63f452ad9720",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "a2f1b4f8e27e6a7d05a017669b4c63f452ad9720",
+            "rebuild_on_change": true
           }
         },
         {
@@ -2859,6 +5047,7 @@
           "kg_dimension": "扣分点",
           "professional_domain_aliases": [
             "management",
+            "digital",
             "earthwork"
           ],
           "reference_standard_codes": [
@@ -2883,6 +5072,387 @@
               "行标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB 50300-2013",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB 50300-2013",
+                "tier": "国标",
+                "effective_date": "2013-01-01",
+                "expiry_date": "2023-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "JGJ 59-2011",
+                "tier": "行标",
+                "effective_date": "2011-01-01",
+                "expiry_date": "2019-12-31",
+                "review_cycle_years": 8,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB 50210-2018",
+                "tier": "国标",
+                "effective_date": "2018-01-01",
+                "expiry_date": "2028-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB 50300-2013",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "BUILDING-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "BUILDING-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "BUILDING-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "inspection_frequency",
+                "unit": "次/班",
+                "dimension": "frequency",
+                "canonical_unit": "次/班",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "response_limit",
+                "unit": "h",
+                "dimension": "time",
+                "canonical_unit": "h",
+                "si_factor": 1.0,
+                "parsed_value": 4.0,
+                "source": "module1_patch"
+              },
+              {
+                "parameter": "hazard_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 3.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "missing_evidence_items",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 1.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "penalty_weight",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.7143,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-9098323593",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-D58BCE788B",
+              "evidence_type": "numeric_source",
+              "parameter": "response_limit",
+              "value": "4",
+              "unit": "h",
+              "source_text": "module1_patch",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-475DB65A42",
+              "evidence_type": "numeric_source",
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-25A8372CFC",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-5D3D3146D6",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-978005C7BC",
+              "evidence_type": "numeric_source",
+              "parameter": "missing_evidence_items",
+              "value": "1",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-596945FB13",
+              "evidence_type": "numeric_source",
+              "parameter": "penalty_weight",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-0390F96687",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "missing_evidence_items * penalty_weight",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "building",
+            "dimension": "扣分点",
+            "requires_domains": [
+              "mep",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "mep",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": true,
+            "status": "approved",
+            "reviewer_role": "项目总工",
+            "release_gate": "manual_or_system_approval_for_auto_generated",
+            "reference_required": true,
+            "approval_source": "system_baseline"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "missing_evidence_items * penalty_weight",
+            "baseline_result": 2.0,
+            "sensitivity": [
+              {
+                "variable": "penalty_weight",
+                "baseline": 2.0,
+                "delta": 0.2,
+                "elasticity": 1.0
+              },
+              {
+                "variable": "missing_evidence_items",
+                "baseline": 1.0,
+                "delta": 0.1,
+                "elasticity": 1.0
+              }
+            ],
+            "sensitivity_risk": "medium"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcBuilding",
+              "IfcWall",
+              "IfcSlab",
+              "IfcColumn"
+            ],
+            "lod": "LOD300",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "inspection_frequency",
+                "ifc_property": "Pset_Zhifei.inspection_frequency",
+                "dimension": "frequency"
+              },
+              {
+                "parameter": "response_limit",
+                "ifc_property": "Pset_Zhifei.response_limit",
+                "dimension": "time"
+              },
+              {
+                "parameter": "hazard_count",
+                "ifc_property": "Pset_Zhifei.hazard_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
+                "dimension": "count"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "missing_evidence_items",
+                "ifc_property": "Pset_Zhifei.missing_evidence_items",
+                "dimension": "dimensionless"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 100.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 8,
+              "numeric_count": 7,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "a769750eee3fd232aef90d2635454bccf7dc1f97",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "a769750eee3fd232aef90d2635454bccf7dc1f97",
+            "rebuild_on_change": true
           }
         },
         {
@@ -3507,6 +6077,426 @@
               "国标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB/T 50326-2017",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50202-2018",
+                "tier": "国标",
+                "effective_date": "2018-01-01",
+                "expiry_date": "2028-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB 50300-2013",
+                "tier": "国标",
+                "effective_date": "2013-01-01",
+                "expiry_date": "2023-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB 50303-2015",
+                "tier": "国标",
+                "effective_date": "2015-01-01",
+                "expiry_date": "2025-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB/T 50326-2017",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "MEP-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "MEP-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "MEP-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "min_process_interval_days",
+                "unit": "天",
+                "dimension": "time",
+                "canonical_unit": "h",
+                "si_factor": 24.0,
+                "parsed_value": 1.0,
+                "source": "module2_patch"
+              },
+              {
+                "parameter": "inspection_frequency",
+                "unit": "次/班",
+                "dimension": "frequency",
+                "canonical_unit": "次/班",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "module2_patch"
+              },
+              {
+                "parameter": "hazard_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 3.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "measured_strength",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 38.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "target_strength",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 40.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "pass_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 95.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "total_check_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 100.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.7778,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-0591671104",
+              "evidence_type": "numeric_source",
+              "parameter": "min_process_interval_days",
+              "value": "1",
+              "unit": "天",
+              "source_text": "module2_patch",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-552663F367",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency",
+              "value": "2",
+              "unit": "次/班",
+              "source_text": "module2_patch",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-9D9D7C0D3A",
+              "evidence_type": "numeric_source",
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-1FA965BD0E",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-4C109B6664",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-45594CF2A5",
+              "evidence_type": "numeric_source",
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-C152CB7D54",
+              "evidence_type": "numeric_source",
+              "parameter": "target_strength",
+              "value": "40",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-770F8ED54F",
+              "evidence_type": "numeric_source",
+              "parameter": "pass_count",
+              "value": "95",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-D7073C8ECF",
+              "evidence_type": "numeric_source",
+              "parameter": "total_check_count",
+              "value": "100",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-B560625F4B",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "pass_count / max(total_check_count, 1) * 100",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "mep",
+            "dimension": "质量",
+            "requires_domains": [
+              "building",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": true,
+            "status": "approved",
+            "reviewer_role": "质量员",
+            "release_gate": "manual_or_system_approval_for_auto_generated",
+            "reference_required": true,
+            "approval_source": "system_baseline"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "pass_count / max(total_check_count, 1) * 100",
+            "baseline_result": 95.0,
+            "sensitivity": [
+              {
+                "variable": "total_check_count",
+                "baseline": 100.0,
+                "delta": 10.0,
+                "elasticity": -1.010101
+              },
+              {
+                "variable": "pass_count",
+                "baseline": 95.0,
+                "delta": 9.5,
+                "elasticity": 1.0
+              }
+            ],
+            "sensitivity_risk": "medium"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcFlowSegment",
+              "IfcFlowController",
+              "IfcDistributionSystem"
+            ],
+            "lod": "LOD350",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "min_process_interval_days",
+                "ifc_property": "Pset_Zhifei.min_process_interval_days",
+                "dimension": "time"
+              },
+              {
+                "parameter": "inspection_frequency",
+                "ifc_property": "Pset_Zhifei.inspection_frequency",
+                "dimension": "frequency"
+              },
+              {
+                "parameter": "hazard_count",
+                "ifc_property": "Pset_Zhifei.hazard_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
+                "dimension": "count"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "measured_strength",
+                "ifc_property": "Pset_Zhifei.measured_strength",
+                "dimension": "dimensionless"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 100.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 10,
+              "numeric_count": 9,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "3b8064bbea4c851b8ec2bd70727db9de7da789b9",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "3b8064bbea4c851b8ec2bd70727db9de7da789b9",
+            "rebuild_on_change": true
           }
         },
         {
@@ -3913,7 +6903,7 @@
           "professional_domain_aliases": [
             "management",
             "building",
-            "earthwork"
+            "digital"
           ],
           "visual_specs": {
             "enabled": true,
@@ -3964,6 +6954,350 @@
               "国标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB/T 50326-2017",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB 50303-2015",
+                "tier": "国标",
+                "effective_date": "2015-01-01",
+                "expiry_date": "2025-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB/T 50326-2017",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "MEP-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "MEP-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "MEP-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "critical_path_lag_days",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 1.0,
+                "source": ""
+              },
+              {
+                "parameter": "crew_efficiency",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 0.9,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "productivity_per_day",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 240.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "work_volume",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 1200.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "delay_hours",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "planned_hours",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 12.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.0,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-C5A0D0E6F6",
+              "evidence_type": "numeric_source",
+              "parameter": "critical_path_lag_days",
+              "value": "1",
+              "unit": "",
+              "source_text": "",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-533A16EF75",
+              "evidence_type": "numeric_source",
+              "parameter": "crew_efficiency",
+              "value": "0.9",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-DA7286FDDD",
+              "evidence_type": "numeric_source",
+              "parameter": "productivity_per_day",
+              "value": "240",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-57FBF7B4E4",
+              "evidence_type": "numeric_source",
+              "parameter": "work_volume",
+              "value": "1200",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-FF60380AA9",
+              "evidence_type": "numeric_source",
+              "parameter": "delay_hours",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-DDDDF1F055",
+              "evidence_type": "numeric_source",
+              "parameter": "planned_hours",
+              "value": "12",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-F7EE05AEBF",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "delay_hours * 100 / max(planned_hours, 1)",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "mep",
+            "dimension": "进度",
+            "requires_domains": [
+              "building",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": false,
+            "status": "approved",
+            "reviewer_role": "施工员",
+            "release_gate": "auto_release",
+            "reference_required": true,
+            "approval_source": "manual"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "delay_hours * 100 / max(planned_hours, 1)",
+            "baseline_result": 16.666667,
+            "sensitivity": [
+              {
+                "variable": "planned_hours",
+                "baseline": 12.0,
+                "delta": 1.2,
+                "elasticity": -1.010101
+              },
+              {
+                "variable": "delay_hours",
+                "baseline": 2.0,
+                "delta": 0.2,
+                "elasticity": 1.0
+              }
+            ],
+            "sensitivity_risk": "medium"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcFlowSegment",
+              "IfcFlowController",
+              "IfcDistributionSystem"
+            ],
+            "lod": "LOD350",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "critical_path_lag_days",
+                "ifc_property": "Pset_Zhifei.critical_path_lag_days",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "crew_efficiency",
+                "ifc_property": "Pset_Zhifei.crew_efficiency",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "productivity_per_day",
+                "ifc_property": "Pset_Zhifei.productivity_per_day",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "work_volume",
+                "ifc_property": "Pset_Zhifei.work_volume",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "delay_hours",
+                "ifc_property": "Pset_Zhifei.delay_hours",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "planned_hours",
+                "ifc_property": "Pset_Zhifei.planned_hours",
+                "dimension": "dimensionless"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 99.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 7,
+              "numeric_count": 6,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "ecb43bbaa72a97a869e156730e5cba10dd090d1c",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "ecb43bbaa72a97a869e156730e5cba10dd090d1c",
+            "rebuild_on_change": true
           }
         },
         {
@@ -4368,7 +7702,8 @@
             "max_retry": 3
           },
           "professional_domain_aliases": [
-            "building"
+            "building",
+            "digital"
           ],
           "visual_specs": {
             "enabled": true,
@@ -4418,6 +7753,424 @@
               "国标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB/T 50326-2017",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB/T 50326-2017",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "MANAGEMENT-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "MANAGEMENT-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "MANAGEMENT-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "risk_trigger_threshold_percent",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 5.0,
+                "source": ""
+              },
+              {
+                "parameter": "complexity_index",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.4,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "specialist_workers",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 12.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "control_measures",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 8.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "risk_items",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 5.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "control_nodes",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 14.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "cross_operation_interfaces",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 10.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.5,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-A5CD8D3312",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_trigger_threshold_percent",
+              "value": "5",
+              "unit": "",
+              "source_text": "",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-D053F43DD7",
+              "evidence_type": "numeric_source",
+              "parameter": "complexity_index",
+              "value": "1.4",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-4D83EF35D9",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-166AA09D88",
+              "evidence_type": "numeric_source",
+              "parameter": "specialist_workers",
+              "value": "12",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-7FCBF0E465",
+              "evidence_type": "numeric_source",
+              "parameter": "control_measures",
+              "value": "8",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-3765FE5DF2",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_items",
+              "value": "5",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-F2C9C0116A",
+              "evidence_type": "numeric_source",
+              "parameter": "control_nodes",
+              "value": "14",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-76F5AC8C69",
+              "evidence_type": "numeric_source",
+              "parameter": "cross_operation_interfaces",
+              "value": "10",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-C5B36CFAE5",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "cross_operation_interfaces / max(control_nodes, 1)",
+              "reference_standard_code": "GB/T 50326-2017",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "management",
+            "dimension": "重难点",
+            "requires_domains": [
+              "building",
+              "mep",
+              "road",
+              "bridge",
+              "tunnel",
+              "railway",
+              "hydraulic",
+              "earthwork",
+              "digital"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "road",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "bridge",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "tunnel",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "railway",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "high"
+              },
+              {
+                "with_domain": "hydraulic",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "earthwork",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "digital",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": false,
+            "status": "approved",
+            "reviewer_role": "技术负责人",
+            "release_gate": "auto_release",
+            "reference_required": true,
+            "approval_source": "manual"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "cross_operation_interfaces / max(control_nodes, 1)",
+            "baseline_result": 0.714286,
+            "sensitivity": [
+              {
+                "variable": "control_nodes",
+                "baseline": 14.0,
+                "delta": 1.4,
+                "elasticity": -1.010101
+              },
+              {
+                "variable": "cross_operation_interfaces",
+                "baseline": 10.0,
+                "delta": 1.0,
+                "elasticity": 1.0
+              }
+            ],
+            "sensitivity_risk": "medium"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcProject",
+              "IfcTask",
+              "IfcWorkSchedule"
+            ],
+            "lod": "LOD300",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "risk_trigger_threshold_percent",
+                "ifc_property": "Pset_Zhifei.risk_trigger_threshold_percent",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "complexity_index",
+                "ifc_property": "Pset_Zhifei.complexity_index",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "specialist_workers",
+                "ifc_property": "Pset_Zhifei.specialist_workers",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "control_measures",
+                "ifc_property": "Pset_Zhifei.control_measures",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "risk_items",
+                "ifc_property": "Pset_Zhifei.risk_items",
+                "dimension": "ratio"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 100.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 9,
+              "numeric_count": 8,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "4cbe00e36f43f8a5e088f5eb78a34da448787891",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "4cbe00e36f43f8a5e088f5eb78a34da448787891",
+            "rebuild_on_change": true
           }
         }
       ]
@@ -4841,9 +8594,9 @@
           ],
           "kg_dimension": "质量",
           "professional_domain_aliases": [
+            "digital",
             "management",
-            "building",
-            "digital"
+            "building"
           ],
           "reference_standard_codes": [
             "GB 50300-2013",
@@ -4867,6 +8620,366 @@
               "行标",
               "企标"
             ]
+          },
+          "standard_validity_timeline": {
+            "version": "v1",
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "timeline_status": "review_required",
+            "primary_standard_code": "GB 50300-2013",
+            "next_review_due": "2012-12-31",
+            "records": [
+              {
+                "standard_code": "GB 50300-2013",
+                "tier": "国标",
+                "effective_date": "2013-01-01",
+                "expiry_date": "2023-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "JGJ 59-2011",
+                "tier": "行标",
+                "effective_date": "2011-01-01",
+                "expiry_date": "2019-12-31",
+                "review_cycle_years": 8,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB/T 50326-2017",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 10,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50242-2002",
+                "tier": "国标",
+                "effective_date": "2002-01-01",
+                "expiry_date": "2012-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "GB 50303-2015",
+                "tier": "国标",
+                "effective_date": "2015-01-01",
+                "expiry_date": "2025-12-31",
+                "review_cycle_years": 10,
+                "status": "review_required"
+              },
+              {
+                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
+                "tier": "企标",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
+              }
+            ]
+          },
+          "regional_policy_layers": {
+            "default_region": "CN",
+            "override_order": [
+              "project",
+              "city",
+              "province",
+              "national"
+            ],
+            "resolution_rule": "project > city > province > national",
+            "effective_source_hierarchy": "答疑文件",
+            "layers": [
+              {
+                "level": "national",
+                "policy_code": "GB 50300-2013",
+                "status": "active"
+              },
+              {
+                "level": "province",
+                "policy_code": "MEP-PROV-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "city",
+                "policy_code": "MEP-CITY-BASELINE",
+                "status": "pending_localization"
+              },
+              {
+                "level": "project",
+                "policy_code": "MEP-PROJECT-OVERRIDE",
+                "status": "ready_override"
+              }
+            ]
+          },
+          "unit_dimension_model": {
+            "enabled": true,
+            "parameters": [
+              {
+                "parameter": "formula_result",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": null,
+                "source": "formula_expression"
+              },
+              {
+                "parameter": "hazard_count",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 3.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "unit": "",
+                "dimension": "count",
+                "canonical_unit": "count",
+                "si_factor": 1.0,
+                "parsed_value": 2.0,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "risk_factor",
+                "unit": "",
+                "dimension": "ratio",
+                "canonical_unit": "ratio",
+                "si_factor": 1.0,
+                "parsed_value": 1.2,
+                "source": "kg_strengthen_default"
+              },
+              {
+                "parameter": "measured_strength",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 38.0,
+                "source": "kg_strengthen_v2_default"
+              },
+              {
+                "parameter": "target_strength",
+                "unit": "",
+                "dimension": "dimensionless",
+                "canonical_unit": "dimensionless",
+                "si_factor": 1.0,
+                "parsed_value": 40.0,
+                "source": "kg_strengthen_v2_default"
+              }
+            ],
+            "dimension_coverage_ratio": 0.5,
+            "consistency_check": {
+              "required": true,
+              "status": "pass"
+            }
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "EA-D0BE5D3B29",
+              "evidence_type": "numeric_source",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "formula_expression",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-6E18B2F9CE",
+              "evidence_type": "numeric_source",
+              "parameter": "hazard_count",
+              "value": "3",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-A6D04E9A18",
+              "evidence_type": "numeric_source",
+              "parameter": "inspection_frequency_per_shift",
+              "value": "2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-04A7AD8534",
+              "evidence_type": "numeric_source",
+              "parameter": "risk_factor",
+              "value": "1.2",
+              "unit": "",
+              "source_text": "kg_strengthen_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-E0DC0931CC",
+              "evidence_type": "numeric_source",
+              "parameter": "measured_strength",
+              "value": "38",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-273B475126",
+              "evidence_type": "numeric_source",
+              "parameter": "target_strength",
+              "value": "40",
+              "unit": "",
+              "source_text": "kg_strengthen_v2_default",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            },
+            {
+              "anchor_id": "EA-CC118CD36E",
+              "evidence_type": "formula_expression",
+              "parameter": "formula_result",
+              "value": "",
+              "unit": "",
+              "source_text": "max(target_strength - measured_strength, 0) / max(target_strength, 1) * 100",
+              "reference_standard_code": "GB 50300-2013",
+              "source_hierarchy": "答疑文件",
+              "confidence": 1.0
+            }
+          ],
+          "cross_discipline_constraints": {
+            "enabled": true,
+            "discipline": "mep",
+            "dimension": "质量",
+            "requires_domains": [
+              "building",
+              "management"
+            ],
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "constraint": "接口参数与时间窗一致性校验",
+                "severity": "medium"
+              }
+            ],
+            "solver": {
+              "name": "cross_discipline_solver_v1",
+              "status": "ready",
+              "blocking_conditions": [
+                "elevation_coordinate_conflict",
+                "schedule_window_conflict",
+                "resource_double_booking"
+              ]
+            }
+          },
+          "approval_workflow": {
+            "required": true,
+            "status": "approved",
+            "reviewer_role": "质量员",
+            "release_gate": "manual_or_system_approval_for_auto_generated",
+            "reference_required": true,
+            "approval_source": "system_baseline"
+          },
+          "formula_sensitivity": {
+            "enabled": true,
+            "formula_expression": "max(target_strength - measured_strength, 0) / max(target_strength, 1) * 100",
+            "baseline_result": 5.0,
+            "sensitivity": [
+              {
+                "variable": "measured_strength",
+                "baseline": 38.0,
+                "delta": 3.8,
+                "elasticity": -14.5
+              },
+              {
+                "variable": "target_strength",
+                "baseline": 40.0,
+                "delta": 4.0,
+                "elasticity": 13.636364
+              }
+            ],
+            "sensitivity_risk": "high"
+          },
+          "bim_ifc_context": {
+            "enabled": true,
+            "ifc_schema": "IFC4",
+            "ifc_entities": [
+              "IfcFlowSegment",
+              "IfcFlowController",
+              "IfcDistributionSystem"
+            ],
+            "lod": "LOD350",
+            "coordinate_reference": "project_local",
+            "binding_status": "ready",
+            "source_data_types": [
+              "FILE",
+              "IFC"
+            ],
+            "ifc_parameter_bindings": [
+              {
+                "parameter": "formula_result",
+                "ifc_property": "Pset_Zhifei.formula_result",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "hazard_count",
+                "ifc_property": "Pset_Zhifei.hazard_count",
+                "dimension": "count"
+              },
+              {
+                "parameter": "inspection_frequency_per_shift",
+                "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
+                "dimension": "count"
+              },
+              {
+                "parameter": "risk_factor",
+                "ifc_property": "Pset_Zhifei.risk_factor",
+                "dimension": "ratio"
+              },
+              {
+                "parameter": "measured_strength",
+                "ifc_property": "Pset_Zhifei.measured_strength",
+                "dimension": "dimensionless"
+              },
+              {
+                "parameter": "target_strength",
+                "ifc_property": "Pset_Zhifei.target_strength",
+                "dimension": "dimensionless"
+              }
+            ]
+          },
+          "retrieval_benchmark": {
+            "latency_target_ms": 80,
+            "precision_target": 0.85,
+            "recall_target": 0.9,
+            "minimum_quality_score": 70,
+            "quality_score": 99.0,
+            "status": "pass",
+            "scoring_breakdown": {
+              "evidence_count": 7,
+              "numeric_count": 6,
+              "has_formula": true,
+              "has_reference_standard_codes": true,
+              "assertion_triplet_ready": true
+            }
+          },
+          "incremental_fingerprint": "ea80f4c033257e58ea5b522d15372a236f88d187",
+          "incremental_update": {
+            "strategy": "fingerprint_diff",
+            "fingerprint": "ea80f4c033257e58ea5b522d15372a236f88d187",
+            "rebuild_on_change": true
           }
         }
       ]

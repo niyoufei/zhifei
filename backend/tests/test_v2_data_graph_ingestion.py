@@ -370,3 +370,79 @@ def test_search_supports_professional_domain_filter_and_gemini_score(tmp_path: P
     )
     assert high_score_result["total"] >= 1
     assert all(float(item.get("gemini_usefulness_score") or 0.0) >= 55 for item in high_score_result["results"])
+
+
+def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "enhanced.json").write_text(
+        json.dumps(
+            {
+                "name": "ZF-KG-ENHANCED",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "ENH-001",
+                                "name": "混凝土浇筑增强节点",
+                                "source_hierarchy": "国标",
+                                "is_auto_generated": True,
+                                "formula_expression": "volume / max(productivity, 1)",
+                                "formula_variables": ["volume", "productivity"],
+                                "standard_validity_timeline": {
+                                    "timeline_status": "active",
+                                    "records": [{"standard_code": "GB 50300-2013"}],
+                                },
+                                "regional_policy_layers": {
+                                    "default_region": "CN",
+                                    "layers": [{"level": "national", "policy_code": "GB 50300-2013"}],
+                                },
+                                "unit_dimension_model": {
+                                    "parameters": [{"parameter": "volume", "unit": "m3", "dimension": "volume"}]
+                                },
+                                "evidence_anchors": [{"anchor_id": "EA-1", "parameter": "volume"}],
+                                "cross_discipline_constraints": {"enabled": True},
+                                "retrieval_benchmark": {"quality_score": 88, "minimum_quality_score": 70},
+                                "approval_workflow": {"required": True, "status": "approved"},
+                                "formula_sensitivity": {"enabled": True, "baseline_result": 4.0},
+                                "bim_ifc_context": {"ifc_entities": ["IfcBuilding"]},
+                                "incremental_fingerprint": "fingerprint-001",
+                                "incremental_update": {"strategy": "fingerprint_diff"},
+                                "content": {
+                                    "environment_sensing": {"activation_signal": "Context CONTAINS '智飞工程'"},
+                                    "operation_desc_premium": {"desc": "混凝土浇筑参数化控制。"},
+                                },
+                            }
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(
+        query="混凝土 浇筑",
+        min_retrieval_quality_score=80,
+        region_context="CN",
+        require_approved_auto=True,
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=5,
+    )
+    assert result["total"] >= 1
+    node = result["results"][0]
+    assert node["retrieval_quality_score"] >= 80
+    assert node["standard_validity_timeline"]["timeline_status"] == "active"
+    assert node["regional_policy_layers"]["default_region"] == "CN"
+    assert isinstance(node["unit_dimension_model"]["parameters"], list)
+    assert isinstance(node["evidence_anchors"], list) and node["evidence_anchors"]
+    assert node["approval_workflow"]["status"] == "approved"
+    assert isinstance(node["bim_ifc_context"]["ifc_entities"], list)
+    assert str(node["incremental_fingerprint"]).strip()

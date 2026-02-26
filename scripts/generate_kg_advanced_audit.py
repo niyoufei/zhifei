@@ -72,6 +72,17 @@ def _check_file(path: Path) -> Dict[str, Any]:
         "missing_authority_resolution": 0,
         "missing_reference_standard_codes": 0,
         "invalid_authority_rank": 0,
+        "missing_standard_timeline": 0,
+        "missing_regional_policy": 0,
+        "missing_unit_dimension_model": 0,
+        "missing_evidence_anchors": 0,
+        "missing_cross_constraints": 0,
+        "missing_retrieval_benchmark": 0,
+        "low_retrieval_quality_score": 0,
+        "auto_generated_unapproved": 0,
+        "missing_formula_sensitivity": 0,
+        "missing_bim_ifc_context": 0,
+        "missing_incremental_fingerprint": 0,
     }
     samples: Dict[str, List[Dict[str, Any]]] = {k: [] for k in issues}
 
@@ -174,6 +185,77 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["invalid_authority_rank"] += 1
             if len(samples["invalid_authority_rank"]) < 8:
                 samples["invalid_authority_rank"].append({"node_id": node_id, "authority_rank": rank})
+
+        timeline = node.get("standard_validity_timeline")
+        if not isinstance(timeline, dict) or not isinstance(timeline.get("records"), list) or not timeline.get("records"):
+            issues["missing_standard_timeline"] += 1
+            if len(samples["missing_standard_timeline"]) < 8:
+                samples["missing_standard_timeline"].append({"node_id": node_id})
+
+        regional = node.get("regional_policy_layers")
+        if not isinstance(regional, dict) or not isinstance(regional.get("layers"), list) or not regional.get("layers"):
+            issues["missing_regional_policy"] += 1
+            if len(samples["missing_regional_policy"]) < 8:
+                samples["missing_regional_policy"].append({"node_id": node_id})
+
+        unit_model = node.get("unit_dimension_model")
+        if not isinstance(unit_model, dict) or not isinstance(unit_model.get("parameters"), list):
+            issues["missing_unit_dimension_model"] += 1
+            if len(samples["missing_unit_dimension_model"]) < 8:
+                samples["missing_unit_dimension_model"].append({"node_id": node_id})
+
+        anchors = node.get("evidence_anchors")
+        if not isinstance(anchors, list) or not anchors:
+            issues["missing_evidence_anchors"] += 1
+            if len(samples["missing_evidence_anchors"]) < 8:
+                samples["missing_evidence_anchors"].append({"node_id": node_id})
+
+        constraints = node.get("cross_discipline_constraints")
+        if not isinstance(constraints, dict) or not bool(constraints.get("enabled")):
+            issues["missing_cross_constraints"] += 1
+            if len(samples["missing_cross_constraints"]) < 8:
+                samples["missing_cross_constraints"].append({"node_id": node_id})
+
+        benchmark = node.get("retrieval_benchmark")
+        if not isinstance(benchmark, dict) or benchmark.get("quality_score") in (None, ""):
+            issues["missing_retrieval_benchmark"] += 1
+            if len(samples["missing_retrieval_benchmark"]) < 8:
+                samples["missing_retrieval_benchmark"].append({"node_id": node_id})
+        else:
+            score = float(benchmark.get("quality_score") or 0.0)
+            minimum = float(benchmark.get("minimum_quality_score") or 0.0)
+            if score < minimum:
+                issues["low_retrieval_quality_score"] += 1
+                if len(samples["low_retrieval_quality_score"]) < 8:
+                    samples["low_retrieval_quality_score"].append({"node_id": node_id, "quality_score": score, "minimum": minimum})
+
+        workflow = node.get("approval_workflow")
+        if bool(node.get("is_auto_generated")):
+            status = ""
+            if isinstance(workflow, dict):
+                status = str(workflow.get("status") or "").strip().lower()
+            if status != "approved":
+                issues["auto_generated_unapproved"] += 1
+                if len(samples["auto_generated_unapproved"]) < 8:
+                    samples["auto_generated_unapproved"].append({"node_id": node_id, "status": status})
+
+        sensitivity = node.get("formula_sensitivity")
+        if str(node.get("formula_expression") or "").strip():
+            if not isinstance(sensitivity, dict) or sensitivity.get("enabled") not in (True, False):
+                issues["missing_formula_sensitivity"] += 1
+                if len(samples["missing_formula_sensitivity"]) < 8:
+                    samples["missing_formula_sensitivity"].append({"node_id": node_id})
+
+        ifc_ctx = node.get("bim_ifc_context")
+        if not isinstance(ifc_ctx, dict) or not isinstance(ifc_ctx.get("ifc_entities"), list):
+            issues["missing_bim_ifc_context"] += 1
+            if len(samples["missing_bim_ifc_context"]) < 8:
+                samples["missing_bim_ifc_context"].append({"node_id": node_id})
+
+        if not str(node.get("incremental_fingerprint") or "").strip():
+            issues["missing_incremental_fingerprint"] += 1
+            if len(samples["missing_incremental_fingerprint"]) < 8:
+                samples["missing_incremental_fingerprint"].append({"node_id": node_id})
 
     total_issues = int(sum(issues.values()))
     ready = total_issues == 0

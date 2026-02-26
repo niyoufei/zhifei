@@ -147,6 +147,17 @@ class ParsedNode:
     quantitative_indices_json: str = "{}"
     numeric_sources_json: str = "[]"
     schedule_constraints_json: str = "{}"
+    standard_validity_timeline_json: str = "{}"
+    regional_policy_layers_json: str = "{}"
+    unit_dimension_model_json: str = "{}"
+    evidence_anchors_json: str = "[]"
+    cross_discipline_constraints_json: str = "{}"
+    retrieval_benchmark_json: str = "{}"
+    approval_workflow_json: str = "{}"
+    formula_sensitivity_json: str = "{}"
+    bim_ifc_context_json: str = "{}"
+    incremental_fingerprint: str = ""
+    incremental_update_json: str = "{}"
     reference_keys: List[str] = field(default_factory=list)
     edge_drafts: List[ParsedEdgeDraft] = field(default_factory=list)
 
@@ -776,6 +787,181 @@ def _extract_schedule_constraints(node: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _extract_standard_timeline(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "standard_validity_timeline",
+            "standard_timeline",
+            "reference_standard_timeline",
+            "标准时效",
+            "标准时效时间线",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "records" not in out or not isinstance(out.get("records"), list):
+        out["records"] = []
+    if "timeline_status" not in out:
+        out["timeline_status"] = "unknown"
+    return out
+
+
+def _extract_regional_policy(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "regional_policy_layers",
+            "regional_policy",
+            "region_policy",
+            "地域政策分层",
+            "区域政策",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "layers" not in out or not isinstance(out.get("layers"), list):
+        out["layers"] = []
+    if "default_region" not in out:
+        out["default_region"] = "CN"
+    return out
+
+
+def _extract_unit_dimension_model(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "unit_dimension_model",
+            "unit_model",
+            "量纲模型",
+            "单位量纲",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "parameters" not in out or not isinstance(out.get("parameters"), list):
+        out["parameters"] = []
+    return out
+
+
+def _extract_evidence_anchors(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "evidence_anchors",
+            "evidence_anchor",
+            "evidence_bindings",
+            "证据锚点",
+        ),
+    )
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            rec = {str(k): v for k, v in item.items() if str(k).strip() and v not in (None, "", [], {})}
+            if rec:
+                out.append(rec)
+    return out
+
+
+def _extract_cross_constraints(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "cross_discipline_constraints",
+            "cross_constraints",
+            "跨专业约束",
+            "跨专业约束求解",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
+def _extract_retrieval_benchmark(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "retrieval_benchmark",
+            "retrieval_metrics",
+            "检索基准",
+            "检索指标",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "quality_score" in out:
+        out["quality_score"] = _safe_float(out.get("quality_score"), 0.0)
+    return out
+
+
+def _extract_approval_workflow(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "approval_workflow",
+            "approval_flow",
+            "审批流",
+            "审核流程",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "required" not in out:
+        out["required"] = False
+    return out
+
+
+def _extract_formula_sensitivity(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "formula_sensitivity",
+            "sensitivity_analysis",
+            "公式敏感性",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
+def _extract_bim_ifc_context(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "bim_ifc_context",
+            "ifc_context",
+            "bim_context",
+            "BIM_IFC",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "ifc_entities" not in out or not isinstance(out.get("ifc_entities"), list):
+        out["ifc_entities"] = []
+    return out
+
+
+def _extract_incremental_state(node: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    fingerprint = str(
+        _dict_get_case_insensitive(node, ("incremental_fingerprint", "fingerprint", "node_fingerprint")) or ""
+    ).strip()
+    update = _coerce_dict(
+        _dict_get_case_insensitive(
+            node,
+            (
+                "incremental_update",
+                "incremental_state",
+                "增量更新",
+            ),
+        )
+    )
+    if fingerprint and "fingerprint" not in update:
+        update["fingerprint"] = fingerprint
+    return fingerprint, update
+
+
 def _extract_activation_terms(signal_text: str) -> List[str]:
     text = str(signal_text or "").strip()
     if not text:
@@ -984,6 +1170,17 @@ def _build_parsed_node(
     quantitative_indices: Optional[Dict[str, Any]] = None,
     numeric_sources: Optional[List[Dict[str, Any]]] = None,
     schedule_constraints: Optional[Dict[str, Any]] = None,
+    standard_validity_timeline: Optional[Dict[str, Any]] = None,
+    regional_policy_layers: Optional[Dict[str, Any]] = None,
+    unit_dimension_model: Optional[Dict[str, Any]] = None,
+    evidence_anchors: Optional[List[Dict[str, Any]]] = None,
+    cross_discipline_constraints: Optional[Dict[str, Any]] = None,
+    retrieval_benchmark: Optional[Dict[str, Any]] = None,
+    approval_workflow: Optional[Dict[str, Any]] = None,
+    formula_sensitivity: Optional[Dict[str, Any]] = None,
+    bim_ifc_context: Optional[Dict[str, Any]] = None,
+    incremental_fingerprint: str = "",
+    incremental_update: Optional[Dict[str, Any]] = None,
 ) -> ParsedNode:
     uid = hashlib.sha1(f"{path}::{node_id}".encode("utf-8")).hexdigest()[:20]
     return ParsedNode(
@@ -1012,6 +1209,17 @@ def _build_parsed_node(
         quantitative_indices_json=_ensure_ascii_json(quantitative_indices or {}),
         numeric_sources_json=_ensure_ascii_json(numeric_sources or []),
         schedule_constraints_json=_ensure_ascii_json(schedule_constraints or {}),
+        standard_validity_timeline_json=_ensure_ascii_json(standard_validity_timeline or {}),
+        regional_policy_layers_json=_ensure_ascii_json(regional_policy_layers or {}),
+        unit_dimension_model_json=_ensure_ascii_json(unit_dimension_model or {}),
+        evidence_anchors_json=_ensure_ascii_json(evidence_anchors or []),
+        cross_discipline_constraints_json=_ensure_ascii_json(cross_discipline_constraints or {}),
+        retrieval_benchmark_json=_ensure_ascii_json(retrieval_benchmark or {}),
+        approval_workflow_json=_ensure_ascii_json(approval_workflow or {}),
+        formula_sensitivity_json=_ensure_ascii_json(formula_sensitivity or {}),
+        bim_ifc_context_json=_ensure_ascii_json(bim_ifc_context or {}),
+        incremental_fingerprint=str(incremental_fingerprint or ""),
+        incremental_update_json=_ensure_ascii_json(incremental_update or {}),
         reference_keys=reference_keys,
         edge_drafts=edge_drafts,
     )
@@ -1230,6 +1438,16 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         resource_requirements=resource_requirements,
                     )
                     schedule_constraints = _extract_schedule_constraints(node)
+                    standard_timeline = _extract_standard_timeline(node)
+                    regional_policy = _extract_regional_policy(node)
+                    unit_dimension_model = _extract_unit_dimension_model(node)
+                    evidence_anchors = _extract_evidence_anchors(node)
+                    cross_constraints = _extract_cross_constraints(node)
+                    retrieval_benchmark = _extract_retrieval_benchmark(node)
+                    approval_workflow = _extract_approval_workflow(node)
+                    formula_sensitivity = _extract_formula_sensitivity(node)
+                    bim_ifc_context = _extract_bim_ifc_context(node)
+                    incremental_fingerprint, incremental_update = _extract_incremental_state(node)
                     object_key = _build_object_key(node, title, node_id)
                     refs = _build_reference_keys(
                         node,
@@ -1262,6 +1480,15 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         "quantitative_indices": quantitative_indices,
                         "numeric_sources": numeric_sources,
                         "schedule_constraints": schedule_constraints,
+                        "standard_validity_timeline": standard_timeline,
+                        "regional_policy_layers": regional_policy,
+                        "unit_dimension_model": unit_dimension_model,
+                        "evidence_anchors": evidence_anchors,
+                        "cross_discipline_constraints": cross_constraints,
+                        "retrieval_benchmark": retrieval_benchmark,
+                        "approval_workflow": approval_workflow,
+                        "formula_sensitivity": formula_sensitivity,
+                        "bim_ifc_context": bim_ifc_context,
                     }
 
                     tactical = _extract_tactical_fields(node, activation_context=activation_ctx)
@@ -1270,6 +1497,15 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     keywords.extend(_extract_terms(numeric_sources))
                     keywords.extend(_extract_terms(quantitative_indices))
                     keywords.extend(_extract_terms(schedule_constraints))
+                    keywords.extend(_extract_terms(standard_timeline))
+                    keywords.extend(_extract_terms(regional_policy))
+                    keywords.extend(_extract_terms(unit_dimension_model))
+                    keywords.extend(_extract_terms(evidence_anchors))
+                    keywords.extend(_extract_terms(cross_constraints))
+                    keywords.extend(_extract_terms(retrieval_benchmark))
+                    keywords.extend(_extract_terms(approval_workflow))
+                    keywords.extend(_extract_terms(formula_sensitivity))
+                    keywords.extend(_extract_terms(bim_ifc_context))
                     activation_signal = ""
                     dna_verified = True
                     tactical_mode = ""
@@ -1345,6 +1581,17 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         quantitative_indices=quantitative_indices,
                         numeric_sources=numeric_sources,
                         schedule_constraints=schedule_constraints,
+                        standard_validity_timeline=standard_timeline,
+                        regional_policy_layers=regional_policy,
+                        unit_dimension_model=unit_dimension_model,
+                        evidence_anchors=evidence_anchors,
+                        cross_discipline_constraints=cross_constraints,
+                        retrieval_benchmark=retrieval_benchmark,
+                        approval_workflow=approval_workflow,
+                        formula_sensitivity=formula_sensitivity,
+                        bim_ifc_context=bim_ifc_context,
+                        incremental_fingerprint=incremental_fingerprint,
+                        incremental_update=incremental_update,
                     )
                     # inject uid reference after creation
                     parsed.reference_keys = _build_reference_keys(
@@ -1781,6 +2028,17 @@ class KnowledgeGraphIndex:
                     quantitative_indices_json TEXT NOT NULL DEFAULT '{}',
                     numeric_sources_json TEXT NOT NULL DEFAULT '[]',
                     schedule_constraints_json TEXT NOT NULL DEFAULT '{}',
+                    standard_validity_timeline_json TEXT NOT NULL DEFAULT '{}',
+                    regional_policy_layers_json TEXT NOT NULL DEFAULT '{}',
+                    unit_dimension_model_json TEXT NOT NULL DEFAULT '{}',
+                    evidence_anchors_json TEXT NOT NULL DEFAULT '[]',
+                    cross_discipline_constraints_json TEXT NOT NULL DEFAULT '{}',
+                    retrieval_benchmark_json TEXT NOT NULL DEFAULT '{}',
+                    approval_workflow_json TEXT NOT NULL DEFAULT '{}',
+                    formula_sensitivity_json TEXT NOT NULL DEFAULT '{}',
+                    bim_ifc_context_json TEXT NOT NULL DEFAULT '{}',
+                    incremental_fingerprint TEXT NOT NULL DEFAULT '',
+                    incremental_update_json TEXT NOT NULL DEFAULT '{}',
                     FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE,
                     UNIQUE(document_id, node_uid)
                 );
@@ -1849,6 +2107,17 @@ class KnowledgeGraphIndex:
             self._ensure_column(conn, "nodes", "quantitative_indices_json TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "nodes", "numeric_sources_json TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(conn, "nodes", "schedule_constraints_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "standard_validity_timeline_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "regional_policy_layers_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "unit_dimension_model_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "evidence_anchors_json TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "nodes", "cross_discipline_constraints_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "retrieval_benchmark_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "approval_workflow_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "formula_sensitivity_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "bim_ifc_context_json TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "nodes", "incremental_fingerprint TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "nodes", "incremental_update_json TEXT NOT NULL DEFAULT '{}'")
 
             try:
                 conn.execute(
@@ -1870,10 +2139,10 @@ class KnowledgeGraphIndex:
             # Schema version tracking for reindex safety.
             vrow = conn.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
             version = str(vrow[0]) if vrow else "0"
-            if version != "5":
+            if version != "6":
                 self._schema_needs_reindex = True
                 conn.execute(
-                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '5')"
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '6')"
                 )
             conn.commit()
 
@@ -2008,9 +2277,20 @@ class KnowledgeGraphIndex:
                             qt_score_booster_json,
                             quantitative_indices_json,
                             numeric_sources_json,
-                            schedule_constraints_json
+                            schedule_constraints_json,
+                            standard_validity_timeline_json,
+                            regional_policy_layers_json,
+                            unit_dimension_model_json,
+                            evidence_anchors_json,
+                            cross_discipline_constraints_json,
+                            retrieval_benchmark_json,
+                            approval_workflow_json,
+                            formula_sensitivity_json,
+                            bim_ifc_context_json,
+                            incremental_fingerprint,
+                            incremental_update_json
                         )
-                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             doc_id,
@@ -2037,6 +2317,17 @@ class KnowledgeGraphIndex:
                             node.quantitative_indices_json,
                             node.numeric_sources_json,
                             node.schedule_constraints_json,
+                            node.standard_validity_timeline_json,
+                            node.regional_policy_layers_json,
+                            node.unit_dimension_model_json,
+                            node.evidence_anchors_json,
+                            node.cross_discipline_constraints_json,
+                            node.retrieval_benchmark_json,
+                            node.approval_workflow_json,
+                            node.formula_sensitivity_json,
+                            node.bim_ifc_context_json,
+                            node.incremental_fingerprint,
+                            node.incremental_update_json,
                         ),
                     )
                     node_id = int(cursor.lastrowid)
@@ -2217,6 +2508,9 @@ class KnowledgeGraphIndex:
         node_types: Optional[List[str]] = None,
         professional_domains: Optional[List[str]] = None,
         min_gemini_usefulness_score: float = 0.0,
+        min_retrieval_quality_score: float = 0.0,
+        region_context: str | None = None,
+        require_approved_auto: bool = False,
         resolve_authority: bool = True,
     ) -> Dict[str, Any]:
         top_k = max(1, min(int(top_k or 12), 200))
@@ -2229,6 +2523,8 @@ class KnowledgeGraphIndex:
             if term and term not in norm_domains:
                 norm_domains.append(term)
         min_gemini_score = max(0.0, min(100.0, _safe_float(min_gemini_usefulness_score, 0.0)))
+        min_retrieval_quality = max(0.0, min(100.0, _safe_float(min_retrieval_quality_score, 0.0)))
+        norm_region = str(region_context or "").strip().upper()
 
         with self._connect() as conn:
             candidates = self._candidate_ids_by_terms(conn, tags=norm_tags, keywords=norm_keywords)
@@ -2284,6 +2580,17 @@ class KnowledgeGraphIndex:
                     n.quantitative_indices_json,
                     n.numeric_sources_json,
                     n.schedule_constraints_json,
+                    n.standard_validity_timeline_json,
+                    n.regional_policy_layers_json,
+                    n.unit_dimension_model_json,
+                    n.evidence_anchors_json,
+                    n.cross_discipline_constraints_json,
+                    n.retrieval_benchmark_json,
+                    n.approval_workflow_json,
+                    n.formula_sensitivity_json,
+                    n.bim_ifc_context_json,
+                    n.incremental_fingerprint,
+                    n.incremental_update_json,
                     d.file_name,
                     d.source_path,
                     COALESCE(GROUP_CONCAT(DISTINCT t.tag), '') AS tags_csv,
@@ -2312,6 +2619,17 @@ class KnowledgeGraphIndex:
             resource_requirements = _safe_json_load(row["resource_requirements_json"], {})
             formula_expression = str(row["formula_expression"] or "").strip()
             activation_signal = str(row["activation_signal"] or "").strip()
+            standard_validity_timeline = _safe_json_load(row["standard_validity_timeline_json"], {})
+            regional_policy_layers = _safe_json_load(row["regional_policy_layers_json"], {})
+            unit_dimension_model = _safe_json_load(row["unit_dimension_model_json"], {})
+            evidence_anchors = _safe_json_load(row["evidence_anchors_json"], [])
+            cross_discipline_constraints = _safe_json_load(row["cross_discipline_constraints_json"], {})
+            retrieval_benchmark = _safe_json_load(row["retrieval_benchmark_json"], {})
+            approval_workflow = _safe_json_load(row["approval_workflow_json"], {})
+            formula_sensitivity = _safe_json_load(row["formula_sensitivity_json"], {})
+            bim_ifc_context = _safe_json_load(row["bim_ifc_context_json"], {})
+            incremental_fingerprint = str(row["incremental_fingerprint"] or "").strip()
+            incremental_update = _safe_json_load(row["incremental_update_json"], {})
 
             score = 0.0
             for tag in norm_tags:
@@ -2356,6 +2674,40 @@ class KnowledgeGraphIndex:
                 continue
             score += min(8.0, gemini_usefulness_score * 0.08)
 
+            retrieval_quality_score = _safe_float(
+                retrieval_benchmark.get("quality_score") if isinstance(retrieval_benchmark, dict) else 0.0,
+                0.0,
+            )
+            if retrieval_quality_score < min_retrieval_quality:
+                continue
+            score += min(6.0, retrieval_quality_score * 0.06)
+
+            if isinstance(approval_workflow, dict):
+                is_required = bool(approval_workflow.get("required"))
+                wf_status = str(approval_workflow.get("status") or "").strip().lower()
+                if require_approved_auto and is_required and wf_status != "approved":
+                    continue
+                if wf_status == "approved":
+                    score += 1.5
+
+            if isinstance(standard_validity_timeline, dict):
+                status = str(standard_validity_timeline.get("timeline_status") or "").strip().lower()
+                if status == "active":
+                    score += 1.5
+                elif status == "review_required":
+                    score -= 1.5
+
+            if norm_region:
+                region_blob = json.dumps(regional_policy_layers, ensure_ascii=False).upper()
+                default_region = str(
+                    regional_policy_layers.get("default_region")
+                    if isinstance(regional_policy_layers, dict)
+                    else ""
+                ).upper()
+                if norm_region not in region_blob and norm_region not in {default_region, "CN"}:
+                    continue
+                score += 1.0
+
             if (norm_tags or norm_keywords or query_tokens) and score <= 0:
                 continue
 
@@ -2386,14 +2738,29 @@ class KnowledgeGraphIndex:
                 "quantitative_indices": _safe_json_load(row["quantitative_indices_json"], {}),
                 "numeric_sources": numeric_sources,
                 "schedule_constraints": _safe_json_load(row["schedule_constraints_json"], {}),
+                "standard_validity_timeline": standard_validity_timeline,
+                "regional_policy_layers": regional_policy_layers,
+                "unit_dimension_model": unit_dimension_model,
+                "evidence_anchors": evidence_anchors,
+                "cross_discipline_constraints": cross_discipline_constraints,
+                "retrieval_benchmark": retrieval_benchmark,
+                "approval_workflow": approval_workflow,
+                "formula_sensitivity": formula_sensitivity,
+                "bim_ifc_context": bim_ifc_context,
+                "incremental_fingerprint": incremental_fingerprint,
+                "incremental_update": incremental_update,
                 "professional_domain_matches": domain_matches,
                 "gemini_usefulness_score": gemini_usefulness_score,
+                "retrieval_quality_score": retrieval_quality_score,
                 "score": round(score, 4),
                 "payload": payload,
                 "source_provenance": {
                     "source_file": row["file_name"],
                     "source_path": row["source_path"],
                     "source_hierarchy": row["source_hierarchy"],
+                    "timeline_status": standard_validity_timeline.get("timeline_status")
+                    if isinstance(standard_validity_timeline, dict)
+                    else "",
                 },
             }
             results.append(result_item)
@@ -2412,6 +2779,9 @@ class KnowledgeGraphIndex:
             "node_types": norm_node_types,
             "professional_domains": norm_domains,
             "min_gemini_usefulness_score": min_gemini_score,
+            "min_retrieval_quality_score": min_retrieval_quality,
+            "region_context": norm_region,
+            "require_approved_auto": bool(require_approved_auto),
             "total": len(results),
             "results": results[:top_k],
             "db_path": str(self.db_path),
@@ -2612,6 +2982,9 @@ def search_graph_index(
     node_types: Optional[List[str]] = None,
     professional_domains: Optional[List[str]] = None,
     min_gemini_usefulness_score: float = 0.0,
+    min_retrieval_quality_score: float = 0.0,
+    region_context: str | None = None,
+    require_approved_auto: bool = False,
     resolve_authority: bool = True,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> Dict[str, Any]:
@@ -2624,6 +2997,9 @@ def search_graph_index(
         node_types=node_types,
         professional_domains=professional_domains,
         min_gemini_usefulness_score=min_gemini_usefulness_score,
+        min_retrieval_quality_score=min_retrieval_quality_score,
+        region_context=region_context,
+        require_approved_auto=require_approved_auto,
         resolve_authority=resolve_authority,
     )
 

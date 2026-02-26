@@ -40,6 +40,36 @@ def _base_node(node_id: str) -> dict:
             "selected_rank": 3,
             "candidates": ["国标"],
         },
+        "standard_validity_timeline": {
+            "version": "v1",
+            "timeline_status": "active",
+            "records": [
+                {
+                    "standard_code": "GB/T 50326-2017",
+                    "tier": "国标",
+                    "effective_date": "2017-01-01",
+                    "expiry_date": "2027-12-31",
+                    "review_cycle_years": 10,
+                    "status": "active",
+                }
+            ],
+        },
+        "regional_policy_layers": {
+            "default_region": "CN",
+            "layers": [{"level": "national", "policy_code": "GB/T 50326-2017", "status": "active"}],
+        },
+        "unit_dimension_model": {
+            "enabled": True,
+            "parameters": [{"parameter": "a", "unit": "次/班", "dimension": "frequency"}],
+            "consistency_check": {"required": True, "status": "pass"},
+        },
+        "evidence_anchors": [{"anchor_id": "EA-TEST0001", "parameter": "a"}],
+        "cross_discipline_constraints": {"enabled": True},
+        "retrieval_benchmark": {"quality_score": 88, "minimum_quality_score": 70},
+        "approval_workflow": {"required": True, "status": "approved"},
+        "formula_sensitivity": {"enabled": True, "baseline_result": 1.0},
+        "bim_ifc_context": {"enabled": True, "ifc_entities": ["IfcProject"]},
+        "incremental_fingerprint": "abc123",
         "visual_specs": {"enabled": True},
         "fail_fast_hooks": {"enabled": True},
         "response_assertions": ["must_have_action", "must_have_parameter", "must_have_checker"],

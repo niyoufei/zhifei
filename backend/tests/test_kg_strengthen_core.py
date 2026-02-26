@@ -97,6 +97,20 @@ def test_strengthen_file_repairs_core_fields(tmp_path: Path) -> None:
         assert node["authority_resolution"]["selected_source_hierarchy"] == node["source_hierarchy"]
         assert int(node.get("source_hierarchy_weight") or 0) >= 1
         assert int(node.get("authority_rank") or 0) >= 1
+        assert isinstance(node.get("standard_validity_timeline"), dict)
+        assert isinstance(node["standard_validity_timeline"].get("records"), list)
+        assert isinstance(node.get("regional_policy_layers"), dict)
+        assert isinstance(node["regional_policy_layers"].get("layers"), list)
+        assert isinstance(node.get("unit_dimension_model"), dict)
+        assert isinstance(node["unit_dimension_model"].get("parameters"), list)
+        assert isinstance(node.get("evidence_anchors"), list) and node["evidence_anchors"]
+        assert isinstance(node.get("cross_discipline_constraints"), dict)
+        assert isinstance(node.get("approval_workflow"), dict)
+        assert isinstance(node.get("formula_sensitivity"), dict)
+        assert isinstance(node.get("bim_ifc_context"), dict)
+        assert isinstance(node["bim_ifc_context"].get("ifc_entities"), list)
+        assert isinstance(node.get("retrieval_benchmark"), dict)
+        assert str(node.get("incremental_fingerprint") or "").strip()
 
 
 def test_strengthen_file_source_hierarchy_mixed(tmp_path: Path) -> None:
