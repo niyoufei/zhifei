@@ -583,12 +583,14 @@ _apply_pending_widget_updates()
 st.title("施组专家系统")
 st.caption("Gemini 大脑 + 行业知识图谱 | 评审标准目录驱动 | A/B/C差异化编制")
 
-with st.sidebar:
-    st.header("连接配置")
-    base_url = st.text_input("后端地址", value=os.environ.get("ZF_BACKEND_BASE_URL", "http://127.0.0.1:8010"))
-    actions_key = st.text_input("Actions Key", value=os.environ.get("ZF_ACTIONS_KEY", ""), type="password")
-    poll_sec = st.number_input("轮询间隔(秒)", min_value=1.0, max_value=20.0, value=2.0, step=1.0)
-    st.session_state["auto_refresh"] = st.checkbox("实时轮询", value=bool(st.session_state.get("auto_refresh", True)))
+# 连接配置改为系统内置，不在前端显示。
+base_url = str(os.environ.get("ZF_BACKEND_BASE_URL", "http://127.0.0.1:8010")).strip() or "http://127.0.0.1:8010"
+actions_key = str(os.environ.get("ZF_ACTIONS_KEY", "")).strip()
+try:
+    poll_sec = float(os.environ.get("ZF_POLL_SEC", "2"))
+except Exception:
+    poll_sec = 2.0
+st.session_state["auto_refresh"] = bool(st.session_state.get("auto_refresh", True))
 
 status_col, stop_col = st.columns([4, 1])
 with status_col:
@@ -627,20 +629,6 @@ with col_left:
 
 with col_right:
     st.subheader("参数配置区")
-    template_keys = [x for x in PROJECT_TYPES if x in TEMPLATE_LIBRARY]
-    if not template_keys:
-        template_keys = list(TEMPLATE_LIBRARY.keys())
-    st.selectbox(
-        "方案模板库",
-        options=template_keys,
-        format_func=lambda x: TEMPLATE_LIBRARY.get(x, {}).get("label", x),
-        key="template_key",
-    )
-    st.caption(TEMPLATE_LIBRARY.get(st.session_state.get("template_key"), {}).get("desc", ""))
-    if st.button("应用模板", use_container_width=True):
-        _apply_template(st.session_state.get("template_key") or (PROJECT_TYPES[0] if PROJECT_TYPES else ""))
-        st.rerun()
-
     st.selectbox("项目类型", options=PROJECT_TYPES, key="project_type")
     st.text_input("项目主题", key="topic_text")
     st.text_input("项目ID（自动取招标文件项目编号）", key="project_id_text")
