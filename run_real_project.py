@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -13,18 +14,38 @@ from backend.zhifei_autoplan.v2.kg_paths import resolve_default_kg_root
 from backend.zhifei_autoplan.v2.multi_agent_pipeline import MultiAgentDocPipeline
 
 BOQ_FILE_EXTENSIONS = {".csv", ".xlsx", ".xls", ".pdf"}
+NUMERIC_LIMITS = {
+    "quantity": 1.0e8,
+    "unit_price": 1.0e7,
+    "total_price": 1.0e12,
+}
 
 
 def _to_float(value: Any) -> float | None:
     if value is None:
         return None
-    text = re.sub(r"[^\d.\-]+", "", str(value))
-    if not text:
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    text = str(value).strip().replace(",", "")
+    m = re.search(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", text)
+    if not m:
         return None
     try:
-        return float(text)
+        return float(m.group(0))
     except Exception:
         return None
+
+
+def _sanitize_numeric(value: float | None, field: str) -> float | None:
+    if value is None:
+        return None
+    limit = float(NUMERIC_LIMITS.get(field) or 0.0)
+    if limit > 0 and abs(value) > limit:
+        return None
+    return value
 
 
 def _pick_value(row: Dict[str, Any], aliases: List[str]) -> Any:
@@ -73,13 +94,19 @@ def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dic
     name = str(raw.get("name") or "").strip()
     if not name:
         return {}
+    quantity = _sanitize_numeric(_to_float(raw.get("quantity")), "quantity")
+    unit_price = _sanitize_numeric(_to_float(raw.get("unit_price")), "unit_price")
+    total_price = _sanitize_numeric(_to_float(raw.get("total_price")), "total_price")
+    if total_price is None and quantity is not None and unit_price is not None:
+        total_price = _sanitize_numeric(quantity * unit_price, "total_price")
+
     return {
         "boq_code": str(raw.get("boq_code") or raw.get("code") or f"AUTO-{seq}"),
         "name": name,
-        "quantity": _to_float(raw.get("quantity")),
+        "quantity": quantity,
         "unit": str(raw.get("unit") or "").strip() or None,
-        "unit_price": _to_float(raw.get("unit_price")),
-        "total_price": _to_float(raw.get("total_price")),
+        "unit_price": unit_price,
+        "total_price": total_price,
         "source_file": str(source_file),
     }
 
@@ -264,6 +291,19 @@ async def _run(args: argparse.Namespace) -> int:
         enable_docx_export=bool(args.docx_export),
         docx_output_path=docx_out_path,
     )
+    if output_path.exists():
+        try:
+            persisted = json.loads(output_path.read_text(encoding="utf-8"))
+        except Exception:
+            persisted = {}
+        if isinstance(persisted, dict):
+            persisted["boq_ingestion"] = {
+                "requested_path": str(boq_path),
+                "source_files": boq_payload.get("source_files") or [],
+                "parse_errors": boq_payload.get("parse_errors") or [],
+                "stats": boq_payload.get("stats") or {},
+            }
+            output_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
 
     audit_agent = (result.get("agents") or {}).get("audit_agent") or {}
     score_audit = audit_agent.get("result") or {}
