@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-26T13:31:32",
+    "updated_at": "2026-02-26T15:14:01",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -433,7 +433,29 @@
           "professional_domain_aliases": [
             "earthwork",
             "management"
-          ]
+          ],
+          "reference_standard_codes": [
+            "GB 50300-2013",
+            "JGJ 59-2011",
+            "GB/T 50326-2017",
+            "GB 50204-2015"
+          ],
+          "reference_standard_count": 5,
+          "reference_standard_primary": "GB 50300-2013 建筑工程施工质量验收统一标准",
+          "source_hierarchy_weight": 5,
+          "authority_rank": 1,
+          "authority_resolution": {
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "selected_source_hierarchy": "答疑文件",
+            "selected_weight": 5,
+            "selected_rank": 1,
+            "candidates": [
+              "答疑文件",
+              "国标",
+              "行标",
+              "企标"
+            ]
+          }
         },
         {
           "node_id": "ZF-KG-47-Scaffolding-Formwork-M1-质量",
@@ -893,7 +915,29 @@
           "professional_domain_aliases": [
             "management",
             "earthwork"
-          ]
+          ],
+          "reference_standard_codes": [
+            "GB 50300-2013",
+            "JGJ 59-2011",
+            "GB/T 50326-2017",
+            "GB 50204-2015"
+          ],
+          "reference_standard_count": 5,
+          "reference_standard_primary": "GB 50300-2013 建筑工程施工质量验收统一标准",
+          "source_hierarchy_weight": 5,
+          "authority_rank": 1,
+          "authority_resolution": {
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "selected_source_hierarchy": "答疑文件",
+            "selected_weight": 5,
+            "selected_rank": 1,
+            "candidates": [
+              "答疑文件",
+              "国标",
+              "行标",
+              "企标"
+            ]
+          }
         },
         {
           "node_id": "ZF-KG-47-Scaffolding-Formwork-M1-进度",
@@ -1354,7 +1398,29 @@
           "professional_domain_aliases": [
             "management",
             "earthwork"
-          ]
+          ],
+          "reference_standard_codes": [
+            "GB 50300-2013",
+            "JGJ 59-2011",
+            "GB/T 50326-2017",
+            "GB 50210-2018"
+          ],
+          "reference_standard_count": 5,
+          "reference_standard_primary": "GB 50300-2013 建筑工程施工质量验收统一标准",
+          "source_hierarchy_weight": 5,
+          "authority_rank": 1,
+          "authority_resolution": {
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "selected_source_hierarchy": "答疑文件",
+            "selected_weight": 5,
+            "selected_rank": 1,
+            "candidates": [
+              "答疑文件",
+              "国标",
+              "行标",
+              "企标"
+            ]
+          }
         },
         {
           "node_id": "ZF-KG-47-Scaffolding-Formwork-M1-环保",
@@ -1815,7 +1881,30 @@
           "professional_domain_aliases": [
             "management",
             "earthwork"
-          ]
+          ],
+          "reference_standard_codes": [
+            "GB 50300-2013",
+            "JGJ 59-2011",
+            "GB/T 50326-2017",
+            "GB/T 50640-2010",
+            "GB 50210-2018"
+          ],
+          "reference_standard_count": 6,
+          "reference_standard_primary": "GB 50300-2013 建筑工程施工质量验收统一标准",
+          "source_hierarchy_weight": 5,
+          "authority_rank": 1,
+          "authority_resolution": {
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "selected_source_hierarchy": "答疑文件",
+            "selected_weight": 5,
+            "selected_rank": 1,
+            "candidates": [
+              "答疑文件",
+              "国标",
+              "行标",
+              "企标"
+            ]
+          }
         },
         {
           "node_id": "ZF-KG-47-Scaffolding-Formwork-M2-PROC-MAP",
@@ -2416,7 +2505,28 @@
             "earthwork",
             "mep",
             "management"
-          ]
+          ],
+          "reference_standard_codes": [
+            "GB/T 50326-2017",
+            "GB 50202-2018",
+            "GB 50300-2013",
+            "GB 50204-2015"
+          ],
+          "reference_standard_count": 5,
+          "reference_standard_primary": "GB/T 50326-2017 建设工程项目管理规范",
+          "source_hierarchy_weight": 5,
+          "authority_rank": 1,
+          "authority_resolution": {
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "selected_source_hierarchy": "答疑文件",
+            "selected_weight": 5,
+            "selected_rank": 1,
+            "candidates": [
+              "答疑文件",
+              "国标",
+              "企标"
+            ]
+          }
         },
         {
           "node_id": "ZF-KG-47-Scaffolding-Formwork-FORM-PROG",
@@ -2847,6 +2957,25 @@
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
             "template": "执行进度控制，参数阈值=95%，检查频次=2次/班，由施工员复核。"
+          },
+          "reference_standard_codes": [
+            "GB/T 50326-2017",
+            "GB 50210-2018"
+          ],
+          "reference_standard_count": 3,
+          "reference_standard_primary": "GB/T 50326-2017 建设工程项目管理规范",
+          "source_hierarchy_weight": 5,
+          "authority_rank": 1,
+          "authority_resolution": {
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "selected_source_hierarchy": "答疑文件",
+            "selected_weight": 5,
+            "selected_rank": 1,
+            "candidates": [
+              "答疑文件",
+              "国标",
+              "企标"
+            ]
           }
         },
         {
@@ -3270,6 +3399,25 @@
             "enabled": true,
             "strategy": "targeted_dimension_rewrite",
             "template": "执行重难点控制，参数阈值=95%，检查频次=2次/班，由总工复核。"
+          },
+          "reference_standard_codes": [
+            "GB/T 50326-2017",
+            "GB 50210-2018"
+          ],
+          "reference_standard_count": 3,
+          "reference_standard_primary": "GB/T 50326-2017 建设工程项目管理规范",
+          "source_hierarchy_weight": 5,
+          "authority_rank": 1,
+          "authority_resolution": {
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "selected_source_hierarchy": "答疑文件",
+            "selected_weight": 5,
+            "selected_rank": 1,
+            "candidates": [
+              "答疑文件",
+              "国标",
+              "企标"
+            ]
           }
         }
       ]
@@ -3706,7 +3854,29 @@
           "professional_domain_aliases": [
             "management",
             "earthwork"
-          ]
+          ],
+          "reference_standard_codes": [
+            "GB 50300-2013",
+            "JGJ 59-2011",
+            "GB/T 50326-2017",
+            "GB 50210-2018"
+          ],
+          "reference_standard_count": 5,
+          "reference_standard_primary": "GB 50300-2013 建筑工程施工质量验收统一标准",
+          "source_hierarchy_weight": 5,
+          "authority_rank": 1,
+          "authority_resolution": {
+            "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
+            "selected_source_hierarchy": "答疑文件",
+            "selected_weight": 5,
+            "selected_rank": 1,
+            "candidates": [
+              "答疑文件",
+              "国标",
+              "行标",
+              "企标"
+            ]
+          }
         }
       ]
     }

@@ -17,6 +17,11 @@ DEFAULT_REPORT_MD = Path("build/KG_Strengthening_Report.md")
 
 AUTHORITY_CHAIN = ["答疑文件", "设计图纸", "国标", "行标", "企标"]
 VALID_SOURCE_HIERARCHY = set(AUTHORITY_CHAIN)
+AUTHORITY_RULE_TEXT = "答疑文件 > 设计图纸 > 国标 > 行标 > 企标"
+AUTHORITY_WEIGHTS = {name: len(AUTHORITY_CHAIN) - idx for idx, name in enumerate(AUTHORITY_CHAIN)}
+STANDARD_CODE_RE = re.compile(
+    r"(?i)\b(?:GB/T|GB|JGJ/T|JGJ|SL|TB|CJJ|JTG/T|JTG|DL/T|DL|SY/T|SY|NY/T|NY|Q/[A-Z0-9.\-]+|T/[A-Z0-9.\-]+)\s*[0-9A-Z./\-]+"
+)
 
 VAGUE_WORDS = ["加强", "提高", "注意", "确保", "严格"]
 
@@ -632,6 +637,16 @@ def _reference_tier(ref: str) -> str:
     return ""
 
 
+def _extract_standard_code(ref: str) -> str:
+    text = str(ref or "").strip()
+    if not text:
+        return ""
+    match = STANDARD_CODE_RE.search(text)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", str(match.group(0) or "").strip())
+
+
 def _is_answer_related(node: Dict[str, Any], dim: str, merged_text: str, node_domain: str, file_stem: str) -> bool:
     if dim == "扣分点" and any(k in merged_text for k in ("扣分", "废标", "否决", "处罚", "失分", "一票否决")):
         return True
@@ -1186,6 +1201,53 @@ def _ensure_standards(node: Dict[str, Any], node_domain: str, dim: str, source_h
 
     if node.get("reference_standard") != refs:
         node["reference_standard"] = refs
+        changed += 1
+
+    code_values: List[str] = []
+    for ref in refs:
+        code = _extract_standard_code(ref)
+        if code:
+            code_values.append(code)
+    standard_codes = _unique_keep_order(code_values)
+    if node.get("reference_standard_codes") != standard_codes:
+        node["reference_standard_codes"] = standard_codes
+        changed += 1
+
+    if int(node.get("reference_standard_count") or 0) != len(refs):
+        node["reference_standard_count"] = len(refs)
+        changed += 1
+
+    primary_ref = refs[0] if refs else ""
+    if str(node.get("reference_standard_primary") or "") != str(primary_ref):
+        node["reference_standard_primary"] = primary_ref
+        changed += 1
+
+    source_weight = int(AUTHORITY_WEIGHTS.get(source_hierarchy, 0))
+    if int(node.get("source_hierarchy_weight") or 0) != source_weight:
+        node["source_hierarchy_weight"] = source_weight
+        changed += 1
+
+    source_rank = AUTHORITY_CHAIN.index(source_hierarchy) + 1 if source_hierarchy in AUTHORITY_CHAIN else len(AUTHORITY_CHAIN) + 1
+    if int(node.get("authority_rank") or 0) != source_rank:
+        node["authority_rank"] = source_rank
+        changed += 1
+
+    candidate_values = [source_hierarchy]
+    for ref in refs:
+        tier = _reference_tier(ref)
+        if tier and tier not in candidate_values:
+            candidate_values.append(tier)
+
+    authority_resolution = node.get("authority_resolution")
+    desired_authority_resolution = {
+        "rule": AUTHORITY_RULE_TEXT,
+        "selected_source_hierarchy": source_hierarchy,
+        "selected_weight": source_weight,
+        "selected_rank": source_rank,
+        "candidates": candidate_values,
+    }
+    if authority_resolution != desired_authority_resolution:
+        node["authority_resolution"] = desired_authority_resolution
         changed += 1
 
     if "is_auto_generated" not in node:

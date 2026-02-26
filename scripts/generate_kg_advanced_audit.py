@@ -15,6 +15,7 @@ DEFAULT_OUT_JSON = Path("build/KG_Advanced_Audit_latest.json")
 
 VIRTUAL_RELATION_TARGETS = {"通用前置条件", "关键风险事件", "不兼容工艺方案"}
 REQUIRED_ASSERTIONS = {"must_have_action", "must_have_parameter", "must_have_checker"}
+AUTHORITY_CHAIN = ["答疑文件", "设计图纸", "国标", "行标", "企标"]
 
 
 def _iter_nodes(raw: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
@@ -68,6 +69,9 @@ def _check_file(path: Path) -> Dict[str, Any]:
         "missing_visual_specs": 0,
         "missing_failfast_enabled": 0,
         "missing_assertions": 0,
+        "missing_authority_resolution": 0,
+        "missing_reference_standard_codes": 0,
+        "invalid_authority_rank": 0,
     }
     samples: Dict[str, List[Dict[str, Any]]] = {k: [] for k in issues}
 
@@ -106,6 +110,11 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_reference_standard"] += 1
             if len(samples["missing_reference_standard"]) < 8:
                 samples["missing_reference_standard"].append({"node_id": node_id})
+        codes = node.get("reference_standard_codes")
+        if not _is_non_empty_list(codes):
+            issues["missing_reference_standard_codes"] += 1
+            if len(samples["missing_reference_standard_codes"]) < 8:
+                samples["missing_reference_standard_codes"].append({"node_id": node_id})
 
         content = node.get("content")
         env = content.get("environment_sensing") if isinstance(content, dict) else None
@@ -154,6 +163,17 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_assertions"] += 1
             if len(samples["missing_assertions"]) < 8:
                 samples["missing_assertions"].append({"node_id": node_id})
+
+        authority = node.get("authority_resolution")
+        if not isinstance(authority, dict) or not str(authority.get("selected_source_hierarchy") or "").strip():
+            issues["missing_authority_resolution"] += 1
+            if len(samples["missing_authority_resolution"]) < 8:
+                samples["missing_authority_resolution"].append({"node_id": node_id})
+        rank = int(node.get("authority_rank") or 0)
+        if rank < 1 or rank > len(AUTHORITY_CHAIN):
+            issues["invalid_authority_rank"] += 1
+            if len(samples["invalid_authority_rank"]) < 8:
+                samples["invalid_authority_rank"].append({"node_id": node_id, "authority_rank": rank})
 
     total_issues = int(sum(issues.values()))
     ready = total_issues == 0

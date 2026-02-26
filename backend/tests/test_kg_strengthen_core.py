@@ -91,6 +91,12 @@ def test_strengthen_file_repairs_core_fields(tmp_path: Path) -> None:
         expr = str(node.get("formula_expression") or "").strip()
         assert expr
         assert sorted(node.get("formula_variables") or []) == _formula_vars(expr)
+        assert isinstance(node.get("reference_standard_codes"), list)
+        assert int(node.get("reference_standard_count") or 0) >= 1
+        assert isinstance(node.get("authority_resolution"), dict)
+        assert node["authority_resolution"]["selected_source_hierarchy"] == node["source_hierarchy"]
+        assert int(node.get("source_hierarchy_weight") or 0) >= 1
+        assert int(node.get("authority_rank") or 0) >= 1
 
 
 def test_strengthen_file_source_hierarchy_mixed(tmp_path: Path) -> None:
@@ -146,6 +152,8 @@ def test_strengthen_file_source_hierarchy_mixed(tmp_path: Path) -> None:
     assert by_id["A2"]["source_hierarchy"] == "行标"
     assert by_id["A3"]["source_hierarchy"] == "国标"
     assert by_id["A4"]["source_hierarchy"] == "设计图纸"
+    assert by_id["A1"]["source_hierarchy_weight"] > by_id["A4"]["source_hierarchy_weight"] > by_id["A3"]["source_hierarchy_weight"] > by_id["A2"]["source_hierarchy_weight"]
+    assert by_id["A1"]["authority_rank"] < by_id["A4"]["authority_rank"] < by_id["A3"]["authority_rank"] < by_id["A2"]["authority_rank"]
 
 
 def test_strengthen_file_is_idempotent_on_second_run(tmp_path: Path) -> None:
