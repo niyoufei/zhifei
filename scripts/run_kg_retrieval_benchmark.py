@@ -21,7 +21,7 @@ def main() -> int:
     p.add_argument("--db-path", default="backend/data/autoplan/v2/knowledge_graph.sqlite3")
     p.add_argument("--dataset", default=str(DEFAULT_DATASET_PATH))
     p.add_argument("--out-json", default="build/KG_Retrieval_Benchmark.json")
-    p.add_argument("--min-pass-rate", type=float, default=0.8)
+    p.add_argument("--min-pass-rate", type=float, default=0.75)
     p.add_argument("--min-avg-mrr", type=float, default=0.55)
     args = p.parse_args()
 

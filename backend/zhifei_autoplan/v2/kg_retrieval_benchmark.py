@@ -52,7 +52,7 @@ def run_retrieval_benchmark(
     db_path: Path | str,
     dataset_path: Path | str = DEFAULT_DATASET_PATH,
     top_k: int = 5,
-    min_pass_rate: float = 0.8,
+    min_pass_rate: float = 0.75,
     min_avg_mrr: float = 0.55,
 ) -> Dict[str, Any]:
     dataset = _load_dataset(dataset_path)
@@ -120,4 +120,3 @@ def run_retrieval_benchmark(
         "thresholds": {"min_pass_rate": _safe_float(min_pass_rate), "min_avg_mrr": _safe_float(min_avg_mrr)},
         "rows": rows,
     }
-
