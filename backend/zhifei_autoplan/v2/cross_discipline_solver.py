@@ -46,10 +46,18 @@ def solve_cross_discipline_constraints(
     cpm_duration = int(cpm.get("project_duration_days") or 0)
 
     conflicts: List[Dict[str, Any]] = []
+    advisories: List[Dict[str, Any]] = []
     recommendations: List[str] = []
     elevations: List[Dict[str, Any]] = []
     durations: List[Dict[str, Any]] = []
     resource_sum: Dict[str, int] = {}
+    domain_set = {
+        str(sec.get("specialist_domain") or "general")
+        for sec in sections
+        if isinstance(sec, dict)
+    }
+    missing_interfaces: List[Dict[str, Any]] = []
+    interface_conflicts: List[Dict[str, Any]] = []
 
     for sec in sections:
         if not isinstance(sec, dict):
@@ -64,6 +72,49 @@ def solve_cross_discipline_constraints(
         for rec in _parse_resources(text):
             key = str(rec.get("unit") or "")
             resource_sum[key] = int(resource_sum.get(key) or 0) + int(rec.get("amount") or 0)
+
+        trace = sec.get("source_trace") if isinstance(sec.get("source_trace"), dict) else {}
+        contract = (
+            trace.get("cross_discipline_interface_contract")
+            if isinstance(trace.get("cross_discipline_interface_contract"), dict)
+            else {}
+        )
+        if not contract and isinstance(sec.get("graph_hit"), dict):
+            gh = sec.get("graph_hit") if isinstance(sec.get("graph_hit"), dict) else {}
+            contract = (
+                gh.get("cross_discipline_interface_contract")
+                if isinstance(gh.get("cross_discipline_interface_contract"), dict)
+                else {}
+            )
+        if isinstance(contract, dict):
+            for row in contract.get("interfaces") or []:
+                if not isinstance(row, dict):
+                    continue
+                target = str(row.get("with_domain") or "").strip()
+                if target and target != "general" and target != domain and target not in domain_set:
+                    missing_interfaces.append(
+                        {
+                            "title": title,
+                            "domain": domain,
+                            "with_domain": target,
+                            "severity": str(row.get("severity") or "medium"),
+                        }
+                    )
+            for edge in contract.get("conflict_graph") or []:
+                if not isinstance(edge, dict):
+                    continue
+                status = str(edge.get("status") or "").strip().lower()
+                if status in {"conflict", "open"}:
+                    interface_conflicts.append(
+                        {
+                            "title": title,
+                            "domain": domain,
+                            "from_domain": str(edge.get("from_domain") or domain),
+                            "to_domain": str(edge.get("to_domain") or ""),
+                            "conflict_type": str(edge.get("conflict_type") or "interface_conflict"),
+                            "status": status,
+                        }
+                    )
 
     if elevations:
         uniq = sorted({round(float(item["value"]), 4) for item in elevations})
@@ -106,6 +157,45 @@ def solve_cross_discipline_constraints(
             )
             recommendations.append("对峰值资源执行错峰与分仓调度，避免同窗口资源双占。")
 
+    if interface_conflicts:
+        conflicts.append(
+            {
+                "type": "interface_contract_conflict",
+                "values": interface_conflicts[:20],
+                "refs": interface_conflicts[:20],
+                "severity": "high",
+            }
+        )
+        recommendations.append("根据接口冲突图谱优先消除open/conflict状态后再放行。")
+
+    if missing_interfaces:
+        hard_missing = [
+            row
+            for row in missing_interfaces
+            if str(row.get("severity") or "").strip().lower() in {"high", "critical"}
+        ]
+        soft_missing = [row for row in missing_interfaces if row not in hard_missing]
+        if hard_missing:
+            conflicts.append(
+                {
+                    "type": "interface_domain_missing",
+                    "values": hard_missing[:20],
+                    "refs": hard_missing[:20],
+                    "severity": "high",
+                }
+            )
+            recommendations.append("补齐高优先级跨专业接口章节或将接口状态标记为已豁免并给出依据。")
+        if soft_missing:
+            advisories.append(
+                {
+                    "type": "interface_domain_missing_advisory",
+                    "values": soft_missing[:20],
+                    "refs": soft_missing[:20],
+                    "severity": "medium",
+                }
+            )
+            recommendations.append("中等级接口域可在下一轮章节扩展中补齐。")
+
     plan = chapter_response_plan if isinstance(chapter_response_plan, dict) else {}
     missing_plan = [
         x for x in (plan.get("chapters") or []) if isinstance(x, dict) and not bool(x.get("coverage_ok"))
@@ -125,7 +215,8 @@ def solve_cross_discipline_constraints(
         "ok": len(conflicts) == 0,
         "conflict_count": len(conflicts),
         "conflicts": conflicts,
+        "advisories": advisories,
+        "advisory_count": len(advisories),
         "recommendations": recommendations,
         "cpm_duration_days": cpm_duration,
     }
-

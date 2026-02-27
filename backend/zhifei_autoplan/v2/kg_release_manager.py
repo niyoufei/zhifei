@@ -159,6 +159,141 @@ def rollback_release_snapshot(
     }
 
 
+def _load_manifest(snapshot_dir: Path) -> Dict[str, Any]:
+    manifest_path = snapshot_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"manifest not found in snapshot: {manifest_path}")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid manifest: {manifest_path}")
+    return payload
+
+
+def _iter_manifest_files(manifest: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    rows = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("file") or "").strip()
+        if not name:
+            continue
+        out[name] = row
+    return out
+
+
+def _snapshot_node_stats(snapshot_dir: Path, files: List[str]) -> Dict[str, Any]:
+    authority_dist: Dict[str, int] = {}
+    stats = {
+        "nodes_total": 0,
+        "auto_generated_nodes": 0,
+        "formula_nodes": 0,
+        "evidence_pass_nodes": 0,
+        "authority_distribution": authority_dist,
+    }
+    for name in files:
+        path = snapshot_dir / name
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        kg = payload.get("knowledge_database")
+        if not isinstance(kg, dict):
+            continue
+        for sec in kg.values():
+            if not isinstance(sec, dict):
+                continue
+            nodes = sec.get("nodes")
+            if not isinstance(nodes, list):
+                continue
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                stats["nodes_total"] += 1
+                if bool(node.get("is_auto_generated")):
+                    stats["auto_generated_nodes"] += 1
+                if str(node.get("node_type") or "").strip() == "FormulaNode":
+                    stats["formula_nodes"] += 1
+                evidence = node.get("evidence_completeness")
+                if isinstance(evidence, dict) and float(evidence.get("completeness_ratio") or 0.0) >= 0.8:
+                    stats["evidence_pass_nodes"] += 1
+                hierarchy = str(node.get("source_hierarchy") or "未知").strip() or "未知"
+                authority_dist[hierarchy] = int(authority_dist.get(hierarchy) or 0) + 1
+    return stats
+
+
+def compare_release_snapshots(
+    *,
+    release_root: Path | str = DEFAULT_RELEASE_ROOT,
+    base_release_id: str,
+    target_release_id: str,
+) -> Dict[str, Any]:
+    rel_root = Path(release_root).expanduser().resolve()
+    base_dir = rel_root / str(base_release_id)
+    target_dir = rel_root / str(target_release_id)
+    if not base_dir.exists():
+        raise FileNotFoundError(f"base release snapshot not found: {base_dir}")
+    if not target_dir.exists():
+        raise FileNotFoundError(f"target release snapshot not found: {target_dir}")
+
+    base_manifest = _load_manifest(base_dir)
+    target_manifest = _load_manifest(target_dir)
+    base_files = _iter_manifest_files(base_manifest)
+    target_files = _iter_manifest_files(target_manifest)
+
+    base_names = set(base_files.keys())
+    target_names = set(target_files.keys())
+    added = sorted(target_names - base_names)
+    removed = sorted(base_names - target_names)
+    common = sorted(base_names & target_names)
+    changed: List[Dict[str, Any]] = []
+    unchanged = 0
+    for name in common:
+        a = str((base_files.get(name) or {}).get("sha256") or "")
+        b = str((target_files.get(name) or {}).get("sha256") or "")
+        if a and b and a != b:
+            changed.append({"file": name, "base_sha256": a, "target_sha256": b})
+        else:
+            unchanged += 1
+
+    base_stats = _snapshot_node_stats(base_dir, sorted(base_names))
+    target_stats = _snapshot_node_stats(target_dir, sorted(target_names))
+    authority_delta: Dict[str, int] = {}
+    for k in sorted(set(base_stats["authority_distribution"].keys()) | set(target_stats["authority_distribution"].keys())):
+        authority_delta[k] = int(target_stats["authority_distribution"].get(k, 0)) - int(
+            base_stats["authority_distribution"].get(k, 0)
+        )
+
+    return {
+        "ok": True,
+        "release_root": str(rel_root),
+        "base_release_id": str(base_release_id),
+        "target_release_id": str(target_release_id),
+        "files": {
+            "base_total": len(base_names),
+            "target_total": len(target_names),
+            "added": added,
+            "removed": removed,
+            "changed": changed,
+            "changed_count": len(changed),
+            "unchanged_count": unchanged,
+        },
+        "node_stats": {
+            "base": base_stats,
+            "target": target_stats,
+            "delta": {
+                "nodes_total": int(target_stats["nodes_total"]) - int(base_stats["nodes_total"]),
+                "auto_generated_nodes": int(target_stats["auto_generated_nodes"]) - int(base_stats["auto_generated_nodes"]),
+                "formula_nodes": int(target_stats["formula_nodes"]) - int(base_stats["formula_nodes"]),
+                "evidence_pass_nodes": int(target_stats["evidence_pass_nodes"]) - int(base_stats["evidence_pass_nodes"]),
+                "authority_distribution": authority_delta,
+            },
+        },
+    }
+
+
 def _state_path(release_root: Path | str = DEFAULT_RELEASE_ROOT) -> Path:
     rel_root = Path(release_root).expanduser().resolve()
     rel_root.mkdir(parents=True, exist_ok=True)

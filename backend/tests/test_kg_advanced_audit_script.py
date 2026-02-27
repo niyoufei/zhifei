@@ -64,6 +64,19 @@ def _base_node(node_id: str) -> dict:
             "parameters": [{"parameter": "a", "unit": "次/班", "dimension": "frequency"}],
             "consistency_check": {"required": True, "status": "pass"},
         },
+        "numeric_sources": [
+            {
+                "parameter": "a",
+                "value": "2",
+                "unit": "次/班",
+                "source_hierarchy": "国标",
+                "effective_date": "2017-01-01",
+                "clause_ref": "第1条",
+                "clause_path": "GB/T 50326-2017/第1条/S1.0/P1",
+                "anchor_hash": "abc123ef45678900",
+                "evidence_anchor_id": "EA-TEST0001",
+            }
+        ],
         "evidence_anchors": [{"anchor_id": "EA-TEST0001", "parameter": "a"}],
         "cross_discipline_constraints": {"enabled": True},
         "process_parameter_pack": {"enabled": True, "steps": [{"seq": 1, "parameter": "a"}]},
@@ -80,12 +93,47 @@ def _base_node(node_id: str) -> dict:
                 }
             ],
         },
-        "cross_discipline_interface_contract": {"enabled": True, "interfaces": [{"with_domain": "mep"}]},
+        "cross_discipline_interface_contract": {
+            "enabled": True,
+            "interfaces": [{"with_domain": "mep"}],
+            "conflict_graph": [{"from_domain": "building", "to_domain": "mep", "status": "resolved"}],
+        },
         "optimization_objectives_ext": {"enabled": True, "objectives": {"duration": 0.4, "risk": 0.6}},
         "online_learning_profile": {"enabled": True, "strategy": "ema_feedback_v1"},
         "retrieval_benchmark": {"quality_score": 88, "minimum_quality_score": 70},
         "approval_workflow": {"required": True, "status": "approved"},
         "formula_sensitivity": {"enabled": True, "baseline_result": 1.0},
+        "formula_safety_profile": {"enabled": True, "safe": True, "warnings": []},
+        "evidence_completeness": {
+            "enabled": True,
+            "completeness_ratio": 1.0,
+            "has_clause_anchor": True,
+            "effective_date": "2017-01-01",
+            "source_hierarchy": "国标",
+        },
+        "entity_alignment": {
+            "enabled": True,
+            "entity_master_key": "EMK-TEST001",
+            "entity_type": "engineering_object",
+            "aliases": ["测试节点", "N1"],
+        },
+        "entity_master_key": "EMK-TEST001",
+        "regional_standard_timeline": {
+            "enabled": True,
+            "default_region": "CN",
+            "records": [{"region_code": "CN", "policy_code": "GB/T 50326-2017", "status": "active"}],
+        },
+        "abnormal_scenario_playbook": {
+            "enabled": True,
+            "domain": "building",
+            "dimension": "质量",
+            "items": [{"scenario": "降雨中断", "response_sla_hours": 4}],
+        },
+        "deduction_counterexample_library": {
+            "enabled": True,
+            "dimension": "质量",
+            "items": [{"counterexample_id": "质量-CE-1", "issue": "缺少复检"}],
+        },
         "bim_ifc_context": {"enabled": True, "ifc_entities": ["IfcProject"]},
         "incremental_fingerprint": "abc123",
         "visual_specs": {"enabled": True},
@@ -120,3 +168,34 @@ def test_advanced_audit_passes_clean_file(tmp_path: Path) -> None:
     row = mod._check_file(kg_file)
     assert row["ready"] is True
     assert row["total_issues"] == 0
+
+
+def test_advanced_audit_detects_p0_profile_gaps(tmp_path: Path) -> None:
+    mod = _load_module()
+    kg_file = tmp_path / "ZF-KG-03-Test.json"
+    node = _base_node("N1")
+    node.pop("entity_alignment", None)
+    node["entity_master_key"] = ""
+    node["formula_safety_profile"] = {"enabled": True, "safe": False}
+    node["evidence_completeness"] = {
+        "enabled": True,
+        "completeness_ratio": 0.45,
+        "has_clause_anchor": False,
+        "effective_date": "",
+        "source_hierarchy": "",
+    }
+    node["cross_discipline_interface_contract"] = {
+        "enabled": True,
+        "interfaces": [{"with_domain": "mep"}],
+        "conflict_graph": [{"from_domain": "building", "to_domain": "mep", "status": "open"}],
+    }
+    kg_file.write_text(json.dumps({"knowledge_database": {"sec": {"nodes": [node]}}}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    row = mod._check_file(kg_file)
+    assert row["ready"] is False
+    assert row["issues"]["missing_entity_alignment"] == 1
+    assert row["issues"]["missing_entity_master_key"] == 1
+    assert row["issues"]["unsafe_formula_safety_profile"] == 1
+    assert row["issues"]["low_evidence_completeness_ratio"] == 1
+    assert row["issues"]["missing_numeric_source_evidence"] == 1
+    assert row["issues"]["open_interface_conflict"] == 1

@@ -91,3 +91,26 @@ def test_update_feedback_memory_writes_back_to_kg_nodes(tmp_path: Path) -> None:
     assert float(profile.get("trace_coverage_avg") or 0.0) == 0.85
     assert float(profile.get("pass_rate") or 0.0) == 1.0
     assert str(profile.get("last_feedback_at") or "").strip()
+
+
+def test_update_feedback_memory_supports_review_decisions(tmp_path: Path) -> None:
+    out = tmp_path / "feedback.json"
+    payload = {
+        "intercepted": False,
+        "sentence_evidence_stats": {"trace_coverage_ratio": 0.8},
+        "sections": [{"title": "质量", "specialist_domain": "building", "content": "每班次检查2次。", "source_trace": {"node_id": "NODE-2"}}],
+        "review_decisions": [
+            {"node_id": "NODE-2", "decision": "accept", "note": "参数准确"},
+            {"node_id": "NODE-2", "decision": "modify", "corrected_values": {"inspection_frequency_per_shift": 3}},
+        ],
+    }
+    result = update_feedback_memory(result_payload=payload, output_path=out)
+    assert result["ok"] is True
+    assert int(result.get("decision_updates") or 0) == 2
+    data = json.loads(out.read_text(encoding="utf-8"))
+    node = data["nodes"]["NODE-2"]
+    assert int(node.get("accepted_count") or 0) == 1
+    assert int(node.get("modified_count") or 0) == 1
+    assert int(node.get("decision_total") or 0) == 2
+    assert str(node.get("last_decision") or "") == "modify"
+    assert int((node.get("recommended_defaults") or {}).get("inspection_frequency_per_shift") or 0) == 3

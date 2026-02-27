@@ -52,6 +52,17 @@ def _node_id_from_section(section: Dict[str, Any]) -> str:
     return str(hit.get("node_id") or "").strip()
 
 
+def _normalize_decision(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"accept", "accepted", "approve", "approved", "采纳", "通过"}:
+        return "accept"
+    if text in {"reject", "rejected", "deny", "驳回", "否决"}:
+        return "reject"
+    if text in {"modify", "modified", "edit", "更新", "修订"}:
+        return "modify"
+    return ""
+
+
 def update_feedback_memory(
     *,
     result_payload: Dict[str, Any],
@@ -125,6 +136,80 @@ def update_feedback_memory(
         node_updates += 1
         touched_node_ids.add(node_id)
 
+    decision_updates = 0
+    decisions = result_payload.get("review_decisions") if isinstance(result_payload.get("review_decisions"), list) else []
+    for row in decisions:
+        if not isinstance(row, dict):
+            continue
+        node_id = str(row.get("kg_node_ref") or row.get("node_id") or row.get("source_node_id") or "").strip()
+        if not node_id:
+            continue
+        decision = _normalize_decision(row.get("decision"))
+        if not decision:
+            continue
+        rec = nodes.get(node_id)
+        if not isinstance(rec, dict):
+            rec = {
+                "hit_count": 0,
+                "pass_count": 0,
+                "trace_coverage_sum": 0.0,
+                "trace_coverage_avg": 0.0,
+                "last_seen_at": project_ts,
+                "domains": {},
+            }
+        rec["accepted_count"] = int(rec.get("accepted_count") or 0)
+        rec["rejected_count"] = int(rec.get("rejected_count") or 0)
+        rec["modified_count"] = int(rec.get("modified_count") or 0)
+        if decision == "accept":
+            rec["accepted_count"] += 1
+        elif decision == "reject":
+            rec["rejected_count"] += 1
+        elif decision == "modify":
+            rec["modified_count"] += 1
+        rec["decision_total"] = int(rec.get("decision_total") or 0) + 1
+        rec["last_decision"] = decision
+        rec["last_decision_at"] = project_ts
+        note = str(row.get("note") or "").strip()
+        if note:
+            rec["last_decision_note"] = note[:200]
+
+        adjustments = rec.get("weight_adjustments")
+        if not isinstance(adjustments, dict):
+            adjustments = {
+                "keyword_exact_weight": 1.0,
+                "query_token_weight": 1.0,
+                "fts_rank_weight": 1.0,
+                "domain_weight": 1.0,
+                "timeline_weight": 1.0,
+                "region_weight": 1.0,
+            }
+        if decision == "accept":
+            adjustments["keyword_exact_weight"] = round(min(1.8, _safe_float(adjustments.get("keyword_exact_weight"), 1.0) + 0.03), 6)
+            adjustments["domain_weight"] = round(min(1.8, _safe_float(adjustments.get("domain_weight"), 1.0) + 0.02), 6)
+        elif decision == "reject":
+            adjustments["keyword_exact_weight"] = round(max(0.6, _safe_float(adjustments.get("keyword_exact_weight"), 1.0) - 0.05), 6)
+            adjustments["fts_rank_weight"] = round(max(0.6, _safe_float(adjustments.get("fts_rank_weight"), 1.0) - 0.03), 6)
+        else:
+            adjustments["keyword_fuzzy_weight"] = round(min(1.8, _safe_float(adjustments.get("keyword_fuzzy_weight"), 1.0) + 0.02), 6)
+            adjustments["query_token_weight"] = round(min(1.8, _safe_float(adjustments.get("query_token_weight"), 1.0) + 0.01), 6)
+        rec["weight_adjustments"] = adjustments
+
+        corrected = row.get("corrected_values")
+        if isinstance(corrected, dict) and corrected:
+            defaults = rec.get("recommended_defaults")
+            if not isinstance(defaults, dict):
+                defaults = {}
+            for k, v in corrected.items():
+                key = str(k).strip()
+                if key:
+                    defaults[key] = v
+            rec["recommended_defaults"] = defaults
+
+        rec["last_seen_at"] = project_ts
+        nodes[node_id] = rec
+        touched_node_ids.add(node_id)
+        decision_updates += 1
+
     memory["projects_total"] = int(memory.get("projects_total") or 0) + 1
     memory["updated_at"] = project_ts
     out.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -154,5 +239,6 @@ def update_feedback_memory(
         "projects_total": int(memory.get("projects_total") or 0),
         "nodes_total": len(nodes),
         "node_updates": node_updates,
+        "decision_updates": decision_updates,
         "writeback": writeback_report,
     }

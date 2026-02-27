@@ -53,6 +53,13 @@ def _is_non_empty_list(value: Any) -> bool:
     return isinstance(value, list) and any(str(x).strip() for x in value)
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def _check_file(path: Path) -> Dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
     nodes = list(_iter_nodes(raw))
@@ -92,6 +99,17 @@ def _check_file(path: Path) -> Dict[str, Any]:
         "missing_formula_sensitivity": 0,
         "missing_bim_ifc_context": 0,
         "missing_incremental_fingerprint": 0,
+        "missing_entity_alignment": 0,
+        "missing_entity_master_key": 0,
+        "missing_regional_standard_timeline": 0,
+        "missing_abnormal_scenario_playbook": 0,
+        "missing_deduction_counterexample_library": 0,
+        "missing_formula_safety_profile": 0,
+        "unsafe_formula_safety_profile": 0,
+        "missing_evidence_completeness": 0,
+        "low_evidence_completeness_ratio": 0,
+        "missing_numeric_source_evidence": 0,
+        "open_interface_conflict": 0,
     }
     samples: Dict[str, List[Dict[str, Any]]] = {k: [] for k in issues}
 
@@ -276,6 +294,19 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_interface_contract"] += 1
             if len(samples["missing_interface_contract"]) < 8:
                 samples["missing_interface_contract"].append({"node_id": node_id})
+        else:
+            unresolved_edges = []
+            for edge in interface_contract.get("conflict_graph") or []:
+                if not isinstance(edge, dict):
+                    continue
+                if str(edge.get("status") or "").strip().lower() in {"conflict", "open"}:
+                    unresolved_edges.append(edge)
+            if unresolved_edges:
+                issues["open_interface_conflict"] += len(unresolved_edges)
+                if len(samples["open_interface_conflict"]) < 8:
+                    samples["open_interface_conflict"].append(
+                        {"node_id": node_id, "unresolved": unresolved_edges[:3]}
+                    )
 
         optimization_ext = node.get("optimization_objectives_ext")
         if not isinstance(optimization_ext, dict) or not bool(optimization_ext.get("enabled")) or not isinstance(optimization_ext.get("objectives"), dict):
@@ -329,6 +360,102 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_incremental_fingerprint"] += 1
             if len(samples["missing_incremental_fingerprint"]) < 8:
                 samples["missing_incremental_fingerprint"].append({"node_id": node_id})
+
+        entity_alignment = node.get("entity_alignment")
+        if not isinstance(entity_alignment, dict) or not bool(entity_alignment.get("enabled")):
+            issues["missing_entity_alignment"] += 1
+            if len(samples["missing_entity_alignment"]) < 8:
+                samples["missing_entity_alignment"].append({"node_id": node_id})
+        master_key = str(
+            node.get("entity_master_key")
+            or ((entity_alignment or {}).get("entity_master_key") if isinstance(entity_alignment, dict) else "")
+            or ""
+        ).strip()
+        if not master_key:
+            issues["missing_entity_master_key"] += 1
+            if len(samples["missing_entity_master_key"]) < 8:
+                samples["missing_entity_master_key"].append({"node_id": node_id})
+
+        regional_timeline = node.get("regional_standard_timeline")
+        if (
+            not isinstance(regional_timeline, dict)
+            or not bool(regional_timeline.get("enabled"))
+            or not isinstance(regional_timeline.get("records"), list)
+            or not regional_timeline.get("records")
+        ):
+            issues["missing_regional_standard_timeline"] += 1
+            if len(samples["missing_regional_standard_timeline"]) < 8:
+                samples["missing_regional_standard_timeline"].append({"node_id": node_id})
+
+        abnormal_playbook = node.get("abnormal_scenario_playbook")
+        if (
+            not isinstance(abnormal_playbook, dict)
+            or not bool(abnormal_playbook.get("enabled"))
+            or not isinstance(abnormal_playbook.get("items"), list)
+            or not abnormal_playbook.get("items")
+        ):
+            issues["missing_abnormal_scenario_playbook"] += 1
+            if len(samples["missing_abnormal_scenario_playbook"]) < 8:
+                samples["missing_abnormal_scenario_playbook"].append({"node_id": node_id})
+
+        deduction_library = node.get("deduction_counterexample_library")
+        if (
+            not isinstance(deduction_library, dict)
+            or not bool(deduction_library.get("enabled"))
+            or not isinstance(deduction_library.get("items"), list)
+            or not deduction_library.get("items")
+        ):
+            issues["missing_deduction_counterexample_library"] += 1
+            if len(samples["missing_deduction_counterexample_library"]) < 8:
+                samples["missing_deduction_counterexample_library"].append({"node_id": node_id})
+
+        formula_expr = str(node.get("formula_expression") or "").strip()
+        if formula_expr:
+            safety = node.get("formula_safety_profile")
+            if (
+                not isinstance(safety, dict)
+                or not bool(safety.get("enabled"))
+                or safety.get("safe") not in (True, False)
+            ):
+                issues["missing_formula_safety_profile"] += 1
+                if len(samples["missing_formula_safety_profile"]) < 8:
+                    samples["missing_formula_safety_profile"].append({"node_id": node_id})
+            elif not bool(safety.get("safe")):
+                issues["unsafe_formula_safety_profile"] += 1
+                if len(samples["unsafe_formula_safety_profile"]) < 8:
+                    samples["unsafe_formula_safety_profile"].append({"node_id": node_id})
+
+        numeric_sources = node.get("numeric_sources")
+        if isinstance(numeric_sources, list) and numeric_sources:
+            evidence = node.get("evidence_completeness")
+            if (
+                not isinstance(evidence, dict)
+                or not bool(evidence.get("enabled"))
+                or evidence.get("completeness_ratio") in (None, "")
+            ):
+                issues["missing_evidence_completeness"] += 1
+                if len(samples["missing_evidence_completeness"]) < 8:
+                    samples["missing_evidence_completeness"].append({"node_id": node_id})
+            else:
+                ratio = _safe_float(evidence.get("completeness_ratio"), 0.0)
+                has_anchor = bool(evidence.get("has_clause_anchor"))
+                effective_date = str(evidence.get("effective_date") or "").strip()
+                source_hierarchy = str(evidence.get("source_hierarchy") or "").strip()
+                if ratio < 0.8:
+                    issues["low_evidence_completeness_ratio"] += 1
+                    if len(samples["low_evidence_completeness_ratio"]) < 8:
+                        samples["low_evidence_completeness_ratio"].append({"node_id": node_id, "ratio": ratio})
+                if not (has_anchor and effective_date and source_hierarchy):
+                    issues["missing_numeric_source_evidence"] += 1
+                    if len(samples["missing_numeric_source_evidence"]) < 8:
+                        samples["missing_numeric_source_evidence"].append(
+                            {
+                                "node_id": node_id,
+                                "has_clause_anchor": has_anchor,
+                                "effective_date": effective_date,
+                                "source_hierarchy": source_hierarchy,
+                            }
+                        )
 
     total_issues = int(sum(issues.values()))
     ready = total_issues == 0

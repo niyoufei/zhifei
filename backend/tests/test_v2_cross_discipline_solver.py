@@ -17,3 +17,24 @@ def test_cross_discipline_solver_detects_conflicts() -> None:
     assert "elevation_inconsistency" in types
     assert "chapter_response_plan_gap" in types
 
+
+def test_cross_discipline_solver_detects_interface_contract_conflicts() -> None:
+    sections = [
+        {
+            "title": "土建",
+            "specialist_domain": "building",
+            "content": "标高=10.50m，持续8天，投入40人。",
+            "graph_hit": {
+                "cross_discipline_interface_contract": {
+                    "enabled": True,
+                    "interfaces": [{"with_domain": "mep", "severity": "high"}],
+                    "conflict_graph": [{"from_domain": "building", "to_domain": "mep", "status": "open"}],
+                }
+            },
+        }
+    ]
+    out = solve_cross_discipline_constraints(sections=sections, quant_index={}, chapter_response_plan={})
+    assert out["ok"] is False
+    types = {str(x.get("type") or "") for x in (out.get("conflicts") or [])}
+    assert "interface_contract_conflict" in types
+    assert "interface_domain_missing" in types

@@ -67,6 +67,14 @@ def test_build_quantitative_index_contains_mapping_and_cpm() -> None:
     assert str(best.get("scenario_id") or "").strip()
     assert "composite_score" in best
 
+    simulation = result.get("scenario_simulation") or {}
+    assert simulation.get("enabled") is True
+    assert int(simulation.get("scenario_count") or 0) >= 2
+    envelope = simulation.get("duration_envelope") or {}
+    assert float(envelope.get("p80_days") or 0.0) >= float(envelope.get("p50_days") or 0.0)
+    assert float(envelope.get("p95_days") or 0.0) >= float(envelope.get("p80_days") or 0.0)
+    assert 0.0 <= float(simulation.get("resilience_index") or 0.0) <= 1.0
+
 
 def test_optimize_execution_plan_respects_objective_weights() -> None:
     engine = QuantitativeBoQEngine()
@@ -95,6 +103,35 @@ def test_optimize_execution_plan_respects_objective_weights() -> None:
     assert "cost_index" in best
     assert "carbon_index" in best
     assert "night_restriction_index" in best
+
+
+def test_simulate_disturbance_scenarios_supports_custom_profiles() -> None:
+    engine = QuantitativeBoQEngine()
+    payload = _sample_boq_payload()
+    out = engine.simulate_disturbance_scenarios(
+        payload,
+        scenario_profiles=[
+            {
+                "scenario_id": "C1",
+                "name": "custom_stress",
+                "probability": 0.7,
+                "duration_factor": 1.2,
+                "risk_delta": 0.1,
+                "resource_factor": 1.05,
+            },
+            {
+                "scenario_id": "C2",
+                "name": "custom_gain",
+                "probability": 0.3,
+                "duration_factor": 0.9,
+                "risk_delta": -0.05,
+                "resource_factor": 0.95,
+            },
+        ],
+    )
+    assert out.get("enabled") is True
+    assert int(out.get("scenario_count") or 0) == 2
+    assert str((out.get("scenarios") or [{}])[0].get("scenario_id") or "").startswith("C")
 
 
 def test_assert_paragraph_quantitative_support_passes() -> None:

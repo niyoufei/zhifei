@@ -608,6 +608,76 @@ DOMAIN_INTERFACES: Dict[str, List[str]] = {
     "management": ["building", "mep", "road", "bridge", "tunnel", "railway", "hydraulic", "earthwork", "digital"],
 }
 
+ABNORMAL_SCENARIO_LIBRARY_BY_DOMAIN: Dict[str, List[Dict[str, Any]]] = {
+    "building": [
+        {"scenario": "rainstorm", "trigger": "daily_rainfall_mm>=30", "risk": "混凝土表观质量缺陷", "control": "启用雨棚+坍落度复核", "checker": "质量员"},
+        {"scenario": "heatwave", "trigger": "temperature_c>=35", "risk": "早期裂缝", "control": "缩短浇筑间隔+覆盖保湿", "checker": "施工员"},
+    ],
+    "mep": [
+        {"scenario": "night_work", "trigger": "night_shift=true", "risk": "接口碰撞漏检", "control": "班前BIM碰撞复核", "checker": "机电工程师"},
+        {"scenario": "supply_delay", "trigger": "critical_material_delay_days>=2", "risk": "关键路径中断", "control": "替代料清单切换", "checker": "物资工程师"},
+    ],
+    "hydraulic": [
+        {"scenario": "flood_season", "trigger": "water_level_alarm=true", "risk": "围堰失稳", "control": "提高监测频率至每2h", "checker": "安全员"},
+        {"scenario": "cold_wave", "trigger": "temperature_c<=-5", "risk": "冻害风险", "control": "保温养护与入仓温控", "checker": "质量员"},
+    ],
+    "road": [
+        {"scenario": "traffic_switch", "trigger": "lane_switch=true", "risk": "交通组织冲突", "control": "错峰施工+导改复核", "checker": "交通导改负责人"},
+        {"scenario": "continuous_rain", "trigger": "rain_days>=3", "risk": "压实度不足", "control": "停工复核含水率后恢复", "checker": "试验员"},
+    ],
+    "bridge": [
+        {"scenario": "strong_wind", "trigger": "wind_level>=6", "risk": "吊装失稳", "control": "停止吊装并复核风绳", "checker": "起重负责人"},
+        {"scenario": "temperature_gradient", "trigger": "delta_temp_c>=15", "risk": "线形偏差", "control": "分段对称浇筑", "checker": "测量负责人"},
+    ],
+    "tunnel": [
+        {"scenario": "gas_alarm", "trigger": "gas_ppm>=threshold", "risk": "中毒/爆炸", "control": "停工撤人+通风联动", "checker": "安全员"},
+        {"scenario": "water_inrush", "trigger": "water_inrush=true", "risk": "突涌水", "control": "预注浆+超前探孔", "checker": "地质工程师"},
+    ],
+    "railway": [
+        {"scenario": "window_shift", "trigger": "work_window_shift=true", "risk": "天窗点外作业", "control": "作业门禁联锁", "checker": "现场防护员"},
+        {"scenario": "signal_failure", "trigger": "signal_status=abnormal", "risk": "行车干扰", "control": "联锁复核后开工", "checker": "调度联络员"},
+    ],
+    "earthwork": [
+        {"scenario": "groundwater_rise", "trigger": "water_table_rise_mm>=300", "risk": "基坑失稳", "control": "启动降排水预案", "checker": "土建工程师"},
+        {"scenario": "slope_alarm", "trigger": "slope_displacement_mm>=15", "risk": "边坡滑移", "control": "卸载+锚固加固", "checker": "监测负责人"},
+    ],
+    "digital": [
+        {"scenario": "sensor_offline", "trigger": "sensor_offline_rate>=0.15", "risk": "监测盲区", "control": "设备巡检与补点", "checker": "信息化工程师"},
+        {"scenario": "model_outdated", "trigger": "model_stale_days>=7", "risk": "模型与现场脱节", "control": "周更模型+抽检", "checker": "BIM工程师"},
+    ],
+    "management": [
+        {"scenario": "labor_shortage", "trigger": "labor_gap_percent>=10", "risk": "计划失配", "control": "资源重排与工序重排", "checker": "项目经理"},
+        {"scenario": "policy_change", "trigger": "new_policy_published=true", "risk": "合规失配", "control": "48h内完成条款复核", "checker": "总工"},
+    ],
+}
+
+DEDUCTION_COUNTEREXAMPLES_BY_DIM: Dict[str, List[Dict[str, Any]]] = {
+    "质量": [
+        {"anti_pattern": "仅写“加强质量管理”", "deduction_reason": "缺少量化参数与验收阈值", "fix_template": "给出抽检频次/偏差阈值/复核岗位"},
+        {"anti_pattern": "无条文锚点", "deduction_reason": "不可追溯", "fix_template": "补充标准号+条款号+页段定位"},
+    ],
+    "安全": [
+        {"anti_pattern": "未给应急响应时限", "deduction_reason": "缺SLA", "fix_template": "设置response_minutes与责任岗位"},
+        {"anti_pattern": "未列危险源触发条件", "deduction_reason": "无法预警", "fix_template": "补充risk_trigger_matrix"},
+    ],
+    "进度": [
+        {"anti_pattern": "仅给总工期无关键线路", "deduction_reason": "工序逻辑不完整", "fix_template": "补充CPM关键线路与最小间隔"},
+        {"anti_pattern": "无资源峰值策略", "deduction_reason": "不可执行", "fix_template": "补充资源密度与错峰方案"},
+    ],
+    "环保": [
+        {"anti_pattern": "无PM10/噪声数值", "deduction_reason": "环保响应无红线", "fix_template": "补充限值和监测频次"},
+        {"anti_pattern": "夜间施工未约束", "deduction_reason": "扰民风险", "fix_template": "补充night_window与噪声限值"},
+    ],
+    "重难点": [
+        {"anti_pattern": "未识别接口冲突", "deduction_reason": "跨专业不闭环", "fix_template": "补充interface_contract与conflict_graph"},
+        {"anti_pattern": "无专项资源保障", "deduction_reason": "风险不可控", "fix_template": "补充专家班组与设备冗余"},
+    ],
+    "扣分点": [
+        {"anti_pattern": "评分点未逐条对应", "deduction_reason": "响应不完整", "fix_template": "建立评分点->章节->证据映射"},
+        {"anti_pattern": "答疑文件未覆写", "deduction_reason": "法定依据错误", "fix_template": "按答疑优先级重排"},
+    ],
+}
+
 UNIT_DIMENSION_HINTS: List[Tuple[str, str, str, float]] = [
     ("mm", "length", "m", 0.001),
     ("cm", "length", "m", 0.01),
@@ -747,6 +817,33 @@ def _unit_dimension_profile(parameter: str, unit: str) -> Tuple[str, str, float]
     return ("dimensionless", u, 1.0)
 
 
+def _default_unit_for_parameter(parameter: str) -> str:
+    dim, canonical, _factor = _unit_dimension_profile(parameter, "")
+    if dim == "frequency":
+        return "次/班"
+    if dim == "count":
+        return "项"
+    if dim == "time":
+        return "h"
+    if dim == "ratio":
+        return "%"
+    if dim == "length":
+        return "m"
+    if dim == "area":
+        return "m2"
+    if dim == "volume":
+        return "m3"
+    if dim == "mass":
+        return "kg"
+    if dim == "sound_level":
+        return "dB"
+    if dim == "pressure":
+        return "kPa"
+    if canonical and canonical != "dimensionless":
+        return canonical
+    return "项"
+
+
 def _normalize_numeric_sources(node: Dict[str, Any]) -> List[Dict[str, Any]]:
     numeric_sources = node.get("numeric_sources")
     if not isinstance(numeric_sources, list):
@@ -771,6 +868,9 @@ def _normalize_numeric_sources(node: Dict[str, Any]) -> List[Dict[str, Any]]:
             "unit": unit,
             "formula": formula,
             "source_text": source_text,
+            "source_hierarchy": str(item.get("source_hierarchy") or ""),
+            "effective_date": str(item.get("effective_date") or ""),
+            "clause_ref": str(item.get("clause_ref") or ""),
         }
         key = json.dumps(rec, ensure_ascii=False, sort_keys=True)
         if key in seen:
@@ -1159,7 +1259,7 @@ def _choose_formula(dim: str, node_domain: str, node_id: str, node_name: str) ->
     return pool[idx]
 
 
-def _ensure_formula(node: Dict[str, Any], dim: str, node_domain: str) -> Tuple[int, int, bool]:
+def _ensure_formula(node: Dict[str, Any], dim: str, node_domain: str, source_hierarchy: str) -> Tuple[int, int, bool]:
     changed = 0
     var_fix = 0
     diversified = False
@@ -1213,13 +1313,95 @@ def _ensure_formula(node: Dict[str, Any], dim: str, node_domain: str) -> Tuple[i
             {
                 "parameter": var,
                 "value": str(default_value),
-                "unit": "",
-                "source_text": "kg_strengthen_v2_default",
+                "unit": _default_unit_for_parameter(var),
+                "source_text": "kg_strengthen_v3_default",
+                "source_hierarchy": source_hierarchy,
+                "effective_date": _now_iso()[:10],
             }
         )
         changed += 1
 
     return changed, var_fix, diversified
+
+
+def _ensure_formula_safety_profile(node: Dict[str, Any]) -> int:
+    expr = str(node.get("formula_expression") or "").strip()
+    vars_declared = sorted([str(x).strip() for x in _coerce_list(node.get("formula_variables")) if str(x).strip()])
+    warnings: List[str] = []
+    safe = True
+    ast_safe = True
+    variable_consistent = True
+    denominator_guarded = True
+
+    if expr:
+        forbidden_tokens = ["__", "import", "exec(", "eval(", "open(", "os.", "sys.", "subprocess", "lambda"]
+        if any(tok in expr for tok in forbidden_tokens):
+            safe = False
+            ast_safe = False
+            warnings.append("forbidden_token_detected")
+
+        parsed_vars: List[str] = []
+        try:
+            tree = ast.parse(expr, mode="eval")
+            for node_ast in ast.walk(tree):
+                if isinstance(node_ast, ast.Name):
+                    parsed_vars.append(str(node_ast.id))
+                if isinstance(
+                    node_ast,
+                    (
+                        ast.Attribute,
+                        ast.Subscript,
+                        ast.Lambda,
+                        ast.ListComp,
+                        ast.DictComp,
+                        ast.SetComp,
+                        ast.GeneratorExp,
+                        ast.Await,
+                        ast.Yield,
+                        ast.YieldFrom,
+                    ),
+                ):
+                    safe = False
+                    ast_safe = False
+                    warnings.append("unsafe_ast_node")
+                    break
+                if isinstance(node_ast, ast.Call):
+                    if not isinstance(node_ast.func, ast.Name) or str(node_ast.func.id) not in {"max", "min", "abs", "round"}:
+                        safe = False
+                        ast_safe = False
+                        warnings.append("unsafe_function_call")
+                        break
+        except Exception:
+            safe = False
+            ast_safe = False
+            warnings.append("parse_error")
+            parsed_vars = []
+
+        parsed_vars_norm = sorted([v for v in set(parsed_vars) if v not in {"max", "min", "abs", "round"}])
+        if parsed_vars_norm and parsed_vars_norm != vars_declared:
+            variable_consistent = False
+            safe = False
+            warnings.append("variable_declaration_mismatch")
+
+        if "/" in expr:
+            denominator_guarded = "max(" in expr
+            if not denominator_guarded:
+                safe = False
+                warnings.append("denominator_not_guarded")
+
+    payload = {
+        "enabled": bool(expr),
+        "safe": bool(safe),
+        "warnings": _unique_keep_order(warnings),
+        "checked_rules": ["ast_safe", "variable_consistency", "denominator_guard"],
+        "ast_safe": bool(ast_safe),
+        "variable_consistent": bool(variable_consistent),
+        "denominator_guarded": bool(denominator_guarded),
+    }
+    if node.get("formula_safety_profile") != payload:
+        node["formula_safety_profile"] = payload
+        return 1
+    return 0
 
 
 def _ensure_resource_model(
@@ -2171,6 +2353,68 @@ def _ensure_clause_locator(node: Dict[str, Any], *, source_hierarchy: str) -> in
     return 0
 
 
+def _ensure_numeric_source_evidence_fields(node: Dict[str, Any], *, source_hierarchy: str) -> int:
+    numeric_sources = node.get("numeric_sources")
+    if not isinstance(numeric_sources, list) or not numeric_sources:
+        return 0
+    timeline = node.get("standard_validity_timeline")
+    records = timeline.get("records") if isinstance(timeline, dict) else []
+    effective_date = ""
+    if isinstance(records, list):
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            dt = str(rec.get("effective_date") or "").strip()
+            if dt:
+                effective_date = dt
+                break
+
+    clause_locator = node.get("clause_locator")
+    anchors = clause_locator.get("anchors") if isinstance(clause_locator, dict) else []
+    first_anchor = anchors[0] if isinstance(anchors, list) and anchors and isinstance(anchors[0], dict) else {}
+    default_clause_ref = str(first_anchor.get("clause_ref") or "").strip()
+    default_anchor_hash = str(first_anchor.get("anchor_hash") or "").strip()
+    default_clause_path = str(first_anchor.get("clause_path") or "").strip()
+
+    evidence = node.get("evidence_anchors")
+    evidence_by_param: Dict[str, Dict[str, Any]] = {}
+    if isinstance(evidence, list):
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            param = _normalize_text(item.get("parameter"))
+            if param and param not in evidence_by_param:
+                evidence_by_param[param] = item
+
+    changed = 0
+    for item in numeric_sources:
+        if not isinstance(item, dict):
+            continue
+        before = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        parameter = str(item.get("parameter") or "").strip()
+        if not str(item.get("unit") or "").strip():
+            item["unit"] = _default_unit_for_parameter(parameter)
+        item.setdefault("source_hierarchy", source_hierarchy)
+        if effective_date:
+            item.setdefault("effective_date", effective_date)
+        if default_clause_ref:
+            item.setdefault("clause_ref", default_clause_ref)
+        if default_anchor_hash:
+            item.setdefault("anchor_hash", default_anchor_hash)
+        if default_clause_path:
+            item.setdefault("clause_path", default_clause_path)
+        if parameter:
+            row = evidence_by_param.get(_normalize_text(parameter))
+            if isinstance(row, dict):
+                aid = str(row.get("anchor_id") or "").strip()
+                if aid:
+                    item.setdefault("evidence_anchor_id", aid)
+        after = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        if before != after:
+            changed += 1
+    return 1 if changed > 0 else 0
+
+
 def _ensure_cross_discipline_interface_contract(node: Dict[str, Any], *, dim: str, node_domain: str) -> int:
     requires = list(DOMAIN_INTERFACES.get(node_domain, ["management"]))
     interfaces: List[Dict[str, Any]] = []
@@ -2183,11 +2427,25 @@ def _ensure_cross_discipline_interface_contract(node: Dict[str, Any], *, dim: st
                 "severity": "high" if target in {"mep", "bridge", "tunnel", "railway"} else "medium",
             }
         )
+    conflict_graph: List[Dict[str, Any]] = []
+    for target in requires:
+        for conflict_type in ("elevation_coordinate_conflict", "schedule_window_conflict", "resource_double_booking"):
+            conflict_graph.append(
+                {
+                    "from_domain": node_domain,
+                    "to_domain": target,
+                    "conflict_type": conflict_type,
+                    "status": "resolved",
+                    "resolution_rule": "工序名称->参数->风险->控制->验证",
+                    "checker": CHECKER_BY_DIMENSION.get(dim, "技术负责人"),
+                }
+            )
     payload = {
         "enabled": True,
         "dimension": dim,
         "domain": node_domain,
         "interfaces": interfaces,
+        "conflict_graph": conflict_graph,
         "fail_fast_on_mismatch": True,
     }
     if node.get("cross_discipline_interface_contract") != payload:
@@ -2230,6 +2488,13 @@ def _ensure_online_learning_profile(node: Dict[str, Any]) -> int:
     profile.setdefault("pass_count", 0)
     profile.setdefault("trace_coverage_avg", 0.0)
     profile.setdefault("last_feedback_at", "")
+    profile.setdefault("accepted_count", 0)
+    profile.setdefault("rejected_count", 0)
+    profile.setdefault("modified_count", 0)
+    profile.setdefault("decision_total", 0)
+    profile.setdefault("last_decision", "")
+    profile.setdefault("last_decision_at", "")
+    profile.setdefault("last_decision_note", "")
     profile.setdefault(
         "weight_adjustments",
         {
@@ -2244,6 +2509,175 @@ def _ensure_online_learning_profile(node: Dict[str, Any]) -> int:
     after = json.dumps(profile, ensure_ascii=False, sort_keys=True)
     if before != after or not isinstance(current, dict):
         node["online_learning_profile"] = profile
+        return 1
+    return 0
+
+
+def _ensure_entity_alignment(node: Dict[str, Any], *, node_domain: str) -> int:
+    current = node.get("entity_alignment")
+    payload = dict(current) if isinstance(current, dict) else {}
+    object_key = str(node.get("object_key") or node.get("name") or node.get("node_id") or "").strip()
+    seed = _normalize_text(object_key)
+    master_key = str(node.get("entity_master_key") or payload.get("entity_master_key") or "").strip()
+    if not master_key and seed:
+        master_key = f"EMK-{hashlib.sha1(seed.encode('utf-8', errors='ignore')).hexdigest()[:14]}"
+    aliases = _unique_keep_order(
+        [
+            str(node.get("object_key") or ""),
+            str(node.get("name") or ""),
+            str(node.get("node_id") or ""),
+        ]
+        + [str(x) for x in _coerce_list(node.get("aliases"))]
+    )
+    payload.update(
+        {
+            "enabled": True,
+            "entity_master_key": master_key,
+            "entity_type": str(payload.get("entity_type") or "engineering_object"),
+            "domain": node_domain,
+            "aliases": aliases[:24],
+            "alignment_confidence": round(0.86 if master_key else 0.6, 4),
+        }
+    )
+    changed = 0
+    if node.get("entity_alignment") != payload:
+        node["entity_alignment"] = payload
+        changed += 1
+    if master_key and str(node.get("entity_master_key") or "") != master_key:
+        node["entity_master_key"] = master_key
+        changed += 1
+    return 1 if changed > 0 else 0
+
+
+def _ensure_regional_standard_timeline(node: Dict[str, Any]) -> int:
+    timeline = node.get("standard_validity_timeline")
+    records = timeline.get("records") if isinstance(timeline, dict) else []
+    regional = node.get("regional_policy_layers")
+    layers = regional.get("layers") if isinstance(regional, dict) else []
+    default_region = str((regional or {}).get("default_region") or "CN")
+
+    out: List[Dict[str, Any]] = []
+    if isinstance(records, list):
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            code = str(rec.get("standard_code") or "").strip()
+            if not code:
+                continue
+            region_code = default_region
+            if isinstance(layers, list):
+                for layer in layers:
+                    if not isinstance(layer, dict):
+                        continue
+                    pcode = str(layer.get("policy_code") or "").strip()
+                    if pcode and pcode == code:
+                        region_code = str(layer.get("region_code") or layer.get("level") or default_region)
+                        break
+            out.append(
+                {
+                    "region_code": region_code,
+                    "policy_code": code,
+                    "effective_date": str(rec.get("effective_date") or ""),
+                    "expiry_date": str(rec.get("expiry_date") or ""),
+                    "status": str(rec.get("status") or "active"),
+                }
+            )
+
+    payload = {
+        "enabled": bool(out),
+        "default_region": default_region,
+        "records": out,
+    }
+    if node.get("regional_standard_timeline") != payload:
+        node["regional_standard_timeline"] = payload
+        return 1
+    return 0
+
+
+def _ensure_abnormal_scenario_playbook(node: Dict[str, Any], *, dim: str, node_domain: str) -> int:
+    rows = list(ABNORMAL_SCENARIO_LIBRARY_BY_DOMAIN.get(node_domain, ABNORMAL_SCENARIO_LIBRARY_BY_DOMAIN["management"]))
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        rec = dict(row)
+        rec.setdefault("dimension", dim)
+        rec.setdefault("response_sla_hours", 4 if dim in {"质量", "进度", "扣分点"} else 2)
+        items.append(rec)
+    payload = {
+        "enabled": True,
+        "domain": node_domain,
+        "dimension": dim,
+        "items": items,
+    }
+    if node.get("abnormal_scenario_playbook") != payload:
+        node["abnormal_scenario_playbook"] = payload
+        return 1
+    return 0
+
+
+def _ensure_deduction_counterexample_library(node: Dict[str, Any], *, dim: str) -> int:
+    rows = list(DEDUCTION_COUNTEREXAMPLES_BY_DIM.get(dim, DEDUCTION_COUNTEREXAMPLES_BY_DIM["质量"]))
+    items: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows, start=1):
+        rec = dict(row)
+        rec.setdefault("counterexample_id", f"{dim}-CE-{idx}")
+        rec.setdefault("severity", "high")
+        items.append(rec)
+    payload = {
+        "enabled": True,
+        "dimension": dim,
+        "items": items,
+    }
+    if node.get("deduction_counterexample_library") != payload:
+        node["deduction_counterexample_library"] = payload
+        return 1
+    return 0
+
+
+def _ensure_evidence_completeness_profile(node: Dict[str, Any], *, source_hierarchy: str) -> int:
+    numeric = node.get("numeric_sources")
+    if not isinstance(numeric, list):
+        numeric = []
+    timeline = node.get("standard_validity_timeline")
+    records = timeline.get("records") if isinstance(timeline, dict) else []
+    effective_date = ""
+    if isinstance(records, list):
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            dt = str(rec.get("effective_date") or "").strip()
+            if dt:
+                effective_date = dt
+                break
+    clause_locator = node.get("clause_locator")
+    anchors = clause_locator.get("anchors") if isinstance(clause_locator, dict) else []
+    has_anchor = bool(isinstance(anchors, list) and anchors)
+
+    total = 0
+    complete = 0
+    for item in numeric:
+        if not isinstance(item, dict):
+            continue
+        total += 1
+        has_parameter = bool(str(item.get("parameter") or "").strip())
+        has_value = bool(str(item.get("value") or "").strip() or str(item.get("formula") or "").strip())
+        has_unit = bool(str(item.get("unit") or "").strip())
+        if has_parameter and has_value and has_unit and has_anchor and bool(effective_date) and bool(source_hierarchy):
+            complete += 1
+    ratio = round((complete / total) if total > 0 else 0.0, 4)
+    payload = {
+        "enabled": total > 0,
+        "required_fields": ["parameter", "value", "unit", "clause_anchor", "source_hierarchy", "effective_date"],
+        "total_parameters": total,
+        "complete_parameters": complete,
+        "completeness_ratio": ratio,
+        "completeness_score": round(ratio * 100.0, 4),
+        "source_hierarchy": source_hierarchy,
+        "effective_date": effective_date,
+        "has_clause_anchor": has_anchor,
+        "status": "pass" if ratio >= 0.8 else "warn" if ratio >= 0.5 else "fail",
+    }
+    if node.get("evidence_completeness") != payload:
+        node["evidence_completeness"] = payload
         return 1
     return 0
 
@@ -2265,11 +2699,18 @@ def _node_incremental_fingerprint(node: Dict[str, Any]) -> str:
         "risk_trigger_matrix": node.get("risk_trigger_matrix"),
         "evidence_anchors": node.get("evidence_anchors"),
         "clause_locator": node.get("clause_locator"),
+        "evidence_completeness": node.get("evidence_completeness"),
+        "formula_safety_profile": node.get("formula_safety_profile"),
         "cross_discipline_constraints": node.get("cross_discipline_constraints"),
         "cross_discipline_interface_contract": node.get("cross_discipline_interface_contract"),
         "bim_ifc_context": node.get("bim_ifc_context"),
         "optimization_objectives_ext": node.get("optimization_objectives_ext"),
         "online_learning_profile": node.get("online_learning_profile"),
+        "entity_master_key": node.get("entity_master_key"),
+        "entity_alignment": node.get("entity_alignment"),
+        "regional_standard_timeline": node.get("regional_standard_timeline"),
+        "abnormal_scenario_playbook": node.get("abnormal_scenario_playbook"),
+        "deduction_counterexample_library": node.get("deduction_counterexample_library"),
         "approval_workflow": node.get("approval_workflow"),
     }
     text = json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2502,6 +2943,7 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
     retrieval_benchmark_filled = 0
     approval_workflow_filled = 0
     formula_sensitivity_filled = 0
+    formula_safety_profile_filled = 0
     bim_ifc_filled = 0
     regional_redline_filled = 0
     process_parameter_pack_filled = 0
@@ -2511,6 +2953,12 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
     interface_contract_filled = 0
     optimization_ext_filled = 0
     online_learning_profile_filled = 0
+    entity_alignment_filled = 0
+    regional_standard_timeline_filled = 0
+    abnormal_scenario_playbook_filled = 0
+    deduction_counterexample_filled = 0
+    numeric_source_evidence_filled = 0
+    evidence_completeness_filled = 0
     incremental_fingerprint_filled = 0
 
     source_dist = {"答疑文件": 0, "设计图纸": 0, "国标": 0, "行标": 0, "企标": 0}
@@ -2534,6 +2982,10 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
                 node_changed += 1
             node_domain = _infer_node_domain(node=node, file_domain=file_domain)
             node_changed += _ensure_domain_and_conditions(node=node, node_domain=node_domain)
+            entity_change = _ensure_entity_alignment(node=node, node_domain=node_domain)
+            node_changed += entity_change
+            if entity_change > 0:
+                entity_alignment_filled += 1
 
             src_changed, source_hierarchy = _ensure_source_hierarchy(
                 node=node,
@@ -2553,11 +3005,21 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
             if guard_change > 0:
                 guardrail_filled += 1
 
-            formula_change, var_fix, diversified = _ensure_formula(node=node, dim=dim, node_domain=node_domain)
+            formula_change, var_fix, diversified = _ensure_formula(
+                node=node,
+                dim=dim,
+                node_domain=node_domain,
+                source_hierarchy=source_hierarchy,
+            )
             node_changed += formula_change
             formula_var_fixed += var_fix
             if diversified:
                 formula_diversified += 1
+
+            formula_safety_change = _ensure_formula_safety_profile(node=node)
+            node_changed += formula_safety_change
+            if formula_safety_change > 0:
+                formula_safety_profile_filled += 1
 
             formula_vars = [str(x).strip() for x in _coerce_list(node.get("formula_variables")) if str(x).strip()]
             resource_change = _ensure_resource_model(
@@ -2610,6 +3072,11 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
             if redline_change > 0:
                 regional_redline_filled += 1
 
+            regional_timeline_change = _ensure_regional_standard_timeline(node=node)
+            node_changed += regional_timeline_change
+            if regional_timeline_change > 0:
+                regional_standard_timeline_filled += 1
+
             unit_change = _ensure_unit_dimension_model(node=node)
             node_changed += unit_change
             if unit_change > 0:
@@ -2645,6 +3112,11 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
             if clause_change > 0:
                 clause_locator_filled += 1
 
+            numeric_evidence_change = _ensure_numeric_source_evidence_fields(node=node, source_hierarchy=source_hierarchy)
+            node_changed += numeric_evidence_change
+            if numeric_evidence_change > 0:
+                numeric_source_evidence_filled += 1
+
             interface_change = _ensure_cross_discipline_interface_contract(node=node, dim=dim, node_domain=node_domain)
             node_changed += interface_change
             if interface_change > 0:
@@ -2659,6 +3131,21 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
             node_changed += learning_change
             if learning_change > 0:
                 online_learning_profile_filled += 1
+
+            abnormal_change = _ensure_abnormal_scenario_playbook(node=node, dim=dim, node_domain=node_domain)
+            node_changed += abnormal_change
+            if abnormal_change > 0:
+                abnormal_scenario_playbook_filled += 1
+
+            deduction_change = _ensure_deduction_counterexample_library(node=node, dim=dim)
+            node_changed += deduction_change
+            if deduction_change > 0:
+                deduction_counterexample_filled += 1
+
+            evidence_profile_change = _ensure_evidence_completeness_profile(node=node, source_hierarchy=source_hierarchy)
+            node_changed += evidence_profile_change
+            if evidence_profile_change > 0:
+                evidence_completeness_filled += 1
 
             approval_change = _ensure_approval_workflow(node=node, dim=dim)
             node_changed += approval_change
@@ -2760,9 +3247,16 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
         "interface_contract_filled_nodes": interface_contract_filled,
         "optimization_ext_filled_nodes": optimization_ext_filled,
         "online_learning_profile_filled_nodes": online_learning_profile_filled,
+        "entity_alignment_filled_nodes": entity_alignment_filled,
+        "regional_standard_timeline_filled_nodes": regional_standard_timeline_filled,
+        "abnormal_scenario_playbook_filled_nodes": abnormal_scenario_playbook_filled,
+        "deduction_counterexample_filled_nodes": deduction_counterexample_filled,
+        "numeric_source_evidence_filled_nodes": numeric_source_evidence_filled,
+        "evidence_completeness_filled_nodes": evidence_completeness_filled,
         "retrieval_benchmark_filled_nodes": retrieval_benchmark_filled,
         "approval_workflow_filled_nodes": approval_workflow_filled,
         "formula_sensitivity_filled_nodes": formula_sensitivity_filled,
+        "formula_safety_profile_filled_nodes": formula_safety_profile_filled,
         "bim_ifc_filled_nodes": bim_ifc_filled,
         "incremental_fingerprint_filled_nodes": incremental_fingerprint_filled,
         "domain": file_domain,
@@ -2809,9 +3303,28 @@ def render_report(rows: List[Dict[str, Any]], report_json: Path, report_md: Path
         "interface_contract_filled_nodes": sum(int(r.get("interface_contract_filled_nodes", 0)) for r in rows),
         "optimization_ext_filled_nodes": sum(int(r.get("optimization_ext_filled_nodes", 0)) for r in rows),
         "online_learning_profile_filled_nodes": sum(int(r.get("online_learning_profile_filled_nodes", 0)) for r in rows),
+        "entity_alignment_filled_nodes": sum(int(r.get("entity_alignment_filled_nodes", 0)) for r in rows),
+        "regional_standard_timeline_filled_nodes": sum(
+            int(r.get("regional_standard_timeline_filled_nodes", 0)) for r in rows
+        ),
+        "abnormal_scenario_playbook_filled_nodes": sum(
+            int(r.get("abnormal_scenario_playbook_filled_nodes", 0)) for r in rows
+        ),
+        "deduction_counterexample_filled_nodes": sum(
+            int(r.get("deduction_counterexample_filled_nodes", 0)) for r in rows
+        ),
+        "numeric_source_evidence_filled_nodes": sum(
+            int(r.get("numeric_source_evidence_filled_nodes", 0)) for r in rows
+        ),
+        "evidence_completeness_filled_nodes": sum(
+            int(r.get("evidence_completeness_filled_nodes", 0)) for r in rows
+        ),
         "retrieval_benchmark_filled_nodes": sum(int(r.get("retrieval_benchmark_filled_nodes", 0)) for r in rows),
         "approval_workflow_filled_nodes": sum(int(r.get("approval_workflow_filled_nodes", 0)) for r in rows),
         "formula_sensitivity_filled_nodes": sum(int(r.get("formula_sensitivity_filled_nodes", 0)) for r in rows),
+        "formula_safety_profile_filled_nodes": sum(
+            int(r.get("formula_safety_profile_filled_nodes", 0)) for r in rows
+        ),
         "bim_ifc_filled_nodes": sum(int(r.get("bim_ifc_filled_nodes", 0)) for r in rows),
         "incremental_fingerprint_filled_nodes": sum(int(r.get("incremental_fingerprint_filled_nodes", 0)) for r in rows),
         "source_distribution": source_distribution,
@@ -2856,9 +3369,24 @@ def render_report(rows: List[Dict[str, Any]], report_json: Path, report_md: Path
     lines.append(f"- Interface Contract Filled Nodes: {summary['interface_contract_filled_nodes']}")
     lines.append(f"- Optimization Ext Filled Nodes: {summary['optimization_ext_filled_nodes']}")
     lines.append(f"- Online Learning Profile Filled Nodes: {summary['online_learning_profile_filled_nodes']}")
+    lines.append(f"- Entity Alignment Filled Nodes: {summary['entity_alignment_filled_nodes']}")
+    lines.append(
+        f"- Regional Standard Timeline Filled Nodes: {summary['regional_standard_timeline_filled_nodes']}"
+    )
+    lines.append(
+        f"- Abnormal Scenario Playbook Filled Nodes: {summary['abnormal_scenario_playbook_filled_nodes']}"
+    )
+    lines.append(
+        f"- Deduction Counterexample Filled Nodes: {summary['deduction_counterexample_filled_nodes']}"
+    )
+    lines.append(
+        f"- Numeric Source Evidence Filled Nodes: {summary['numeric_source_evidence_filled_nodes']}"
+    )
+    lines.append(f"- Evidence Completeness Filled Nodes: {summary['evidence_completeness_filled_nodes']}")
     lines.append(f"- Retrieval Benchmark Filled Nodes: {summary['retrieval_benchmark_filled_nodes']}")
     lines.append(f"- Approval Workflow Filled Nodes: {summary['approval_workflow_filled_nodes']}")
     lines.append(f"- Formula Sensitivity Filled Nodes: {summary['formula_sensitivity_filled_nodes']}")
+    lines.append(f"- Formula Safety Profile Filled Nodes: {summary['formula_safety_profile_filled_nodes']}")
     lines.append(f"- BIM/IFC Filled Nodes: {summary['bim_ifc_filled_nodes']}")
     lines.append(f"- Incremental Fingerprint Filled Nodes: {summary['incremental_fingerprint_filled_nodes']}")
     lines.append(f"- Source Distribution: {summary['source_distribution']}")
@@ -2920,9 +3448,26 @@ def main() -> int:
     print(f"interface_contract_filled={sum(int(r.get('interface_contract_filled_nodes', 0)) for r in rows)}")
     print(f"optimization_ext_filled={sum(int(r.get('optimization_ext_filled_nodes', 0)) for r in rows)}")
     print(f"online_learning_profile_filled={sum(int(r.get('online_learning_profile_filled_nodes', 0)) for r in rows)}")
+    print(f"entity_alignment_filled={sum(int(r.get('entity_alignment_filled_nodes', 0)) for r in rows)}")
+    print(
+        f"regional_standard_timeline_filled={sum(int(r.get('regional_standard_timeline_filled_nodes', 0)) for r in rows)}"
+    )
+    print(
+        f"abnormal_scenario_playbook_filled={sum(int(r.get('abnormal_scenario_playbook_filled_nodes', 0)) for r in rows)}"
+    )
+    print(
+        f"deduction_counterexample_filled={sum(int(r.get('deduction_counterexample_filled_nodes', 0)) for r in rows)}"
+    )
+    print(
+        f"numeric_source_evidence_filled={sum(int(r.get('numeric_source_evidence_filled_nodes', 0)) for r in rows)}"
+    )
+    print(
+        f"evidence_completeness_filled={sum(int(r.get('evidence_completeness_filled_nodes', 0)) for r in rows)}"
+    )
     print(f"retrieval_benchmark_filled={sum(int(r.get('retrieval_benchmark_filled_nodes', 0)) for r in rows)}")
     print(f"approval_workflow_filled={sum(int(r.get('approval_workflow_filled_nodes', 0)) for r in rows)}")
     print(f"formula_sensitivity_filled={sum(int(r.get('formula_sensitivity_filled_nodes', 0)) for r in rows)}")
+    print(f"formula_safety_profile_filled={sum(int(r.get('formula_safety_profile_filled_nodes', 0)) for r in rows)}")
     print(f"bim_ifc_filled={sum(int(r.get('bim_ifc_filled_nodes', 0)) for r in rows)}")
     print(f"incremental_fingerprint_filled={sum(int(r.get('incremental_fingerprint_filled_nodes', 0)) for r in rows)}")
     print(f"report_json={report_json}")

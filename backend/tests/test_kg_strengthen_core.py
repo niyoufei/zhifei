@@ -105,6 +105,20 @@ def test_strengthen_file_repairs_core_fields(tmp_path: Path) -> None:
         assert isinstance(node.get("unit_dimension_model"), dict)
         assert isinstance(node["unit_dimension_model"].get("parameters"), list)
         assert isinstance(node.get("evidence_anchors"), list) and node["evidence_anchors"]
+        assert isinstance(node.get("formula_safety_profile"), dict)
+        assert (node.get("formula_safety_profile") or {}).get("safe") in (True, False)
+        assert isinstance(node.get("evidence_completeness"), dict)
+        assert float((node.get("evidence_completeness") or {}).get("completeness_ratio") or 0.0) >= 0.8
+        assert isinstance(node.get("entity_alignment"), dict)
+        assert str((node.get("entity_alignment") or {}).get("entity_master_key") or "").strip()
+        assert str(node.get("entity_master_key") or "").strip()
+        assert isinstance(node.get("regional_standard_timeline"), dict)
+        assert isinstance((node.get("regional_standard_timeline") or {}).get("records"), list)
+        assert bool((node.get("regional_standard_timeline") or {}).get("records"))
+        assert isinstance(node.get("abnormal_scenario_playbook"), dict)
+        assert bool((node.get("abnormal_scenario_playbook") or {}).get("items"))
+        assert isinstance(node.get("deduction_counterexample_library"), dict)
+        assert bool((node.get("deduction_counterexample_library") or {}).get("items"))
         assert isinstance(node.get("process_parameter_pack"), dict)
         assert isinstance((node.get("process_parameter_pack") or {}).get("steps"), list)
         assert isinstance(node.get("resource_productivity_model"), dict)
@@ -128,6 +142,12 @@ def test_strengthen_file_repairs_core_fields(tmp_path: Path) -> None:
         assert isinstance(node.get("online_learning_profile"), dict)
         assert isinstance(node.get("retrieval_benchmark"), dict)
         assert str(node.get("incremental_fingerprint") or "").strip()
+        for source in node.get("numeric_sources") or []:
+            if not isinstance(source, dict):
+                continue
+            assert str(source.get("source_hierarchy") or "").strip()
+            assert str(source.get("effective_date") or "").strip()
+            assert str(source.get("clause_ref") or "").strip()
 
 
 def test_strengthen_file_source_hierarchy_mixed(tmp_path: Path) -> None:

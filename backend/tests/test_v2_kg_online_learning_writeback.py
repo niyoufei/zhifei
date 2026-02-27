@@ -31,7 +31,17 @@ def test_writeback_online_learning_profile_updates_nodes(tmp_path: Path) -> None
     report = writeback_online_learning_profile(
         graph_root=kg_root,
         node_feedback={
-            "NODE-1": {"hit_count": 3, "pass_count": 2, "trace_coverage_avg": 0.8},
+            "NODE-1": {
+                "hit_count": 3,
+                "pass_count": 2,
+                "trace_coverage_avg": 0.8,
+                "accepted_count": 1,
+                "rejected_count": 0,
+                "modified_count": 1,
+                "decision_total": 2,
+                "last_decision": "modify",
+                "weight_adjustments": {"keyword_exact_weight": 1.15},
+            },
             "NODE-X": {"hit_count": 1, "pass_count": 1, "trace_coverage_avg": 1.0},
         },
         timestamp="2026-02-27T12:00:00",
@@ -49,6 +59,9 @@ def test_writeback_online_learning_profile_updates_nodes(tmp_path: Path) -> None
     assert int(profile.get("pass_count") or 0) == 2
     assert float(profile.get("pass_rate") or 0.0) == round(2 / 3, 6)
     assert str(profile.get("last_feedback_at") or "") == "2026-02-27T12:00:00"
+    assert int(profile.get("decision_total") or 0) == 2
+    assert str(profile.get("last_decision") or "") == "modify"
+    assert float((profile.get("weight_adjustments") or {}).get("keyword_exact_weight") or 0.0) == 1.15
 
 
 def test_writeback_online_learning_profile_returns_error_for_missing_root(tmp_path: Path) -> None:

@@ -435,6 +435,8 @@ def _estimate_gemini_usefulness(
     body: str,
     tags: List[str],
     keywords: List[str],
+    evidence_completeness: Dict[str, Any] | None = None,
+    formula_safety_profile: Dict[str, Any] | None = None,
 ) -> float:
     score = 35.0
     score += float(SOURCE_HIERARCHY_WEIGHTS.get(str(source_hierarchy or "未知"), 0) * 5.0)
@@ -459,6 +461,24 @@ def _estimate_gemini_usefulness(
         score -= 8.0
     if len(tags) + len(keywords) < 6:
         score -= 4.0
+
+    evidence = evidence_completeness if isinstance(evidence_completeness, dict) else {}
+    ratio = _safe_float(evidence.get("completeness_ratio"), -1.0)
+    if ratio >= 0.9:
+        score += 12.0
+    elif ratio >= 0.75:
+        score += 8.0
+    elif ratio >= 0.55:
+        score += 4.0
+    elif 0.0 <= ratio < 0.35:
+        score -= 10.0
+
+    safety = formula_safety_profile if isinstance(formula_safety_profile, dict) else {}
+    if bool(safety.get("enabled")):
+        if bool(safety.get("safe")):
+            score += 6.0
+        else:
+            score -= 10.0
 
     payload_score = _safe_float(payload.get("gemini_usefulness_score"), default=-1.0)
     if payload_score >= 0:
@@ -1321,6 +1341,366 @@ def _extract_online_learning_profile(node: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _extract_entity_alignment(
+    node: Dict[str, Any],
+    *,
+    object_key: str,
+    title: str,
+    node_id: str,
+) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "entity_alignment",
+            "entity_master",
+            "实体对齐",
+        ),
+    )
+    out = _coerce_dict(raw)
+    direct_master = _dict_get_case_insensitive(node, ("entity_master_key", "master_entity_key", "entity_key"))
+    master_key = str(direct_master or out.get("entity_master_key") or "").strip()
+    if not master_key:
+        seed = _normalize_alias(object_key or title or node_id)
+        if seed:
+            master_key = f"EMK-{hashlib.sha1(seed.encode('utf-8', errors='ignore')).hexdigest()[:14]}"
+    aliases = _coerce_targets(_dict_get_case_insensitive(node, ("aliases", "alias", "ref", "references")))
+    aliases.extend([object_key, title, node_id])
+    aliases_norm: List[str] = []
+    seen = set()
+    for item in aliases:
+        val = str(item or "").strip()
+        if not val:
+            continue
+        key = _normalize_alias(val)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        aliases_norm.append(val)
+    out["enabled"] = True
+    out["entity_master_key"] = master_key
+    out.setdefault("entity_type", str(_dict_get_case_insensitive(node, ("entity_type", "node_type", "type")) or "engineering_object"))
+    out["aliases"] = aliases_norm[:24]
+    return out
+
+
+def _extract_regional_standard_timeline(
+    node: Dict[str, Any],
+    *,
+    standard_timeline: Dict[str, Any],
+    regional_policy: Dict[str, Any],
+) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "regional_standard_timeline",
+            "region_standard_timeline",
+            "地方标准时效",
+        ),
+    )
+    out = _coerce_dict(raw)
+    records = out.get("records")
+    if not isinstance(records, list):
+        records = []
+    normalized: List[Dict[str, Any]] = []
+    default_region = str(regional_policy.get("default_region") or "CN") if isinstance(regional_policy, dict) else "CN"
+    layer_map: Dict[str, Dict[str, Any]] = {}
+    if isinstance(regional_policy, dict):
+        for item in regional_policy.get("layers") or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("policy_code") or "").strip()
+            if code:
+                layer_map[code] = item
+    timeline_records = standard_timeline.get("records") if isinstance(standard_timeline, dict) else []
+    if isinstance(timeline_records, list):
+        for rec in timeline_records:
+            if not isinstance(rec, dict):
+                continue
+            code = str(rec.get("standard_code") or "").strip()
+            if not code:
+                continue
+            layer = layer_map.get(code) or {}
+            region_code = str(layer.get("region_code") or layer.get("level") or default_region).strip() or default_region
+            normalized.append(
+                {
+                    "region_code": region_code,
+                    "policy_code": code,
+                    "effective_date": str(rec.get("effective_date") or ""),
+                    "expiry_date": str(rec.get("expiry_date") or ""),
+                    "status": str(rec.get("status") or "active"),
+                }
+            )
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        code = str(rec.get("policy_code") or rec.get("standard_code") or "").strip()
+        if not code:
+            continue
+        normalized.append(
+            {
+                "region_code": str(rec.get("region_code") or default_region).strip() or default_region,
+                "policy_code": code,
+                "effective_date": str(rec.get("effective_date") or ""),
+                "expiry_date": str(rec.get("expiry_date") or ""),
+                "status": str(rec.get("status") or "active"),
+            }
+        )
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for rec in normalized:
+        key = json.dumps(rec, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(rec)
+    out["records"] = deduped
+    out["enabled"] = bool(deduped)
+    out.setdefault("default_region", default_region)
+    return out
+
+
+def _extract_abnormal_scenario_playbook(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "abnormal_scenario_playbook",
+            "scenario_playbook",
+            "异常工况经验库",
+        ),
+    )
+    out = _coerce_dict(raw)
+    items = out.get("items")
+    if not isinstance(items, list):
+        items = []
+    cleaned: List[Dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            rec = {str(k): v for k, v in item.items() if str(k).strip() and v not in (None, "", [], {})}
+            if rec:
+                cleaned.append(rec)
+    out["items"] = cleaned
+    out["enabled"] = bool(cleaned)
+    return out
+
+
+def _extract_deduction_counterexample_library(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "deduction_counterexample_library",
+            "counterexample_library",
+            "扣分反例库",
+        ),
+    )
+    out = _coerce_dict(raw)
+    items = out.get("items")
+    if not isinstance(items, list):
+        items = []
+    cleaned: List[Dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            rec = {str(k): v for k, v in item.items() if str(k).strip() and v not in (None, "", [], {})}
+            if rec:
+                cleaned.append(rec)
+    out["items"] = cleaned
+    out["enabled"] = bool(cleaned)
+    return out
+
+
+def _extract_formula_safety_profile(
+    *,
+    formula_expression: str,
+    formula_variables: List[str],
+    unit_dimension_model: Dict[str, Any],
+) -> Dict[str, Any]:
+    expr = str(formula_expression or "").strip()
+    declared = [str(x).strip() for x in (formula_variables or []) if str(x).strip()]
+    if not expr:
+        return {"enabled": False, "reason": "no_formula"}
+
+    parse_ok = True
+    expr_vars: List[str] = []
+    try:
+        tree = ast.parse(expr, mode="eval")
+        for node in ast.walk(tree):
+            if not isinstance(node, ALLOWED_AST_NODES):
+                parse_ok = False
+                break
+            if isinstance(node, ast.Call):
+                if not isinstance(node.func, ast.Name) or node.func.id not in ALLOWED_FORMULA_FUNCS:
+                    parse_ok = False
+                    break
+        if parse_ok:
+            expr_vars = sorted(
+                {
+                    n.id
+                    for n in ast.walk(tree)
+                    if isinstance(n, ast.Name) and n.id not in ALLOWED_FORMULA_FUNCS
+                }
+            )
+    except Exception:
+        parse_ok = False
+
+    missing_declared = sorted([v for v in expr_vars if v not in declared])
+    extra_declared = sorted([v for v in declared if v not in expr_vars])
+    denominator_guard_ok = ("/" not in expr and "//" not in expr) or ("max(" in expr.lower())
+
+    unit_params = set()
+    params = unit_dimension_model.get("parameters") if isinstance(unit_dimension_model, dict) else []
+    if isinstance(params, list):
+        for item in params:
+            if not isinstance(item, dict):
+                continue
+            p = str(item.get("parameter") or "").strip()
+            if p:
+                unit_params.add(p)
+    missing_unit_bindings = sorted([v for v in expr_vars if v not in unit_params])
+
+    executable_ok = False
+    if parse_ok:
+        vars_seed = {v: 1.0 for v in expr_vars}
+        try:
+            _safe_eval_formula(expr, vars_seed)
+            executable_ok = True
+        except Exception:
+            executable_ok = False
+
+    score = 100.0
+    if not parse_ok:
+        score -= 50.0
+    if missing_declared:
+        score -= min(25.0, 6.0 * len(missing_declared))
+    if missing_unit_bindings:
+        score -= min(15.0, 4.0 * len(missing_unit_bindings))
+    if not denominator_guard_ok:
+        score -= 12.0
+    if not executable_ok:
+        score -= 16.0
+    score = max(0.0, min(100.0, score))
+
+    safe = bool(
+        parse_ok
+        and executable_ok
+        and not missing_declared
+        and denominator_guard_ok
+        and score >= 65.0
+    )
+    return {
+        "enabled": True,
+        "parse_ok": parse_ok,
+        "executable_ok": executable_ok,
+        "denominator_guard_ok": denominator_guard_ok,
+        "expression_variables": expr_vars,
+        "declared_variables": declared,
+        "missing_declared_variables": missing_declared,
+        "extra_declared_variables": extra_declared,
+        "missing_unit_bindings": missing_unit_bindings,
+        "safety_score": round(score, 4),
+        "safe": safe,
+    }
+
+
+def _extract_evidence_completeness_profile(
+    *,
+    numeric_sources: List[Any],
+    clause_locator: Dict[str, Any],
+    source_hierarchy: str,
+    standard_timeline: Dict[str, Any],
+) -> Dict[str, Any]:
+    required_fields = ["parameter", "value", "unit", "clause_anchor", "source_hierarchy", "effective_date"]
+    anchors = clause_locator.get("anchors") if isinstance(clause_locator, dict) else []
+    has_anchor = False
+    if isinstance(anchors, list):
+        for item in anchors:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("anchor_hash") or "").strip() or str(item.get("clause_ref") or "").strip():
+                has_anchor = True
+                break
+    records = standard_timeline.get("records") if isinstance(standard_timeline, dict) else []
+    effective_dates = []
+    if isinstance(records, list):
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            dt = str(rec.get("effective_date") or "").strip()
+            if dt:
+                effective_dates.append(dt)
+    effective_date = effective_dates[0] if effective_dates else ""
+    if not effective_date:
+        for item in numeric_sources:
+            if not isinstance(item, dict):
+                continue
+            dt = str(item.get("effective_date") or "").strip()
+            if dt:
+                effective_date = dt
+                break
+    items = [item for item in numeric_sources if isinstance(item, dict)]
+    if not items:
+        return {
+            "enabled": False,
+            "required_fields": required_fields,
+            "total_parameters": 0,
+            "complete_parameters": 0,
+            "completeness_ratio": 0.0,
+            "completeness_score": 0.0,
+            "missing_field_totals": {field: 0 for field in required_fields},
+            "status": "no_numeric_sources",
+        }
+
+    complete = 0
+    missing_totals = {field: 0 for field in required_fields}
+    rows: List[Dict[str, Any]] = []
+    for item in items:
+        has_parameter = bool(str(item.get("parameter") or "").strip())
+        formula_text = str(item.get("formula") or "").strip()
+        has_formula = bool(formula_text)
+        has_value = bool(str(item.get("value") or "").strip() or has_formula)
+        has_unit = bool(str(item.get("unit") or "").strip()) or has_formula
+        has_source = bool(str(source_hierarchy or "").strip())
+        item_effective_date = str(item.get("effective_date") or "").strip()
+        flags = {
+            "parameter": has_parameter,
+            "value": has_value,
+            "unit": has_unit,
+            "clause_anchor": has_anchor,
+            "source_hierarchy": has_source,
+            "effective_date": bool(item_effective_date or effective_date or has_formula),
+        }
+        missing_fields = [k for k, v in flags.items() if not bool(v)]
+        for f in missing_fields:
+            missing_totals[f] += 1
+        is_complete = len(missing_fields) == 0
+        if is_complete:
+            complete += 1
+        rows.append(
+            {
+                "parameter": str(item.get("parameter") or ""),
+                "complete": is_complete,
+                "missing_fields": missing_fields,
+            }
+        )
+
+    total = len(items)
+    ratio = round(complete / max(total, 1), 4)
+    score = round(ratio * 100.0, 4)
+    status = "pass" if ratio >= 0.8 else "warn" if ratio >= 0.5 else "fail"
+    return {
+        "enabled": True,
+        "required_fields": required_fields,
+        "total_parameters": total,
+        "complete_parameters": complete,
+        "completeness_ratio": ratio,
+        "completeness_score": score,
+        "missing_field_totals": missing_totals,
+        "source_hierarchy": source_hierarchy,
+        "effective_date": effective_date,
+        "has_clause_anchor": has_anchor,
+        "status": status,
+        "items": rows[:32],
+    }
+
+
 def _extract_activation_terms(signal_text: str) -> List[str]:
     text = str(signal_text or "").strip()
     if not text:
@@ -1815,6 +2195,30 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     online_learning_profile = _extract_online_learning_profile(node)
                     incremental_fingerprint, incremental_update = _extract_incremental_state(node)
                     object_key = _build_object_key(node, title, node_id)
+                    entity_alignment = _extract_entity_alignment(
+                        node,
+                        object_key=object_key,
+                        title=title,
+                        node_id=node_id,
+                    )
+                    regional_standard_timeline = _extract_regional_standard_timeline(
+                        node,
+                        standard_timeline=standard_timeline,
+                        regional_policy=regional_policy,
+                    )
+                    abnormal_scenario_playbook = _extract_abnormal_scenario_playbook(node)
+                    deduction_counterexample_library = _extract_deduction_counterexample_library(node)
+                    formula_safety_profile = _extract_formula_safety_profile(
+                        formula_expression=formula_expression,
+                        formula_variables=formula_variables,
+                        unit_dimension_model=unit_dimension_model,
+                    )
+                    evidence_completeness = _extract_evidence_completeness_profile(
+                        numeric_sources=numeric_sources,
+                        clause_locator=clause_locator,
+                        source_hierarchy=source_hierarchy,
+                        standard_timeline=standard_timeline,
+                    )
                     refs = _build_reference_keys(
                         node,
                         uid="",
@@ -1862,6 +2266,13 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         "cross_discipline_interface_contract": interface_contract,
                         "optimization_objectives_ext": optimization_objectives_ext,
                         "online_learning_profile": online_learning_profile,
+                        "entity_alignment": entity_alignment,
+                        "entity_master_key": str(entity_alignment.get("entity_master_key") or ""),
+                        "regional_standard_timeline": regional_standard_timeline,
+                        "abnormal_scenario_playbook": abnormal_scenario_playbook,
+                        "deduction_counterexample_library": deduction_counterexample_library,
+                        "formula_safety_profile": formula_safety_profile,
+                        "evidence_completeness": evidence_completeness,
                     }
 
                     tactical = _extract_tactical_fields(node, activation_context=activation_ctx)
@@ -1886,6 +2297,12 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     keywords.extend(_extract_terms(interface_contract))
                     keywords.extend(_extract_terms(optimization_objectives_ext))
                     keywords.extend(_extract_terms(online_learning_profile))
+                    keywords.extend(_extract_terms(entity_alignment))
+                    keywords.extend(_extract_terms(regional_standard_timeline))
+                    keywords.extend(_extract_terms(abnormal_scenario_playbook))
+                    keywords.extend(_extract_terms(deduction_counterexample_library))
+                    keywords.extend(_extract_terms(formula_safety_profile))
+                    keywords.extend(_extract_terms(evidence_completeness))
                     activation_signal = ""
                     dna_verified = True
                     tactical_mode = ""
@@ -3054,7 +3471,14 @@ class KnowledgeGraphIndex:
         grouped: Dict[str, Dict[str, Any]] = {}
 
         for item in rows:
-            key = _normalize_alias(str(item.get("object_key") or "")) or _normalize_alias(str(item.get("title") or ""))
+            entity_key = _normalize_alias(
+                str(
+                    item.get("entity_master_key")
+                    or ((item.get("entity_alignment") or {}).get("entity_master_key") if isinstance(item.get("entity_alignment"), dict) else "")
+                    or ""
+                )
+            )
+            key = entity_key or _normalize_alias(str(item.get("object_key") or "")) or _normalize_alias(str(item.get("title") or ""))
             if not key:
                 key = str(item.get("node_id"))
             weight = int(SOURCE_HIERARCHY_WEIGHTS.get(str(item.get("source_hierarchy") or "未知"), 0))
@@ -3227,6 +3651,18 @@ class KnowledgeGraphIndex:
             interface_contract = _coerce_dict(payload.get("cross_discipline_interface_contract"))
             optimization_objectives_ext = _coerce_dict(payload.get("optimization_objectives_ext"))
             online_learning_profile = _coerce_dict(payload.get("online_learning_profile"))
+            entity_alignment = _coerce_dict(payload.get("entity_alignment"))
+            entity_master_key = str(
+                payload.get("entity_master_key")
+                or entity_alignment.get("entity_master_key")
+                or row["object_key"]
+                or ""
+            ).strip()
+            regional_standard_timeline = _coerce_dict(payload.get("regional_standard_timeline"))
+            abnormal_scenario_playbook = _coerce_dict(payload.get("abnormal_scenario_playbook"))
+            deduction_counterexample_library = _coerce_dict(payload.get("deduction_counterexample_library"))
+            formula_safety_profile = _coerce_dict(payload.get("formula_safety_profile"))
+            evidence_completeness = _coerce_dict(payload.get("evidence_completeness"))
             incremental_fingerprint = str(row["incremental_fingerprint"] or "").strip()
             incremental_update = _safe_json_load(row["incremental_update_json"], {})
 
@@ -3272,6 +3708,8 @@ class KnowledgeGraphIndex:
                 body=body,
                 tags=tags_row,
                 keywords=keywords_row,
+                evidence_completeness=evidence_completeness,
+                formula_safety_profile=formula_safety_profile,
             )
             if gemini_usefulness_score < min_gemini_score:
                 continue
@@ -3352,6 +3790,23 @@ class KnowledgeGraphIndex:
                 score += 0.5
             if isinstance(online_learning_profile, dict) and bool(online_learning_profile.get("enabled")):
                 score += 0.4
+            if isinstance(evidence_completeness, dict):
+                ratio = _safe_float(evidence_completeness.get("completeness_ratio"), 0.0)
+                if ratio >= 0.8:
+                    score += 1.2
+                elif ratio <= 0.3:
+                    score -= 1.2
+            if isinstance(formula_safety_profile, dict) and bool(formula_safety_profile.get("enabled")):
+                if bool(formula_safety_profile.get("safe")):
+                    score += 1.0
+                else:
+                    score -= 1.4
+            if isinstance(abnormal_scenario_playbook, dict) and bool(abnormal_scenario_playbook.get("enabled")):
+                score += 0.4
+            if isinstance(deduction_counterexample_library, dict) and bool(
+                deduction_counterexample_library.get("enabled")
+            ):
+                score += 0.4
 
             if (norm_tags or norm_keywords or query_tokens) and score <= 0:
                 continue
@@ -3367,6 +3822,7 @@ class KnowledgeGraphIndex:
                 "source_hierarchy": row["source_hierarchy"],
                 "node_type": row["node_type"],
                 "object_key": row["object_key"],
+                "entity_master_key": entity_master_key,
                 "applicable_conditions": _safe_json_load(row["applicable_conditions_json"], {}),
                 "resource_requirements": resource_requirements,
                 "safety_level": row["safety_level"],
@@ -3401,6 +3857,12 @@ class KnowledgeGraphIndex:
                 "cross_discipline_interface_contract": interface_contract,
                 "optimization_objectives_ext": optimization_objectives_ext,
                 "online_learning_profile": online_learning_profile,
+                "entity_alignment": entity_alignment,
+                "regional_standard_timeline": regional_standard_timeline,
+                "abnormal_scenario_playbook": abnormal_scenario_playbook,
+                "deduction_counterexample_library": deduction_counterexample_library,
+                "formula_safety_profile": formula_safety_profile,
+                "evidence_completeness": evidence_completeness,
                 "incremental_fingerprint": incremental_fingerprint,
                 "incremental_update": incremental_update,
                 "professional_domain_matches": domain_matches,
@@ -3416,6 +3878,8 @@ class KnowledgeGraphIndex:
                     if isinstance(standard_validity_timeline, dict)
                     else "",
                     "timeline_match_state": timeline_match.get("state"),
+                    "entity_master_key": entity_master_key,
+                    "evidence_completeness_ratio": _safe_float(evidence_completeness.get("completeness_ratio"), 0.0),
                 },
             }
             results.append(result_item)

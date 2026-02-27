@@ -389,6 +389,151 @@ class QuantitativeBoQEngine:
                 out.append(str(a.get("scenario_id") or f"S{i + 1}"))
         return out
 
+    def _percentile(self, values: List[float], p: float) -> float:
+        arr = sorted(float(v) for v in values if v is not None)
+        if not arr:
+            return 0.0
+        q = max(0.0, min(1.0, float(p)))
+        if len(arr) == 1:
+            return float(arr[0])
+        pos = q * (len(arr) - 1)
+        left = int(math.floor(pos))
+        right = int(math.ceil(pos))
+        if left == right:
+            return float(arr[left])
+        frac = pos - left
+        return float(arr[left] * (1.0 - frac) + arr[right] * frac)
+
+    def simulate_disturbance_scenarios(
+        self,
+        boq_payload: Dict[str, Any],
+        *,
+        scenario_profiles: List[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
+        items = boq_payload.get("items") if isinstance(boq_payload.get("items"), list) else []
+        mapping = self.build_mapping(items)
+        base_cpm = self._compute_cpm(mapping["process_nodes"], mapping["process_edges"])
+        base_indices = self._compute_quant_indices(boq_items=items, mapping=mapping, cpm=base_cpm)
+
+        base_duration = float(max(int(base_cpm.get("project_duration_days") or 0), 1))
+        base_risk = float(base_cpm.get("risk_index") or 0.0)
+        base_density = float(base_indices.get("resource_density_index") or 0.0)
+        complexity = float(base_indices.get("complexity_index") or 0.0)
+
+        default_profiles = [
+            {
+                "scenario_id": "DS-01",
+                "name": "rainy_weather",
+                "probability": 0.22,
+                "duration_factor": 1.12,
+                "risk_delta": 0.08,
+                "resource_factor": 1.05,
+            },
+            {
+                "scenario_id": "DS-02",
+                "name": "supply_chain_delay",
+                "probability": 0.18,
+                "duration_factor": 1.18,
+                "risk_delta": 0.10,
+                "resource_factor": 1.02,
+            },
+            {
+                "scenario_id": "DS-03",
+                "name": "cross_interface_rework",
+                "probability": 0.16,
+                "duration_factor": 1.15,
+                "risk_delta": 0.12,
+                "resource_factor": 1.08,
+            },
+            {
+                "scenario_id": "DS-04",
+                "name": "safety_incident_pause",
+                "probability": 0.09,
+                "duration_factor": 1.28,
+                "risk_delta": 0.18,
+                "resource_factor": 1.00,
+            },
+            {
+                "scenario_id": "DS-05",
+                "name": "digital_coordination_gain",
+                "probability": 0.20,
+                "duration_factor": 0.94,
+                "risk_delta": -0.05,
+                "resource_factor": 0.96,
+            },
+            {
+                "scenario_id": "DS-06",
+                "name": "prefab_delivery_gain",
+                "probability": 0.15,
+                "duration_factor": 0.91,
+                "risk_delta": -0.04,
+                "resource_factor": 0.93,
+            },
+        ]
+        profiles = scenario_profiles if isinstance(scenario_profiles, list) and scenario_profiles else default_profiles
+        total_prob = sum(max(0.0, float((row or {}).get("probability") or 0.0)) for row in profiles)
+        if total_prob <= 0:
+            total_prob = 1.0
+
+        scenarios: List[Dict[str, Any]] = []
+        for idx, row in enumerate(profiles, start=1):
+            if not isinstance(row, dict):
+                continue
+            sid = str(row.get("scenario_id") or f"DS-{idx:02d}")
+            name = str(row.get("name") or sid)
+            probability = max(0.0, float(row.get("probability") or 0.0)) / total_prob
+            duration_factor = max(0.6, float(row.get("duration_factor") or 1.0))
+            risk_delta = float(row.get("risk_delta") or 0.0)
+            resource_factor = max(0.6, float(row.get("resource_factor") or 1.0))
+
+            duration_days = int(math.ceil(base_duration * duration_factor))
+            risk_index = min(1.0, max(0.0, base_risk + risk_delta + complexity * 0.04))
+            density_index = min(1.0, max(0.0, base_density * resource_factor))
+            scenarios.append(
+                {
+                    "scenario_id": sid,
+                    "name": name,
+                    "probability": round(probability, 6),
+                    "duration_days": duration_days,
+                    "risk_index": round(risk_index, 6),
+                    "resource_density_index": round(density_index, 6),
+                    "duration_factor": round(duration_factor, 6),
+                    "risk_delta": round(risk_delta, 6),
+                    "resource_factor": round(resource_factor, 6),
+                }
+            )
+
+        durations = [float(s.get("duration_days") or 0.0) for s in scenarios] or [base_duration]
+        risks = [float(s.get("risk_index") or 0.0) for s in scenarios] or [base_risk]
+        weighted_duration = sum(
+            float(s.get("duration_days") or 0.0) * float(s.get("probability") or 0.0) for s in scenarios
+        )
+        weighted_risk = sum(float(s.get("risk_index") or 0.0) * float(s.get("probability") or 0.0) for s in scenarios)
+        p50 = self._percentile(durations, 0.5)
+        p80 = self._percentile(durations, 0.8)
+        p95 = self._percentile(durations, 0.95)
+        expected_overrun = max(0.0, weighted_duration - base_duration) / max(base_duration, 1.0)
+        risk_uplift = max(0.0, weighted_risk - base_risk)
+        resilience = max(0.0, min(1.0, 1.0 - expected_overrun * 0.65 - risk_uplift * 0.35))
+
+        return {
+            "enabled": True,
+            "scenario_count": len(scenarios),
+            "base_duration_days": int(base_duration),
+            "base_risk_index": round(base_risk, 6),
+            "expected_duration_days": round(weighted_duration, 6),
+            "expected_risk_index": round(weighted_risk, 6),
+            "resilience_index": round(resilience, 6),
+            "duration_envelope": {
+                "min_days": int(min(durations)),
+                "p50_days": round(p50, 4),
+                "p80_days": round(p80, 4),
+                "p95_days": round(p95, 4),
+                "max_days": int(max(durations)),
+            },
+            "scenarios": scenarios,
+        }
+
     def optimize_execution_plan(
         self,
         boq_payload: Dict[str, Any],
@@ -536,6 +681,7 @@ class QuantitativeBoQEngine:
         chapter_structure = self._build_chapter_structure(items)
         indices = self._compute_quant_indices(boq_items=items, mapping=mapping, cpm=cpm)
         optimization = self.optimize_execution_plan(boq_payload)
+        scenario_simulation = self.simulate_disturbance_scenarios(boq_payload)
 
         return {
             "mapping_3d": mapping["items"],
@@ -547,6 +693,7 @@ class QuantitativeBoQEngine:
             "cpm": cpm,
             "indices": indices,
             "optimization": optimization,
+            "scenario_simulation": scenario_simulation,
         }
 
 

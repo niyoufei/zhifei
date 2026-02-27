@@ -183,7 +183,14 @@ def test_tactical_fields_are_mapped_from_json(tmp_path: Path) -> None:
 
     result = search_graph_index(query="双曲面 参数化", db_path=db_path, resolve_authority=False, top_k=20)
     assert result["total"] >= 1
-    node = result["results"][0]
+    node = next(
+        (
+            item
+            for item in (result.get("results") or [])
+            if str(item.get("title") or "") == "混凝土浇筑增强节点"
+        ),
+        (result.get("results") or [{}])[0],
+    )
     assert node["dna_verified"] is True
     assert node["tactical_mode"] == "premium"
     assert node["bid_response_strategy"]["trigger_keywords"] == ["双曲面", "加工精度"]
@@ -389,6 +396,19 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
                                 "is_auto_generated": True,
                                 "formula_expression": "volume / max(productivity, 1)",
                                 "formula_variables": ["volume", "productivity"],
+                                "numeric_sources": [
+                                    {
+                                        "parameter": "volume",
+                                        "value": "120",
+                                        "unit": "m3",
+                                        "source_hierarchy": "国标",
+                                        "effective_date": "2024-01-01",
+                                        "clause_ref": "第1条",
+                                        "clause_path": "GB 50300-2013/第1条/S1.0/P1",
+                                        "anchor_hash": "abc123ef45678900",
+                                        "evidence_anchor_id": "EA-1",
+                                    }
+                                ],
                                 "standard_validity_timeline": {
                                     "timeline_status": "active",
                                     "records": [{"standard_code": "GB 50300-2013"}],
@@ -415,6 +435,7 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
                                 "cross_discipline_interface_contract": {
                                     "enabled": True,
                                     "interfaces": [{"with_domain": "mep"}],
+                                    "conflict_graph": [{"from_domain": "building", "to_domain": "mep", "status": "resolved"}],
                                 },
                                 "optimization_objectives_ext": {
                                     "enabled": True,
@@ -424,6 +445,39 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
                                 "retrieval_benchmark": {"quality_score": 88, "minimum_quality_score": 70},
                                 "approval_workflow": {"required": True, "status": "approved"},
                                 "formula_sensitivity": {"enabled": True, "baseline_result": 4.0},
+                                "formula_safety_profile": {"enabled": True, "safe": True, "warnings": []},
+                                "evidence_completeness": {
+                                    "enabled": True,
+                                    "completeness_ratio": 1.0,
+                                    "completeness_score": 100,
+                                    "source_hierarchy": "国标",
+                                    "effective_date": "2024-01-01",
+                                    "has_clause_anchor": True,
+                                    "status": "pass",
+                                },
+                                "entity_master_key": "EMK-ENH-001",
+                                "entity_alignment": {
+                                    "enabled": True,
+                                    "entity_master_key": "EMK-ENH-001",
+                                    "entity_type": "engineering_object",
+                                    "aliases": ["混凝土浇筑增强节点"],
+                                },
+                                "regional_standard_timeline": {
+                                    "enabled": True,
+                                    "default_region": "CN",
+                                    "records": [{"region_code": "CN", "policy_code": "GB 50300-2013"}],
+                                },
+                                "abnormal_scenario_playbook": {
+                                    "enabled": True,
+                                    "dimension": "质量",
+                                    "domain": "building",
+                                    "items": [{"scenario": "降雨中断", "response_sla_hours": 4}],
+                                },
+                                "deduction_counterexample_library": {
+                                    "enabled": True,
+                                    "dimension": "质量",
+                                    "items": [{"counterexample_id": "质量-CE-1", "issue": "缺少复检"}],
+                                },
                                 "bim_ifc_context": {"ifc_entities": ["IfcBuilding"]},
                                 "incremental_fingerprint": "fingerprint-001",
                                 "incremental_update": {"strategy": "fingerprint_diff"},
@@ -476,6 +530,13 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
     assert bool((node.get("cross_discipline_interface_contract") or {}).get("enabled"))
     assert bool((node.get("optimization_objectives_ext") or {}).get("enabled"))
     assert bool((node.get("online_learning_profile") or {}).get("enabled"))
+    assert bool((node.get("formula_safety_profile") or {}).get("safe"))
+    assert float((node.get("evidence_completeness") or {}).get("completeness_ratio") or 0.0) >= 0.8
+    assert str(node.get("entity_master_key") or "").strip() == "EMK-ENH-001"
+    assert str((node.get("entity_alignment") or {}).get("entity_master_key") or "").strip() == "EMK-ENH-001"
+    assert bool((node.get("regional_standard_timeline") or {}).get("records"))
+    assert bool((node.get("abnormal_scenario_playbook") or {}).get("items"))
+    assert bool((node.get("deduction_counterexample_library") or {}).get("items"))
 
 
 def test_search_supports_bid_date_timeline_effective_filter(tmp_path: Path) -> None:
@@ -695,3 +756,54 @@ def test_search_can_load_retrieval_weight_profile(tmp_path: Path) -> None:
     weights = result.get("retrieval_score_weights") or {}
     assert float(weights.get("query_token_weight") or 0.0) == 1.7
     assert float(weights.get("keyword_exact_weight") or 0.0) == 1.3
+
+
+def test_authority_resolution_prefers_entity_master_key_grouping(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "authority_entity.json").write_text(
+        json.dumps(
+            {
+                "name": "ZF-KG-AUTH-ENTITY",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "AUTH-LOW",
+                                "name": "模板方案A",
+                                "object_key": "obj-low",
+                                "source_hierarchy": "行标",
+                                "entity_master_key": "EMK-AUTH-001",
+                                "entity_alignment": {"enabled": True, "entity_master_key": "EMK-AUTH-001"},
+                                "keywords": ["模板", "支撑"],
+                                "content": {"operation_desc_premium": {"desc": "旧版模板支撑方案。"}},
+                            },
+                            {
+                                "node_id": "AUTH-HIGH",
+                                "name": "模板方案B",
+                                "object_key": "obj-high",
+                                "source_hierarchy": "答疑文件",
+                                "entity_master_key": "EMK-AUTH-001",
+                                "entity_alignment": {"enabled": True, "entity_master_key": "EMK-AUTH-001"},
+                                "keywords": ["模板", "支撑"],
+                                "content": {"operation_desc_premium": {"desc": "答疑明确模板支撑参数。"}},
+                            },
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(query="模板 支撑", db_path=db_path, top_k=10, resolve_authority=True)
+    matched = [item for item in (result.get("results") or []) if str(item.get("entity_master_key") or "") == "EMK-AUTH-001"]
+    assert len(matched) == 1
+    node = matched[0]
+    assert str(node.get("source_hierarchy") or "") == "答疑文件"

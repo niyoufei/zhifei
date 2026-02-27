@@ -73,6 +73,16 @@ def _merge_online_learning_profile(
     profile["trace_coverage_avg"] = trace_coverage_avg
     profile["pass_rate"] = pass_rate
     profile["last_feedback_at"] = str(timestamp or profile.get("last_feedback_at") or "")
+    profile["accepted_count"] = max(_safe_int(feedback.get("accepted_count"), _safe_int(profile.get("accepted_count"), 0)), 0)
+    profile["rejected_count"] = max(_safe_int(feedback.get("rejected_count"), _safe_int(profile.get("rejected_count"), 0)), 0)
+    profile["modified_count"] = max(_safe_int(feedback.get("modified_count"), _safe_int(profile.get("modified_count"), 0)), 0)
+    profile["decision_total"] = max(_safe_int(feedback.get("decision_total"), _safe_int(profile.get("decision_total"), 0)), 0)
+    if str(feedback.get("last_decision") or "").strip():
+        profile["last_decision"] = str(feedback.get("last_decision"))
+    if str(feedback.get("last_decision_at") or "").strip():
+        profile["last_decision_at"] = str(feedback.get("last_decision_at"))
+    if str(feedback.get("last_decision_note") or "").strip():
+        profile["last_decision_note"] = str(feedback.get("last_decision_note"))[:200]
 
     domains = feedback.get("domains")
     if isinstance(domains, dict) and domains:
@@ -80,6 +90,13 @@ def _merge_online_learning_profile(
     recommended_defaults = feedback.get("recommended_defaults")
     if isinstance(recommended_defaults, dict) and recommended_defaults:
         profile["recommended_defaults"] = dict(recommended_defaults)
+    adjustments = feedback.get("weight_adjustments")
+    if isinstance(adjustments, dict) and adjustments:
+        profile["weight_adjustments"] = {
+            str(k): round(_safe_float(v, 1.0), 6)
+            for k, v in adjustments.items()
+            if str(k).strip()
+        }
     return profile
 
 
@@ -161,4 +178,3 @@ def writeback_online_learning_profile(
         "unresolved_node_ids": sorted(unresolved)[:50],
         "parse_errors": parse_errors[:20],
     }
-

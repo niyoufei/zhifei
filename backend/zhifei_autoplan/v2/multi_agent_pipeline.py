@@ -302,6 +302,59 @@ class MultiAgentDocPipeline:
                 return True
         return False
 
+    def _hit_evidence_ok(self, hit: Dict[str, Any] | None) -> bool:
+        if not isinstance(hit, dict):
+            return False
+        evidence = hit.get("evidence_completeness") if isinstance(hit.get("evidence_completeness"), dict) else {}
+        if not evidence:
+            return True
+        ratio = float(evidence.get("completeness_ratio") or 0.0)
+        status = str(evidence.get("status") or "").strip().lower()
+        has_anchor = bool(evidence.get("has_clause_anchor"))
+        has_effective_date = bool(str(evidence.get("effective_date") or "").strip())
+        if status == "no_numeric_sources":
+            return True
+        if (ratio >= 0.55 or status == "pass") and has_anchor and has_effective_date:
+            return True
+        source_hierarchy = str(hit.get("source_hierarchy") or "").strip()
+        if ratio >= 0.55 and source_hierarchy in {"企标", "行标"}:
+            return True
+        return False
+
+    def _hit_formula_safety_ok(self, hit: Dict[str, Any] | None) -> bool:
+        if not isinstance(hit, dict):
+            return False
+        expr = str(hit.get("formula_expression") or "").strip()
+        if not expr:
+            return True
+        profile = hit.get("formula_safety_profile") if isinstance(hit.get("formula_safety_profile"), dict) else {}
+        if not profile:
+            return True
+        return bool(profile.get("safe"))
+
+    def _hit_interface_conflict_ok(self, hit: Dict[str, Any] | None) -> bool:
+        if not isinstance(hit, dict):
+            return False
+        contract = (
+            hit.get("cross_discipline_interface_contract")
+            if isinstance(hit.get("cross_discipline_interface_contract"), dict)
+            else {}
+        )
+        if not contract:
+            return True
+        conflict_graph = contract.get("conflict_graph")
+        if not isinstance(conflict_graph, list):
+            return True
+        if isinstance(conflict_graph, list):
+            unresolved = [
+                item
+                for item in conflict_graph
+                if isinstance(item, dict) and str(item.get("status") or "").strip().lower() in {"conflict", "open"}
+            ]
+            if unresolved:
+                return False
+        return True
+
     def _hit_parameter_ok(self, hit: Dict[str, Any] | None) -> bool:
         if not isinstance(hit, dict):
             return False
@@ -314,7 +367,18 @@ class MultiAgentDocPipeline:
         safety_level = str(hit.get("safety_level") or "unknown").strip().lower()
         has_conditions = isinstance(applicable, dict) and len(applicable) > 0
         has_resources = isinstance(resources, dict) and len(resources) > 0
-        return bool(node_ok and has_conditions and has_resources and safety_level != "unknown")
+        evidence_ok = self._hit_evidence_ok(hit)
+        formula_safety_ok = self._hit_formula_safety_ok(hit)
+        interface_ok = self._hit_interface_conflict_ok(hit)
+        return bool(
+            node_ok
+            and has_conditions
+            and has_resources
+            and safety_level != "unknown"
+            and evidence_ok
+            and formula_safety_ok
+            and interface_ok
+        )
 
     def _select_graph_hit(self, query: str, *, professional_domain: str | None = None) -> Dict[str, Any]:
         domains = [str(professional_domain).strip()] if str(professional_domain or "").strip() else None
@@ -693,10 +757,14 @@ class MultiAgentDocPipeline:
                 "formula_total": formula_total,
                 "formula_node_id": formula_hit.get("node_id") if formula_required else None,
                 "formula_title": formula_hit.get("title") if formula_required else None,
+                "evidence_ok": self._hit_evidence_ok(graph_hit),
+                "formula_safety_ok": self._hit_formula_safety_ok(graph_hit),
+                "interface_ok": self._hit_interface_conflict_ok(graph_hit),
                 "ok": ok,
             }
+            check["ok"] = bool(check["ok"] and check["evidence_ok"] and check["formula_safety_ok"] and check["interface_ok"])
             checks.append(check)
-            if not ok:
+            if not check["ok"]:
                 missing.append(check)
 
         return {
@@ -751,6 +819,13 @@ class MultiAgentDocPipeline:
                     "cross_discipline_interface_contract": hit.get("cross_discipline_interface_contract") or {},
                     "optimization_objectives_ext": hit.get("optimization_objectives_ext") or {},
                     "online_learning_profile": hit.get("online_learning_profile") or {},
+                    "entity_master_key": hit.get("entity_master_key"),
+                    "entity_alignment": hit.get("entity_alignment") or {},
+                    "regional_standard_timeline": hit.get("regional_standard_timeline") or {},
+                    "abnormal_scenario_playbook": hit.get("abnormal_scenario_playbook") or {},
+                    "deduction_counterexample_library": hit.get("deduction_counterexample_library") or {},
+                    "formula_safety_profile": hit.get("formula_safety_profile") or {},
+                    "evidence_completeness": hit.get("evidence_completeness") or {},
                     "retrieval_hints": (hit.get("payload") or {}).get("retrieval_hints")
                     if isinstance(hit.get("payload"), dict)
                     else {},
@@ -963,6 +1038,56 @@ class MultiAgentDocPipeline:
                                 "applicable_conditions(气候/地质)",
                                 "resource_requirements(资源消耗模型)",
                                 "safety_level(风险等级)",
+                            ],
+                        }
+                    )
+            if item.get("node_ok") and not item.get("evidence_ok"):
+                key = ("evidence_incomplete", dim)
+                if key not in seen:
+                    seen.add(key)
+                    gaps.append(
+                        {
+                            "type": "evidence_incomplete",
+                            "dimension": dim,
+                            "required_keywords": item.get("keywords") or [],
+                            "query": item.get("graph_query"),
+                            "suggested_parameters": [
+                                "numeric_sources: parameter/value/unit",
+                                "clause_locator: anchor_hash/clause_path",
+                                "standard_validity_timeline: effective_date",
+                            ],
+                        }
+                    )
+            if item.get("node_ok") and not item.get("formula_safety_ok"):
+                key = ("formula_safety_missing", dim)
+                if key not in seen:
+                    seen.add(key)
+                    gaps.append(
+                        {
+                            "type": "formula_safety_missing",
+                            "dimension": dim,
+                            "required_keywords": item.get("keywords") or [],
+                            "query": item.get("graph_query"),
+                            "suggested_parameters": [
+                                "formula_safety_profile.safe == true",
+                                "公式变量声明与量纲绑定一致",
+                                "分母保护(max(...,1))",
+                            ],
+                        }
+                    )
+            if item.get("node_ok") and not item.get("interface_ok"):
+                key = ("interface_conflict_open", dim)
+                if key not in seen:
+                    seen.add(key)
+                    gaps.append(
+                        {
+                            "type": "interface_conflict_open",
+                            "dimension": dim,
+                            "required_keywords": item.get("keywords") or [],
+                            "query": item.get("graph_query"),
+                            "suggested_parameters": [
+                                "cross_discipline_interface_contract.conflict_graph",
+                                "冲突状态由conflict/open闭环为resolved",
                             ],
                         }
                     )
