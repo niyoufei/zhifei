@@ -73,6 +73,10 @@ class FileResult:
     mandatory_count: int = 0
     parameter_count: int = 0
     chunk_count: int = 0
+    skipped: bool = False
+    source_sha256: str = ""
+    source_size: int = 0
+    source_mtime_ns: int = 0
     error: str = ""
 
 
@@ -89,6 +93,51 @@ def _safe_name(text: str, *, fallback_prefix: str = "standard") -> str:
     digest = hashlib.sha1(str(text or "").encode("utf-8", errors="ignore")).hexdigest()[:8]
     prefix = re.sub(r"[^0-9A-Za-z_\-]+", "_", fallback_prefix).strip("_") or "standard"
     return f"{prefix}_{digest}"
+
+
+def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            b = f.read(chunk_size)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def _manifest_path(output_dir: Path) -> Path:
+    return output_dir / "_ingest_manifest.json"
+
+
+def _load_manifest(output_dir: Path) -> Dict[str, Any]:
+    p = _manifest_path(output_dir)
+    if not p.exists():
+        return {"version": 1, "files": {}}
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(obj, dict) and isinstance(obj.get("files"), dict):
+            return obj
+    except Exception:
+        pass
+    return {"version": 1, "files": {}}
+
+
+def _save_manifest(output_dir: Path, manifest: Dict[str, Any]) -> None:
+    p = _manifest_path(output_dir)
+    obj = {
+        "version": 1,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+        "files": manifest.get("files") if isinstance(manifest.get("files"), dict) else {},
+    }
+    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _source_key(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except Exception:
+        return str(path)
 
 
 def _canonical_prefix(prefix: str) -> str:
@@ -572,6 +621,13 @@ async def _process_one_file(
 ) -> FileResult:
     async with semaphore:
         try:
+            try:
+                st = path.stat()
+                source_size = int(st.st_size)
+                source_mtime_ns = int(st.st_mtime_ns)
+            except Exception:
+                source_size = 0
+                source_mtime_ns = 0
             loop = asyncio.get_running_loop()
             text, parse_meta = await loop.run_in_executor(parse_executor, lambda: _parse_sync(path, ocr_max_pages=ocr_max_pages))
             if not text or len(text.strip()) < 300:
@@ -608,11 +664,9 @@ async def _process_one_file(
             if not all_clauses:
                 raise ValueError(f"llm_no_clauses_extracted errors={','.join(llm_errors[:5])}")
 
-            output_base = _safe_name(standard_code, fallback_prefix="STD")
-            output_path = output_dir / f"{output_base}_compliance.json"
-            if output_path.exists():
-                src_tag = hashlib.sha1(str(path).encode("utf-8", errors="ignore")).hexdigest()[:6]
-                output_path = output_dir / f"{output_base}_{src_tag}_compliance.json"
+            # Stable output naming by source path hash to avoid uncontrolled file growth.
+            src_tag = hashlib.sha1(_source_key(path).encode("utf-8", errors="ignore")).hexdigest()[:8]
+            output_path = output_dir / f"SRC_{src_tag}_compliance.json"
 
             nodes: List[Dict[str, Any]] = []
             for idx, clause in enumerate(all_clauses, start=1):
@@ -658,6 +712,7 @@ async def _process_one_file(
             }
             output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+            source_sha256 = _sha256_file(path)
             return FileResult(
                 source_file=str(path),
                 ok=True,
@@ -668,13 +723,38 @@ async def _process_one_file(
                 mandatory_count=len(nodes),
                 parameter_count=len(all_params),
                 chunk_count=len(chunks),
+                source_sha256=source_sha256,
+                source_size=source_size,
+                source_mtime_ns=source_mtime_ns,
             )
         except Exception as exc:
-            return FileResult(source_file=str(path), ok=False, error=repr(exc))
+            try:
+                st = path.stat()
+                source_size = int(st.st_size)
+                source_mtime_ns = int(st.st_mtime_ns)
+            except Exception:
+                source_size = 0
+                source_mtime_ns = 0
+            return FileResult(
+                source_file=str(path),
+                ok=False,
+                error=repr(exc),
+                source_size=source_size,
+                source_mtime_ns=source_mtime_ns,
+            )
 
 
-def _pick_input_files(input_dir: Path, *, limit: Optional[int], sample_seed: int) -> List[Path]:
-    files = sorted([p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_SUFFIXES])
+def _pick_input_files(input_dir: Path, *, limit: Optional[int], sample_seed: int, recursive: bool = True) -> List[Path]:
+    if recursive:
+        files = sorted(
+            [
+                p
+                for p in input_dir.rglob("*")
+                if p.is_file() and p.suffix.lower() in ALLOWED_SUFFIXES and "/." not in str(p)
+            ]
+        )
+    else:
+        files = sorted([p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_SUFFIXES])
     if limit is None or limit <= 0 or limit >= len(files):
         return files
     rnd = random.Random(sample_seed)
@@ -696,9 +776,63 @@ async def run_pipeline(
     limit: Optional[int],
     sample_seed: int,
     max_chunks_per_file: int,
+    force_reindex: bool,
+    recursive: bool,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    files = _pick_input_files(input_dir, limit=limit, sample_seed=sample_seed)
+    all_files = _pick_input_files(input_dir, limit=limit, sample_seed=sample_seed, recursive=recursive)
+    manifest = _load_manifest(output_dir)
+    manifest_files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    if not isinstance(manifest_files, dict):
+        manifest_files = {}
+    current_keys = {_source_key(p) for p in all_files}
+    # Prune deleted files from manifest to keep index stable over time.
+    for k in list(manifest_files.keys()):
+        if k not in current_keys:
+            manifest_files.pop(k, None)
+
+    files: List[Path] = []
+    skipped_results: List[FileResult] = []
+    for p in all_files:
+        key = _source_key(p)
+        rec = manifest_files.get(key) if isinstance(manifest_files.get(key), dict) else {}
+        try:
+            st = p.stat()
+            size = int(st.st_size)
+            mtime_ns = int(st.st_mtime_ns)
+        except Exception:
+            size = 0
+            mtime_ns = 0
+        output_file = str(rec.get("output_file") or "").strip()
+        output_ok = bool(output_file and Path(output_file).exists())
+        unchanged = (
+            (not force_reindex)
+            and bool(rec)
+            and int(rec.get("source_size") or -1) == size
+            and int(rec.get("source_mtime_ns") or -2) == mtime_ns
+            and output_ok
+        )
+        if unchanged:
+            skipped_results.append(
+                FileResult(
+                    source_file=str(p),
+                    ok=True,
+                    output_file=output_file,
+                    standard_code=str(rec.get("standard_code") or ""),
+                    prefix_tag=str(rec.get("prefix_tag") or ""),
+                    domain_tag=str(rec.get("domain_tag") or ""),
+                    mandatory_count=int(rec.get("mandatory_count") or 0),
+                    parameter_count=int(rec.get("parameter_count") or 0),
+                    chunk_count=int(rec.get("chunk_count") or 0),
+                    skipped=True,
+                    source_sha256=str(rec.get("source_sha256") or ""),
+                    source_size=size,
+                    source_mtime_ns=mtime_ns,
+                )
+            )
+            continue
+        files.append(p)
+
     parse_sem = asyncio.Semaphore(max(1, max_workers))
     parse_executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
     llm_semaphore = asyncio.Semaphore(max(1, llm_workers))
@@ -732,7 +866,7 @@ async def run_pipeline(
         for path in files
     ]
 
-    results: List[FileResult] = []
+    results: List[FileResult] = list(skipped_results)
     pbar = tqdm(total=len(tasks), desc="规范LLM深度入库", unit="file", ncols=130)
     try:
         for fut in asyncio.as_completed(tasks):
@@ -752,25 +886,67 @@ async def run_pipeline(
 
     success = [r for r in results if r.ok]
     failed = [r for r in results if not r.ok]
+    skipped_count = len([r for r in results if r.skipped])
     error_log_path = output_dir / "_ingest_errors.jsonl"
     if failed:
         with error_log_path.open("w", encoding="utf-8") as f:
             for item in failed:
                 f.write(json.dumps({"source_file": item.source_file, "error": item.error}, ensure_ascii=False) + "\n")
 
+    # Update manifest from processed + skipped results.
+    for item in results:
+        key = _source_key(Path(item.source_file))
+        manifest_files[key] = {
+            "source_file": item.source_file,
+            "output_file": item.output_file,
+            "standard_code": item.standard_code,
+            "prefix_tag": item.prefix_tag,
+            "domain_tag": item.domain_tag,
+            "mandatory_count": int(item.mandatory_count or 0),
+            "parameter_count": int(item.parameter_count or 0),
+            "chunk_count": int(item.chunk_count or 0),
+            "source_sha256": item.source_sha256,
+            "source_size": int(item.source_size or 0),
+            "source_mtime_ns": int(item.source_mtime_ns or 0),
+            "ok": bool(item.ok),
+            "error": item.error or "",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+        }
+    manifest["files"] = manifest_files
+    _save_manifest(output_dir, manifest)
+
+    # Build retrieval catalog for fast runtime pre-filter.
+    catalog_summary: Dict[str, Any] = {}
+    try:
+        from backend.zhifei_autoplan.compliance_runtime import build_compliance_catalog
+
+        catalog = build_compliance_catalog(output_dir)
+        catalog_summary = {
+            "catalog_count": int(catalog.get("count") or 0),
+            "catalog_file": str((output_dir / "_catalog.json")),
+        }
+    except Exception as exc:
+        catalog_summary = {"catalog_error": repr(exc)}
+
     summary = {
         "ok": True,
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
         "total": len(results),
+        "candidates": len(all_files),
+        "processed": len(files),
+        "skipped_unchanged": skipped_count,
         "success": len(success),
         "failed": len(failed),
         "llm_enabled": True,
         "llm_provider": llm_provider,
         "llm_model": llm_model,
         "limit": limit or 0,
+        "force_reindex": bool(force_reindex),
+        "recursive": bool(recursive),
         "sample_seed": sample_seed,
         "error_log": str(error_log_path) if failed else "",
+        **catalog_summary,
         "results": [r.__dict__ for r in results],
     }
     (output_dir / "_run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -802,6 +978,8 @@ async def _amain(args: argparse.Namespace) -> int:
         limit=args.limit,
         sample_seed=args.sample_seed,
         max_chunks_per_file=args.max_chunks_per_file,
+        force_reindex=bool(args.force_reindex),
+        recursive=bool(args.recursive),
     )
     print(json.dumps({k: v for k, v in summary.items() if k != "results"}, ensure_ascii=False, indent=2))
     sample = _pick_sample_output_with_parameters(summary)
@@ -835,6 +1013,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-chunks-per-file", type=int, default=10, help="每份规范最多送入LLM的Chunk数量")
     parser.add_argument("--limit", type=int, default=0, help="灰度测试抽样数量（0表示全量）")
     parser.add_argument("--sample-seed", type=int, default=20260226, help="抽样随机种子")
+    parser.add_argument("--force-reindex", action="store_true", help="强制全量重建（忽略增量manifest）")
+    parser.add_argument("--recursive", action="store_true", default=True, help="递归扫描输入目录（默认开启）")
+    parser.add_argument("--no-recursive", dest="recursive", action="store_false", help="仅扫描输入目录第一层文件")
     return parser
 
 

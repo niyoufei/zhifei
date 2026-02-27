@@ -33,6 +33,7 @@ from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
 from backend.zhifei_autoplan.agent_contract import build_agent_contract, validate_section_with_contract
 from backend.zhifei_autoplan.score_mapper import build_score_mapping
 from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
+from backend.zhifei_autoplan.compliance_runtime import query_compliance
 from backend.zhifei_autoplan.terminology_guard import (
     load_labor_allocation_matrix,
     normalize_sections_terminology_async,
@@ -811,6 +812,46 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             section_requirements.append("招标文件未明确给值的参数，按图谱同类工程经验值补位并显式标注：")
             section_requirements.extend(exp_values[:4])
             section_requirements.append("凡经验值必须保留“【经验值:...】”与“【图谱经验值:...】”标记。")
+        # Compliance retrieval: pre-filter by involved domain + prefer latest standard version.
+        compliance_domains = [str(x).strip() for x in (graph_ctx.get("agents", {}).get("domain_tags") or []) if str(x).strip()]
+        if not compliance_domains:
+            compliance_domains = [str(x).strip() for x in (multi_agent_plan.dispatch.get("involved_domains") or []) if str(x).strip()]
+        compliance_hits = query_compliance(
+            f"{topic} {title} 质量 安全 工期 验收 允许偏差 抽检 频次",
+            domain_tags=compliance_domains or None,
+            top_k=4,
+            prefer_latest=True,
+        )
+        if compliance_hits:
+            section_requirements.append("本章应优先引用适配专业且最新版本的规范条款（禁止跨专业串用规范）。")
+            for ch in compliance_hits[:4]:
+                ctype = str(ch.get("type") or "").strip()
+                code = str(ch.get("standard_code") or "").strip()
+                locator = str(ch.get("locator") or "").strip()
+                if ctype == "parameter":
+                    p_name = str(ch.get("parameter_name") or "参数").strip()
+                    p_val = str(ch.get("value") or "").strip()
+                    p_unit = str(ch.get("unit") or "").strip()
+                    section_requirements.append(
+                        f"规范参数建议：{code} {p_name}={p_val}{p_unit}【证据:{locator}】"
+                    )
+                else:
+                    c_no = str(ch.get("clause_no") or "").strip()
+                    c_text = str(ch.get("text") or "").strip()
+                    preview = c_text[:90]
+                    if c_no:
+                        section_requirements.append(
+                            f"规范强条：{code} {c_no} {preview}【证据:{locator}】"
+                        )
+                    else:
+                        section_requirements.append(
+                            f"规范强条：{code} {preview}【证据:{locator}】"
+                        )
+                # Merge as evidence context for writer prompt grounding.
+                txt = str(ch.get("text") or "").strip()
+                if txt:
+                    kg_evidence.append(f"规范/{code}: {txt}")
+        kg_evidence = _dedup_lines(kg_evidence, limit=16)
 
         ctx = {
             "requirements": section_requirements,
@@ -843,6 +884,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "boq_wbs_cpm_summary": cpm_summary if isinstance(cpm_summary, dict) else {},
             "boq_wbs_top_process": (boq_wbs_cpm.get("wbs") or [])[:8] if isinstance(boq_wbs_cpm, dict) else [],
             "labor_hint": labor_hint if isinstance(labor_hint, dict) else {},
+            "compliance_hits": compliance_hits if isinstance(compliance_hits, list) else [],
         }
         if bp:
             ctx["chapter_blueprint"] = bp
