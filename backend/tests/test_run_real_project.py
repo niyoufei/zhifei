@@ -75,3 +75,29 @@ def test_load_boq_payload_filters_extreme_numeric_outliers(tmp_path: Path) -> No
     assert by_code["C01"]["total_price"] is None
     assert by_code["C02"]["quantity"] == 120.0
     assert by_code["C02"]["total_price"] == 6720.0
+    stats = payload.get("stats") or {}
+    assert int(stats.get("anomaly_count") or 0) >= 1
+    assert any(str(x.get("boq_code") or "") == "C01" for x in (stats.get("anomaly_items") or []))
+
+
+def test_load_boq_payload_flags_scientific_explosion_values(tmp_path: Path) -> None:
+    mod = _load_module()
+    boq_dir = tmp_path / "boq"
+    boq_dir.mkdir(parents=True, exist_ok=True)
+
+    (boq_dir / "sci.csv").write_text(
+        "boq_code,name,quantity,unit,unit_price,total_price\n"
+        "D01,科学计数异常,1.23E+42,m3,5.0E+11,6.15E+53\n"
+        "D02,正常项,80,m3,66,5280\n",
+        encoding="utf-8",
+    )
+
+    payload = asyncio.run(mod._load_boq_payload(boq_dir))
+    items = payload.get("items") or []
+    by_code = {str(it.get("boq_code")): it for it in items}
+    assert by_code["D01"]["quantity"] is None
+    assert by_code["D01"]["unit_price"] is None
+    assert by_code["D01"]["total_price"] is None
+    assert by_code["D02"]["quantity"] == 80.0
+    stats = payload.get("stats") or {}
+    assert int(stats.get("anomaly_count") or 0) >= 1

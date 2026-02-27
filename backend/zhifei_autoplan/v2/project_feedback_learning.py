@@ -119,6 +119,48 @@ def update_feedback_memory(
         domains[domain] = int(domains.get(domain) or 0) + 1
         rec["domains"] = domains
 
+        segment_perf = rec.get("segment_performance")
+        if not isinstance(segment_perf, dict):
+            segment_perf = {}
+        seg_key = f"domain:{domain}"
+        seg_row = segment_perf.get(seg_key)
+        if not isinstance(seg_row, dict):
+            seg_row = {"hit_count": 0, "pass_count": 0}
+        seg_row["hit_count"] = int(seg_row.get("hit_count") or 0) + 1
+        if project_ok:
+            seg_row["pass_count"] = int(seg_row.get("pass_count") or 0) + 1
+        seg_row["pass_rate"] = round(
+            int(seg_row.get("pass_count") or 0) / max(int(seg_row.get("hit_count") or 1), 1),
+            6,
+        )
+        segment_perf[seg_key] = seg_row
+        rec["segment_performance"] = segment_perf
+
+        segment_overrides = rec.get("segment_overrides")
+        if not isinstance(segment_overrides, list):
+            segment_overrides = []
+        dom_pass = float(seg_row.get("pass_rate") or 0.0)
+        dom_weight = 1.06 if dom_pass >= 0.85 else 0.95 if dom_pass < 0.55 else 1.0
+        updated = False
+        for row in segment_overrides:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("segment_type") or "") == "domain" and str(row.get("segment_key") or "") == domain:
+                row["min_hit_count"] = 3
+                row["weight_adjustments"] = {"domain_weight": round(dom_weight, 6)}
+                updated = True
+                break
+        if not updated:
+            segment_overrides.append(
+                {
+                    "segment_type": "domain",
+                    "segment_key": domain,
+                    "min_hit_count": 3,
+                    "weight_adjustments": {"domain_weight": round(dom_weight, 6)},
+                }
+            )
+        rec["segment_overrides"] = segment_overrides[:24]
+
         # Rolling recommended baseline from section text hints.
         text = str(section.get("content") or "")
         recommended = rec.get("recommended_defaults")

@@ -144,3 +144,60 @@ def test_compare_release_snapshots_reports_changed_files_and_node_deltas(tmp_pat
     node_delta = ((diff.get("node_stats") or {}).get("delta") or {})
     assert int(node_delta.get("nodes_total") or 0) == 1
     assert int(node_delta.get("auto_generated_nodes") or 0) == 1
+    assert isinstance(diff.get("health_gate"), dict)
+    assert "healthy" in (diff.get("health_gate") or {})
+
+
+def test_compare_release_snapshots_can_flag_unhealthy_and_rollback(tmp_path: Path) -> None:
+    kg_root = tmp_path / "kg"
+    release_root = tmp_path / "releases"
+    kg_root.mkdir(parents=True, exist_ok=True)
+    kg_file = kg_root / "ZF-KG-02-Test.json"
+    kg_file.write_text(
+        json.dumps(
+            {
+                "knowledge_database": {
+                    "sec": {
+                        "nodes": [
+                            {
+                                "node_id": "N1",
+                                "name": "高权威节点",
+                                "source_hierarchy": "答疑文件",
+                                "evidence_completeness": {"completeness_ratio": 1.0},
+                                "is_auto_generated": False,
+                            }
+                        ]
+                    }
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    rel_a = create_release_snapshot(kg_root=kg_root, release_root=release_root, label="base")
+    assert rel_a["ok"] is True
+
+    payload = json.loads(kg_file.read_text(encoding="utf-8"))
+    payload["knowledge_database"]["sec"]["nodes"] = [
+        {
+            "node_id": "N2",
+            "name": "低权威自动节点",
+            "source_hierarchy": "企标",
+            "evidence_completeness": {"completeness_ratio": 0.2},
+            "is_auto_generated": True,
+        }
+    ]
+    kg_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    rel_b = create_release_snapshot(kg_root=kg_root, release_root=release_root, label="target")
+    assert rel_b["ok"] is True
+
+    diff = compare_release_snapshots(
+        release_root=release_root,
+        base_release_id=rel_a["release_id"],
+        target_release_id=rel_b["release_id"],
+        health_thresholds={"min_evidence_pass_ratio": 0.95, "max_high_authority_ratio_drop": 0.01},
+    )
+    gate = diff.get("health_gate") or {}
+    assert gate.get("healthy") is False
+    assert gate.get("rollback_recommended") is True

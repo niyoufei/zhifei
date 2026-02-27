@@ -68,6 +68,8 @@ def _merge_online_learning_profile(
 
     profile["enabled"] = True
     profile.setdefault("strategy", str(feedback.get("strategy") or "ema_feedback_v1"))
+    profile.setdefault("layered_strategy", str(feedback.get("layered_strategy") or "global+domain+region+dimension"))
+    profile.setdefault("fallback_on_sparse_segments", True)
     profile["hit_count"] = hit_count
     profile["pass_count"] = pass_count
     profile["trace_coverage_avg"] = trace_coverage_avg
@@ -97,6 +99,34 @@ def _merge_online_learning_profile(
             for k, v in adjustments.items()
             if str(k).strip()
         }
+    segment_overrides = feedback.get("segment_overrides")
+    if isinstance(segment_overrides, list) and segment_overrides:
+        cleaned = []
+        for row in segment_overrides:
+            if not isinstance(row, dict):
+                continue
+            seg_type = str(row.get("segment_type") or "").strip()
+            seg_key = str(row.get("segment_key") or "").strip()
+            wadj = row.get("weight_adjustments")
+            if not seg_type or not seg_key or not isinstance(wadj, dict):
+                continue
+            cleaned.append(
+                {
+                    "segment_type": seg_type,
+                    "segment_key": seg_key,
+                    "min_hit_count": int(_safe_int(row.get("min_hit_count"), 0)),
+                    "weight_adjustments": {
+                        str(k): round(_safe_float(v, 1.0), 6)
+                        for k, v in wadj.items()
+                        if str(k).strip()
+                    },
+                }
+            )
+        if cleaned:
+            profile["segment_overrides"] = cleaned[:24]
+    segment_perf = feedback.get("segment_performance")
+    if isinstance(segment_perf, dict) and segment_perf:
+        profile["segment_performance"] = segment_perf
     return profile
 
 

@@ -40,6 +40,12 @@ def _base_node(node_id: str) -> dict:
             "selected_rank": 3,
             "candidates": ["国标"],
         },
+        "source_provenance": {
+            "resolved_source_hierarchy": "国标",
+            "reference_tiers": ["国标"],
+            "reference_codes": ["GB/T 50326-2017"],
+            "derivation_mode": "evidence_first",
+        },
         "standard_validity_timeline": {
             "version": "v1",
             "timeline_status": "active",
@@ -99,7 +105,30 @@ def _base_node(node_id: str) -> dict:
             "conflict_graph": [{"from_domain": "building", "to_domain": "mep", "status": "resolved"}],
         },
         "optimization_objectives_ext": {"enabled": True, "objectives": {"duration": 0.4, "risk": 0.6}},
-        "online_learning_profile": {"enabled": True, "strategy": "ema_feedback_v1"},
+        "online_learning_profile": {
+            "enabled": True,
+            "strategy": "ema_feedback_v1",
+            "layered_strategy": "global+domain+region+dimension",
+            "segment_overrides": [
+                {
+                    "segment_type": "domain",
+                    "segment_key": "building",
+                    "min_hit_count": 3,
+                    "weight_adjustments": {"domain_weight": 1.05},
+                }
+            ],
+        },
+        "long_tail_profile": {
+            "enabled": True,
+            "specialty_tag": "hospital",
+            "fallback_domains": ["building", "mep"],
+            "transfer_factor": 0.9,
+        },
+        "uncertainty_profile": {
+            "enabled": True,
+            "confidence_level": 0.76,
+            "relative_interval": 0.12,
+        },
         "retrieval_benchmark": {"quality_score": 88, "minimum_quality_score": 70},
         "approval_workflow": {"required": True, "status": "approved"},
         "formula_sensitivity": {"enabled": True, "baseline_result": 1.0},
@@ -110,6 +139,7 @@ def _base_node(node_id: str) -> dict:
             "has_clause_anchor": True,
             "effective_date": "2017-01-01",
             "source_hierarchy": "国标",
+            "verification_ratio": 1.0,
         },
         "entity_alignment": {
             "enabled": True,
@@ -183,6 +213,7 @@ def test_advanced_audit_detects_p0_profile_gaps(tmp_path: Path) -> None:
         "has_clause_anchor": False,
         "effective_date": "",
         "source_hierarchy": "",
+        "verification_ratio": 0.0,
     }
     node["cross_discipline_interface_contract"] = {
         "enabled": True,
@@ -197,5 +228,6 @@ def test_advanced_audit_detects_p0_profile_gaps(tmp_path: Path) -> None:
     assert row["issues"]["missing_entity_master_key"] == 1
     assert row["issues"]["unsafe_formula_safety_profile"] == 1
     assert row["issues"]["low_evidence_completeness_ratio"] == 1
+    assert row["issues"]["low_evidence_verification_ratio"] == 1
     assert row["issues"]["missing_numeric_source_evidence"] == 1
     assert row["issues"]["open_interface_conflict"] == 1

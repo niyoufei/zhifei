@@ -81,8 +81,20 @@ def train_retrieval_weight_profile(
     if isinstance(nodes, dict) and nodes:
         pass_rates = [_safe_float((row or {}).get("pass_rate"), 0.0) for row in nodes.values() if isinstance(row, dict)]
         coverage = [_safe_float((row or {}).get("trace_coverage_avg"), 0.0) for row in nodes.values() if isinstance(row, dict)]
+        segment_pass_rates = []
+        for row in nodes.values():
+            if not isinstance(row, dict):
+                continue
+            seg_perf = row.get("segment_performance")
+            if not isinstance(seg_perf, dict):
+                continue
+            for seg in seg_perf.values():
+                if not isinstance(seg, dict):
+                    continue
+                segment_pass_rates.append(_safe_float(seg.get("pass_rate"), 0.0))
         avg_node_pass = sum(pass_rates) / max(len(pass_rates), 1) if pass_rates else 0.0
         avg_node_coverage = sum(coverage) / max(len(coverage), 1) if coverage else 0.0
+        avg_segment_pass = sum(segment_pass_rates) / max(len(segment_pass_rates), 1) if segment_pass_rates else 0.0
         if avg_node_pass < 0.85:
             gap = max(0.0, 0.85 - avg_node_pass)
             weights["approval_bonus_weight"] += min(0.25, gap * 1.0)
@@ -91,6 +103,13 @@ def train_retrieval_weight_profile(
             gap = max(0.0, 0.80 - avg_node_coverage)
             weights["query_token_weight"] += min(0.20, gap * 1.0)
             weights["region_weight"] += min(0.15, gap * 0.8)
+        if segment_pass_rates:
+            if avg_segment_pass < 0.78:
+                gap = max(0.0, 0.78 - avg_segment_pass)
+                weights["domain_weight"] += min(0.25, gap * 1.2)
+                weights["keyword_exact_weight"] += min(0.20, gap * 1.0)
+            elif avg_segment_pass > 0.9:
+                weights["domain_weight"] += 0.05
 
     for key in list(weights.keys()):
         weights[key] = round(_clip(weights[key]), 6)
@@ -108,6 +127,28 @@ def train_retrieval_weight_profile(
             "benchmark_avg_mrr": round(avg_mrr, 6),
             "benchmark_failed_cases": failed_cases,
             "feedback_nodes": (len(nodes) if isinstance(nodes, dict) else 0),
+            "feedback_segment_pass_mean": round(
+                (
+                    sum(
+                        _safe_float((seg or {}).get("pass_rate"), 0.0)
+                        for row in (nodes or {}).values()
+                        if isinstance(row, dict)
+                        for seg in ((row.get("segment_performance") or {}).values() if isinstance(row.get("segment_performance"), dict) else [])
+                        if isinstance(seg, dict)
+                    )
+                    / max(
+                        sum(
+                            1
+                            for row in (nodes or {}).values()
+                            if isinstance(row, dict)
+                            for seg in ((row.get("segment_performance") or {}).values() if isinstance(row.get("segment_performance"), dict) else [])
+                            if isinstance(seg, dict)
+                        ),
+                        1,
+                    )
+                ),
+                6,
+            ),
         },
     }
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

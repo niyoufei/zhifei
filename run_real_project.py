@@ -6,6 +6,7 @@ import asyncio
 import csv
 import json
 import re
+from statistics import median
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -19,6 +20,19 @@ NUMERIC_LIMITS = {
     "quantity": 1.0e8,
     "unit_price": 1.0e7,
     "total_price": 1.0e12,
+}
+UNIT_QUANTITY_LIMITS = {
+    "m3": 1.0e7,
+    "m2": 1.0e8,
+    "m": 1.0e8,
+    "t": 1.0e7,
+    "kg": 1.0e9,
+    "台": 1.0e6,
+    "套": 1.0e7,
+    "个": 1.0e8,
+    "项": 1.0e6,
+    "处": 1.0e6,
+    "座": 1.0e6,
 }
 
 
@@ -47,6 +61,85 @@ def _sanitize_numeric(value: float | None, field: str) -> float | None:
     if limit > 0 and abs(value) > limit:
         return None
     return value
+
+
+def _normalize_unit(unit: Any) -> str:
+    raw = str(unit or "").strip().lower()
+    mapping = {
+        "㎡": "m2",
+        "m²": "m2",
+        "米2": "m2",
+        "米²": "m2",
+        "㎡/": "m2",
+        "㎥": "m3",
+        "m³": "m3",
+        "米3": "m3",
+        "米³": "m3",
+        "吨": "t",
+    }
+    if raw in mapping:
+        return mapping[raw]
+    return raw
+
+
+def _quantity_limit_by_unit(unit: str) -> float:
+    key = _normalize_unit(unit)
+    if key in UNIT_QUANTITY_LIMITS:
+        return float(UNIT_QUANTITY_LIMITS[key])
+    return float(NUMERIC_LIMITS["quantity"])
+
+
+def _looks_like_scientific_explosion(raw: Any) -> bool:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return False
+    if "e+" in text:
+        m = re.search(r"e\+(\d+)", text)
+        if m and int(m.group(1)) >= 9:
+            return True
+    digits = re.sub(r"[^0-9]", "", text)
+    return len(digits) >= 16
+
+
+def _fallback_parse_pdf_text_rows(path: Path) -> List[Dict[str, Any]]:
+    try:
+        import pdfplumber  # type: ignore
+    except Exception:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    line_re = re.compile(
+        r"(?P<code>[A-Za-z0-9][A-Za-z0-9./_-]{2,})\s+"
+        r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()\-_/·、]{2,50})\s+"
+        r"(?P<qty>\d+(?:\.\d+)?)\s*"
+        r"(?P<unit>m3|m2|m|t|kg|台|套|个|项|处|座|樘|米|吨|㎡|㎥)\b",
+        flags=re.IGNORECASE,
+    )
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            pages = pdf.pages[: min(20, len(pdf.pages))]
+            for page in pages:
+                text = page.extract_text() or ""
+                for line in text.splitlines():
+                    clean = re.sub(r"\s+", " ", str(line or "").strip())
+                    if not clean:
+                        continue
+                    m = line_re.search(clean)
+                    if not m:
+                        continue
+                    rows.append(
+                        {
+                            "boq_code": m.group("code"),
+                            "name": m.group("name"),
+                            "quantity": m.group("qty"),
+                            "unit": m.group("unit"),
+                            "unit_price": None,
+                            "total_price": None,
+                        }
+                    )
+    except Exception:
+        return []
+    return rows[:2000]
 
 
 def _pick_value(row: Dict[str, Any], aliases: List[str]) -> Any:
@@ -95,25 +188,59 @@ def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dic
     name = str(raw.get("name") or "").strip()
     if not name:
         return {}
-    quantity = _sanitize_numeric(_to_float(raw.get("quantity")), "quantity")
-    unit_price = _sanitize_numeric(_to_float(raw.get("unit_price")), "unit_price")
-    total_price = _sanitize_numeric(_to_float(raw.get("total_price")), "total_price")
+    anomalies: List[str] = []
+    unit = str(raw.get("unit") or "").strip() or None
+    quantity_raw = raw.get("quantity")
+    quantity = _sanitize_numeric(_to_float(quantity_raw), "quantity")
+    if _looks_like_scientific_explosion(quantity_raw):
+        quantity = None
+        anomalies.append("quantity_scientific_explosion")
+    if quantity is not None:
+        q_limit = _quantity_limit_by_unit(unit or "")
+        if abs(float(quantity)) > q_limit:
+            quantity = None
+            anomalies.append("quantity_unit_outlier")
+
+    unit_price_raw = raw.get("unit_price")
+    total_price_raw = raw.get("total_price")
+    unit_price = _sanitize_numeric(_to_float(unit_price_raw), "unit_price")
+    total_price = _sanitize_numeric(_to_float(total_price_raw), "total_price")
+    if _looks_like_scientific_explosion(unit_price_raw):
+        unit_price = None
+        anomalies.append("unit_price_scientific_explosion")
+    if _looks_like_scientific_explosion(total_price_raw):
+        total_price = None
+        anomalies.append("total_price_scientific_explosion")
     if total_price is None and quantity is not None and unit_price is not None:
         total_price = _sanitize_numeric(quantity * unit_price, "total_price")
+    if (
+        total_price is not None
+        and quantity is not None
+        and unit_price is not None
+        and abs(float(quantity) * float(unit_price)) > 0
+    ):
+        expect = abs(float(quantity) * float(unit_price))
+        ratio = abs(float(total_price) - expect) / max(expect, 1.0)
+        if ratio > 8.0:
+            anomalies.append("price_consistency_outlier")
+    if quantity is not None and (unit is None or not str(unit).strip()):
+        anomalies.append("missing_unit_for_quantity")
 
     return {
         "boq_code": str(raw.get("boq_code") or raw.get("code") or f"AUTO-{seq}"),
         "name": name,
         "quantity": quantity,
-        "unit": str(raw.get("unit") or "").strip() or None,
+        "unit": unit,
         "unit_price": unit_price,
         "total_price": total_price,
         "source_file": str(source_file),
+        "anomalies": anomalies,
     }
 
 
 async def _load_single_boq(path: Path) -> Dict[str, Any]:
     suffix = path.suffix.lower()
+    fallback_used = False
     if suffix == ".csv":
         payload = _load_boq_csv(path)
     else:
@@ -123,18 +250,60 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
             "items": [it.model_dump() for it in items],
             "stats": stats,
         }
+        if suffix == ".pdf" and not payload.get("items"):
+            fallback_rows = _fallback_parse_pdf_text_rows(path)
+            if fallback_rows:
+                payload["items"] = fallback_rows
+                payload["stats"] = dict(payload.get("stats") or {})
+                payload["stats"]["fallback_text_rows"] = len(fallback_rows)
+                fallback_used = True
     normalized_items: List[Dict[str, Any]] = []
+    anomaly_items: List[Dict[str, Any]] = []
     for idx, item in enumerate(payload.get("items") or [], start=1):
         if not isinstance(item, dict):
             continue
         normalized = _normalize_boq_item(item, path, idx)
         if normalized:
             normalized_items.append(normalized)
+            if normalized.get("anomalies"):
+                anomaly_items.append(
+                    {
+                        "boq_code": normalized.get("boq_code"),
+                        "name": normalized.get("name"),
+                        "anomalies": normalized.get("anomalies"),
+                    }
+                )
+
+    quantities = [float(it.get("quantity")) for it in normalized_items if isinstance(it.get("quantity"), (int, float))]
+    if quantities:
+        med = float(median(quantities))
+        dynamic_limit = max(_quantity_limit_by_unit(""), med * 2000.0)
+        for it in normalized_items:
+            q = it.get("quantity")
+            if not isinstance(q, (int, float)):
+                continue
+            if abs(float(q)) > dynamic_limit:
+                it["quantity"] = None
+                anomalies = list(it.get("anomalies") or [])
+                if "quantity_dynamic_outlier" not in anomalies:
+                    anomalies.append("quantity_dynamic_outlier")
+                it["anomalies"] = anomalies
+                anomaly_items.append(
+                    {
+                        "boq_code": it.get("boq_code"),
+                        "name": it.get("name"),
+                        "anomalies": ["quantity_dynamic_outlier"],
+                    }
+                )
+
     payload["items"] = normalized_items
     payload["source_file"] = str(path)
     payload["stats"] = dict(payload.get("stats") or {})
     payload["stats"]["item_count"] = len(normalized_items)
     payload["stats"]["total_quantity"] = sum(float(it.get("quantity") or 0.0) for it in normalized_items)
+    payload["stats"]["anomaly_count"] = len(anomaly_items)
+    payload["stats"]["anomaly_items"] = anomaly_items[:120]
+    payload["stats"]["fallback_used"] = bool(fallback_used)
     if not payload.get("items"):
         raise ValueError(f"BOQ parsing returned empty items: {path}")
     return payload
@@ -166,6 +335,7 @@ async def _load_boq_payload(path: Path) -> Dict[str, Any]:
     parse_errors: List[Dict[str, str]] = []
     file_item_count: Dict[str, int] = {}
     source_stats: Dict[str, Any] = {}
+    anomaly_rows: List[Dict[str, Any]] = []
 
     for file_path in candidates:
         try:
@@ -174,6 +344,9 @@ async def _load_boq_payload(path: Path) -> Dict[str, Any]:
             merged_items.extend(items)
             file_item_count[str(file_path)] = len(items)
             source_stats[str(file_path)] = payload.get("stats") or {}
+            for row in (payload.get("stats") or {}).get("anomaly_items") or []:
+                if isinstance(row, dict):
+                    anomaly_rows.append({**row, "source_file": str(file_path)})
         except Exception as exc:
             parse_errors.append({"file": str(file_path), "error": str(exc)})
 
@@ -182,7 +355,7 @@ async def _load_boq_payload(path: Path) -> Dict[str, Any]:
         raise ValueError(f"BOQ parsing returned empty items for all candidates: {path}; errors={parse_errors}")
 
     top_quantity_items = sorted(
-        merged_items,
+        [it for it in merged_items if isinstance(it.get("quantity"), (int, float))],
         key=lambda it: float(it.get("quantity") or 0.0),
         reverse=True,
     )[:10]
@@ -198,6 +371,8 @@ async def _load_boq_payload(path: Path) -> Dict[str, Any]:
             "file_item_count": file_item_count,
             "source_stats": source_stats,
             "top_quantity_items": top_quantity_items,
+            "anomaly_count": len(anomaly_rows),
+            "anomaly_items": anomaly_rows[:300],
         },
         "source_files": [str(p) for p in candidates],
         "parse_errors": parse_errors,

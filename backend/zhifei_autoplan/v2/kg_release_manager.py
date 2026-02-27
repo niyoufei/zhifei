@@ -10,6 +10,12 @@ from typing import Any, Dict, List
 DEFAULT_RELEASE_ROOT = Path("build/kg_releases")
 DEFAULT_ENV_STATE_FILE = "environments.json"
 ENVIRONMENTS = ("dev", "staging", "prod")
+DEFAULT_RELEASE_HEALTH_THRESHOLDS = {
+    "max_changed_file_ratio": 0.45,
+    "max_auto_generated_growth_ratio": 0.35,
+    "min_evidence_pass_ratio": 0.70,
+    "max_high_authority_ratio_drop": 0.20,
+}
 
 
 def _iter_kg_files(kg_root: Path, pattern: str = "ZF-KG-*.json") -> List[Path]:
@@ -224,11 +230,71 @@ def _snapshot_node_stats(snapshot_dir: Path, files: List[str]) -> Dict[str, Any]
     return stats
 
 
+def _release_health_gate(
+    *,
+    base_stats: Dict[str, Any],
+    target_stats: Dict[str, Any],
+    changed_count: int,
+    target_file_total: int,
+    thresholds: Dict[str, float] | None = None,
+) -> Dict[str, Any]:
+    cfg = dict(DEFAULT_RELEASE_HEALTH_THRESHOLDS)
+    if isinstance(thresholds, dict):
+        for key in cfg.keys():
+            if key in thresholds:
+                try:
+                    cfg[key] = float(thresholds[key])
+                except Exception:
+                    pass
+
+    changed_ratio = float(changed_count) / max(int(target_file_total or 0), 1)
+    base_nodes = max(int(base_stats.get("nodes_total") or 0), 1)
+    target_nodes = max(int(target_stats.get("nodes_total") or 0), 1)
+    auto_growth_ratio = (
+        float(int(target_stats.get("auto_generated_nodes") or 0) - int(base_stats.get("auto_generated_nodes") or 0))
+        / float(base_nodes)
+    )
+    evidence_pass_ratio = float(target_stats.get("evidence_pass_nodes") or 0) / float(target_nodes)
+
+    def high_authority_ratio(stats: Dict[str, Any]) -> float:
+        dist = stats.get("authority_distribution") if isinstance(stats.get("authority_distribution"), dict) else {}
+        top = int(dist.get("答疑文件", 0)) + int(dist.get("设计图纸", 0)) + int(dist.get("国标", 0))
+        total = max(sum(int(v) for v in dist.values()), 1)
+        return float(top) / float(total)
+
+    base_high = high_authority_ratio(base_stats)
+    target_high = high_authority_ratio(target_stats)
+    high_authority_ratio_drop = max(0.0, base_high - target_high)
+
+    checks = {
+        "changed_file_ratio_ok": changed_ratio <= float(cfg["max_changed_file_ratio"]),
+        "auto_generated_growth_ok": auto_growth_ratio <= float(cfg["max_auto_generated_growth_ratio"]),
+        "evidence_pass_ratio_ok": evidence_pass_ratio >= float(cfg["min_evidence_pass_ratio"]),
+        "high_authority_drop_ok": high_authority_ratio_drop <= float(cfg["max_high_authority_ratio_drop"]),
+    }
+    healthy = all(bool(v) for v in checks.values())
+    return {
+        "healthy": healthy,
+        "rollback_recommended": not healthy,
+        "thresholds": cfg,
+        "metrics": {
+            "changed_file_ratio": round(changed_ratio, 6),
+            "auto_generated_growth_ratio": round(auto_growth_ratio, 6),
+            "evidence_pass_ratio": round(evidence_pass_ratio, 6),
+            "base_high_authority_ratio": round(base_high, 6),
+            "target_high_authority_ratio": round(target_high, 6),
+            "high_authority_ratio_drop": round(high_authority_ratio_drop, 6),
+        },
+        "checks": checks,
+    }
+
+
 def compare_release_snapshots(
     *,
     release_root: Path | str = DEFAULT_RELEASE_ROOT,
     base_release_id: str,
     target_release_id: str,
+    health_thresholds: Dict[str, float] | None = None,
 ) -> Dict[str, Any]:
     rel_root = Path(release_root).expanduser().resolve()
     base_dir = rel_root / str(base_release_id)
@@ -265,6 +331,13 @@ def compare_release_snapshots(
         authority_delta[k] = int(target_stats["authority_distribution"].get(k, 0)) - int(
             base_stats["authority_distribution"].get(k, 0)
         )
+    health_gate = _release_health_gate(
+        base_stats=base_stats,
+        target_stats=target_stats,
+        changed_count=len(changed),
+        target_file_total=len(target_names),
+        thresholds=health_thresholds,
+    )
 
     return {
         "ok": True,
@@ -291,6 +364,7 @@ def compare_release_snapshots(
                 "authority_distribution": authority_delta,
             },
         },
+        "health_gate": health_gate,
     }
 
 

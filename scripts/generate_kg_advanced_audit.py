@@ -93,6 +93,10 @@ def _check_file(path: Path) -> Dict[str, Any]:
         "missing_interface_contract": 0,
         "missing_optimization_objectives_ext": 0,
         "missing_online_learning_profile": 0,
+        "missing_online_learning_segment_overrides": 0,
+        "missing_long_tail_profile": 0,
+        "missing_uncertainty_profile": 0,
+        "low_uncertainty_confidence": 0,
         "missing_retrieval_benchmark": 0,
         "low_retrieval_quality_score": 0,
         "auto_generated_unapproved": 0,
@@ -110,6 +114,8 @@ def _check_file(path: Path) -> Dict[str, Any]:
         "low_evidence_completeness_ratio": 0,
         "missing_numeric_source_evidence": 0,
         "open_interface_conflict": 0,
+        "missing_source_provenance": 0,
+        "low_evidence_verification_ratio": 0,
     }
     samples: Dict[str, List[Dict[str, Any]]] = {k: [] for k in issues}
 
@@ -319,6 +325,31 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_online_learning_profile"] += 1
             if len(samples["missing_online_learning_profile"]) < 8:
                 samples["missing_online_learning_profile"].append({"node_id": node_id})
+        else:
+            seg = learning.get("segment_overrides")
+            if not isinstance(seg, list) or not seg:
+                issues["missing_online_learning_segment_overrides"] += 1
+                if len(samples["missing_online_learning_segment_overrides"]) < 8:
+                    samples["missing_online_learning_segment_overrides"].append({"node_id": node_id})
+
+        long_tail = node.get("long_tail_profile")
+        if not isinstance(long_tail, dict) or not bool(long_tail.get("enabled")):
+            issues["missing_long_tail_profile"] += 1
+            if len(samples["missing_long_tail_profile"]) < 8:
+                samples["missing_long_tail_profile"].append({"node_id": node_id})
+
+        uncertainty = node.get("uncertainty_profile")
+        if str(node.get("formula_expression") or "").strip():
+            if not isinstance(uncertainty, dict) or not bool(uncertainty.get("enabled")):
+                issues["missing_uncertainty_profile"] += 1
+                if len(samples["missing_uncertainty_profile"]) < 8:
+                    samples["missing_uncertainty_profile"].append({"node_id": node_id})
+            else:
+                confidence = _safe_float(uncertainty.get("confidence_level"), 0.0)
+                if confidence < 0.5:
+                    issues["low_uncertainty_confidence"] += 1
+                    if len(samples["low_uncertainty_confidence"]) < 8:
+                        samples["low_uncertainty_confidence"].append({"node_id": node_id, "confidence_level": confidence})
 
         benchmark = node.get("retrieval_benchmark")
         if not isinstance(benchmark, dict) or benchmark.get("quality_score") in (None, ""):
@@ -360,6 +391,11 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_incremental_fingerprint"] += 1
             if len(samples["missing_incremental_fingerprint"]) < 8:
                 samples["missing_incremental_fingerprint"].append({"node_id": node_id})
+        provenance = node.get("source_provenance")
+        if not isinstance(provenance, dict) or not str(provenance.get("resolved_source_hierarchy") or "").strip():
+            issues["missing_source_provenance"] += 1
+            if len(samples["missing_source_provenance"]) < 8:
+                samples["missing_source_provenance"].append({"node_id": node_id})
 
         entity_alignment = node.get("entity_alignment")
         if not isinstance(entity_alignment, dict) or not bool(entity_alignment.get("enabled")):
@@ -445,6 +481,13 @@ def _check_file(path: Path) -> Dict[str, Any]:
                     issues["low_evidence_completeness_ratio"] += 1
                     if len(samples["low_evidence_completeness_ratio"]) < 8:
                         samples["low_evidence_completeness_ratio"].append({"node_id": node_id, "ratio": ratio})
+                verify_ratio = _safe_float(evidence.get("verification_ratio"), 0.0)
+                if verify_ratio < 0.2:
+                    issues["low_evidence_verification_ratio"] += 1
+                    if len(samples["low_evidence_verification_ratio"]) < 8:
+                        samples["low_evidence_verification_ratio"].append(
+                            {"node_id": node_id, "verification_ratio": verify_ratio}
+                        )
                 if not (has_anchor and effective_date and source_hierarchy):
                     issues["missing_numeric_source_evidence"] += 1
                     if len(samples["missing_numeric_source_evidence"]) < 8:

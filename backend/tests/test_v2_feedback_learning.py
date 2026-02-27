@@ -114,3 +114,6 @@ def test_update_feedback_memory_supports_review_decisions(tmp_path: Path) -> Non
     assert int(node.get("decision_total") or 0) == 2
     assert str(node.get("last_decision") or "") == "modify"
     assert int((node.get("recommended_defaults") or {}).get("inspection_frequency_per_shift") or 0) == 3
+    seg_overrides = node.get("segment_overrides") or []
+    assert isinstance(seg_overrides, list) and seg_overrides
+    assert any(str((row or {}).get("segment_type") or "") == "domain" for row in seg_overrides if isinstance(row, dict))

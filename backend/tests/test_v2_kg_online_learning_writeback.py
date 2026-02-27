@@ -41,6 +41,14 @@ def test_writeback_online_learning_profile_updates_nodes(tmp_path: Path) -> None
                 "decision_total": 2,
                 "last_decision": "modify",
                 "weight_adjustments": {"keyword_exact_weight": 1.15},
+                "segment_overrides": [
+                    {
+                        "segment_type": "domain",
+                        "segment_key": "building",
+                        "min_hit_count": 3,
+                        "weight_adjustments": {"domain_weight": 1.08},
+                    }
+                ],
             },
             "NODE-X": {"hit_count": 1, "pass_count": 1, "trace_coverage_avg": 1.0},
         },
@@ -62,6 +70,8 @@ def test_writeback_online_learning_profile_updates_nodes(tmp_path: Path) -> None
     assert int(profile.get("decision_total") or 0) == 2
     assert str(profile.get("last_decision") or "") == "modify"
     assert float((profile.get("weight_adjustments") or {}).get("keyword_exact_weight") or 0.0) == 1.15
+    assert str(profile.get("layered_strategy") or "").strip()
+    assert isinstance(profile.get("segment_overrides"), list) and profile.get("segment_overrides")
 
 
 def test_writeback_online_learning_profile_returns_error_for_missing_root(tmp_path: Path) -> None:

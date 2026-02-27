@@ -140,6 +140,14 @@ def test_strengthen_file_repairs_core_fields(tmp_path: Path) -> None:
         assert isinstance(node.get("optimization_objectives_ext"), dict)
         assert isinstance((node.get("optimization_objectives_ext") or {}).get("objectives"), dict)
         assert isinstance(node.get("online_learning_profile"), dict)
+        assert bool((node.get("online_learning_profile") or {}).get("layered_strategy"))
+        assert isinstance((node.get("online_learning_profile") or {}).get("segment_overrides"), list)
+        assert bool((node.get("online_learning_profile") or {}).get("segment_overrides"))
+        assert isinstance(node.get("long_tail_profile"), dict)
+        assert bool((node.get("long_tail_profile") or {}).get("enabled"))
+        assert isinstance(node.get("uncertainty_profile"), dict)
+        assert bool((node.get("uncertainty_profile") or {}).get("enabled"))
+        assert float((node.get("uncertainty_profile") or {}).get("confidence_level") or 0.0) >= 0.35
         assert isinstance(node.get("retrieval_benchmark"), dict)
         assert str(node.get("incremental_fingerprint") or "").strip()
         for source in node.get("numeric_sources") or []:
@@ -163,7 +171,7 @@ def test_strengthen_file_source_hierarchy_mixed(tmp_path: Path) -> None:
                         "node_id": "A1",
                         "name": "扣分响应节点",
                         "qt_tag": ["扣分点"],
-                        "content": {"operation_desc_premium": {"desc": "扣分风险处置"}},
+                        "content": {"operation_desc_premium": {"desc": "答疑文件明确扣分风险处置"}},
                     },
                     {
                         "node_id": "A2",

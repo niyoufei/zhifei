@@ -67,6 +67,23 @@ PROFESSIONAL_DOMAIN_SEEDS: Dict[str, Tuple[str, ...]] = {
     "general": ("general", "综合", "通用"),
 }
 
+QUERY_DIMENSION_SEEDS: Dict[str, Tuple[str, ...]] = {
+    "质量": ("质量", "验收", "偏差", "强度", "抽检"),
+    "安全": ("安全", "隐患", "危大", "应急", "事故"),
+    "进度": ("进度", "工期", "关键线路", "节点", "里程碑"),
+    "环保": ("环保", "扬尘", "噪声", "pm10", "污水"),
+    "重难点": ("重难点", "复杂", "接口", "高风险", "专项"),
+    "扣分点": ("扣分", "否决", "处罚", "废标", "失分"),
+}
+
+LONG_TAIL_TRANSFER_DEFAULT: Dict[str, Dict[str, Any]] = {
+    "airport": {"fallback_domains": ["road", "building", "mep"], "transfer_factor": 0.85},
+    "petrochemical": {"fallback_domains": ["mep", "earthwork", "management"], "transfer_factor": 0.82},
+    "offshorewind-marine": {"fallback_domains": ["hydraulic", "mep", "management"], "transfer_factor": 0.86},
+    "port-harbor": {"fallback_domains": ["hydraulic", "road", "management"], "transfer_factor": 0.84},
+    "data-center": {"fallback_domains": ["mep", "building", "digital"], "transfer_factor": 0.88},
+}
+
 DNA_CONTEXT_ENV_KEYS = ("ZHIFEI_DNA_CONTEXT", "ZF_DNA_CONTEXT", "TACTICAL_DNA_CONTEXT")
 
 RELATION_KEYS: Dict[str, Tuple[str, ...]] = {
@@ -422,6 +439,167 @@ def _domain_match(
         if any(str(seed).lower() in merged for seed in seeds):
             matched.append(norm)
     return float(len(matched) * 9.0), matched
+
+
+def _detect_query_dimensions(query: str, tags: List[str], keywords: List[str]) -> List[str]:
+    merged = " ".join([str(query or "")] + [str(x) for x in tags] + [str(x) for x in keywords]).lower()
+    dims: List[str] = []
+    for dim, seeds in QUERY_DIMENSION_SEEDS.items():
+        if any(str(seed).lower() in merged for seed in seeds):
+            dims.append(dim)
+    return dims
+
+
+def _match_long_tail_profile(
+    *,
+    profile: Dict[str, Any],
+    professional_domains: List[str],
+    title: str,
+    body: str,
+    tags: List[str],
+    keywords: List[str],
+) -> Dict[str, Any]:
+    if not isinstance(profile, dict) or not bool(profile.get("enabled")):
+        return {"matched": False, "score": 0.0, "matches": []}
+    if not professional_domains or "general" in professional_domains:
+        return {"matched": False, "score": 0.0, "matches": []}
+
+    long_tail_domains = [str(x).strip().lower() for x in (profile.get("long_tail_domains") or []) if str(x).strip()]
+    specialty_tag = str(profile.get("specialty_tag") or "").strip().lower()
+    if specialty_tag and specialty_tag not in long_tail_domains:
+        long_tail_domains.append(specialty_tag)
+
+    fallback_domains = [str(x).strip().lower() for x in (profile.get("fallback_domains") or []) if str(x).strip()]
+    merged = " ".join([title, body] + [str(x) for x in tags] + [str(x) for x in keywords]).lower()
+    matched_domains: List[str] = []
+    for dom in professional_domains:
+        token = str(dom or "").strip().lower()
+        if not token:
+            continue
+        if token in long_tail_domains:
+            matched_domains.append(token)
+            continue
+        transfer = LONG_TAIL_TRANSFER_DEFAULT.get(token)
+        transfer_fallback = [str(x).strip().lower() for x in ((transfer or {}).get("fallback_domains") or []) if str(x).strip()]
+        if fallback_domains and any(x in fallback_domains for x in transfer_fallback):
+            matched_domains.append(token)
+            continue
+        if specialty_tag and specialty_tag in merged and token in LONG_TAIL_TRANSFER_DEFAULT:
+            matched_domains.append(token)
+
+    if not matched_domains:
+        return {"matched": False, "score": 0.0, "matches": []}
+    transfer_factor = _safe_float(profile.get("transfer_factor"), 0.85)
+    transfer_factor = max(0.5, min(1.2, transfer_factor))
+    score = round(6.0 * len(set(matched_domains)) * transfer_factor, 4)
+    return {"matched": True, "score": score, "matches": sorted(set(matched_domains))}
+
+
+def _build_uncertainty_interval(
+    *,
+    uncertainty_profile: Dict[str, Any],
+    formula_sensitivity: Dict[str, Any],
+    quantitative_indices: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(uncertainty_profile, dict) or not bool(uncertainty_profile.get("enabled")):
+        return {}
+    confidence = _safe_float(uncertainty_profile.get("confidence_level"), 0.0)
+    relative = _safe_float(
+        uncertainty_profile.get("relative_interval"),
+        _safe_float(uncertainty_profile.get("interval_ratio"), 0.0),
+    )
+    relative = max(0.0, min(0.6, relative))
+
+    baseline = _safe_float(
+        uncertainty_profile.get("baseline_result"),
+        _safe_float(formula_sensitivity.get("baseline_result"), 0.0),
+    )
+    if baseline <= 0:
+        baseline = max(
+            _safe_float(quantitative_indices.get("duration_index"), 0.0),
+            _safe_float(quantitative_indices.get("risk_index"), 0.0),
+            _safe_float(quantitative_indices.get("resource_density_index"), 0.0),
+        )
+    if baseline <= 0:
+        baseline = 1.0
+    lower = round(float(baseline) * (1.0 - relative), 6)
+    upper = round(float(baseline) * (1.0 + relative), 6)
+    return {
+        "enabled": True,
+        "confidence_level": round(confidence, 4),
+        "relative_interval": round(relative, 4),
+        "baseline": round(float(baseline), 6),
+        "lower": lower,
+        "upper": upper,
+    }
+
+
+def _apply_online_learning_weights(
+    *,
+    base_weights: Dict[str, float],
+    profile: Dict[str, Any],
+    region_context: str,
+    professional_domains: List[str],
+    query_dimensions: List[str],
+) -> Tuple[Dict[str, float], Dict[str, Any]]:
+    weights = dict(base_weights)
+    if not isinstance(profile, dict) or not bool(profile.get("enabled")):
+        return weights, {"applied": False, "segments": [], "weight_adjustments": {}}
+
+    applied_segments: List[str] = []
+    applied_weights: Dict[str, float] = {}
+
+    direct = profile.get("weight_adjustments")
+    if isinstance(direct, dict):
+        for key, value in direct.items():
+            k = str(key).strip()
+            if not k or k not in weights:
+                continue
+            mul = max(0.2, min(3.0, _safe_float(value, 1.0)))
+            weights[k] = round(max(0.2, min(3.0, weights[k] * mul)), 6)
+            applied_weights[k] = round(mul, 6)
+    if applied_weights:
+        applied_segments.append("global")
+
+    overrides = profile.get("segment_overrides")
+    if isinstance(overrides, list):
+        for item in overrides:
+            if not isinstance(item, dict):
+                continue
+            seg_type = str(item.get("segment_type") or "").strip().lower()
+            seg_key = str(item.get("segment_key") or "").strip()
+            if not seg_type or not seg_key:
+                continue
+            min_hit_count = int(float(item.get("min_hit_count") or 0))
+            hit_count = int(float(profile.get("hit_count") or 0))
+            if min_hit_count > 0 and hit_count < min_hit_count and bool(profile.get("fallback_on_sparse_segments", True)):
+                continue
+            matched = False
+            if seg_type == "region" and region_context:
+                matched = seg_key.upper() == region_context.upper()
+            elif seg_type == "domain":
+                matched = seg_key.lower() in [str(x).lower() for x in professional_domains]
+            elif seg_type == "dimension":
+                matched = seg_key in query_dimensions
+            if not matched:
+                continue
+            wadj = item.get("weight_adjustments")
+            if not isinstance(wadj, dict):
+                continue
+            for key, value in wadj.items():
+                k = str(key).strip()
+                if not k or k not in weights:
+                    continue
+                mul = max(0.2, min(3.0, _safe_float(value, 1.0)))
+                weights[k] = round(max(0.2, min(3.0, weights[k] * mul)), 6)
+                applied_weights[k] = round(mul, 6)
+            applied_segments.append(f"{seg_type}:{seg_key}")
+
+    return weights, {
+        "applied": bool(applied_segments),
+        "segments": applied_segments,
+        "weight_adjustments": applied_weights,
+    }
 
 
 def _estimate_gemini_usefulness(
@@ -1338,6 +1516,68 @@ def _extract_online_learning_profile(node: Dict[str, Any]) -> Dict[str, Any]:
     out = _coerce_dict(raw)
     if "enabled" not in out:
         out["enabled"] = False
+    if bool(out.get("enabled")):
+        out.setdefault("layered_strategy", "global+domain+region+dimension")
+        out.setdefault("fallback_on_sparse_segments", True)
+        if not isinstance(out.get("segment_overrides"), list):
+            out["segment_overrides"] = []
+        if not isinstance(out.get("weight_adjustments"), dict):
+            out["weight_adjustments"] = {}
+    return out
+
+
+def _extract_long_tail_profile(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "long_tail_profile",
+            "sparse_domain_profile",
+            "long_tail_domain_profile",
+            "长尾专业画像",
+        ),
+    )
+    out = _coerce_dict(raw)
+    long_tail_domains = out.get("long_tail_domains")
+    if isinstance(long_tail_domains, str):
+        long_tail_domains = [x.strip() for x in re.split(r"[;,，；、|]+", long_tail_domains) if x.strip()]
+    if not isinstance(long_tail_domains, list):
+        long_tail_domains = []
+    fallback_domains = out.get("fallback_domains")
+    if isinstance(fallback_domains, str):
+        fallback_domains = [x.strip() for x in re.split(r"[;,，；、|]+", fallback_domains) if x.strip()]
+    if not isinstance(fallback_domains, list):
+        fallback_domains = []
+    transfer_factor = _safe_float(out.get("transfer_factor"), 0.85)
+    out["long_tail_domains"] = [str(x).strip().lower() for x in long_tail_domains if str(x).strip()][:12]
+    out["fallback_domains"] = [str(x).strip().lower() for x in fallback_domains if str(x).strip()][:12]
+    out["transfer_factor"] = round(max(0.5, min(1.2, transfer_factor)), 4)
+    out["specialty_tag"] = str(out.get("specialty_tag") or "").strip().lower()
+    if "enabled" not in out:
+        out["enabled"] = bool(out["long_tail_domains"] or out["specialty_tag"])
+    return out
+
+
+def _extract_uncertainty_profile(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "uncertainty_profile",
+            "uncertainty_model",
+            "confidence_profile",
+            "不确定性画像",
+        ),
+    )
+    out = _coerce_dict(raw)
+    confidence = _safe_float(out.get("confidence_level"), -1.0)
+    if confidence < 0:
+        confidence = _safe_float(out.get("confidence"), -1.0)
+    interval = _safe_float(out.get("relative_interval"), -1.0)
+    if interval < 0:
+        interval = _safe_float(out.get("interval_ratio"), 0.0)
+    out["confidence_level"] = round(max(0.0, min(1.0, confidence if confidence >= 0 else 0.0)), 4)
+    out["relative_interval"] = round(max(0.0, min(0.6, interval)), 4)
+    if "enabled" not in out:
+        out["enabled"] = bool(out["confidence_level"] > 0.0 or out["relative_interval"] > 0.0)
     return out
 
 
@@ -1644,11 +1884,15 @@ def _extract_evidence_completeness_profile(
             "complete_parameters": 0,
             "completeness_ratio": 0.0,
             "completeness_score": 0.0,
+            "verifiable_parameters": 0,
+            "verification_ratio": 0.0,
+            "verification_status": "no_numeric_sources",
             "missing_field_totals": {field: 0 for field in required_fields},
             "status": "no_numeric_sources",
         }
 
     complete = 0
+    verifiable = 0
     missing_totals = {field: 0 for field in required_fields}
     rows: List[Dict[str, Any]] = []
     for item in items:
@@ -1667,16 +1911,31 @@ def _extract_evidence_completeness_profile(
             "source_hierarchy": has_source,
             "effective_date": bool(item_effective_date or effective_date or has_formula),
         }
+        origin = str(item.get("evidence_origin") or "").strip().lower()
+        is_verifiable = bool(item.get("evidence_verified"))
+        if not is_verifiable and origin not in {"synthetic_default", "derived_formula"}:
+            is_verifiable = bool(
+                str(item.get("anchor_hash") or "").strip()
+                and str(item.get("clause_path") or "").strip()
+                and (
+                    str(item.get("source_page") or "").strip()
+                    or str(item.get("clause_ref") or "").strip()
+                )
+            )
         missing_fields = [k for k, v in flags.items() if not bool(v)]
         for f in missing_fields:
             missing_totals[f] += 1
         is_complete = len(missing_fields) == 0
         if is_complete:
             complete += 1
+        if is_verifiable:
+            verifiable += 1
         rows.append(
             {
                 "parameter": str(item.get("parameter") or ""),
                 "complete": is_complete,
+                "verifiable": is_verifiable,
+                "evidence_origin": origin,
                 "missing_fields": missing_fields,
             }
         )
@@ -1684,6 +1943,14 @@ def _extract_evidence_completeness_profile(
     total = len(items)
     ratio = round(complete / max(total, 1), 4)
     score = round(ratio * 100.0, 4)
+    verification_ratio = round(verifiable / max(total, 1), 4)
+    verification_status = (
+        "pass"
+        if verification_ratio >= 0.6
+        else "warn"
+        if verification_ratio >= 0.2
+        else "synthetic_only"
+    )
     status = "pass" if ratio >= 0.8 else "warn" if ratio >= 0.5 else "fail"
     return {
         "enabled": True,
@@ -1692,6 +1959,9 @@ def _extract_evidence_completeness_profile(
         "complete_parameters": complete,
         "completeness_ratio": ratio,
         "completeness_score": score,
+        "verifiable_parameters": verifiable,
+        "verification_ratio": verification_ratio,
+        "verification_status": verification_status,
         "missing_field_totals": missing_totals,
         "source_hierarchy": source_hierarchy,
         "effective_date": effective_date,
@@ -2193,6 +2463,7 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     interface_contract = _extract_interface_contract(node)
                     optimization_objectives_ext = _extract_optimization_objectives_ext(node)
                     online_learning_profile = _extract_online_learning_profile(node)
+                    long_tail_profile = _extract_long_tail_profile(node)
                     incremental_fingerprint, incremental_update = _extract_incremental_state(node)
                     object_key = _build_object_key(node, title, node_id)
                     entity_alignment = _extract_entity_alignment(
@@ -2219,6 +2490,21 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         source_hierarchy=source_hierarchy,
                         standard_timeline=standard_timeline,
                     )
+                    uncertainty_profile = _extract_uncertainty_profile(node)
+                    if not bool(uncertainty_profile.get("enabled")) and (
+                        formula_expression or isinstance(evidence_completeness, dict)
+                    ):
+                        c_ratio = _safe_float(evidence_completeness.get("completeness_ratio"), 0.0)
+                        v_ratio = _safe_float(evidence_completeness.get("verification_ratio"), 0.0)
+                        safe_bonus = 0.08 if bool(formula_safety_profile.get("safe")) else -0.12
+                        confidence = max(0.35, min(0.96, 0.42 + c_ratio * 0.30 + v_ratio * 0.20 + safe_bonus))
+                        relative_interval = max(0.03, min(0.45, 1.0 - confidence))
+                        uncertainty_profile = {
+                            "enabled": True,
+                            "method": "derived_from_evidence_v1",
+                            "confidence_level": round(confidence, 4),
+                            "relative_interval": round(relative_interval, 4),
+                        }
                     refs = _build_reference_keys(
                         node,
                         uid="",
@@ -2266,6 +2552,7 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         "cross_discipline_interface_contract": interface_contract,
                         "optimization_objectives_ext": optimization_objectives_ext,
                         "online_learning_profile": online_learning_profile,
+                        "long_tail_profile": long_tail_profile,
                         "entity_alignment": entity_alignment,
                         "entity_master_key": str(entity_alignment.get("entity_master_key") or ""),
                         "regional_standard_timeline": regional_standard_timeline,
@@ -2273,6 +2560,7 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         "deduction_counterexample_library": deduction_counterexample_library,
                         "formula_safety_profile": formula_safety_profile,
                         "evidence_completeness": evidence_completeness,
+                        "uncertainty_profile": uncertainty_profile,
                     }
 
                     tactical = _extract_tactical_fields(node, activation_context=activation_ctx)
@@ -2297,12 +2585,14 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     keywords.extend(_extract_terms(interface_contract))
                     keywords.extend(_extract_terms(optimization_objectives_ext))
                     keywords.extend(_extract_terms(online_learning_profile))
+                    keywords.extend(_extract_terms(long_tail_profile))
                     keywords.extend(_extract_terms(entity_alignment))
                     keywords.extend(_extract_terms(regional_standard_timeline))
                     keywords.extend(_extract_terms(abnormal_scenario_playbook))
                     keywords.extend(_extract_terms(deduction_counterexample_library))
                     keywords.extend(_extract_terms(formula_safety_profile))
                     keywords.extend(_extract_terms(evidence_completeness))
+                    keywords.extend(_extract_terms(uncertainty_profile))
                     activation_signal = ""
                     dna_verified = True
                     tactical_mode = ""
@@ -3624,6 +3914,7 @@ class KnowledgeGraphIndex:
             ).fetchall()
 
         query_tokens = _tokenize(query)
+        query_dimensions = _detect_query_dimensions(query, norm_tags, norm_keywords)
         results: List[Dict[str, Any]] = []
         for row in rows:
             body = str(row["body"] or "")
@@ -3651,6 +3942,8 @@ class KnowledgeGraphIndex:
             interface_contract = _coerce_dict(payload.get("cross_discipline_interface_contract"))
             optimization_objectives_ext = _coerce_dict(payload.get("optimization_objectives_ext"))
             online_learning_profile = _coerce_dict(payload.get("online_learning_profile"))
+            long_tail_profile = _coerce_dict(payload.get("long_tail_profile"))
+            uncertainty_profile = _coerce_dict(payload.get("uncertainty_profile"))
             entity_alignment = _coerce_dict(payload.get("entity_alignment"))
             entity_master_key = str(
                 payload.get("entity_master_key")
@@ -3665,25 +3958,37 @@ class KnowledgeGraphIndex:
             evidence_completeness = _coerce_dict(payload.get("evidence_completeness"))
             incremental_fingerprint = str(row["incremental_fingerprint"] or "").strip()
             incremental_update = _safe_json_load(row["incremental_update_json"], {})
+            uncertainty_interval = _build_uncertainty_interval(
+                uncertainty_profile=uncertainty_profile,
+                formula_sensitivity=formula_sensitivity if isinstance(formula_sensitivity, dict) else {},
+                quantitative_indices=_safe_json_load(row["quantitative_indices_json"], {}),
+            )
+            effective_weights, learning_apply = _apply_online_learning_weights(
+                base_weights=score_weights,
+                profile=online_learning_profile,
+                region_context=norm_region,
+                professional_domains=norm_domains,
+                query_dimensions=query_dimensions,
+            )
 
             score = 0.0
             for tag in norm_tags:
                 if tag in tags_row:
-                    score += 10.0 * float(score_weights.get("tag_weight") or 1.0)
+                    score += 10.0 * float(effective_weights.get("tag_weight") or 1.0)
             for keyword in norm_keywords:
                 if keyword in keywords_row:
-                    score += 8.0 * float(score_weights.get("keyword_exact_weight") or 1.0)
+                    score += 8.0 * float(effective_weights.get("keyword_exact_weight") or 1.0)
                 elif keyword in _normalize_term(title) or keyword in _normalize_term(body):
-                    score += 5.0 * float(score_weights.get("keyword_fuzzy_weight") or 1.0)
+                    score += 5.0 * float(effective_weights.get("keyword_fuzzy_weight") or 1.0)
             if query_tokens:
                 merged = f"{title}\n{body}".lower()
                 score += sum(1.5 for token in query_tokens if token in merged) * float(
-                    score_weights.get("query_token_weight") or 1.0
+                    effective_weights.get("query_token_weight") or 1.0
                 )
             row_id = int(row["id"])
             if row_id in rank_map:
                 score += max(0.0, 20.0 - min(20.0, abs(rank_map[row_id]) * 4.0)) * float(
-                    score_weights.get("fts_rank_weight") or 1.0
+                    effective_weights.get("fts_rank_weight") or 1.0
                 )
 
             domain_score, domain_matches = _domain_match(
@@ -3694,9 +3999,20 @@ class KnowledgeGraphIndex:
                 keywords=keywords_row,
                 source_file=str(row["file_name"] or ""),
             )
-            if norm_domains and not domain_matches:
+            long_tail_match = _match_long_tail_profile(
+                profile=long_tail_profile,
+                professional_domains=norm_domains,
+                title=title,
+                body=body,
+                tags=tags_row,
+                keywords=keywords_row,
+            )
+            if norm_domains and not domain_matches and not bool(long_tail_match.get("matched")):
                 continue
-            score += domain_score * float(score_weights.get("domain_weight") or 1.0)
+            if domain_matches:
+                score += domain_score * float(effective_weights.get("domain_weight") or 1.0)
+            elif bool(long_tail_match.get("matched")):
+                score += float(long_tail_match.get("score") or 0.0) * float(effective_weights.get("domain_weight") or 1.0)
 
             gemini_usefulness_score = _estimate_gemini_usefulness(
                 payload=payload,
@@ -3714,7 +4030,7 @@ class KnowledgeGraphIndex:
             if gemini_usefulness_score < min_gemini_score:
                 continue
             score += min(8.0, gemini_usefulness_score * 0.08) * float(
-                score_weights.get("gemini_weight_scale") or 1.0
+                effective_weights.get("gemini_weight_scale") or 1.0
             )
 
             retrieval_quality_score = _safe_float(
@@ -3724,7 +4040,7 @@ class KnowledgeGraphIndex:
             if retrieval_quality_score < min_retrieval_quality:
                 continue
             score += min(6.0, retrieval_quality_score * 0.06) * float(
-                score_weights.get("retrieval_quality_weight_scale") or 1.0
+                effective_weights.get("retrieval_quality_weight_scale") or 1.0
             )
 
             if isinstance(approval_workflow, dict):
@@ -3733,14 +4049,14 @@ class KnowledgeGraphIndex:
                 if require_approved_auto and is_required and wf_status != "approved":
                     continue
                 if wf_status == "approved":
-                    score += 1.5 * float(score_weights.get("approval_bonus_weight") or 1.0)
+                    score += 1.5 * float(effective_weights.get("approval_bonus_weight") or 1.0)
 
             if isinstance(standard_validity_timeline, dict):
                 status = str(standard_validity_timeline.get("timeline_status") or "").strip().lower()
                 if status == "active":
-                    score += 1.5 * float(score_weights.get("timeline_weight") or 1.0)
+                    score += 1.5 * float(effective_weights.get("timeline_weight") or 1.0)
                 elif status == "review_required":
-                    score -= 1.5 * float(score_weights.get("timeline_weight") or 1.0)
+                    score -= 1.5 * float(effective_weights.get("timeline_weight") or 1.0)
 
             timeline_match = _timeline_match_for_bid(
                 standard_validity_timeline if isinstance(standard_validity_timeline, dict) else {},
@@ -3751,9 +4067,9 @@ class KnowledgeGraphIndex:
                 continue
             t_state = str(timeline_match.get("state") or "")
             if t_state == "active":
-                score += 0.9 * float(score_weights.get("timeline_weight") or 1.0)
+                score += 0.9 * float(effective_weights.get("timeline_weight") or 1.0)
             elif t_state in {"superseded_allowed", "expired"}:
-                score -= 0.6 * float(score_weights.get("timeline_weight") or 1.0)
+                score -= 0.6 * float(effective_weights.get("timeline_weight") or 1.0)
 
             if norm_region:
                 region_blob = json.dumps(regional_policy_layers, ensure_ascii=False).upper()
@@ -3764,7 +4080,7 @@ class KnowledgeGraphIndex:
                 ).upper()
                 if norm_region not in region_blob and norm_region not in {default_region, "CN"}:
                     continue
-                score += 1.0 * float(score_weights.get("region_weight") or 1.0)
+                score += 1.0 * float(effective_weights.get("region_weight") or 1.0)
 
             region_plugin_match = _evaluate_region_plugin(
                 plugin=region_plugin,
@@ -3774,7 +4090,7 @@ class KnowledgeGraphIndex:
             )
             if norm_region and region_plugin and not bool(region_plugin_match.get("allow")):
                 continue
-            score += float(region_plugin_match.get("bonus") or 0.0) * float(score_weights.get("region_weight") or 1.0)
+            score += float(region_plugin_match.get("bonus") or 0.0) * float(effective_weights.get("region_weight") or 1.0)
 
             if isinstance(process_parameter_pack, dict) and bool(process_parameter_pack.get("enabled")):
                 score += 0.8
@@ -3790,12 +4106,22 @@ class KnowledgeGraphIndex:
                 score += 0.5
             if isinstance(online_learning_profile, dict) and bool(online_learning_profile.get("enabled")):
                 score += 0.4
+            if bool(learning_apply.get("applied")):
+                score += 0.25
             if isinstance(evidence_completeness, dict):
                 ratio = _safe_float(evidence_completeness.get("completeness_ratio"), 0.0)
                 if ratio >= 0.8:
                     score += 1.2
                 elif ratio <= 0.3:
                     score -= 1.2
+            if isinstance(uncertainty_profile, dict) and bool(uncertainty_profile.get("enabled")):
+                confidence = _safe_float(uncertainty_profile.get("confidence_level"), 0.0)
+                if confidence >= 0.75:
+                    score += 0.9
+                elif confidence >= 0.55:
+                    score += 0.4
+                elif confidence < 0.4:
+                    score -= 0.9
             if isinstance(formula_safety_profile, dict) and bool(formula_safety_profile.get("enabled")):
                 if bool(formula_safety_profile.get("safe")):
                     score += 1.0
@@ -3811,6 +4137,7 @@ class KnowledgeGraphIndex:
             if (norm_tags or norm_keywords or query_tokens) and score <= 0:
                 continue
 
+            merged_domain_matches = sorted(set([str(x) for x in (domain_matches or []) + (long_tail_match.get("matches") or []) if str(x)]))
             result_item = {
                 "node_id": row["node_uid"],
                 "title": title,
@@ -3857,15 +4184,20 @@ class KnowledgeGraphIndex:
                 "cross_discipline_interface_contract": interface_contract,
                 "optimization_objectives_ext": optimization_objectives_ext,
                 "online_learning_profile": online_learning_profile,
+                "retrieval_learning_adjustment": learning_apply,
+                "long_tail_profile": long_tail_profile,
+                "long_tail_match": long_tail_match,
                 "entity_alignment": entity_alignment,
                 "regional_standard_timeline": regional_standard_timeline,
                 "abnormal_scenario_playbook": abnormal_scenario_playbook,
                 "deduction_counterexample_library": deduction_counterexample_library,
                 "formula_safety_profile": formula_safety_profile,
                 "evidence_completeness": evidence_completeness,
+                "uncertainty_profile": uncertainty_profile,
+                "uncertainty_interval": uncertainty_interval,
                 "incremental_fingerprint": incremental_fingerprint,
                 "incremental_update": incremental_update,
-                "professional_domain_matches": domain_matches,
+                "professional_domain_matches": merged_domain_matches,
                 "gemini_usefulness_score": gemini_usefulness_score,
                 "retrieval_quality_score": retrieval_quality_score,
                 "score": round(score, 4),
@@ -3880,6 +4212,8 @@ class KnowledgeGraphIndex:
                     "timeline_match_state": timeline_match.get("state"),
                     "entity_master_key": entity_master_key,
                     "evidence_completeness_ratio": _safe_float(evidence_completeness.get("completeness_ratio"), 0.0),
+                    "uncertainty_confidence_level": _safe_float(uncertainty_profile.get("confidence_level"), 0.0),
+                    "long_tail_specialty_tag": str(long_tail_profile.get("specialty_tag") or ""),
                 },
             }
             results.append(result_item)
@@ -3895,6 +4229,7 @@ class KnowledgeGraphIndex:
             "query": query,
             "tags": norm_tags,
             "keywords": norm_keywords,
+            "query_dimensions": query_dimensions,
             "node_types": norm_node_types,
             "professional_domains": norm_domains,
             "min_gemini_usefulness_score": min_gemini_score,

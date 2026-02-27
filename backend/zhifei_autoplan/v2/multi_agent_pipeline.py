@@ -309,14 +309,25 @@ class MultiAgentDocPipeline:
         if not evidence:
             return True
         ratio = float(evidence.get("completeness_ratio") or 0.0)
+        verification_ratio = float(evidence.get("verification_ratio") or 0.0)
+        verification_status = str(evidence.get("verification_status") or "").strip().lower()
         status = str(evidence.get("status") or "").strip().lower()
         has_anchor = bool(evidence.get("has_clause_anchor"))
         has_effective_date = bool(str(evidence.get("effective_date") or "").strip())
         if status == "no_numeric_sources":
             return True
-        if (ratio >= 0.55 or status == "pass") and has_anchor and has_effective_date:
+        if self._is_auto_generated_hit(hit):
             return True
         source_hierarchy = str(hit.get("source_hierarchy") or "").strip()
+        # 答疑/图纸来源必须提供可验证证据，标准/企标来源允许阶段性 synthetic_only。
+        if source_hierarchy in {"答疑文件", "设计图纸"}:
+            if verification_ratio < 0.5 and verification_status not in {"pass"}:
+                return False
+        if (ratio >= 0.55 or status == "pass") and has_anchor and has_effective_date:
+            if verification_status in {"pass", "warn"}:
+                return True
+            if verification_status == "synthetic_only" and source_hierarchy in {"国标", "行标", "企标"}:
+                return True
         if ratio >= 0.55 and source_hierarchy in {"企标", "行标"}:
             return True
         return False
@@ -355,6 +366,26 @@ class MultiAgentDocPipeline:
                 return False
         return True
 
+    def _hit_uncertainty_ok(self, hit: Dict[str, Any] | None, *, formula_required: bool = False) -> bool:
+        if not isinstance(hit, dict):
+            return False
+        has_formula = bool(str(hit.get("formula_expression") or "").strip())
+        if not has_formula and not formula_required:
+            return True
+        profile = hit.get("uncertainty_profile") if isinstance(hit.get("uncertainty_profile"), dict) else {}
+        if not profile:
+            if self._is_auto_generated_hit(hit):
+                return True
+            sensitivity = hit.get("formula_sensitivity") if isinstance(hit.get("formula_sensitivity"), dict) else {}
+            evidence = hit.get("evidence_completeness") if isinstance(hit.get("evidence_completeness"), dict) else {}
+            if bool(sensitivity.get("enabled")) and float(evidence.get("completeness_ratio") or 0.0) >= 0.6:
+                return True
+            return False
+        if not bool(profile.get("enabled")):
+            return False
+        confidence = float(profile.get("confidence_level") or 0.0)
+        return confidence >= 0.5
+
     def _hit_parameter_ok(self, hit: Dict[str, Any] | None) -> bool:
         if not isinstance(hit, dict):
             return False
@@ -370,6 +401,10 @@ class MultiAgentDocPipeline:
         evidence_ok = self._hit_evidence_ok(hit)
         formula_safety_ok = self._hit_formula_safety_ok(hit)
         interface_ok = self._hit_interface_conflict_ok(hit)
+        uncertainty_ok = self._hit_uncertainty_ok(hit, formula_required=bool(str(hit.get("formula_expression") or "").strip()))
+        if self._is_auto_generated_hit(hit):
+            minimum_semantic_ok = bool(has_conditions or has_resources or safety_level != "unknown")
+            return bool(node_ok and minimum_semantic_ok and formula_safety_ok and interface_ok and uncertainty_ok)
         return bool(
             node_ok
             and has_conditions
@@ -378,6 +413,7 @@ class MultiAgentDocPipeline:
             and evidence_ok
             and formula_safety_ok
             and interface_ok
+            and uncertainty_ok
         )
 
     def _select_graph_hit(self, query: str, *, professional_domain: str | None = None) -> Dict[str, Any]:
@@ -651,6 +687,12 @@ class MultiAgentDocPipeline:
                             "optimization_objectives_ext": selected_graph.get("optimization_objectives_ext")
                             if isinstance(selected_graph, dict)
                             else {},
+                            "long_tail_profile": selected_graph.get("long_tail_profile")
+                            if isinstance(selected_graph, dict)
+                            else {},
+                            "uncertainty_profile": selected_graph.get("uncertainty_profile")
+                            if isinstance(selected_graph, dict)
+                            else {},
                             "is_auto_generated": self._is_auto_generated_hit(selected_graph),
                         },
                     }
@@ -757,12 +799,40 @@ class MultiAgentDocPipeline:
                 "formula_total": formula_total,
                 "formula_node_id": formula_hit.get("node_id") if formula_required else None,
                 "formula_title": formula_hit.get("title") if formula_required else None,
+                "evidence_completeness_ratio": float(
+                    ((graph_hit.get("evidence_completeness") or {}).get("completeness_ratio") or 0.0)
+                    if isinstance(graph_hit.get("evidence_completeness"), dict)
+                    else 0.0
+                ),
+                "evidence_verification_ratio": float(
+                    ((graph_hit.get("evidence_completeness") or {}).get("verification_ratio") or 0.0)
+                    if isinstance(graph_hit.get("evidence_completeness"), dict)
+                    else 0.0
+                ),
+                "evidence_verification_status": str(
+                    ((graph_hit.get("evidence_completeness") or {}).get("verification_status") or "")
+                    if isinstance(graph_hit.get("evidence_completeness"), dict)
+                    else ""
+                ),
                 "evidence_ok": self._hit_evidence_ok(graph_hit),
                 "formula_safety_ok": self._hit_formula_safety_ok(graph_hit),
                 "interface_ok": self._hit_interface_conflict_ok(graph_hit),
+                "auto_generated_support": self._is_auto_generated_hit(graph_hit),
+                "uncertainty_confidence_level": float(
+                    ((graph_hit.get("uncertainty_profile") or {}).get("confidence_level") or 0.0)
+                    if isinstance(graph_hit.get("uncertainty_profile"), dict)
+                    else 0.0
+                ),
+                "uncertainty_ok": self._hit_uncertainty_ok(graph_hit, formula_required=formula_required),
                 "ok": ok,
             }
-            check["ok"] = bool(check["ok"] and check["evidence_ok"] and check["formula_safety_ok"] and check["interface_ok"])
+            check["ok"] = bool(
+                check["ok"]
+                and check["evidence_ok"]
+                and check["formula_safety_ok"]
+                and check["interface_ok"]
+                and check["uncertainty_ok"]
+            )
             checks.append(check)
             if not check["ok"]:
                 missing.append(check)
@@ -819,6 +889,9 @@ class MultiAgentDocPipeline:
                     "cross_discipline_interface_contract": hit.get("cross_discipline_interface_contract") or {},
                     "optimization_objectives_ext": hit.get("optimization_objectives_ext") or {},
                     "online_learning_profile": hit.get("online_learning_profile") or {},
+                    "long_tail_profile": hit.get("long_tail_profile") or {},
+                    "uncertainty_profile": hit.get("uncertainty_profile") or {},
+                    "uncertainty_interval": hit.get("uncertainty_interval") or {},
                     "entity_master_key": hit.get("entity_master_key"),
                     "entity_alignment": hit.get("entity_alignment") or {},
                     "regional_standard_timeline": hit.get("regional_standard_timeline") or {},
@@ -1058,6 +1131,26 @@ class MultiAgentDocPipeline:
                             ],
                         }
                     )
+            if item.get("node_ok"):
+                ver = float(item.get("evidence_verification_ratio") or 0.0)
+                ver_status = str(item.get("evidence_verification_status") or "").strip().lower()
+                if ver < 0.2 and ver_status in {"synthetic_only", "warn"}:
+                    key = ("evidence_unverified", dim)
+                    if key not in seen:
+                        seen.add(key)
+                        gaps.append(
+                            {
+                                "type": "evidence_unverified",
+                                "dimension": dim,
+                                "required_keywords": item.get("keywords") or [],
+                                "query": item.get("graph_query"),
+                                "suggested_parameters": [
+                                    "numeric_sources.evidence_verified",
+                                    "numeric_sources.source_page/source_file",
+                                    "evidence_completeness.verification_ratio >= 0.6",
+                                ],
+                            }
+                        )
             if item.get("node_ok") and not item.get("formula_safety_ok"):
                 key = ("formula_safety_missing", dim)
                 if key not in seen:
@@ -1088,6 +1181,23 @@ class MultiAgentDocPipeline:
                             "suggested_parameters": [
                                 "cross_discipline_interface_contract.conflict_graph",
                                 "冲突状态由conflict/open闭环为resolved",
+                            ],
+                        }
+                    )
+            if item.get("node_ok") and not item.get("uncertainty_ok"):
+                key = ("uncertainty_low", dim)
+                if key not in seen:
+                    seen.add(key)
+                    gaps.append(
+                        {
+                            "type": "uncertainty_low",
+                            "dimension": dim,
+                            "required_keywords": item.get("keywords") or [],
+                            "query": item.get("graph_query"),
+                            "suggested_parameters": [
+                                "uncertainty_profile.enabled == true",
+                                "uncertainty_profile.confidence_level >= 0.5",
+                                "uncertainty_profile.relative_interval + baseline_result",
                             ],
                         }
                     )

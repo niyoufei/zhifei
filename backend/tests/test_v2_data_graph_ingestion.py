@@ -454,8 +454,15 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
                                     "effective_date": "2024-01-01",
                                     "has_clause_anchor": True,
                                     "status": "pass",
+                                    "verification_ratio": 1.0,
+                                    "verification_status": "pass",
                                 },
                                 "entity_master_key": "EMK-ENH-001",
+                                "source_provenance": {
+                                    "resolved_source_hierarchy": "国标",
+                                    "reference_tiers": ["国标"],
+                                    "reference_codes": ["GB 50300-2013"],
+                                },
                                 "entity_alignment": {
                                     "enabled": True,
                                     "entity_master_key": "EMK-ENH-001",
@@ -532,6 +539,7 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
     assert bool((node.get("online_learning_profile") or {}).get("enabled"))
     assert bool((node.get("formula_safety_profile") or {}).get("safe"))
     assert float((node.get("evidence_completeness") or {}).get("completeness_ratio") or 0.0) >= 0.8
+    assert float((node.get("evidence_completeness") or {}).get("verification_ratio") or 0.0) >= 0.5
     assert str(node.get("entity_master_key") or "").strip() == "EMK-ENH-001"
     assert str((node.get("entity_alignment") or {}).get("entity_master_key") or "").strip() == "EMK-ENH-001"
     assert bool((node.get("regional_standard_timeline") or {}).get("records"))
@@ -807,3 +815,128 @@ def test_authority_resolution_prefers_entity_master_key_grouping(tmp_path: Path)
     assert len(matched) == 1
     node = matched[0]
     assert str(node.get("source_hierarchy") or "") == "答疑文件"
+
+
+def test_search_supports_long_tail_domain_transfer_and_segment_learning(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "long_tail.json").write_text(
+        json.dumps(
+            {
+                "name": "ZF-KG-LONGTAIL",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "LT-001",
+                                "name": "机场飞行区排水控制",
+                                "keywords": ["飞行区", "机场", "排水", "道面"],
+                                "source_hierarchy": "国标",
+                                "long_tail_profile": {
+                                    "enabled": True,
+                                    "specialty_tag": "airport",
+                                    "fallback_domains": ["road", "building", "mep"],
+                                    "transfer_factor": 0.95,
+                                },
+                                "online_learning_profile": {
+                                    "enabled": True,
+                                    "layered_strategy": "global+domain+region+dimension",
+                                    "weight_adjustments": {"query_token_weight": 1.05},
+                                    "segment_overrides": [
+                                        {
+                                            "segment_type": "domain",
+                                            "segment_key": "airport",
+                                            "min_hit_count": 0,
+                                            "weight_adjustments": {"domain_weight": 1.25},
+                                        }
+                                    ],
+                                },
+                                "content": {"operation_desc_premium": {"desc": "飞行区排水系统参数化控制。"}},
+                            },
+                            {
+                                "node_id": "RD-001",
+                                "name": "市政道路排水控制",
+                                "keywords": ["道路", "排水", "雨污分流"],
+                                "source_hierarchy": "国标",
+                                "content": {"operation_desc_premium": {"desc": "道路排水常规控制。"}},
+                            },
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(
+        query="飞行区 排水",
+        professional_domains=["airport"],
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=10,
+    )
+    assert result["total"] >= 1
+    best = result["results"][0]
+    assert "机场飞行区排水控制" in str(best.get("title") or "")
+    assert bool((best.get("long_tail_match") or {}).get("matched"))
+    assert "airport" in (best.get("professional_domain_matches") or [])
+    assert bool((best.get("retrieval_learning_adjustment") or {}).get("applied"))
+
+
+def test_search_outputs_uncertainty_interval_bundle(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "uncertainty.json").write_text(
+        json.dumps(
+            {
+                "name": "ZF-KG-UNCERTAINTY",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "UC-001",
+                                "name": "浇筑时长推导节点",
+                                "keywords": ["浇筑", "时长", "推导"],
+                                "source_hierarchy": "国标",
+                                "formula_expression": "volume / max(productivity, 1)",
+                                "formula_variables": ["volume", "productivity"],
+                                "formula_sensitivity": {"enabled": True, "baseline_result": 10.0},
+                                "uncertainty_profile": {
+                                    "enabled": True,
+                                    "confidence_level": 0.72,
+                                    "relative_interval": 0.2,
+                                    "baseline_result": 10.0,
+                                },
+                                "content": {"operation_desc_premium": {"desc": "按方量推导浇筑时长。"}},
+                            }
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(
+        query="浇筑 时长 推导",
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=5,
+    )
+    assert result["total"] >= 1
+    node = result["results"][0]
+    interval = node.get("uncertainty_interval") or {}
+    assert bool(interval.get("enabled"))
+    assert float(interval.get("confidence_level") or 0.0) == pytest.approx(0.72, rel=1e-6)
+    assert float(interval.get("lower") or 0.0) == pytest.approx(8.0, rel=1e-6)
+    assert float(interval.get("upper") or 0.0) == pytest.approx(12.0, rel=1e-6)
