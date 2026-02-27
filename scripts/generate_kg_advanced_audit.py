@@ -74,9 +74,17 @@ def _check_file(path: Path) -> Dict[str, Any]:
         "invalid_authority_rank": 0,
         "missing_standard_timeline": 0,
         "missing_regional_policy": 0,
+        "missing_regional_redlines": 0,
         "missing_unit_dimension_model": 0,
         "missing_evidence_anchors": 0,
         "missing_cross_constraints": 0,
+        "missing_process_parameter_pack": 0,
+        "missing_resource_productivity_model": 0,
+        "missing_risk_trigger_matrix": 0,
+        "missing_clause_locator": 0,
+        "missing_interface_contract": 0,
+        "missing_optimization_objectives_ext": 0,
+        "missing_online_learning_profile": 0,
         "missing_retrieval_benchmark": 0,
         "low_retrieval_quality_score": 0,
         "auto_generated_unapproved": 0,
@@ -197,6 +205,11 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_regional_policy"] += 1
             if len(samples["missing_regional_policy"]) < 8:
                 samples["missing_regional_policy"].append({"node_id": node_id})
+        redlines = regional.get("numeric_redlines") if isinstance(regional, dict) else {}
+        if not isinstance(redlines, dict) or not bool(redlines.get("enabled")):
+            issues["missing_regional_redlines"] += 1
+            if len(samples["missing_regional_redlines"]) < 8:
+                samples["missing_regional_redlines"].append({"node_id": node_id})
 
         unit_model = node.get("unit_dimension_model")
         if not isinstance(unit_model, dict) or not isinstance(unit_model.get("parameters"), list):
@@ -215,6 +228,48 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_cross_constraints"] += 1
             if len(samples["missing_cross_constraints"]) < 8:
                 samples["missing_cross_constraints"].append({"node_id": node_id})
+
+        process_pack = node.get("process_parameter_pack")
+        if not isinstance(process_pack, dict) or not bool(process_pack.get("enabled")) or not isinstance(process_pack.get("steps"), list):
+            issues["missing_process_parameter_pack"] += 1
+            if len(samples["missing_process_parameter_pack"]) < 8:
+                samples["missing_process_parameter_pack"].append({"node_id": node_id})
+
+        resource_model = node.get("resource_productivity_model")
+        if not isinstance(resource_model, dict) or not bool(resource_model.get("enabled")):
+            issues["missing_resource_productivity_model"] += 1
+            if len(samples["missing_resource_productivity_model"]) < 8:
+                samples["missing_resource_productivity_model"].append({"node_id": node_id})
+
+        risk_matrix = node.get("risk_trigger_matrix")
+        if not isinstance(risk_matrix, dict) or not bool(risk_matrix.get("enabled")) or not isinstance(risk_matrix.get("items"), list):
+            issues["missing_risk_trigger_matrix"] += 1
+            if len(samples["missing_risk_trigger_matrix"]) < 8:
+                samples["missing_risk_trigger_matrix"].append({"node_id": node_id})
+
+        clause_locator = node.get("clause_locator")
+        if not isinstance(clause_locator, dict) or not bool(clause_locator.get("enabled")) or not isinstance(clause_locator.get("anchors"), list):
+            issues["missing_clause_locator"] += 1
+            if len(samples["missing_clause_locator"]) < 8:
+                samples["missing_clause_locator"].append({"node_id": node_id})
+
+        interface_contract = node.get("cross_discipline_interface_contract")
+        if not isinstance(interface_contract, dict) or not bool(interface_contract.get("enabled")) or not isinstance(interface_contract.get("interfaces"), list):
+            issues["missing_interface_contract"] += 1
+            if len(samples["missing_interface_contract"]) < 8:
+                samples["missing_interface_contract"].append({"node_id": node_id})
+
+        optimization_ext = node.get("optimization_objectives_ext")
+        if not isinstance(optimization_ext, dict) or not bool(optimization_ext.get("enabled")) or not isinstance(optimization_ext.get("objectives"), dict):
+            issues["missing_optimization_objectives_ext"] += 1
+            if len(samples["missing_optimization_objectives_ext"]) < 8:
+                samples["missing_optimization_objectives_ext"].append({"node_id": node_id})
+
+        learning = node.get("online_learning_profile")
+        if not isinstance(learning, dict) or not bool(learning.get("enabled")):
+            issues["missing_online_learning_profile"] += 1
+            if len(samples["missing_online_learning_profile"]) < 8:
+                samples["missing_online_learning_profile"].append({"node_id": node_id})
 
         benchmark = node.get("retrieval_benchmark")
         if not isinstance(benchmark, dict) or benchmark.get("quality_score") in (None, ""):

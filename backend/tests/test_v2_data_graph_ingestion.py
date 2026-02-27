@@ -402,6 +402,22 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
                                 },
                                 "evidence_anchors": [{"anchor_id": "EA-1", "parameter": "volume"}],
                                 "cross_discipline_constraints": {"enabled": True},
+                                "process_parameter_pack": {
+                                    "enabled": True,
+                                    "steps": [{"seq": 1, "parameter": "volume", "default_value": 120}],
+                                },
+                                "resource_productivity_model": {"enabled": True, "unit_output_per_day": 320.0},
+                                "risk_trigger_matrix": {"enabled": True, "items": [{"trigger_id": "R-1"}]},
+                                "clause_locator": {"enabled": True, "anchors": [{"clause_ref": "第1条"}]},
+                                "cross_discipline_interface_contract": {
+                                    "enabled": True,
+                                    "interfaces": [{"with_domain": "mep"}],
+                                },
+                                "optimization_objectives_ext": {
+                                    "enabled": True,
+                                    "objectives": {"duration": 0.4, "risk": 0.3, "cost": 0.3},
+                                },
+                                "online_learning_profile": {"enabled": True, "strategy": "ema_feedback_v1"},
                                 "retrieval_benchmark": {"quality_score": 88, "minimum_quality_score": 70},
                                 "approval_workflow": {"required": True, "status": "approved"},
                                 "formula_sensitivity": {"enabled": True, "baseline_result": 4.0},
@@ -446,6 +462,13 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
     assert node["approval_workflow"]["status"] == "approved"
     assert isinstance(node["bim_ifc_context"]["ifc_entities"], list)
     assert str(node["incremental_fingerprint"]).strip()
+    assert bool((node.get("process_parameter_pack") or {}).get("enabled"))
+    assert bool((node.get("resource_productivity_model") or {}).get("enabled"))
+    assert bool((node.get("risk_trigger_matrix") or {}).get("enabled"))
+    assert bool((node.get("clause_locator") or {}).get("enabled"))
+    assert bool((node.get("cross_discipline_interface_contract") or {}).get("enabled"))
+    assert bool((node.get("optimization_objectives_ext") or {}).get("enabled"))
+    assert bool((node.get("online_learning_profile") or {}).get("enabled"))
 
 
 def test_search_supports_bid_date_timeline_effective_filter(tmp_path: Path) -> None:

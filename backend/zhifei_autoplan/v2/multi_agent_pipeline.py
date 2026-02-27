@@ -520,6 +520,11 @@ class MultiAgentDocPipeline:
                     top_k=8,
                     professional_domains=[domain],
                     min_gemini_usefulness_score=self.min_gemini_usefulness_score,
+                    region_context=self.region_context,
+                    bid_date=self.bid_date,
+                    allow_superseded=self.allow_superseded,
+                    regional_plugin_dir=self.regional_plugin_dir,
+                    retrieval_weight_profile_path=self.retrieval_weight_profile_path,
                     db_path=self.kg_db_path,
                 )
                 text = self._make_section_text(
@@ -568,6 +573,15 @@ class MultiAgentDocPipeline:
                             "formula_variables": selected_graph.get("formula_variables")
                             if isinstance(selected_graph, dict)
                             else [],
+                            "clause_locator": selected_graph.get("clause_locator")
+                            if isinstance(selected_graph, dict)
+                            else {},
+                            "cross_discipline_interface_contract": selected_graph.get("cross_discipline_interface_contract")
+                            if isinstance(selected_graph, dict)
+                            else {},
+                            "optimization_objectives_ext": selected_graph.get("optimization_objectives_ext")
+                            if isinstance(selected_graph, dict)
+                            else {},
                             "is_auto_generated": self._is_auto_generated_hit(selected_graph),
                         },
                     }
@@ -725,6 +739,13 @@ class MultiAgentDocPipeline:
                     "applicable_conditions": hit.get("applicable_conditions") or {},
                     "resource_requirements": hit.get("resource_requirements") or {},
                     "numeric_sources": hit.get("numeric_sources") or [],
+                    "process_parameter_pack": hit.get("process_parameter_pack") or {},
+                    "resource_productivity_model": hit.get("resource_productivity_model") or {},
+                    "risk_trigger_matrix": hit.get("risk_trigger_matrix") or {},
+                    "clause_locator": hit.get("clause_locator") or {},
+                    "cross_discipline_interface_contract": hit.get("cross_discipline_interface_contract") or {},
+                    "optimization_objectives_ext": hit.get("optimization_objectives_ext") or {},
+                    "online_learning_profile": hit.get("online_learning_profile") or {},
                     "retrieval_hints": (hit.get("payload") or {}).get("retrieval_hints")
                     if isinstance(hit.get("payload"), dict)
                     else {},
@@ -773,6 +794,29 @@ class MultiAgentDocPipeline:
             formula_variables = source_trace.get("formula_variables")
             if not isinstance(formula_variables, list):
                 formula_variables = graph_hit.get("formula_variables") if isinstance(graph_hit.get("formula_variables"), list) else []
+            clause_locator = (
+                source_trace.get("clause_locator")
+                if isinstance(source_trace.get("clause_locator"), dict)
+                else (graph_hit.get("clause_locator") if isinstance(graph_hit.get("clause_locator"), dict) else {})
+            )
+            clause_anchors = clause_locator.get("anchors") if isinstance(clause_locator, dict) else []
+            if not isinstance(clause_anchors, list):
+                clause_anchors = []
+            clause_refs: List[str] = []
+            for anchor in clause_anchors:
+                if not isinstance(anchor, dict):
+                    continue
+                cref = str(anchor.get("clause_ref") or "").strip()
+                if cref and cref not in clause_refs:
+                    clause_refs.append(cref)
+            if not clause_refs:
+                for chunk in support_chunks:
+                    if not isinstance(chunk, dict):
+                        continue
+                    for cref in (chunk.get("clause_refs") or []):
+                        term = str(cref).strip()
+                        if term and term not in clause_refs:
+                            clause_refs.append(term)
 
             for idx, sentence in enumerate(self._split_sentences(content), start=1):
                 sentence_id_seed = f"{title}|{idx}|{sentence}"
@@ -797,10 +841,12 @@ class MultiAgentDocPipeline:
                                     "path": chunk.get("path"),
                                     "chunk_id": chunk.get("chunk_id"),
                                     "section_title": chunk.get("section_title"),
+                                    "clause_refs": chunk.get("clause_refs") or [],
                                 }
                                 for chunk in support_chunks[:3]
                                 if isinstance(chunk, dict)
                             ],
+                            "clause_refs": clause_refs[:12],
                         },
                         "evidence": {
                             "node_id": source_trace.get("node_id") or graph_hit.get("node_id"),
@@ -813,6 +859,12 @@ class MultiAgentDocPipeline:
                             "formula_expression": source_trace.get("formula_expression")
                             or graph_hit.get("formula_expression"),
                             "formula_variables": formula_variables[:8],
+                            "clause_refs": clause_refs[:12],
+                            "clause_anchor": (
+                                clause_anchors[0]
+                                if clause_anchors and isinstance(clause_anchors[0], dict)
+                                else {}
+                            ),
                             "retrieval_query": sec.get("graph_query"),
                             "index_source_path": (
                                 support_chunks[0].get("path")

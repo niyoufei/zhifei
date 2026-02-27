@@ -57,6 +57,7 @@ def _base_node(node_id: str) -> dict:
         "regional_policy_layers": {
             "default_region": "CN",
             "layers": [{"level": "national", "policy_code": "GB/T 50326-2017", "status": "active"}],
+            "numeric_redlines": {"enabled": True, "active_region": "CN", "active_values": {"pm10_limit_ug_m3": 150}},
         },
         "unit_dimension_model": {
             "enabled": True,
@@ -65,6 +66,13 @@ def _base_node(node_id: str) -> dict:
         },
         "evidence_anchors": [{"anchor_id": "EA-TEST0001", "parameter": "a"}],
         "cross_discipline_constraints": {"enabled": True},
+        "process_parameter_pack": {"enabled": True, "steps": [{"seq": 1, "parameter": "a"}]},
+        "resource_productivity_model": {"enabled": True, "unit_output_per_day": 100},
+        "risk_trigger_matrix": {"enabled": True, "items": [{"trigger_id": "R1"}]},
+        "clause_locator": {"enabled": True, "anchors": [{"clause_ref": "第1条"}]},
+        "cross_discipline_interface_contract": {"enabled": True, "interfaces": [{"with_domain": "mep"}]},
+        "optimization_objectives_ext": {"enabled": True, "objectives": {"duration": 0.4, "risk": 0.6}},
+        "online_learning_profile": {"enabled": True, "strategy": "ema_feedback_v1"},
         "retrieval_benchmark": {"quality_score": 88, "minimum_quality_score": 70},
         "approval_workflow": {"required": True, "status": "approved"},
         "formula_sensitivity": {"enabled": True, "baseline_result": 1.0},

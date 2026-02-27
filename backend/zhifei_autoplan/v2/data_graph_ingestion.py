@@ -1153,6 +1153,129 @@ def _extract_incremental_state(node: Dict[str, Any]) -> Tuple[str, Dict[str, Any
     return fingerprint, update
 
 
+def _extract_process_parameter_pack(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "process_parameter_pack",
+            "parameter_pack",
+            "process_parameters",
+            "工序参数包",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "steps" not in out or not isinstance(out.get("steps"), list):
+        out["steps"] = []
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
+def _extract_resource_productivity_model(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "resource_productivity_model",
+            "productivity_model",
+            "资源产能模型",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
+def _extract_risk_trigger_matrix(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "risk_trigger_matrix",
+            "risk_triggers",
+            "risk_matrix",
+            "风险触发矩阵",
+        ),
+    )
+    out = _coerce_dict(raw)
+    items = out.get("items")
+    if not isinstance(items, list):
+        out["items"] = []
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
+def _extract_clause_locator(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "clause_locator",
+            "clause_trace",
+            "clause_anchor",
+            "条文定位",
+            "条文溯源",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "anchors" not in out or not isinstance(out.get("anchors"), list):
+        out["anchors"] = []
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
+def _extract_interface_contract(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "cross_discipline_interface_contract",
+            "interface_contract",
+            "cross_interface_contract",
+            "跨专业接口合同",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "interfaces" not in out or not isinstance(out.get("interfaces"), list):
+        out["interfaces"] = []
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
+def _extract_optimization_objectives_ext(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "optimization_objectives_ext",
+            "optimization_objectives",
+            "multi_objective",
+            "多目标优化",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "objectives" not in out or not isinstance(out.get("objectives"), dict):
+        out["objectives"] = {}
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
+def _extract_online_learning_profile(node: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "online_learning_profile",
+            "learning_profile",
+            "retrieval_learning_profile",
+            "在线学习画像",
+        ),
+    )
+    out = _coerce_dict(raw)
+    if "enabled" not in out:
+        out["enabled"] = False
+    return out
+
+
 def _extract_activation_terms(signal_text: str) -> List[str]:
     text = str(signal_text or "").strip()
     if not text:
@@ -1638,6 +1761,13 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     approval_workflow = _extract_approval_workflow(node)
                     formula_sensitivity = _extract_formula_sensitivity(node)
                     bim_ifc_context = _extract_bim_ifc_context(node)
+                    process_parameter_pack = _extract_process_parameter_pack(node)
+                    resource_productivity_model = _extract_resource_productivity_model(node)
+                    risk_trigger_matrix = _extract_risk_trigger_matrix(node)
+                    clause_locator = _extract_clause_locator(node)
+                    interface_contract = _extract_interface_contract(node)
+                    optimization_objectives_ext = _extract_optimization_objectives_ext(node)
+                    online_learning_profile = _extract_online_learning_profile(node)
                     incremental_fingerprint, incremental_update = _extract_incremental_state(node)
                     object_key = _build_object_key(node, title, node_id)
                     refs = _build_reference_keys(
@@ -1680,6 +1810,13 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         "approval_workflow": approval_workflow,
                         "formula_sensitivity": formula_sensitivity,
                         "bim_ifc_context": bim_ifc_context,
+                        "process_parameter_pack": process_parameter_pack,
+                        "resource_productivity_model": resource_productivity_model,
+                        "risk_trigger_matrix": risk_trigger_matrix,
+                        "clause_locator": clause_locator,
+                        "cross_discipline_interface_contract": interface_contract,
+                        "optimization_objectives_ext": optimization_objectives_ext,
+                        "online_learning_profile": online_learning_profile,
                     }
 
                     tactical = _extract_tactical_fields(node, activation_context=activation_ctx)
@@ -1697,6 +1834,13 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     keywords.extend(_extract_terms(approval_workflow))
                     keywords.extend(_extract_terms(formula_sensitivity))
                     keywords.extend(_extract_terms(bim_ifc_context))
+                    keywords.extend(_extract_terms(process_parameter_pack))
+                    keywords.extend(_extract_terms(resource_productivity_model))
+                    keywords.extend(_extract_terms(risk_trigger_matrix))
+                    keywords.extend(_extract_terms(clause_locator))
+                    keywords.extend(_extract_terms(interface_contract))
+                    keywords.extend(_extract_terms(optimization_objectives_ext))
+                    keywords.extend(_extract_terms(online_learning_profile))
                     activation_signal = ""
                     dna_verified = True
                     tactical_mode = ""
@@ -3031,6 +3175,13 @@ class KnowledgeGraphIndex:
             approval_workflow = _safe_json_load(row["approval_workflow_json"], {})
             formula_sensitivity = _safe_json_load(row["formula_sensitivity_json"], {})
             bim_ifc_context = _safe_json_load(row["bim_ifc_context_json"], {})
+            process_parameter_pack = _coerce_dict(payload.get("process_parameter_pack"))
+            resource_productivity_model = _coerce_dict(payload.get("resource_productivity_model"))
+            risk_trigger_matrix = _coerce_dict(payload.get("risk_trigger_matrix"))
+            clause_locator = _coerce_dict(payload.get("clause_locator"))
+            interface_contract = _coerce_dict(payload.get("cross_discipline_interface_contract"))
+            optimization_objectives_ext = _coerce_dict(payload.get("optimization_objectives_ext"))
+            online_learning_profile = _coerce_dict(payload.get("online_learning_profile"))
             incremental_fingerprint = str(row["incremental_fingerprint"] or "").strip()
             incremental_update = _safe_json_load(row["incremental_update_json"], {})
 
@@ -3142,6 +3293,21 @@ class KnowledgeGraphIndex:
                 continue
             score += float(region_plugin_match.get("bonus") or 0.0) * float(score_weights.get("region_weight") or 1.0)
 
+            if isinstance(process_parameter_pack, dict) and bool(process_parameter_pack.get("enabled")):
+                score += 0.8
+            if isinstance(resource_productivity_model, dict) and bool(resource_productivity_model.get("enabled")):
+                score += 0.8
+            if isinstance(risk_trigger_matrix, dict) and bool(risk_trigger_matrix.get("enabled")):
+                score += 0.8
+            if isinstance(clause_locator, dict) and bool(clause_locator.get("enabled")):
+                score += 0.8
+            if isinstance(interface_contract, dict) and bool(interface_contract.get("enabled")):
+                score += 0.6
+            if isinstance(optimization_objectives_ext, dict) and bool(optimization_objectives_ext.get("enabled")):
+                score += 0.5
+            if isinstance(online_learning_profile, dict) and bool(online_learning_profile.get("enabled")):
+                score += 0.4
+
             if (norm_tags or norm_keywords or query_tokens) and score <= 0:
                 continue
 
@@ -3183,6 +3349,13 @@ class KnowledgeGraphIndex:
                 "approval_workflow": approval_workflow,
                 "formula_sensitivity": formula_sensitivity,
                 "bim_ifc_context": bim_ifc_context,
+                "process_parameter_pack": process_parameter_pack,
+                "resource_productivity_model": resource_productivity_model,
+                "risk_trigger_matrix": risk_trigger_matrix,
+                "clause_locator": clause_locator,
+                "cross_discipline_interface_contract": interface_contract,
+                "optimization_objectives_ext": optimization_objectives_ext,
+                "online_learning_profile": online_learning_profile,
                 "incremental_fingerprint": incremental_fingerprint,
                 "incremental_update": incremental_update,
                 "professional_domain_matches": domain_matches,

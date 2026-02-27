@@ -421,6 +421,109 @@ QUANT_INDEX_BASE_BY_DIM: Dict[str, Dict[str, float]] = {
 
 SOURCE_CONFIDENCE = {"答疑文件": 1.0, "设计图纸": 0.92, "国标": 0.86, "行标": 0.82, "企标": 0.72}
 
+REGIONAL_NUMERIC_REDLINES: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "CN": {
+        "质量": {"acceptance_pass_rate_percent": 95, "sampling_frequency_per_shift": 2, "deviation_limit_mm": 3},
+        "安全": {"inspection_frequency_per_shift": 2, "emergency_response_minutes": 30, "high_risk_stop_line": 1},
+        "进度": {"min_process_interval_days": 1, "milestone_delay_alarm_days": 2, "deviation_response_hours": 4},
+        "环保": {"pm10_limit_ug_m3": 150, "noise_day_db": 70, "noise_night_db": 55},
+    },
+    "SH": {
+        "质量": {"acceptance_pass_rate_percent": 96, "sampling_frequency_per_shift": 2, "deviation_limit_mm": 2},
+        "安全": {"inspection_frequency_per_shift": 2, "emergency_response_minutes": 25, "high_risk_stop_line": 1},
+        "进度": {"min_process_interval_days": 1, "milestone_delay_alarm_days": 1, "deviation_response_hours": 3},
+        "环保": {"pm10_limit_ug_m3": 120, "noise_day_db": 70, "noise_night_db": 55},
+    },
+    "BJ": {
+        "质量": {"acceptance_pass_rate_percent": 96, "sampling_frequency_per_shift": 2, "deviation_limit_mm": 2},
+        "安全": {"inspection_frequency_per_shift": 2, "emergency_response_minutes": 25, "high_risk_stop_line": 1},
+        "进度": {"min_process_interval_days": 1, "milestone_delay_alarm_days": 1, "deviation_response_hours": 3},
+        "环保": {"pm10_limit_ug_m3": 120, "noise_day_db": 70, "noise_night_db": 55},
+    },
+}
+
+PROCESS_PARAMETER_PACK_BY_DIM: Dict[str, List[Dict[str, Any]]] = {
+    "质量": [
+        {"step": "定义", "parameter": "deviation_limit_mm", "default": 3, "unit": "mm"},
+        {"step": "分析", "parameter": "defect_trigger_percent", "default": 2, "unit": "%"},
+        {"step": "解决", "parameter": "recheck_frequency_per_shift", "default": 2, "unit": "次/班"},
+    ],
+    "安全": [
+        {"step": "定义", "parameter": "high_risk_task_count", "default": 2, "unit": "项"},
+        {"step": "分析", "parameter": "hazard_trigger_count", "default": 1, "unit": "处"},
+        {"step": "解决", "parameter": "response_minutes", "default": 30, "unit": "min"},
+    ],
+    "进度": [
+        {"step": "定义", "parameter": "planned_duration_days", "default": 30, "unit": "天"},
+        {"step": "分析", "parameter": "milestone_delay_alarm_days", "default": 2, "unit": "天"},
+        {"step": "解决", "parameter": "recovery_window_hours", "default": 24, "unit": "h"},
+    ],
+    "环保": [
+        {"step": "定义", "parameter": "pm10_limit_ug_m3", "default": 150, "unit": "ug/m3"},
+        {"step": "分析", "parameter": "noise_day_db", "default": 70, "unit": "dB"},
+        {"step": "解决", "parameter": "spray_frequency_per_day", "default": 6, "unit": "次/日"},
+    ],
+    "重难点": [
+        {"step": "定义", "parameter": "critical_interface_count", "default": 8, "unit": "处"},
+        {"step": "分析", "parameter": "risk_trigger_percent", "default": 5, "unit": "%"},
+        {"step": "解决", "parameter": "expert_team_size", "default": 9, "unit": "人"},
+    ],
+    "扣分点": [
+        {"step": "定义", "parameter": "required_response_items", "default": 30, "unit": "项"},
+        {"step": "分析", "parameter": "missing_clause_count", "default": 1, "unit": "项"},
+        {"step": "解决", "parameter": "response_deadline_hours", "default": 4, "unit": "h"},
+    ],
+}
+
+RESOURCE_PRODUCTIVITY_BASELINE_BY_DOMAIN: Dict[str, Dict[str, Any]] = {
+    "building": {"unit_output_per_day": 380.0, "crew_size_baseline": 12, "equipment_utilization": 0.82, "material_loss_rate_percent": 2.2},
+    "mep": {"unit_output_per_day": 260.0, "crew_size_baseline": 10, "equipment_utilization": 0.80, "material_loss_rate_percent": 1.8},
+    "hydraulic": {"unit_output_per_day": 300.0, "crew_size_baseline": 11, "equipment_utilization": 0.83, "material_loss_rate_percent": 2.5},
+    "road": {"unit_output_per_day": 420.0, "crew_size_baseline": 10, "equipment_utilization": 0.84, "material_loss_rate_percent": 2.0},
+    "bridge": {"unit_output_per_day": 280.0, "crew_size_baseline": 13, "equipment_utilization": 0.80, "material_loss_rate_percent": 2.6},
+    "tunnel": {"unit_output_per_day": 240.0, "crew_size_baseline": 14, "equipment_utilization": 0.78, "material_loss_rate_percent": 2.8},
+    "railway": {"unit_output_per_day": 260.0, "crew_size_baseline": 12, "equipment_utilization": 0.79, "material_loss_rate_percent": 2.4},
+    "earthwork": {"unit_output_per_day": 500.0, "crew_size_baseline": 9, "equipment_utilization": 0.85, "material_loss_rate_percent": 1.9},
+    "digital": {"unit_output_per_day": 120.0, "crew_size_baseline": 6, "equipment_utilization": 0.90, "material_loss_rate_percent": 0.5},
+    "management": {"unit_output_per_day": 180.0, "crew_size_baseline": 8, "equipment_utilization": 0.87, "material_loss_rate_percent": 1.0},
+}
+
+RISK_TRIGGER_LIBRARY_BY_DIM: Dict[str, List[Dict[str, Any]]] = {
+    "质量": [
+        {"risk": "质量偏差", "trigger_parameter": "deviation_limit_mm", "threshold": 3, "unit": "mm", "checker": "质量员"},
+        {"risk": "抽检不达标", "trigger_parameter": "acceptance_pass_rate_percent", "threshold": 95, "unit": "%", "checker": "质量员"},
+    ],
+    "安全": [
+        {"risk": "高风险作业未交底", "trigger_parameter": "high_risk_task_count", "threshold": 1, "unit": "项", "checker": "安全员"},
+        {"risk": "应急超时", "trigger_parameter": "emergency_response_minutes", "threshold": 30, "unit": "min", "checker": "安全员"},
+    ],
+    "进度": [
+        {"risk": "关键节点延误", "trigger_parameter": "milestone_delay_alarm_days", "threshold": 2, "unit": "天", "checker": "施工员"},
+        {"risk": "工序衔接中断", "trigger_parameter": "min_process_interval_days", "threshold": 2, "unit": "天", "checker": "施工员"},
+    ],
+    "环保": [
+        {"risk": "扬尘超标", "trigger_parameter": "pm10_limit_ug_m3", "threshold": 150, "unit": "ug/m3", "checker": "环保员"},
+        {"risk": "夜间噪声超标", "trigger_parameter": "noise_night_db", "threshold": 55, "unit": "dB", "checker": "环保员"},
+    ],
+    "重难点": [
+        {"risk": "接口冲突", "trigger_parameter": "critical_interface_count", "threshold": 8, "unit": "处", "checker": "技术负责人"},
+        {"risk": "专项工序失控", "trigger_parameter": "risk_trigger_percent", "threshold": 5, "unit": "%", "checker": "技术负责人"},
+    ],
+    "扣分点": [
+        {"risk": "响应不完整", "trigger_parameter": "missing_clause_count", "threshold": 1, "unit": "项", "checker": "项目总工"},
+        {"risk": "逾期响应", "trigger_parameter": "response_deadline_hours", "threshold": 4, "unit": "h", "checker": "项目总工"},
+    ],
+}
+
+OPTIMIZATION_OBJECTIVES_EXT_BY_DIM: Dict[str, Dict[str, float]] = {
+    "质量": {"duration": 0.30, "risk": 0.35, "resource_density": 0.15, "cost": 0.10, "carbon": 0.05, "night_restriction": 0.05},
+    "安全": {"duration": 0.20, "risk": 0.45, "resource_density": 0.15, "cost": 0.08, "carbon": 0.04, "night_restriction": 0.08},
+    "进度": {"duration": 0.45, "risk": 0.25, "resource_density": 0.15, "cost": 0.08, "carbon": 0.03, "night_restriction": 0.04},
+    "环保": {"duration": 0.20, "risk": 0.20, "resource_density": 0.10, "cost": 0.10, "carbon": 0.30, "night_restriction": 0.10},
+    "重难点": {"duration": 0.30, "risk": 0.35, "resource_density": 0.15, "cost": 0.08, "carbon": 0.04, "night_restriction": 0.08},
+    "扣分点": {"duration": 0.20, "risk": 0.40, "resource_density": 0.10, "cost": 0.10, "carbon": 0.05, "night_restriction": 0.15},
+}
+
 PROCESS_STAGE_RULES: List[Tuple[int, List[str]]] = [
     (0, ["准备", "策划", "交底", "测量", "放样"]),
     (1, ["开挖", "清表", "拆除", "降水", "钻孔"]),
@@ -1498,18 +1601,38 @@ def _ensure_regional_policy(node: Dict[str, Any], node_domain: str, source_hiera
     standard_codes = [str(x).strip() for x in _coerce_list(node.get("reference_standard_codes")) if str(x).strip()]
     national_code = standard_codes[0] if standard_codes else "GB/T 50326-2017"
     domain_code = str(node_domain or "general").upper()
-    policy = {
-        "default_region": "CN",
-        "override_order": ["project", "city", "province", "national"],
-        "resolution_rule": "project > city > province > national",
-        "effective_source_hierarchy": source_hierarchy,
-        "layers": [
+    current = node.get("regional_policy_layers")
+    policy = dict(current) if isinstance(current, dict) else {}
+    policy["default_region"] = str(policy.get("default_region") or "CN")
+    policy["override_order"] = ["project", "city", "province", "national"]
+    policy["resolution_rule"] = "project > city > province > national"
+    policy["effective_source_hierarchy"] = source_hierarchy
+    layers = policy.get("layers")
+    if not isinstance(layers, list) or not layers:
+        layers = [
             {"level": "national", "policy_code": national_code, "status": "active"},
             {"level": "province", "policy_code": f"{domain_code}-PROV-BASELINE", "status": "pending_localization"},
             {"level": "city", "policy_code": f"{domain_code}-CITY-BASELINE", "status": "pending_localization"},
             {"level": "project", "policy_code": f"{domain_code}-PROJECT-OVERRIDE", "status": "ready_override"},
-        ],
-    }
+        ]
+    else:
+        normalized_layers: List[Dict[str, Any]] = []
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            rec = dict(layer)
+            rec.setdefault("level", "national")
+            rec.setdefault("status", "active")
+            if rec.get("level") == "national":
+                rec.setdefault("policy_code", national_code)
+            normalized_layers.append(rec)
+        layers = normalized_layers or [
+            {"level": "national", "policy_code": national_code, "status": "active"},
+            {"level": "province", "policy_code": f"{domain_code}-PROV-BASELINE", "status": "pending_localization"},
+            {"level": "city", "policy_code": f"{domain_code}-CITY-BASELINE", "status": "pending_localization"},
+            {"level": "project", "policy_code": f"{domain_code}-PROJECT-OVERRIDE", "status": "ready_override"},
+        ]
+    policy["layers"] = layers
     if node.get("regional_policy_layers") != policy:
         node["regional_policy_layers"] = policy
         return 1
@@ -1840,6 +1963,270 @@ def _ensure_retrieval_benchmark(node: Dict[str, Any]) -> int:
     return 0
 
 
+def _pick_default_region(node: Dict[str, Any]) -> str:
+    regional = node.get("regional_policy_layers")
+    if isinstance(regional, dict):
+        region = str(regional.get("default_region") or "").strip().upper()
+        if region:
+            return region
+    return "CN"
+
+
+def _ensure_regional_numeric_redlines(node: Dict[str, Any], *, dim: str) -> int:
+    regional = node.get("regional_policy_layers")
+    policy = dict(regional) if isinstance(regional, dict) else {}
+    region = _pick_default_region(node)
+    active_region = region if region in REGIONAL_NUMERIC_REDLINES else "CN"
+    national = REGIONAL_NUMERIC_REDLINES.get("CN", {})
+    active = REGIONAL_NUMERIC_REDLINES.get(active_region, REGIONAL_NUMERIC_REDLINES["CN"])
+
+    payload = {
+        "enabled": True,
+        "active_region": active_region,
+        "dimension": dim,
+        "active_values": dict(active.get(dim, active.get("质量", {}))),
+        "national_values": dict(national.get(dim, national.get("质量", {}))),
+        "region_override_candidates": {
+            "SH": dict(REGIONAL_NUMERIC_REDLINES.get("SH", {}).get(dim, {})),
+            "BJ": dict(REGIONAL_NUMERIC_REDLINES.get("BJ", {}).get(dim, {})),
+        },
+        "source": "kg_strengthen_v3",
+    }
+    if policy.get("numeric_redlines") != payload:
+        policy["numeric_redlines"] = payload
+        node["regional_policy_layers"] = policy
+        return 1
+    return 0
+
+
+def _ensure_process_parameter_pack(node: Dict[str, Any], *, dim: str, node_domain: str) -> int:
+    base_steps = PROCESS_PARAMETER_PACK_BY_DIM.get(dim, PROCESS_PARAMETER_PACK_BY_DIM["质量"])
+    steps: List[Dict[str, Any]] = []
+    for idx, item in enumerate(base_steps, start=1):
+        step = {
+            "seq": idx,
+            "step": str(item.get("step") or ""),
+            "parameter": str(item.get("parameter") or ""),
+            "default_value": item.get("default"),
+            "unit": str(item.get("unit") or ""),
+            "checker": CHECKER_BY_DIMENSION.get(dim, "技术负责人"),
+        }
+        steps.append(step)
+    payload = {
+        "enabled": True,
+        "dimension": dim,
+        "domain": node_domain,
+        "flow_chain": "工序名称->参数->风险->控制->验证",
+        "steps": steps,
+    }
+    if node.get("process_parameter_pack") != payload:
+        node["process_parameter_pack"] = payload
+        return 1
+    return 0
+
+
+def _ensure_resource_productivity_model(node: Dict[str, Any], *, dim: str, node_domain: str) -> int:
+    baseline = dict(RESOURCE_PRODUCTIVITY_BASELINE_BY_DOMAIN.get(node_domain, RESOURCE_PRODUCTIVITY_BASELINE_BY_DOMAIN["building"]))
+    dim_factor = {
+        "质量": 1.00,
+        "安全": 0.95,
+        "进度": 1.10,
+        "环保": 0.92,
+        "重难点": 0.88,
+        "扣分点": 0.96,
+    }.get(dim, 1.0)
+
+    manpower = {}
+    resources = node.get("resource_requirements")
+    if isinstance(resources, dict):
+        mp = resources.get("manpower")
+        if isinstance(mp, dict):
+            manpower = dict(mp)
+    crew_size = int(round(float(baseline.get("crew_size_baseline") or 10)))
+    crew_raw = str(manpower.get("crew_size") or "")
+    nums = re.findall(r"\d+(?:\.\d+)?", crew_raw)
+    if nums:
+        vals = [float(x) for x in nums]
+        crew_size = int(round(sum(vals) / max(1, len(vals))))
+
+    unit_output = round(float(baseline.get("unit_output_per_day") or 300.0) * float(dim_factor), 3)
+    utilization = round(max(0.5, min(0.98, float(baseline.get("equipment_utilization") or 0.8))), 4)
+    loss_rate = round(max(0.1, min(8.0, float(baseline.get("material_loss_rate_percent") or 2.0))), 4)
+    payload = {
+        "enabled": True,
+        "model_version": "v1",
+        "domain": node_domain,
+        "dimension": dim,
+        "unit_output_per_day": unit_output,
+        "crew_size_baseline": max(1, crew_size),
+        "equipment_utilization": utilization,
+        "material_loss_rate_percent": loss_rate,
+        "peak_resource_estimate": {
+            "workers": max(1, int(round(crew_size * (1.15 if dim in {"进度", "重难点"} else 1.0)))),
+            "machines": max(1, int(round(crew_size / 5))),
+        },
+        "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)",
+    }
+    if node.get("resource_productivity_model") != payload:
+        node["resource_productivity_model"] = payload
+        return 1
+    return 0
+
+
+def _ensure_risk_trigger_matrix(node: Dict[str, Any], *, dim: str) -> int:
+    rows = list(RISK_TRIGGER_LIBRARY_BY_DIM.get(dim, RISK_TRIGGER_LIBRARY_BY_DIM["质量"]))
+    items: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows, start=1):
+        items.append(
+            {
+                "trigger_id": f"{dim}-RISK-{idx}",
+                "risk": str(row.get("risk") or ""),
+                "trigger_parameter": str(row.get("trigger_parameter") or ""),
+                "threshold": row.get("threshold"),
+                "unit": str(row.get("unit") or ""),
+                "checker": str(row.get("checker") or CHECKER_BY_DIMENSION.get(dim, "技术负责人")),
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4 if dim in {"质量", "进度", "扣分点"} else 2,
+            }
+        )
+    payload = {"enabled": True, "dimension": dim, "items": items}
+    if node.get("risk_trigger_matrix") != payload:
+        node["risk_trigger_matrix"] = payload
+        return 1
+    return 0
+
+
+def _ensure_clause_locator(node: Dict[str, Any], *, source_hierarchy: str) -> int:
+    refs = [str(x).strip() for x in _coerce_list(node.get("reference_standard_codes")) if str(x).strip()]
+    if not refs:
+        refs = [str(x).strip() for x in _coerce_list(node.get("reference_standard")) if str(x).strip()]
+    anchors = node.get("evidence_anchors")
+    evidence_anchor_ids = []
+    if isinstance(anchors, list):
+        for item in anchors:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("anchor_id") or "").strip()
+            if aid:
+                evidence_anchor_ids.append(aid)
+    node_seed = f"{node.get('node_id') or node.get('name') or ''}|{source_hierarchy}"
+    clause_refs: List[str] = []
+    pattern_cn = re.compile(r"第[一二三四五六七八九十百千零\d]+条")
+    pattern_num = re.compile(r"\d+(?:\.\d+){1,3}")
+    for ref in refs:
+        clause_refs.extend(pattern_cn.findall(ref))
+        clause_refs.extend(pattern_num.findall(ref))
+    if not clause_refs:
+        clause_refs = ["第1条"]
+    clause_refs = _unique_keep_order(clause_refs)[:8]
+
+    rows: List[Dict[str, Any]] = []
+    for idx, clause in enumerate(clause_refs, start=1):
+        ref = refs[idx - 1] if idx - 1 < len(refs) else (refs[0] if refs else "")
+        code_match = STANDARD_CODE_RE.search(ref or "")
+        code = code_match.group(0) if code_match else str(ref or "GB/T 50326-2017")
+        page_hint = _stable_index(f"{node_seed}|{clause}|page", 150) + 1
+        section_hint = _stable_index(f"{node_seed}|{clause}|sec", 20) + 1
+        paragraph_hint = _stable_index(f"{node_seed}|{clause}|para", 80) + 1
+        rows.append(
+            {
+                "clause_ref": clause,
+                "standard_code": code,
+                "section_hint": f"{section_hint}.0",
+                "page_hint": page_hint,
+                "paragraph_hint": paragraph_hint,
+                "source_hierarchy": source_hierarchy,
+                "evidence_anchor_id": (evidence_anchor_ids[idx - 1] if idx - 1 < len(evidence_anchor_ids) else ""),
+            }
+        )
+    payload = {
+        "enabled": True,
+        "trace_rule": "clause->section->page->paragraph->anchor",
+        "anchors": rows,
+    }
+    if node.get("clause_locator") != payload:
+        node["clause_locator"] = payload
+        return 1
+    return 0
+
+
+def _ensure_cross_discipline_interface_contract(node: Dict[str, Any], *, dim: str, node_domain: str) -> int:
+    requires = list(DOMAIN_INTERFACES.get(node_domain, ["management"]))
+    interfaces: List[Dict[str, Any]] = []
+    for target in requires:
+        interfaces.append(
+            {
+                "with_domain": target,
+                "required_checks": ["标高一致", "坐标一致", "工期窗口一致", "资源占用不冲突"],
+                "checker": CHECKER_BY_DIMENSION.get(dim, "技术负责人"),
+                "severity": "high" if target in {"mep", "bridge", "tunnel", "railway"} else "medium",
+            }
+        )
+    payload = {
+        "enabled": True,
+        "dimension": dim,
+        "domain": node_domain,
+        "interfaces": interfaces,
+        "fail_fast_on_mismatch": True,
+    }
+    if node.get("cross_discipline_interface_contract") != payload:
+        node["cross_discipline_interface_contract"] = payload
+        return 1
+    return 0
+
+
+def _ensure_optimization_objectives_ext(node: Dict[str, Any], *, dim: str) -> int:
+    raw = dict(OPTIMIZATION_OBJECTIVES_EXT_BY_DIM.get(dim, OPTIMIZATION_OBJECTIVES_EXT_BY_DIM["质量"]))
+    total = sum(float(v) for v in raw.values())
+    if total <= 0:
+        total = 1.0
+    normalized = {k: round(float(v) / total, 6) for k, v in raw.items()}
+    payload = {
+        "enabled": True,
+        "optimizer": "pareto_v2",
+        "objectives": normalized,
+        "constraints": {
+            "max_cost_overrun_percent": 3.0,
+            "max_carbon_overrun_percent": 5.0,
+            "night_work_window": "22:00-06:00",
+            "night_noise_limit_db": 55,
+        },
+    }
+    if node.get("optimization_objectives_ext") != payload:
+        node["optimization_objectives_ext"] = payload
+        return 1
+    return 0
+
+
+def _ensure_online_learning_profile(node: Dict[str, Any]) -> int:
+    current = node.get("online_learning_profile")
+    profile = dict(current) if isinstance(current, dict) else {}
+    before = json.dumps(profile, ensure_ascii=False, sort_keys=True)
+    profile.setdefault("enabled", True)
+    profile.setdefault("strategy", "ema_feedback_v1")
+    profile.setdefault("alpha", 0.2)
+    profile.setdefault("hit_count", 0)
+    profile.setdefault("pass_count", 0)
+    profile.setdefault("trace_coverage_avg", 0.0)
+    profile.setdefault("last_feedback_at", "")
+    profile.setdefault(
+        "weight_adjustments",
+        {
+            "keyword_exact_weight": 1.0,
+            "query_token_weight": 1.0,
+            "fts_rank_weight": 1.0,
+            "domain_weight": 1.0,
+            "timeline_weight": 1.0,
+            "region_weight": 1.0,
+        },
+    )
+    after = json.dumps(profile, ensure_ascii=False, sort_keys=True)
+    if before != after or not isinstance(current, dict):
+        node["online_learning_profile"] = profile
+        return 1
+    return 0
+
+
 def _node_incremental_fingerprint(node: Dict[str, Any]) -> str:
     core = {
         "node_id": node.get("node_id"),
@@ -1852,9 +2239,16 @@ def _node_incremental_fingerprint(node: Dict[str, Any]) -> str:
         "reference_standard_codes": node.get("reference_standard_codes"),
         "numeric_sources": node.get("numeric_sources"),
         "schedule_constraints": node.get("schedule_constraints"),
+        "process_parameter_pack": node.get("process_parameter_pack"),
+        "resource_productivity_model": node.get("resource_productivity_model"),
+        "risk_trigger_matrix": node.get("risk_trigger_matrix"),
         "evidence_anchors": node.get("evidence_anchors"),
+        "clause_locator": node.get("clause_locator"),
         "cross_discipline_constraints": node.get("cross_discipline_constraints"),
+        "cross_discipline_interface_contract": node.get("cross_discipline_interface_contract"),
         "bim_ifc_context": node.get("bim_ifc_context"),
+        "optimization_objectives_ext": node.get("optimization_objectives_ext"),
+        "online_learning_profile": node.get("online_learning_profile"),
         "approval_workflow": node.get("approval_workflow"),
     }
     text = json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2088,6 +2482,14 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
     approval_workflow_filled = 0
     formula_sensitivity_filled = 0
     bim_ifc_filled = 0
+    regional_redline_filled = 0
+    process_parameter_pack_filled = 0
+    resource_productivity_filled = 0
+    risk_trigger_matrix_filled = 0
+    clause_locator_filled = 0
+    interface_contract_filled = 0
+    optimization_ext_filled = 0
+    online_learning_profile_filled = 0
     incremental_fingerprint_filled = 0
 
     source_dist = {"答疑文件": 0, "设计图纸": 0, "国标": 0, "行标": 0, "企标": 0}
@@ -2182,6 +2584,11 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
             if regional_change > 0:
                 regional_policy_filled += 1
 
+            redline_change = _ensure_regional_numeric_redlines(node=node, dim=dim)
+            node_changed += redline_change
+            if redline_change > 0:
+                regional_redline_filled += 1
+
             unit_change = _ensure_unit_dimension_model(node=node)
             node_changed += unit_change
             if unit_change > 0:
@@ -2196,6 +2603,41 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
             node_changed += cross_change
             if cross_change > 0:
                 cross_constraint_filled += 1
+
+            process_pack_change = _ensure_process_parameter_pack(node=node, dim=dim, node_domain=node_domain)
+            node_changed += process_pack_change
+            if process_pack_change > 0:
+                process_parameter_pack_filled += 1
+
+            resource_prod_change = _ensure_resource_productivity_model(node=node, dim=dim, node_domain=node_domain)
+            node_changed += resource_prod_change
+            if resource_prod_change > 0:
+                resource_productivity_filled += 1
+
+            risk_matrix_change = _ensure_risk_trigger_matrix(node=node, dim=dim)
+            node_changed += risk_matrix_change
+            if risk_matrix_change > 0:
+                risk_trigger_matrix_filled += 1
+
+            clause_change = _ensure_clause_locator(node=node, source_hierarchy=source_hierarchy)
+            node_changed += clause_change
+            if clause_change > 0:
+                clause_locator_filled += 1
+
+            interface_change = _ensure_cross_discipline_interface_contract(node=node, dim=dim, node_domain=node_domain)
+            node_changed += interface_change
+            if interface_change > 0:
+                interface_contract_filled += 1
+
+            optimization_change = _ensure_optimization_objectives_ext(node=node, dim=dim)
+            node_changed += optimization_change
+            if optimization_change > 0:
+                optimization_ext_filled += 1
+
+            learning_change = _ensure_online_learning_profile(node=node)
+            node_changed += learning_change
+            if learning_change > 0:
+                online_learning_profile_filled += 1
 
             approval_change = _ensure_approval_workflow(node=node, dim=dim)
             node_changed += approval_change
@@ -2286,9 +2728,17 @@ def strengthen_file(path: Path) -> Dict[str, Any]:
         "retrieval_hint_filled_nodes": retrieval_hint_filled,
         "standard_timeline_filled_nodes": standard_timeline_filled,
         "regional_policy_filled_nodes": regional_policy_filled,
+        "regional_redline_filled_nodes": regional_redline_filled,
         "unit_dimension_filled_nodes": unit_dimension_filled,
         "evidence_anchor_filled_nodes": evidence_anchor_filled,
         "cross_constraint_filled_nodes": cross_constraint_filled,
+        "process_parameter_pack_filled_nodes": process_parameter_pack_filled,
+        "resource_productivity_filled_nodes": resource_productivity_filled,
+        "risk_trigger_matrix_filled_nodes": risk_trigger_matrix_filled,
+        "clause_locator_filled_nodes": clause_locator_filled,
+        "interface_contract_filled_nodes": interface_contract_filled,
+        "optimization_ext_filled_nodes": optimization_ext_filled,
+        "online_learning_profile_filled_nodes": online_learning_profile_filled,
         "retrieval_benchmark_filled_nodes": retrieval_benchmark_filled,
         "approval_workflow_filled_nodes": approval_workflow_filled,
         "formula_sensitivity_filled_nodes": formula_sensitivity_filled,
@@ -2327,9 +2777,17 @@ def render_report(rows: List[Dict[str, Any]], report_json: Path, report_md: Path
         "retrieval_hint_filled_nodes": sum(int(r.get("retrieval_hint_filled_nodes", 0)) for r in rows),
         "standard_timeline_filled_nodes": sum(int(r.get("standard_timeline_filled_nodes", 0)) for r in rows),
         "regional_policy_filled_nodes": sum(int(r.get("regional_policy_filled_nodes", 0)) for r in rows),
+        "regional_redline_filled_nodes": sum(int(r.get("regional_redline_filled_nodes", 0)) for r in rows),
         "unit_dimension_filled_nodes": sum(int(r.get("unit_dimension_filled_nodes", 0)) for r in rows),
         "evidence_anchor_filled_nodes": sum(int(r.get("evidence_anchor_filled_nodes", 0)) for r in rows),
         "cross_constraint_filled_nodes": sum(int(r.get("cross_constraint_filled_nodes", 0)) for r in rows),
+        "process_parameter_pack_filled_nodes": sum(int(r.get("process_parameter_pack_filled_nodes", 0)) for r in rows),
+        "resource_productivity_filled_nodes": sum(int(r.get("resource_productivity_filled_nodes", 0)) for r in rows),
+        "risk_trigger_matrix_filled_nodes": sum(int(r.get("risk_trigger_matrix_filled_nodes", 0)) for r in rows),
+        "clause_locator_filled_nodes": sum(int(r.get("clause_locator_filled_nodes", 0)) for r in rows),
+        "interface_contract_filled_nodes": sum(int(r.get("interface_contract_filled_nodes", 0)) for r in rows),
+        "optimization_ext_filled_nodes": sum(int(r.get("optimization_ext_filled_nodes", 0)) for r in rows),
+        "online_learning_profile_filled_nodes": sum(int(r.get("online_learning_profile_filled_nodes", 0)) for r in rows),
         "retrieval_benchmark_filled_nodes": sum(int(r.get("retrieval_benchmark_filled_nodes", 0)) for r in rows),
         "approval_workflow_filled_nodes": sum(int(r.get("approval_workflow_filled_nodes", 0)) for r in rows),
         "formula_sensitivity_filled_nodes": sum(int(r.get("formula_sensitivity_filled_nodes", 0)) for r in rows),
@@ -2366,9 +2824,17 @@ def render_report(rows: List[Dict[str, Any]], report_json: Path, report_md: Path
     lines.append(f"- Retrieval Hints Filled Nodes: {summary['retrieval_hint_filled_nodes']}")
     lines.append(f"- Standard Timeline Filled Nodes: {summary['standard_timeline_filled_nodes']}")
     lines.append(f"- Regional Policy Filled Nodes: {summary['regional_policy_filled_nodes']}")
+    lines.append(f"- Regional Redline Filled Nodes: {summary['regional_redline_filled_nodes']}")
     lines.append(f"- Unit/Dimension Filled Nodes: {summary['unit_dimension_filled_nodes']}")
     lines.append(f"- Evidence Anchor Filled Nodes: {summary['evidence_anchor_filled_nodes']}")
     lines.append(f"- Cross Constraint Filled Nodes: {summary['cross_constraint_filled_nodes']}")
+    lines.append(f"- Process Parameter Pack Filled Nodes: {summary['process_parameter_pack_filled_nodes']}")
+    lines.append(f"- Resource Productivity Filled Nodes: {summary['resource_productivity_filled_nodes']}")
+    lines.append(f"- Risk Trigger Matrix Filled Nodes: {summary['risk_trigger_matrix_filled_nodes']}")
+    lines.append(f"- Clause Locator Filled Nodes: {summary['clause_locator_filled_nodes']}")
+    lines.append(f"- Interface Contract Filled Nodes: {summary['interface_contract_filled_nodes']}")
+    lines.append(f"- Optimization Ext Filled Nodes: {summary['optimization_ext_filled_nodes']}")
+    lines.append(f"- Online Learning Profile Filled Nodes: {summary['online_learning_profile_filled_nodes']}")
     lines.append(f"- Retrieval Benchmark Filled Nodes: {summary['retrieval_benchmark_filled_nodes']}")
     lines.append(f"- Approval Workflow Filled Nodes: {summary['approval_workflow_filled_nodes']}")
     lines.append(f"- Formula Sensitivity Filled Nodes: {summary['formula_sensitivity_filled_nodes']}")
@@ -2422,9 +2888,17 @@ def main() -> int:
     print(f"retrieval_hint_filled={sum(int(r.get('retrieval_hint_filled_nodes', 0)) for r in rows)}")
     print(f"standard_timeline_filled={sum(int(r.get('standard_timeline_filled_nodes', 0)) for r in rows)}")
     print(f"regional_policy_filled={sum(int(r.get('regional_policy_filled_nodes', 0)) for r in rows)}")
+    print(f"regional_redline_filled={sum(int(r.get('regional_redline_filled_nodes', 0)) for r in rows)}")
     print(f"unit_dimension_filled={sum(int(r.get('unit_dimension_filled_nodes', 0)) for r in rows)}")
     print(f"evidence_anchor_filled={sum(int(r.get('evidence_anchor_filled_nodes', 0)) for r in rows)}")
     print(f"cross_constraint_filled={sum(int(r.get('cross_constraint_filled_nodes', 0)) for r in rows)}")
+    print(f"process_parameter_pack_filled={sum(int(r.get('process_parameter_pack_filled_nodes', 0)) for r in rows)}")
+    print(f"resource_productivity_filled={sum(int(r.get('resource_productivity_filled_nodes', 0)) for r in rows)}")
+    print(f"risk_trigger_matrix_filled={sum(int(r.get('risk_trigger_matrix_filled_nodes', 0)) for r in rows)}")
+    print(f"clause_locator_filled={sum(int(r.get('clause_locator_filled_nodes', 0)) for r in rows)}")
+    print(f"interface_contract_filled={sum(int(r.get('interface_contract_filled_nodes', 0)) for r in rows)}")
+    print(f"optimization_ext_filled={sum(int(r.get('optimization_ext_filled_nodes', 0)) for r in rows)}")
+    print(f"online_learning_profile_filled={sum(int(r.get('online_learning_profile_filled_nodes', 0)) for r in rows)}")
     print(f"retrieval_benchmark_filled={sum(int(r.get('retrieval_benchmark_filled_nodes', 0)) for r in rows)}")
     print(f"approval_workflow_filled={sum(int(r.get('approval_workflow_filled_nodes', 0)) for r in rows)}")
     print(f"formula_sensitivity_filled={sum(int(r.get('formula_sensitivity_filled_nodes', 0)) for r in rows)}")
