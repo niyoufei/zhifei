@@ -75,6 +75,16 @@ def test_build_quantitative_index_contains_mapping_and_cpm() -> None:
     assert float(envelope.get("p95_days") or 0.0) >= float(envelope.get("p80_days") or 0.0)
     assert 0.0 <= float(simulation.get("resilience_index") or 0.0) <= 1.0
 
+    unit_consistency = result.get("unit_consistency") or {}
+    assert unit_consistency.get("enabled") is True
+    assert int(unit_consistency.get("item_total") or 0) == len(_sample_boq_payload()["items"])
+    assert 0.0 <= float(unit_consistency.get("consistency_score") or 0.0) <= 1.0
+
+    monte_carlo = result.get("monte_carlo") or {}
+    assert monte_carlo.get("enabled") is True
+    assert int(monte_carlo.get("iterations") or 0) >= 100
+    assert float(monte_carlo.get("p95_days") or 0.0) >= float(monte_carlo.get("p80_days") or 0.0)
+
 
 def test_optimize_execution_plan_respects_objective_weights() -> None:
     engine = QuantitativeBoQEngine()

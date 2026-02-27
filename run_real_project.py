@@ -5,7 +5,9 @@ import argparse
 import asyncio
 import csv
 import json
+import math
 import re
+import time
 from statistics import median
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -21,6 +23,7 @@ NUMERIC_LIMITS = {
     "unit_price": 1.0e7,
     "total_price": 1.0e12,
 }
+BOQ_REVIEW_QUEUE_MAX = 400
 UNIT_QUANTITY_LIMITS = {
     "m3": 1.0e7,
     "m2": 1.0e8,
@@ -175,6 +178,152 @@ def _load_boq_csv(path: Path) -> Dict[str, Any]:
     return {"items": items, "stats": stats}
 
 
+def _load_boq_excel(path: Path) -> Dict[str, Any]:
+    aliases = {
+        "boq_code": ["boq_code", "code", "清单编码", "编码", "项目编码"],
+        "name": ["name", "项目名称", "清单项目名称", "名称"],
+        "quantity": ["quantity", "qty", "工程量", "数量"],
+        "unit": ["unit", "单位", "计量单位"],
+        "unit_price": ["unit_price", "综合单价", "单价"],
+        "total_price": ["total_price", "合价", "总价", "金额"],
+    }
+
+    def _header_index(header: List[str]) -> Dict[str, int]:
+        idx_map: Dict[str, int] = {}
+        lower = [str(x or "").strip().lower() for x in header]
+        for key, keys in aliases.items():
+            for i, col in enumerate(lower):
+                if any(col == k.lower() for k in keys):
+                    idx_map[key] = i
+                    break
+        return idx_map
+
+    rows: List[List[Any]] = []
+    sheet_count = 0
+    try:
+        from openpyxl import load_workbook  # type: ignore
+
+        wb = load_workbook(filename=str(path), data_only=True, read_only=True)
+        for ws in wb.worksheets:
+            sheet_count += 1
+            for r in ws.iter_rows(values_only=True):
+                vals = list(r)
+                if not any(str(x or "").strip() for x in vals):
+                    continue
+                rows.append(vals)
+    except Exception:
+        try:
+            import pandas as pd  # type: ignore
+
+            xls = pd.ExcelFile(str(path))
+            for sheet_name in xls.sheet_names:
+                sheet_count += 1
+                df = pd.read_excel(xls, sheet_name=sheet_name)
+                rows.append(list(df.columns))
+                for _, row in df.iterrows():
+                    rows.append(list(row.values))
+        except Exception as exc:
+            raise ValueError(f"excel parse failed: {path} | {exc}")
+
+    if not rows:
+        return {"items": [], "stats": {"item_count": 0, "sheet_count": sheet_count}}
+
+    header_row = None
+    header_map: Dict[str, int] = {}
+    for i in range(min(12, len(rows))):
+        test_header = [str(x or "").strip() for x in rows[i]]
+        test_map = _header_index(test_header)
+        if len(test_map) >= 2 and "name" in test_map:
+            header_row = i
+            header_map = test_map
+            break
+    if header_row is None:
+        header_row = 0
+        header_map = _header_index([str(x or "").strip() for x in rows[0]])
+
+    items: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows[header_row + 1 :], start=1):
+        get = lambda key: row[header_map[key]] if key in header_map and header_map[key] < len(row) else None
+        name = get("name")
+        if not str(name or "").strip():
+            continue
+        item = {
+            "boq_code": str(get("boq_code") or f"XLS-{idx}").strip(),
+            "name": str(name).strip(),
+            "quantity": _to_float(get("quantity")),
+            "unit": str(get("unit") or "").strip() or None,
+            "unit_price": _to_float(get("unit_price")),
+            "total_price": _to_float(get("total_price")),
+        }
+        items.append(item)
+
+    stats = {
+        "item_count": len(items),
+        "total_quantity": sum([float(it.get("quantity") or 0.0) for it in items]),
+        "sheet_count": sheet_count,
+    }
+    return {"items": items, "stats": stats}
+
+
+def _fallback_parse_pdf_table_rows(path: Path) -> List[Dict[str, Any]]:
+    try:
+        import pdfplumber  # type: ignore
+    except Exception:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            pages = pdf.pages[: min(25, len(pdf.pages))]
+            for page in pages:
+                for table in page.extract_tables() or []:
+                    if not isinstance(table, list) or len(table) < 2:
+                        continue
+                    header = [str(x or "").strip() for x in (table[0] or [])]
+                    header_l = [h.lower() for h in header]
+                    has_name = any(h in {"项目名称", "清单项目名称", "名称", "name"} for h in header)
+                    if not has_name and not any("名称" in h for h in header):
+                        continue
+
+                    def _pick_idx(candidates: List[str], default: int | None = None) -> int | None:
+                        for i, h in enumerate(header_l):
+                            if any(h == c.lower() for c in candidates):
+                                return i
+                        for i, h in enumerate(header):
+                            if any(c in str(h) for c in candidates):
+                                return i
+                        return default
+
+                    idx_code = _pick_idx(["boq_code", "code", "清单编码", "编码", "项目编码"], 0)
+                    idx_name = _pick_idx(["name", "项目名称", "清单项目名称", "名称"], 1)
+                    idx_qty = _pick_idx(["quantity", "qty", "工程量", "数量"], 2)
+                    idx_unit = _pick_idx(["unit", "单位", "计量单位"], 3)
+                    idx_up = _pick_idx(["unit_price", "综合单价", "单价"])
+                    idx_tp = _pick_idx(["total_price", "合价", "总价", "金额"])
+
+                    for r in table[1:]:
+                        if not isinstance(r, list):
+                            continue
+                        name = r[idx_name] if idx_name is not None and idx_name < len(r) else None
+                        if not str(name or "").strip():
+                            continue
+                        rows.append(
+                            {
+                                "boq_code": str(r[idx_code]).strip()
+                                if idx_code is not None and idx_code < len(r) and str(r[idx_code] or "").strip()
+                                else "",
+                                "name": str(name).strip(),
+                                "quantity": r[idx_qty] if idx_qty is not None and idx_qty < len(r) else None,
+                                "unit": r[idx_unit] if idx_unit is not None and idx_unit < len(r) else None,
+                                "unit_price": r[idx_up] if idx_up is not None and idx_up < len(r) else None,
+                                "total_price": r[idx_tp] if idx_tp is not None and idx_tp < len(r) else None,
+                            }
+                        )
+    except Exception:
+        return []
+    return rows[:3000]
+
+
 def _boq_candidates(path: Path) -> List[Path]:
     if path.is_file():
         return [path]
@@ -241,8 +390,11 @@ def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dic
 async def _load_single_boq(path: Path) -> Dict[str, Any]:
     suffix = path.suffix.lower()
     fallback_used = False
+    fallback_sources: List[str] = []
     if suffix == ".csv":
         payload = _load_boq_csv(path)
+    elif suffix in {".xlsx", ".xls"}:
+        payload = _load_boq_excel(path)
     else:
         parser = BoQParser()
         items, stats = await parser.parse(str(path))
@@ -250,13 +402,26 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
             "items": [it.model_dump() for it in items],
             "stats": stats,
         }
-        if suffix == ".pdf" and not payload.get("items"):
-            fallback_rows = _fallback_parse_pdf_text_rows(path)
-            if fallback_rows:
-                payload["items"] = fallback_rows
+        if suffix == ".pdf":
+            parser_rows = list(payload.get("items") or [])
+            table_rows = _fallback_parse_pdf_table_rows(path)
+            text_rows = _fallback_parse_pdf_text_rows(path)
+            merged_rows: List[Dict[str, Any]] = []
+            if parser_rows:
+                merged_rows.extend(parser_rows)
+            if table_rows:
+                merged_rows.extend(table_rows)
+                fallback_sources.append("pdf_table")
+            if text_rows:
+                merged_rows.extend(text_rows)
+                fallback_sources.append("pdf_text")
+            if merged_rows:
+                payload["items"] = merged_rows
                 payload["stats"] = dict(payload.get("stats") or {})
-                payload["stats"]["fallback_text_rows"] = len(fallback_rows)
-                fallback_used = True
+                payload["stats"]["fallback_table_rows"] = len(table_rows)
+                payload["stats"]["fallback_text_rows"] = len(text_rows)
+                payload["stats"]["fusion_sources"] = ["boq_parser"] + fallback_sources
+                fallback_used = bool(fallback_sources)
     normalized_items: List[Dict[str, Any]] = []
     anomaly_items: List[Dict[str, Any]] = []
     for idx, item in enumerate(payload.get("items") or [], start=1):
@@ -304,6 +469,15 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
     payload["stats"]["anomaly_count"] = len(anomaly_items)
     payload["stats"]["anomaly_items"] = anomaly_items[:120]
     payload["stats"]["fallback_used"] = bool(fallback_used)
+    payload["stats"]["fallback_sources"] = list(fallback_sources)
+    payload["stats"]["valid_quantity_count"] = sum(
+        1 for it in normalized_items if isinstance(it.get("quantity"), (int, float))
+    )
+    payload["stats"]["valid_price_count"] = sum(
+        1
+        for it in normalized_items
+        if isinstance(it.get("unit_price"), (int, float)) or isinstance(it.get("total_price"), (int, float))
+    )
     if not payload.get("items"):
         raise ValueError(f"BOQ parsing returned empty items: {path}")
     return payload
@@ -379,6 +553,153 @@ async def _load_boq_payload(path: Path) -> Dict[str, Any]:
     }
 
 
+def _build_boq_governance(
+    *,
+    boq_payload: Dict[str, Any],
+    trust_threshold: float,
+) -> Dict[str, Any]:
+    stats = boq_payload.get("stats") if isinstance(boq_payload.get("stats"), dict) else {}
+    source_stats = stats.get("source_stats") if isinstance(stats.get("source_stats"), dict) else {}
+    parse_errors = boq_payload.get("parse_errors") if isinstance(boq_payload.get("parse_errors"), list) else []
+    file_item_count = stats.get("file_item_count") if isinstance(stats.get("file_item_count"), dict) else {}
+
+    file_scores: List[Dict[str, Any]] = []
+    weighted_sum = 0.0
+    weighted_count = 0.0
+    manual_review_queue: List[Dict[str, Any]] = []
+
+    for file_path, row in source_stats.items():
+        info = row if isinstance(row, dict) else {}
+        item_count = int(info.get("item_count") or file_item_count.get(file_path) or 0)
+        anomaly_count = int(info.get("anomaly_count") or 0)
+        valid_qty = int(info.get("valid_quantity_count") or 0)
+        valid_price = int(info.get("valid_price_count") or 0)
+        fallback_used = bool(info.get("fallback_used"))
+        anomaly_ratio = float(anomaly_count) / max(item_count, 1)
+        qty_ratio = float(valid_qty) / max(item_count, 1)
+        price_ratio = float(valid_price) / max(item_count, 1)
+        fallback_penalty = 0.08 if fallback_used else 0.0
+        score = max(
+            0.0,
+            min(
+                1.0,
+                1.0
+                - anomaly_ratio * 0.55
+                - max(0.0, 1.0 - qty_ratio) * 0.20
+                - max(0.0, 1.0 - price_ratio) * 0.10
+                - fallback_penalty,
+            ),
+        )
+        trust_level = "high" if score >= 0.85 else "medium" if score >= trust_threshold else "low"
+        file_scores.append(
+            {
+                "file": str(file_path),
+                "item_count": item_count,
+                "anomaly_count": anomaly_count,
+                "anomaly_ratio": round(anomaly_ratio, 6),
+                "valid_quantity_ratio": round(qty_ratio, 6),
+                "valid_price_ratio": round(price_ratio, 6),
+                "fallback_used": fallback_used,
+                "trust_score": round(score, 6),
+                "trust_level": trust_level,
+            }
+        )
+        weighted_sum += score * max(item_count, 1)
+        weighted_count += max(item_count, 1)
+
+        if trust_level == "low" or anomaly_count > max(10, int(math.ceil(item_count * 0.08))):
+            for row_item in (info.get("anomaly_items") or [])[:80]:
+                if isinstance(row_item, dict):
+                    manual_review_queue.append(
+                        {
+                            "file": str(file_path),
+                            "type": "anomaly_item",
+                            "boq_code": str(row_item.get("boq_code") or ""),
+                            "name": str(row_item.get("name") or ""),
+                            "anomalies": [str(x) for x in (row_item.get("anomalies") or [])[:6]],
+                        }
+                    )
+
+    for err in parse_errors:
+        if not isinstance(err, dict):
+            continue
+        manual_review_queue.append(
+            {
+                "file": str(err.get("file") or ""),
+                "type": "parse_error",
+                "error": str(err.get("error") or "")[:400],
+            }
+        )
+
+    overall = round(weighted_sum / max(weighted_count, 1.0), 6)
+    low_trust_files = [x for x in file_scores if str(x.get("trust_level")) == "low"]
+    parse_error_rate = round(len(parse_errors) / max(int(stats.get("source_file_count") or 1), 1), 6)
+    trusted = bool(overall >= trust_threshold and parse_error_rate <= 0.35 and len(low_trust_files) == 0)
+    governance = {
+        "enabled": True,
+        "trust_threshold": round(float(trust_threshold), 6),
+        "overall_trust_score": overall,
+        "trusted": trusted,
+        "parse_error_rate": parse_error_rate,
+        "file_scores": sorted(file_scores, key=lambda x: (x.get("trust_score", 0.0), x.get("file", ""))),
+        "low_trust_files": low_trust_files,
+        "manual_review_queue": manual_review_queue[:BOQ_REVIEW_QUEUE_MAX],
+        "manual_review_total": len(manual_review_queue),
+        "hard_gate_recommended": bool((not trusted) or parse_error_rate > 0.35),
+    }
+    return governance
+
+
+def _write_boq_manual_review_report(governance: Dict[str, Any], *, output_path: Path | str) -> str:
+    out = Path(output_path).expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    lines: List[str] = []
+    lines.append("# BOQ Manual Review Queue")
+    lines.append("")
+    lines.append(f"- Generated At: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+    lines.append(f"- Trusted: {bool(governance.get('trusted'))}")
+    lines.append(f"- Overall Trust Score: {float(governance.get('overall_trust_score') or 0.0):.4f}")
+    lines.append(f"- Parse Error Rate: {float(governance.get('parse_error_rate') or 0.0):.4f}")
+    lines.append(f"- Hard Gate Recommended: {bool(governance.get('hard_gate_recommended'))}")
+    lines.append("")
+    lines.append("## Low Trust Files")
+    lines.append("")
+    low_files = governance.get("low_trust_files") if isinstance(governance.get("low_trust_files"), list) else []
+    if not low_files:
+        lines.append("None")
+    else:
+        lines.append("| File | Trust Score | Item Count | Anomaly Count |")
+        lines.append("|---|---:|---:|---:|")
+        for row in low_files:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"| {row.get('file')} | {float(row.get('trust_score') or 0.0):.4f} | "
+                f"{int(row.get('item_count') or 0)} | {int(row.get('anomaly_count') or 0)} |"
+            )
+    lines.append("")
+    lines.append("## Manual Review Items")
+    lines.append("")
+    queue = governance.get("manual_review_queue") if isinstance(governance.get("manual_review_queue"), list) else []
+    if not queue:
+        lines.append("None")
+    else:
+        lines.append("| # | File | Type | BOQ Code | Name | Details |")
+        lines.append("|---|---|---|---|---|---|")
+        for idx, row in enumerate(queue, start=1):
+            if not isinstance(row, dict):
+                continue
+            details = str(row.get("error") or "、".join([str(x) for x in (row.get("anomalies") or [])]))
+            details = details.replace("|", "\\|")
+            lines.append(
+                f"| {idx} | {row.get('file')} | {row.get('type')} | {row.get('boq_code') or ''} | "
+                f"{row.get('name') or ''} | {details} |"
+            )
+    lines.append("")
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return str(out)
+
+
 def _arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run V2 engine on a real project (production mode).")
     p.add_argument("--tender", nargs="+", required=True, help="招标文件路径（PDF/Word/TXT等）。")
@@ -446,6 +767,18 @@ def _arg_parser() -> argparse.ArgumentParser:
         "--benchmark-dataset",
         default=str(DEFAULT_BENCHMARK_DATASET_PATH),
         help="检索评测集JSON路径。",
+    )
+    p.add_argument(
+        "--benchmark-min-pass-rate",
+        type=float,
+        default=0.85,
+        help="检索门禁最小通过率阈值。",
+    )
+    p.add_argument(
+        "--benchmark-min-avg-mrr",
+        type=float,
+        default=0.65,
+        help="检索门禁最小平均MRR阈值。",
     )
     p.add_argument(
         "--enforce-retrieval-gate",
@@ -529,6 +862,23 @@ def _arg_parser() -> argparse.ArgumentParser:
         default="build/Auto_KG_Enrichment_Draft.json",
         help="知识盲区反向补图草案输出路径。",
     )
+    p.add_argument(
+        "--boq-review-queue",
+        default="build/BOQ_Manual_Review_Queue.md",
+        help="BOQ人工复核队列报告输出路径。",
+    )
+    p.add_argument(
+        "--boq-trust-threshold",
+        type=float,
+        default=0.78,
+        help="BOQ可信度阈值（0-1）。",
+    )
+    p.add_argument(
+        "--boq-hard-gate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否在BOQ可信度不足时直接拦截运行。",
+    )
     return p
 
 
@@ -540,6 +890,7 @@ async def _run(args: argparse.Namespace) -> int:
     output_path = Path(args.out).expanduser().resolve()
     report_path = Path(args.missing_report).expanduser().resolve()
     docx_out_path = Path(args.docx_out).expanduser().resolve()
+    boq_review_queue_path = Path(args.boq_review_queue).expanduser().resolve()
 
     for tender in tender_paths:
         if not Path(tender).exists():
@@ -550,6 +901,21 @@ async def _run(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"kg root not found: {kg_root}")
 
     boq_payload = await _load_boq_payload(boq_path)
+    governance = _build_boq_governance(
+        boq_payload=boq_payload,
+        trust_threshold=max(0.0, min(float(args.boq_trust_threshold), 1.0)),
+    )
+    boq_review_queue_saved = _write_boq_manual_review_report(
+        governance,
+        output_path=boq_review_queue_path,
+    )
+    boq_payload["governance"] = governance
+    if bool(args.boq_hard_gate) and not bool(governance.get("trusted")):
+        raise ValueError(
+            f"BOQ trust gate blocked: score={float(governance.get('overall_trust_score') or 0.0):.4f}, "
+            f"threshold={float(governance.get('trust_threshold') or 0.0):.4f}"
+        )
+
     pipeline = MultiAgentDocPipeline(
         kg_db_path=kg_db,
         self_healing_provider=args.self_heal_provider,
@@ -568,6 +934,8 @@ async def _run(args: argparse.Namespace) -> int:
         enable_standard_auto_update=bool(args.standard_auto_update),
         run_retrieval_benchmark_gate=bool(args.retrieval_benchmark_gate),
         benchmark_dataset_path=Path(args.benchmark_dataset).expanduser().resolve(),
+        benchmark_min_pass_rate=float(args.benchmark_min_pass_rate),
+        benchmark_min_avg_mrr=float(args.benchmark_min_avg_mrr),
         enforce_retrieval_gate=bool(args.enforce_retrieval_gate),
         enable_retrieval_weight_training=bool(args.retrieval_weight_training),
         retrieval_weight_profile_path=Path(args.retrieval_weight_profile).expanduser().resolve(),
@@ -586,6 +954,7 @@ async def _run(args: argparse.Namespace) -> int:
         hit_rate_dashboard_json_path=Path(args.hit_rate_dashboard_json).expanduser().resolve(),
         hit_rate_dashboard_md_path=Path(args.hit_rate_dashboard_md).expanduser().resolve(),
         enrichment_draft_path=Path(args.enrichment_draft).expanduser().resolve(),
+        boq_governance=governance,
     )
     if output_path.exists():
         try:
@@ -598,6 +967,8 @@ async def _run(args: argparse.Namespace) -> int:
                 "source_files": boq_payload.get("source_files") or [],
                 "parse_errors": boq_payload.get("parse_errors") or [],
                 "stats": boq_payload.get("stats") or {},
+                "governance": governance,
+                "manual_review_queue_report": boq_review_queue_saved,
             }
             output_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -617,6 +988,15 @@ async def _run(args: argparse.Namespace) -> int:
         f"failed={int(boq_stats.get('failed_file_count') or 0)}, "
         f"items={int(boq_stats.get('item_count') or 0)}"
     )
+    boq_governance = boq_payload.get("governance") if isinstance(boq_payload.get("governance"), dict) else {}
+    if boq_governance:
+        print(
+            "BOQ Governance: "
+            f"trusted={bool(boq_governance.get('trusted'))}, "
+            f"score={float(boq_governance.get('overall_trust_score') or 0.0):.4f}, "
+            f"review_items={int(boq_governance.get('manual_review_total') or 0)}, "
+            f"queue={boq_review_queue_saved}"
+        )
     print(f"Diagnosis JSON: {result.get('saved_at')}")
     print(f"Missing_Knowledge_Report: {result.get('missing_knowledge_report')}")
     print(

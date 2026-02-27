@@ -78,6 +78,8 @@ async def test_multi_agent_pipeline_run(tmp_path: Path) -> None:
     assert len(result["gemini_context_packets"]) == len(result["index_matrix"]["index_matrix"])
     assert isinstance(result.get("sentence_evidence_chain"), list)
     assert isinstance(result.get("sentence_evidence_stats"), dict)
+    assert isinstance(result.get("numeric_density_gate"), dict)
+    assert isinstance(result.get("standard_validity_warnings"), list)
     assert int(result["sentence_evidence_stats"].get("total_sentences") or 0) >= len(result["sections"])
     assert float(result["sentence_evidence_stats"].get("trace_coverage_ratio") or 0.0) > 0.0
     first_trace = result["sentence_evidence_chain"][0]

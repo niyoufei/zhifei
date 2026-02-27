@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-28T00:20:45",
+    "updated_at": "2026-02-28T06:13:42",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -92,7 +92,7 @@
               "assumption": "资源随工序强度动态调整"
             }
           },
-          "source_hierarchy": "国标",
+          "source_hierarchy": "答疑文件",
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
             "JGJ 59-2011 建筑施工安全检查标准",
@@ -452,7 +452,7 @@
               "checker"
             ]
           },
-          "professional_domain": "building",
+          "professional_domain": "railway",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -574,11 +574,12 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "review_required"
+                "status": "superseded",
+                "superseded_by": "GB 50300-2024"
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2011-01-01",
                 "expiry_date": "2019-12-31",
                 "review_cycle_years": 8,
@@ -594,7 +595,7 @@
               },
               {
                 "standard_code": "GB 50210-2018",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2018-01-01",
                 "expiry_date": "2028-12-31",
                 "review_cycle_years": 10,
@@ -903,7 +904,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T00:30:19",
+            "approved_at": "2026-02-28T06:16:16",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -999,22 +1000,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T00:30:19",
+            "checked_at": "2026-02-28T06:16:15",
             "catalog_version": "v1",
             "checked_codes": 4,
-            "superseded_count": 0,
-            "updated_count": 0,
-            "status": "up_to_date",
+            "superseded_count": 1,
+            "updated_count": 1,
+            "status": "updated",
             "details": [
               {
-                "code": "GB 50300-2024",
+                "code": "GB 50300-2013",
                 "key": "GB50300",
-                "current_year": 2024,
+                "current_year": 2013,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "active",
-                "replacement": ""
+                "status": "superseded",
+                "replacement": "GB 50300-2024"
               },
               {
                 "code": "JGJ 59-2011",
@@ -1022,7 +1023,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               },
@@ -1042,7 +1043,7 @@
                 "current_year": 2018,
                 "latest_code": "GB 50210-2018",
                 "latest_year": 2018,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               }
@@ -1495,7 +1496,7 @@
             "试验",
             "一次验收合格率"
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
@@ -1908,7 +1909,7 @@
               "checker"
             ]
           },
-          "professional_domain": "building",
+          "professional_domain": "railway",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -2046,11 +2047,12 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "review_required"
+                "status": "superseded",
+                "superseded_by": "GB 50300-2024"
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2011-01-01",
                 "expiry_date": "2019-12-31",
                 "review_cycle_years": 8,
@@ -2066,7 +2068,7 @@
               },
               {
                 "standard_code": "GB 50210-2018",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2018-01-01",
                 "expiry_date": "2028-12-31",
                 "review_cycle_years": 10,
@@ -2375,7 +2377,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T00:30:19",
+            "approved_at": "2026-02-28T06:16:16",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -2471,22 +2473,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T00:30:19",
+            "checked_at": "2026-02-28T06:16:15",
             "catalog_version": "v1",
             "checked_codes": 4,
-            "superseded_count": 0,
-            "updated_count": 0,
-            "status": "up_to_date",
+            "superseded_count": 1,
+            "updated_count": 1,
+            "status": "updated",
             "details": [
               {
-                "code": "GB 50300-2024",
+                "code": "GB 50300-2013",
                 "key": "GB50300",
-                "current_year": 2024,
+                "current_year": 2013,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "active",
-                "replacement": ""
+                "status": "superseded",
+                "replacement": "GB 50300-2024"
               },
               {
                 "code": "JGJ 59-2011",
@@ -2494,7 +2496,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               },
@@ -2514,7 +2516,7 @@
                 "current_year": 2018,
                 "latest_code": "GB 50210-2018",
                 "latest_year": 2018,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               }
@@ -2967,7 +2969,7 @@
             "赶工",
             "总工期"
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
@@ -3396,7 +3398,7 @@
               "checker"
             ]
           },
-          "professional_domain": "building",
+          "professional_domain": "railway",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -3528,11 +3530,12 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "review_required"
+                "status": "superseded",
+                "superseded_by": "GB 50300-2024"
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2011-01-01",
                 "expiry_date": "2019-12-31",
                 "review_cycle_years": 8,
@@ -3877,7 +3880,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T00:30:19",
+            "approved_at": "2026-02-28T06:16:16",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -3973,22 +3976,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T00:30:19",
+            "checked_at": "2026-02-28T06:16:15",
             "catalog_version": "v1",
             "checked_codes": 4,
-            "superseded_count": 0,
-            "updated_count": 0,
-            "status": "up_to_date",
+            "superseded_count": 1,
+            "updated_count": 1,
+            "status": "updated",
             "details": [
               {
-                "code": "GB 50300-2024",
+                "code": "GB 50300-2013",
                 "key": "GB50300",
-                "current_year": 2024,
+                "current_year": 2013,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "active",
-                "replacement": ""
+                "status": "superseded",
+                "replacement": "GB 50300-2024"
               },
               {
                 "code": "JGJ 59-2011",
@@ -3996,7 +3999,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               },
@@ -4469,7 +4472,7 @@
             "排放",
             "PM10"
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
@@ -4883,7 +4886,7 @@
               "checker"
             ]
           },
-          "professional_domain": "building",
+          "professional_domain": "railway",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -5022,11 +5025,12 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "review_required"
+                "status": "superseded",
+                "superseded_by": "GB 50300-2024"
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2011-01-01",
                 "expiry_date": "2019-12-31",
                 "review_cycle_years": 8,
@@ -5042,7 +5046,7 @@
               },
               {
                 "standard_code": "GB/T 50640-2010",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2010-01-01",
                 "expiry_date": "2020-12-31",
                 "review_cycle_years": 10,
@@ -5359,7 +5363,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T00:30:19",
+            "approved_at": "2026-02-28T06:16:16",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -5455,22 +5459,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T00:30:19",
+            "checked_at": "2026-02-28T06:16:15",
             "catalog_version": "v1",
             "checked_codes": 5,
-            "superseded_count": 0,
-            "updated_count": 0,
-            "status": "up_to_date",
+            "superseded_count": 1,
+            "updated_count": 1,
+            "status": "updated",
             "details": [
               {
-                "code": "GB 50300-2024",
+                "code": "GB 50300-2013",
                 "key": "GB50300",
-                "current_year": 2024,
+                "current_year": 2013,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "active",
-                "replacement": ""
+                "status": "superseded",
+                "replacement": "GB 50300-2024"
               },
               {
                 "code": "JGJ 59-2011",
@@ -5478,7 +5482,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               },
@@ -5498,7 +5502,7 @@
                 "current_year": 2010,
                 "latest_code": "GB/T 50640-2010",
                 "latest_year": 2010,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               },
@@ -5969,7 +5973,7 @@
             "失分",
             "一票否决"
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB 50300-2013 建筑工程施工质量验收统一标准",
@@ -6399,7 +6403,7 @@
               "checker"
             ]
           },
-          "professional_domain": "building",
+          "professional_domain": "railway",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -6537,11 +6541,12 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "review_required"
+                "status": "superseded",
+                "superseded_by": "GB 50300-2024"
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2011-01-01",
                 "expiry_date": "2019-12-31",
                 "review_cycle_years": 8,
@@ -6878,7 +6883,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T00:30:19",
+            "approved_at": "2026-02-28T06:16:16",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -6986,22 +6991,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T00:30:19",
+            "checked_at": "2026-02-28T06:16:15",
             "catalog_version": "v1",
             "checked_codes": 4,
-            "superseded_count": 0,
-            "updated_count": 0,
-            "status": "up_to_date",
+            "superseded_count": 1,
+            "updated_count": 1,
+            "status": "updated",
             "details": [
               {
-                "code": "GB 50300-2024",
+                "code": "GB 50300-2013",
                 "key": "GB50300",
-                "current_year": 2024,
+                "current_year": 2013,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "active",
-                "replacement": ""
+                "status": "superseded",
+                "replacement": "GB 50300-2024"
               },
               {
                 "code": "JGJ 59-2011",
@@ -7009,7 +7014,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               },
@@ -7619,7 +7624,7 @@
               "min_interval_days": 1
             }
           ],
-          "source_hierarchy": "国标",
+          "source_hierarchy": "答疑文件",
           "is_auto_generated": true,
           "reference_standard": [
             "GB/T 50326-2017 建设工程项目管理规范",
@@ -8035,7 +8040,7 @@
               "checker"
             ]
           },
-          "professional_domain": "building",
+          "professional_domain": "mep",
           "retrieval_hints": {
             "must_keywords": [
               "安全",
@@ -8188,11 +8193,12 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "review_required"
+                "status": "superseded",
+                "superseded_by": "GB 50300-2024"
               },
               {
                 "standard_code": "GB 50210-2018",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2018-01-01",
                 "expiry_date": "2028-12-31",
                 "review_cycle_years": 10,
@@ -8501,7 +8507,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T00:30:19",
+            "approved_at": "2026-02-28T06:16:16",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -8597,12 +8603,12 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T00:30:19",
+            "checked_at": "2026-02-28T06:16:15",
             "catalog_version": "v1",
             "checked_codes": 4,
-            "superseded_count": 0,
-            "updated_count": 0,
-            "status": "up_to_date",
+            "superseded_count": 1,
+            "updated_count": 1,
+            "status": "updated",
             "details": [
               {
                 "code": "GB/T 50326-2017",
@@ -8625,14 +8631,14 @@
                 "replacement": ""
               },
               {
-                "code": "GB 50300-2024",
+                "code": "GB 50300-2013",
                 "key": "GB50300",
-                "current_year": 2024,
+                "current_year": 2013,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "active",
-                "replacement": ""
+                "status": "superseded",
+                "replacement": "GB 50300-2024"
               },
               {
                 "code": "GB 50210-2018",
@@ -8640,7 +8646,7 @@
                 "current_year": 2018,
                 "latest_code": "GB 50210-2018",
                 "latest_year": 2018,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               }
@@ -9090,8 +9096,8 @@
             "公式",
             "计算"
           ],
-          "professional_domain": "building",
-          "source_hierarchy": "国标",
+          "professional_domain": "mep",
+          "source_hierarchy": "答疑文件",
           "reference_standard": [
             "GB/T 50326-2017 建设工程项目管理规范",
             "GB 50210-2018 建筑装饰装修工程质量验收标准"
@@ -9592,7 +9598,7 @@
               },
               {
                 "standard_code": "GB 50210-2018",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2018-01-01",
                 "expiry_date": "2028-12-31",
                 "review_cycle_years": 10,
@@ -9933,7 +9939,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T00:30:19",
+            "checked_at": "2026-02-28T06:16:15",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -9956,7 +9962,7 @@
                 "current_year": 2018,
                 "latest_code": "GB 50210-2018",
                 "latest_year": 2018,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               }
@@ -10390,8 +10396,8 @@
             "公式",
             "计算"
           ],
-          "professional_domain": "building",
-          "source_hierarchy": "国标",
+          "professional_domain": "mep",
+          "source_hierarchy": "答疑文件",
           "reference_standard": [
             "GB/T 50326-2017 建设工程项目管理规范",
             "GB 50210-2018 建筑装饰装修工程质量验收标准"
@@ -10897,7 +10903,7 @@
               },
               {
                 "standard_code": "GB 50210-2018",
-                "tier": "国标",
+                "tier": "答疑文件",
                 "effective_date": "2018-01-01",
                 "expiry_date": "2028-12-31",
                 "review_cycle_years": 10,
@@ -11256,7 +11262,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T00:30:19",
+            "checked_at": "2026-02-28T06:16:15",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -11279,7 +11285,7 @@
                 "current_year": 2018,
                 "latest_code": "GB 50210-2018",
                 "latest_year": 2018,
-                "tier": "国标",
+                "tier": "答疑文件",
                 "status": "active",
                 "replacement": ""
               }

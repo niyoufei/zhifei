@@ -252,6 +252,35 @@ def update_feedback_memory(
         touched_node_ids.add(node_id)
         decision_updates += 1
 
+    global_patterns = memory.get("global_patterns")
+    if not isinstance(global_patterns, dict):
+        global_patterns = {}
+    numeric_gate = result_payload.get("numeric_density_gate") if isinstance(result_payload.get("numeric_density_gate"), dict) else {}
+    if numeric_gate:
+        global_patterns["numeric_density_gate_runs"] = int(global_patterns.get("numeric_density_gate_runs") or 0) + 1
+        if not bool(numeric_gate.get("ok")):
+            global_patterns["numeric_density_gate_failures"] = int(global_patterns.get("numeric_density_gate_failures") or 0) + 1
+    validity_warnings = (
+        result_payload.get("standard_validity_warnings")
+        if isinstance(result_payload.get("standard_validity_warnings"), list)
+        else []
+    )
+    if validity_warnings:
+        global_patterns["standard_validity_warning_total"] = int(
+            global_patterns.get("standard_validity_warning_total") or 0
+        ) + len(validity_warnings)
+    boq_gov = result_payload.get("boq_governance") if isinstance(result_payload.get("boq_governance"), dict) else {}
+    if boq_gov:
+        global_patterns["boq_governance_runs"] = int(global_patterns.get("boq_governance_runs") or 0) + 1
+        if not bool(boq_gov.get("trusted")):
+            global_patterns["boq_untrusted_runs"] = int(global_patterns.get("boq_untrusted_runs") or 0) + 1
+        global_patterns["boq_trust_score_sum"] = round(
+            _safe_float(global_patterns.get("boq_trust_score_sum"), 0.0)
+            + _safe_float(boq_gov.get("overall_trust_score"), 0.0),
+            6,
+        )
+    memory["global_patterns"] = global_patterns
+
     memory["projects_total"] = int(memory.get("projects_total") or 0) + 1
     memory["updated_at"] = project_ts
     out.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")

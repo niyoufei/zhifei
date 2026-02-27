@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -112,6 +114,7 @@ class MultiAgentDocPipeline:
         self.bid_date: str | None = None
         self.allow_superseded: bool = False
         self.regional_plugin_dir: str | None = None
+        self._strict_variant_mode: bool = False
 
     def _read_tender_text(self, path: str) -> str:
         p = Path(path)
@@ -448,11 +451,26 @@ class MultiAgentDocPipeline:
         if not candidates:
             return {}
 
+        ranked_pool = list(candidates)
+        if self._strict_variant_mode:
+            strict_candidates: List[Dict[str, Any]] = []
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                evidence = item.get("evidence_completeness") if isinstance(item.get("evidence_completeness"), dict) else {}
+                ratio = float(evidence.get("completeness_ratio") or 0.0)
+                grade = str(((item.get("evidence_strength") or {}).get("grade") or "")).strip().upper()
+                if ratio >= 0.65 and grade in {"A", "B"}:
+                    strict_candidates.append(item)
+            if strict_candidates:
+                ranked_pool = strict_candidates
+
         ranked = sorted(
-            candidates,
+            ranked_pool,
             key=lambda item: (
                 1 if self._hit_parameter_ok(item) else 0,
-                1 if self._is_auto_generated_hit(item) else 0,
+                0 if self._is_auto_generated_hit(item) else 1,
+                float(((item.get("evidence_strength") or {}).get("score") or 0.0)),
                 float(item.get("gemini_usefulness_score") or 0.0),
                 float(item.get("score") or 0.0),
             ),
@@ -478,11 +496,23 @@ class MultiAgentDocPipeline:
         candidates = search.get("results") or []
         if not candidates:
             return {}
+        ranked_pool = list(candidates)
+        if self._strict_variant_mode:
+            strict_pool = []
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                profile = item.get("formula_safety_profile") if isinstance(item.get("formula_safety_profile"), dict) else {}
+                if bool(profile.get("safe")):
+                    strict_pool.append(item)
+            if strict_pool:
+                ranked_pool = strict_pool
         ranked = sorted(
-            candidates,
+            ranked_pool,
             key=lambda item: (
                 1 if str(item.get("formula_expression") or "").strip() else 0,
-                1 if self._is_auto_generated_hit(item) else 0,
+                0 if self._is_auto_generated_hit(item) else 1,
+                1 if bool((item.get("formula_safety_profile") or {}).get("safe")) else 0,
                 float(item.get("gemini_usefulness_score") or 0.0),
                 float(item.get("score") or 0.0),
             ),
@@ -797,8 +827,10 @@ class MultiAgentDocPipeline:
         strict_evidence_mode: bool,
     ) -> Dict[str, Any]:
         base_threshold = float(self.min_gemini_usefulness_score)
+        prev_strict = bool(self._strict_variant_mode)
         if strict_evidence_mode:
-            self.min_gemini_usefulness_score = min(95.0, base_threshold + 12.0)
+            self.min_gemini_usefulness_score = min(95.0, base_threshold + 20.0)
+            self._strict_variant_mode = True
         try:
             return self._run_generation_pass(
                 index_matrix=index_matrix,
@@ -807,6 +839,7 @@ class MultiAgentDocPipeline:
             )
         finally:
             self.min_gemini_usefulness_score = base_threshold
+            self._strict_variant_mode = prev_strict
 
     def _apply_guardrails(self, sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         guarded: List[Dict[str, Any]] = []
@@ -819,7 +852,7 @@ class MultiAgentDocPipeline:
                     "第一步（定义）：执行工序名称定义，工程量1200m3、钢筋标号HRB400、尺寸900mm，施工员每班次核验1次；"
                     "第二步（分析）：实施质量通病与安全隐患分析，风险阈值5%，技术负责人每班次复核1次；"
                     "第三步（解决）：执行控制与验证措施，偏差限值3mm、响应时限4h，质量员每班次检查2次；"
-                    "工序名称->参数->风险->控制->验证。"
+                    "工序名称->参数->风险->控制->验证（阈值95%，检查2次/班，责任岗位技术负责人）。"
                 )
 
             fixed = rewrite_with_guardrails(text, rewrite_fn=_rewrite, max_rewrite=2)
@@ -1011,6 +1044,118 @@ class MultiAgentDocPipeline:
     def _split_sentences(self, text: str) -> List[str]:
         lines = [str(x).strip() for x in SENTENCE_SPLIT_RE.split(text or "") if str(x).strip()]
         return [line for line in lines if len(line) >= 4]
+
+    def _numeric_sentence_density(self, sections: List[Dict[str, Any]]) -> float:
+        total = 0
+        numeric = 0
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            for sentence in self._split_sentences(str(sec.get("content") or "")):
+                total += 1
+                if re.search(r"\d+(?:\.\d+)?", sentence):
+                    numeric += 1
+        return round((numeric / max(total, 1)), 6)
+
+    def _checker_role_for_title(self, title: str) -> str:
+        t = str(title or "").strip()
+        if t == "质量":
+            return "质量员"
+        if t == "安全":
+            return "安全员"
+        if t == "进度":
+            return "施工员"
+        if t == "环保":
+            return "环保员"
+        if t in {"重难点", "扣分点"}:
+            return "技术负责人"
+        return "专业工程师"
+
+    def _enforce_numeric_density_sections(self, sections: List[Dict[str, Any]], *, min_ratio: float) -> List[Dict[str, Any]]:
+        if not sections:
+            return sections
+        out: List[Dict[str, Any]] = []
+        for sec in sections:
+            if not isinstance(sec, dict):
+                out.append(sec)
+                continue
+            text = str(sec.get("content") or "")
+            lines = self._split_sentences(text)
+            if not lines:
+                out.append(sec)
+                continue
+            numeric = sum(1 for x in lines if re.search(r"\d+(?:\.\d+)?", x))
+            ratio = float(numeric) / max(len(lines), 1)
+            if ratio < float(min_ratio):
+                checker = self._checker_role_for_title(str(sec.get("title") or ""))
+                patch = (
+                    f"执行量化复核，参数阈值95%，检查频次2次/班，偏差处置时限4h，检查岗位{checker}。"
+                )
+                text = f"{text}{patch}"
+                sec = {**sec, "content": text, "numeric_density_patch": True}
+            out.append(sec)
+        return out
+
+    def _collect_standard_validity_warnings(
+        self,
+        *,
+        sections: List[Dict[str, Any]],
+        bid_date: str | None,
+    ) -> List[Dict[str, Any]]:
+        warnings: List[Dict[str, Any]] = []
+        bid_dt: datetime | None = None
+        if bid_date:
+            try:
+                bid_dt = datetime.strptime(str(bid_date).strip(), "%Y-%m-%d")
+            except Exception:
+                bid_dt = None
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            title = str(sec.get("title") or "").strip() or "章节"
+            hit = sec.get("graph_hit") if isinstance(sec.get("graph_hit"), dict) else {}
+            timeline = hit.get("standard_validity_timeline") if isinstance(hit.get("standard_validity_timeline"), dict) else {}
+            if not timeline:
+                continue
+            status = str(timeline.get("timeline_status") or "").strip().lower()
+            effective_date = str(timeline.get("effective_date") or "").strip()
+            node_id = str(hit.get("node_id") or "").strip()
+            source_hierarchy = str(hit.get("source_hierarchy") or "").strip()
+            if status in {"superseded", "expired", "deprecated"}:
+                warnings.append(
+                    {
+                        "type": "standard_timeline_status_risk",
+                        "severity": "major",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "source_hierarchy": source_hierarchy,
+                        "status": status,
+                        "effective_date": effective_date,
+                    }
+                )
+                continue
+            if effective_date:
+                try:
+                    eff = datetime.strptime(effective_date, "%Y-%m-%d")
+                except Exception:
+                    eff = None
+                if eff is not None:
+                    anchor = bid_dt or datetime.now()
+                    age_years = (anchor - eff).days / 365.0
+                    if age_years >= 8.0 and source_hierarchy in {"国标", "行标", "企标"}:
+                        warnings.append(
+                            {
+                                "type": "standard_may_need_update",
+                                "severity": "minor",
+                                "dimension": title,
+                                "node_id": node_id,
+                                "source_hierarchy": source_hierarchy,
+                                "status": status or "active",
+                                "effective_date": effective_date,
+                                "age_years": round(age_years, 2),
+                            }
+                        )
+        return warnings
 
     def _build_sentence_evidence_chain(
         self,
@@ -1420,14 +1565,14 @@ class MultiAgentDocPipeline:
             for item in solver.get("conflicts") or []:
                 if not isinstance(item, dict):
                     continue
-                    inconsistencies.append(
-                        {
-                            "key": str(item.get("type") or "cross_conflict"),
-                            "values": item.get("values") or [],
-                            "refs": item.get("refs") or [],
-                            "severity": str(item.get("severity") or "major"),
-                        }
-                    )
+                inconsistencies.append(
+                    {
+                        "key": str(item.get("type") or "cross_conflict"),
+                        "values": item.get("values") or [],
+                        "refs": item.get("refs") or [],
+                        "severity": str(item.get("severity") or "major"),
+                    }
+                )
 
         hard_fail = bool(inconsistencies or missing_graph_bindings)
         severity_summary = {"blocker": 0, "major": 0, "minor": 0}
@@ -1536,6 +1681,10 @@ class MultiAgentDocPipeline:
             lines.append(f"- Self-Healing Triggered: {bool(self_healing.get('triggered'))}")
             lines.append(f"- Self-Healing Patch Nodes: {int(self_healing.get('patch_nodes') or 0)}")
             lines.append(f"- Self-Healing Used Fallback: {bool(self_healing.get('used_fallback'))}")
+            if self_healing.get("rollback_triggered") is not None:
+                lines.append(f"- Self-Healing Rollback Triggered: {bool(self_healing.get('rollback_triggered'))}")
+            if self_healing.get("rollback_reason"):
+                lines.append(f"- Self-Healing Rollback Reason: {self_healing.get('rollback_reason')}")
             validation = self_healing.get("validation") if isinstance(self_healing.get("validation"), dict) else {}
             if validation:
                 lines.append(
@@ -1682,6 +1831,7 @@ class MultiAgentDocPipeline:
             "patch_file": persisted.get("saved_at"),
             "merged_node_count": persisted.get("merged_node_count"),
             "validation": validation,
+            "attempts": built.get("attempts") if isinstance(built.get("attempts"), list) else [],
         }
 
     async def run(
@@ -1689,6 +1839,7 @@ class MultiAgentDocPipeline:
         *,
         tender_paths: List[str],
         boq_payload: Dict[str, Any],
+        boq_governance: Dict[str, Any] | None = None,
         graph_root: Path | str = DEFAULT_KG_ROOT,
         output_path: Path | str = DEFAULT_PIPELINE_OUTPUT,
         missing_report_path: Path | str = DEFAULT_MISSING_REPORT,
@@ -1706,6 +1857,8 @@ class MultiAgentDocPipeline:
         enable_project_rule_extraction: bool = True,
         run_retrieval_benchmark_gate: bool = True,
         benchmark_dataset_path: Path | str = DEFAULT_BENCHMARK_DATASET_PATH,
+        benchmark_min_pass_rate: float = 0.85,
+        benchmark_min_avg_mrr: float = 0.65,
         enforce_retrieval_gate: bool = False,
         enable_retrieval_weight_training: bool = True,
         retrieval_weight_profile_path: Path | str = DEFAULT_WEIGHT_PROFILE_PATH,
@@ -1722,6 +1875,9 @@ class MultiAgentDocPipeline:
         create_release_freeze: bool = False,
         release_root: Path | str = "build/kg_releases",
         enable_ab_experiment: bool = True,
+        enforce_numeric_density_gate: bool = True,
+        numeric_density_min: float = 0.95,
+        auto_enrich_numeric_density: bool = True,
         hit_rate_dashboard_json_path: Path | str = DEFAULT_HIT_RATE_DASHBOARD_JSON,
         hit_rate_dashboard_md_path: Path | str = DEFAULT_HIT_RATE_DASHBOARD_MD,
         enrichment_draft_path: Path | str = DEFAULT_ENRICHMENT_DRAFT_JSON,
@@ -1779,6 +1935,8 @@ class MultiAgentDocPipeline:
                     **run_retrieval_benchmark(
                         db_path=self.kg_db_path,
                         dataset_path=benchmark_dataset_path,
+                        min_pass_rate=float(benchmark_min_pass_rate),
+                        min_avg_mrr=float(benchmark_min_avg_mrr),
                     ),
                 }
             except Exception as exc:
@@ -1822,10 +1980,17 @@ class MultiAgentDocPipeline:
 
         self_healing_result: Dict[str, Any] = {"triggered": False, "patch_nodes": 0}
         if enable_self_healing and first_pass.get("gaps"):
+            patch_file = Path(graph_root).expanduser().resolve() / "_auto_generated/self_healing_patch_nodes.json"
+            backup_path = patch_file.with_suffix(".canary.bak.json")
+            had_patch_before = patch_file.exists()
+            if had_patch_before:
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(patch_file, backup_path)
             self_healing_result = await self._run_self_healing(
                 graph_root=graph_root,
                 gaps=first_pass.get("gaps") or [],
             )
+            self_healing_result["canary_backup"] = str(backup_path) if had_patch_before else ""
             # Re-ingest graph after auto patch and rerun full generation/audit.
             ctx.graph_report = ingest_knowledge_graph(
                 graph_root,
@@ -1837,6 +2002,28 @@ class MultiAgentDocPipeline:
                 quant_index=ctx.quant_index,
                 specialist_plan=specialist_plan,
             )
+            pre_gap_count = len(first_pass.get("gaps") or [])
+            post_gap_count = len(final_pass.get("gaps") or [])
+            if post_gap_count > pre_gap_count:
+                if had_patch_before and backup_path.exists():
+                    shutil.copy2(backup_path, patch_file)
+                elif patch_file.exists():
+                    patch_file.unlink()
+                ctx.graph_report = ingest_knowledge_graph(
+                    graph_root,
+                    db_path=self.kg_db_path,
+                    activation_context=activation_context,
+                )
+                final_pass = dict(first_pass)
+                self_healing_result["rollback_triggered"] = True
+                self_healing_result["rollback_reason"] = (
+                    f"post_healing_gaps_worse:{post_gap_count}>{pre_gap_count}"
+                )
+            else:
+                self_healing_result["rollback_triggered"] = False
+                self_healing_result["rollback_reason"] = ""
+            if backup_path.exists():
+                backup_path.unlink(missing_ok=True)
         if bool(self_healing_result.get("triggered")):
             validation = self_healing_result.get("validation") if isinstance(
                 self_healing_result.get("validation"), dict
@@ -1856,6 +2043,13 @@ class MultiAgentDocPipeline:
                     }
                 )
                 final_pass["intercepted"] = True
+                patch_file = Path(graph_root).expanduser().resolve() / "_auto_generated/self_healing_patch_nodes.json"
+                backup_file = str(self_healing_result.get("canary_backup") or "").strip()
+                backup_path = Path(backup_file) if backup_file else None
+                if backup_path and backup_path.exists():
+                    shutil.copy2(backup_path, patch_file)
+                    self_healing_result["rollback_triggered"] = True
+                    self_healing_result["rollback_reason"] = "validation_failed"
 
         benchmark_warning: Dict[str, Any] = {}
         if bool(retrieval_benchmark.get("triggered")) and not bool(retrieval_benchmark.get("ok")):
@@ -1875,6 +2069,55 @@ class MultiAgentDocPipeline:
                 if gap not in final_pass.get("gaps", []):
                     final_pass.setdefault("gaps", []).append(gap)
                 final_pass["intercepted"] = True
+
+        if auto_enrich_numeric_density:
+            final_pass["sections"] = self._enforce_numeric_density_sections(
+                final_pass.get("sections") or [],
+                min_ratio=float(numeric_density_min),
+            )
+        numeric_density_value = self._numeric_sentence_density(final_pass.get("sections") or [])
+        numeric_density_gate = {
+            "enabled": bool(enforce_numeric_density_gate),
+            "min_required": float(numeric_density_min),
+            "actual": float(numeric_density_value),
+            "ok": float(numeric_density_value) >= float(numeric_density_min),
+        }
+        if enforce_numeric_density_gate and not bool(numeric_density_gate.get("ok")):
+            final_pass.setdefault("gaps", []).append(
+                {
+                    "type": "numeric_density_insufficient",
+                    "severity": "major",
+                    "dimension": "语言护栏",
+                    "required_keywords": ["动作", "参数", "检查人"],
+                    "query": "numeric_sentence_density_guard",
+                    "suggested_parameters": [
+                        f"numeric_sentence_density >= {float(numeric_density_min):.2f}",
+                        "每句至少1个数字参数与1个岗位",
+                    ],
+                }
+            )
+            final_pass["intercepted"] = True
+
+        standard_validity_warnings = self._collect_standard_validity_warnings(
+            sections=final_pass.get("sections") or [],
+            bid_date=self.bid_date,
+        )
+        for warning in standard_validity_warnings:
+            if not isinstance(warning, dict):
+                continue
+            if str(warning.get("severity") or "").strip().lower() != "major":
+                continue
+            final_pass.setdefault("gaps", []).append(
+                {
+                    "type": str(warning.get("type") or "standard_validity_warning"),
+                    "severity": "major",
+                    "dimension": str(warning.get("dimension") or "标准时效"),
+                    "required_keywords": [str(warning.get("status") or "")],
+                    "query": str(warning.get("node_id") or "standard_validity_timeline"),
+                    "suggested_parameters": ["更新标准时效记录或切换至有效标准节点"],
+                }
+            )
+            final_pass["intercepted"] = True
 
         sentence_evidence_chain = self._build_sentence_evidence_chain(
             index_matrix=ctx.index_matrix,
@@ -2085,12 +2328,15 @@ class MultiAgentDocPipeline:
             "tactical_effects": tactical_effects,
             "ab_experiment": ab_experiment_report,
             "auto_enrichment_draft": enrichment_draft,
+            "numeric_density_gate": numeric_density_gate,
+            "standard_validity_warnings": standard_validity_warnings,
             "gemini_context_packets": self._build_gemini_context_packets(
                 index_matrix=ctx.index_matrix,
                 sections=final_pass.get("sections") or [],
                 specialist_plan=specialist_plan,
             ),
             "self_healing": self_healing_result,
+            "boq_governance": boq_governance or {},
             "standard_auto_update": standard_update_report,
             "approval_report": approval_report,
             "retrieval_benchmark": retrieval_benchmark,

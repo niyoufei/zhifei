@@ -101,3 +101,41 @@ def test_load_boq_payload_flags_scientific_explosion_values(tmp_path: Path) -> N
     assert by_code["D02"]["quantity"] == 80.0
     stats = payload.get("stats") or {}
     assert int(stats.get("anomaly_count") or 0) >= 1
+
+
+def test_build_boq_governance_and_review_queue_report(tmp_path: Path) -> None:
+    mod = _load_module()
+    payload = {
+        "items": [{"boq_code": "X1", "name": "测试项", "quantity": 10, "unit": "m3"}],
+        "stats": {
+            "source_file_count": 2,
+            "source_stats": {
+                str(tmp_path / "a.csv"): {
+                    "item_count": 10,
+                    "anomaly_count": 5,
+                    "valid_quantity_count": 6,
+                    "valid_price_count": 4,
+                    "fallback_used": False,
+                    "anomaly_items": [{"boq_code": "A1", "name": "异常1", "anomalies": ["quantity_scientific_explosion"]}],
+                },
+                str(tmp_path / "b.pdf"): {
+                    "item_count": 6,
+                    "anomaly_count": 0,
+                    "valid_quantity_count": 6,
+                    "valid_price_count": 6,
+                    "fallback_used": True,
+                    "anomaly_items": [],
+                },
+            },
+            "file_item_count": {str(tmp_path / "a.csv"): 10, str(tmp_path / "b.pdf"): 6},
+        },
+        "parse_errors": [{"file": str(tmp_path / "broken.pdf"), "error": "parse failed"}],
+    }
+    gov = mod._build_boq_governance(boq_payload=payload, trust_threshold=0.78)
+    assert gov["enabled"] is True
+    assert isinstance(gov.get("file_scores"), list)
+    assert int(gov.get("manual_review_total") or 0) >= 1
+    report = mod._write_boq_manual_review_report(gov, output_path=tmp_path / "queue.md")
+    assert Path(report).exists()
+    text = Path(report).read_text(encoding="utf-8")
+    assert "BOQ Manual Review Queue" in text

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -33,6 +34,37 @@ PROCESS_RULES: Tuple[ProcessRule, ...] = (
 )
 
 DEFAULT_RULE = ProcessRule(("通用",), "综合收尾", 9, ("项目管理人员",), 400.0)
+
+UNIT_ALIAS = {
+    "㎡": "m2",
+    "m²": "m2",
+    "m2": "m2",
+    "m³": "m3",
+    "m3": "m3",
+    "米": "m",
+    "米2": "m2",
+    "米3": "m3",
+    "吨": "t",
+}
+EXPECTED_UNITS_BY_KEYWORD: Dict[str, Tuple[str, ...]] = {
+    "混凝土": ("m3",),
+    "土方": ("m3",),
+    "回填": ("m3",),
+    "钢筋": ("t", "kg"),
+    "模板": ("m2",),
+    "抹灰": ("m2",),
+    "涂料": ("m2",),
+    "防水": ("m2",),
+    "墙面": ("m2",),
+    "地面": ("m2",),
+    "吊顶": ("m2",),
+    "管道": ("m",),
+    "电缆": ("m",),
+    "桥架": ("m",),
+    "阀门": ("台", "套", "个"),
+    "风机": ("台", "套"),
+    "泵": ("台", "套"),
+}
 
 
 class QuantitativeBoQEngine:
@@ -263,6 +295,128 @@ class QuantitativeBoQEngine:
                 }
             )
         return {"chapter_count": len(chapters), "chapters": chapters}
+
+    def _normalize_unit_text(self, unit: Any) -> str:
+        text = str(unit or "").strip().lower()
+        if text in UNIT_ALIAS:
+            return str(UNIT_ALIAS[text])
+        return text
+
+    def _infer_expected_units(self, item_name: str) -> List[str]:
+        text = str(item_name or "")
+        out: List[str] = []
+        for kw, units in EXPECTED_UNITS_BY_KEYWORD.items():
+            if kw in text:
+                for unit in units:
+                    if unit not in out:
+                        out.append(unit)
+        return out
+
+    def _unit_consistency_analysis(self, boq_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        missing_unit = 0
+        mismatch = 0
+        unknown = 0
+        rows: List[Dict[str, Any]] = []
+        unit_dist: Dict[str, int] = {}
+        for item in boq_items:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("boq_code") or "").strip()
+            name = str(item.get("name") or "").strip()
+            raw_unit = str(item.get("unit") or "").strip()
+            unit = self._normalize_unit_text(raw_unit)
+            if not unit:
+                missing_unit += 1
+                rows.append(
+                    {
+                        "boq_code": code,
+                        "name": name,
+                        "issue": "missing_unit",
+                        "unit": raw_unit,
+                        "expected_units": self._infer_expected_units(name),
+                    }
+                )
+                continue
+            unit_dist[unit] = int(unit_dist.get(unit) or 0) + 1
+            expected = self._infer_expected_units(name)
+            if expected and unit not in expected:
+                mismatch += 1
+                rows.append(
+                    {
+                        "boq_code": code,
+                        "name": name,
+                        "issue": "unit_mismatch",
+                        "unit": unit,
+                        "expected_units": expected,
+                    }
+                )
+            elif not expected:
+                unknown += 1
+
+        total = max(len(boq_items), 1)
+        missing_ratio = float(missing_unit) / total
+        mismatch_ratio = float(mismatch) / total
+        score = max(0.0, min(1.0, 1.0 - missing_ratio * 0.65 - mismatch_ratio * 0.35))
+        return {
+            "enabled": True,
+            "item_total": int(len(boq_items)),
+            "missing_unit_count": int(missing_unit),
+            "unit_mismatch_count": int(mismatch),
+            "unknown_expected_unit_count": int(unknown),
+            "unit_distribution": unit_dist,
+            "consistency_score": round(score, 6),
+            "issues": rows[:200],
+        }
+
+    def monte_carlo_schedule_risk(
+        self,
+        boq_payload: Dict[str, Any],
+        *,
+        iterations: int = 600,
+        seed: int = 42,
+    ) -> Dict[str, Any]:
+        items = boq_payload.get("items") if isinstance(boq_payload.get("items"), list) else []
+        mapping = self.build_mapping(items)
+        cpm = self._compute_cpm(mapping["process_nodes"], mapping["process_edges"])
+        base_duration = float(max(int(cpm.get("project_duration_days") or 0), 1))
+        base_risk = float(cpm.get("risk_index") or 0.0)
+        durations = [max(1, int(n.get("duration_days") or 1)) for n in (mapping.get("process_nodes") or [])]
+        lag_sum = sum(int(edge.get("lag_days") or 0) for edge in (mapping.get("process_edges") or []))
+        if not durations:
+            durations = [1]
+
+        rng = random.Random(int(seed))
+        sampled: List[float] = []
+        for _ in range(max(100, int(iterations))):
+            total = float(lag_sum)
+            for d in durations:
+                low = max(1.0, float(d) * (0.80 - base_risk * 0.10))
+                mode = max(1.0, float(d))
+                high = max(low + 0.1, float(d) * (1.35 + base_risk * 0.35))
+                total += rng.triangular(low, high, mode)
+            if rng.random() < min(0.55, 0.15 + base_risk * 0.45):
+                total += rng.uniform(0.0, max(1.0, base_duration * 0.10))
+            sampled.append(total)
+
+        sampled.sort()
+        p50 = self._percentile(sampled, 0.50)
+        p80 = self._percentile(sampled, 0.80)
+        p95 = self._percentile(sampled, 0.95)
+        expected = sum(sampled) / max(len(sampled), 1)
+        overrun_prob = sum(1 for x in sampled if x > base_duration * 1.10) / max(len(sampled), 1)
+        return {
+            "enabled": True,
+            "iterations": int(len(sampled)),
+            "seed": int(seed),
+            "base_duration_days": int(base_duration),
+            "expected_duration_days": round(expected, 6),
+            "p50_days": round(p50, 4),
+            "p80_days": round(p80, 4),
+            "p95_days": round(p95, 4),
+            "max_days": round(max(sampled), 4),
+            "min_days": round(min(sampled), 4),
+            "risk_overrun_probability_10pct": round(overrun_prob, 6),
+        }
 
     def _compute_cpm(self, process_nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Dict[str, Any]:
         durations = {str(n["process"]): int(n.get("duration_days") or 1) for n in process_nodes}
@@ -748,6 +902,8 @@ class QuantitativeBoQEngine:
         indices = self._compute_quant_indices(boq_items=items, mapping=mapping, cpm=cpm)
         optimization = self.optimize_execution_plan(boq_payload)
         scenario_simulation = self.simulate_disturbance_scenarios(boq_payload)
+        unit_consistency = self._unit_consistency_analysis(items)
+        monte_carlo = self.monte_carlo_schedule_risk(boq_payload)
 
         return {
             "mapping_3d": mapping["items"],
@@ -760,6 +916,8 @@ class QuantitativeBoQEngine:
             "indices": indices,
             "optimization": optimization,
             "scenario_simulation": scenario_simulation,
+            "unit_consistency": unit_consistency,
+            "monte_carlo": monte_carlo,
         }
 
 

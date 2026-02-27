@@ -31,6 +31,7 @@ async def test_self_healing_agent_fallback_build_and_persist(tmp_path: Path) -> 
     assert built["ok"] is True
     assert built["used_fallback"] is True
     assert len(built["nodes"]) == 2
+    assert isinstance(built.get("attempts"), list)
 
     parameter_node = built["nodes"][0]
     formula_node = built["nodes"][1]

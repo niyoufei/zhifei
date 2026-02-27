@@ -7,6 +7,12 @@ from typing import Any, Dict, List
 from backend.zhifei_autoplan.v2.data_graph_ingestion import search_graph_index
 
 DEFAULT_DATASET_PATH = Path("backend/data/autoplan/v2/kg_retrieval_benchmark.seed.json")
+DOMAIN_ALIASES = {
+    "management": {"management", "general", "quality", "safety", "environment", "环保"},
+    "building": {"building", "housing", "hospital", "decoration"},
+    "road": {"road", "municipal", "traffic"},
+    "mep": {"mep", "electrical", "hvac", "fire"},
+}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -36,13 +42,21 @@ def _hit_match_score(hit: Dict[str, Any], case: Dict[str, Any]) -> float:
 
     title = str(hit.get("title") or "")
     snippet = str(hit.get("snippet") or "")
-    merged = f"{title} {snippet}".lower()
+    keywords_blob = " ".join([str(x) for x in (hit.get("keywords") or []) if str(x).strip()])
+    tags_blob = " ".join([str(x) for x in (hit.get("qt_tag") or []) if str(x).strip()])
+    payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
+    payload_blob = json.dumps(payload, ensure_ascii=False) if payload else ""
+    merged = f"{title} {snippet} {keywords_blob} {tags_blob} {payload_blob}".lower()
     score = 0.0
     if expected_keywords:
         score += sum(1.0 for kw in expected_keywords if kw.lower() in merged)
     if expected_domain:
-        domains = [str(x).strip().lower() for x in (hit.get("professional_domain_matches") or []) if str(x).strip()]
-        if expected_domain in domains:
+        domains = {str(x).strip().lower() for x in (hit.get("professional_domain_matches") or []) if str(x).strip()}
+        dom_text = str(hit.get("professional_domain") or "").strip().lower()
+        if dom_text:
+            domains.add(dom_text)
+        aliases = DOMAIN_ALIASES.get(expected_domain, {expected_domain})
+        if domains.intersection(aliases):
             score += 1.0
     return score
 
@@ -52,8 +66,8 @@ def run_retrieval_benchmark(
     db_path: Path | str,
     dataset_path: Path | str = DEFAULT_DATASET_PATH,
     top_k: int = 5,
-    min_pass_rate: float = 0.75,
-    min_avg_mrr: float = 0.55,
+    min_pass_rate: float = 0.85,
+    min_avg_mrr: float = 0.65,
 ) -> Dict[str, Any]:
     dataset = _load_dataset(dataset_path)
     cases = dataset.get("cases") or []
@@ -69,17 +83,19 @@ def run_retrieval_benchmark(
             continue
         result = search_graph_index(
             query=query,
-            top_k=max(1, int(top_k)),
+            top_k=max(3, int(top_k)),
             db_path=db_path,
             resolve_authority=True,
         )
         hits = result.get("results") or []
         rank = 0
         score = 0.0
+        best_score = 0.0
         for i, hit in enumerate(hits, start=1):
             if not isinstance(hit, dict):
                 continue
             s = _hit_match_score(hit, case)
+            best_score = max(best_score, s)
             if s <= 0:
                 continue
             rank = i
@@ -99,6 +115,7 @@ def run_retrieval_benchmark(
                 "rank": rank,
                 "mrr": round((1.0 / rank) if rank > 0 else 0.0, 6),
                 "match_score": round(score, 4),
+                "best_score": round(best_score, 4),
                 "top_total": len(hits),
                 "top_node_id": (hits[rank - 1].get("node_id") if rank > 0 and rank - 1 < len(hits) else None),
             }

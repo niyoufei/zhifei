@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import json
 import os
@@ -33,6 +34,14 @@ SAFE_FORMULA_AST_NODES = (
     ast.USub,
     ast.UAdd,
     ast.Call,
+)
+TEMPORARY_ERROR_HINTS = ("timeout", "unavailable", "503", "disconnect", "remoteprotocolerror", "rate limit")
+FALLBACK_BACKEND_CHAIN = (
+    ("google", "gemini-3.1-pro-preview"),
+    ("google", "gemini-2.5-pro"),
+    ("openai", "gpt-4.1-mini"),
+    ("qwen", "qwen-plus"),
+    ("deepseek", "deepseek-chat"),
 )
 
 
@@ -432,6 +441,65 @@ class SelfHealingAgent:
             return os.getenv("ZF_ZHIPU_API_KEY") or os.getenv("ZHIPU_API_KEY")
         return None
 
+    def _candidate_backends(self) -> List[Dict[str, str]]:
+        ordered: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        first = (str(self.provider or "").strip().lower(), str(self.model or "").strip())
+        if first[0] and first[1]:
+            seen.add(first)
+            ordered.append({"provider": first[0], "model": first[1]})
+        for provider, model in FALLBACK_BACKEND_CHAIN:
+            key = (str(provider).strip().lower(), str(model).strip())
+            if not key[0] or not key[1] or key in seen:
+                continue
+            seen.add(key)
+            ordered.append({"provider": key[0], "model": key[1]})
+        return ordered
+
+    async def _complete_with_failover(self, prompt: str) -> Dict[str, Any]:
+        backends = self._candidate_backends()
+        attempts: List[Dict[str, Any]] = []
+        final_resp: Dict[str, Any] = {"provider": self.provider, "model": self.model, "text": "", "error": "no_backend"}
+
+        for backend in backends:
+            provider = str(backend.get("provider") or "").strip().lower()
+            model = str(backend.get("model") or "").strip()
+            api_key = self._resolve_api_key(provider)
+            client = LLMClient(provider=provider, model=model, api_key=api_key)
+            for attempt in range(1, 4):
+                resp = await client.complete(prompt)
+                text = str(resp.get("text") or "").strip()
+                err = str(resp.get("error") or "").strip()
+                attempts.append(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "attempt": attempt,
+                        "ok": bool(text),
+                        "error": err[:300],
+                    }
+                )
+                if text:
+                    resp["provider"] = str(resp.get("provider") or provider)
+                    resp["model"] = str(resp.get("model") or model)
+                    resp["attempts"] = attempts
+                    return resp
+                final_resp = {
+                    "provider": provider,
+                    "model": model,
+                    "text": "",
+                    "error": err or "empty_response",
+                    "attempts": attempts,
+                }
+                if not err:
+                    break
+                lower = err.lower()
+                if any(hint in lower for hint in TEMPORARY_ERROR_HINTS):
+                    await asyncio.sleep(min(2.0, 0.4 * attempt))
+                    continue
+                break
+        return final_resp
+
     def _build_prompt(self, gaps: List[Dict[str, Any]]) -> str:
         payload = []
         for item in gaps:
@@ -753,14 +821,23 @@ class SelfHealingAgent:
                 "used_fallback": False,
                 "nodes": [],
                 "validation": {"ok": True, "issues": [], "issues_count": 0},
+                "attempts": [],
             }
 
         prompt = self._build_prompt(gaps)
-        resp = await self._llm.complete(prompt)
+        resp = await self._complete_with_failover(prompt)
         parsed = _extract_json(str(resp.get("text") or ""))
         raw_nodes = parsed.get("nodes") if isinstance(parsed, dict) else None
         if not isinstance(raw_nodes, list):
             raw_nodes = []
+
+        configured_provider = str(self.provider or "").strip().lower()
+        configured_model = str(self.model or "").strip()
+        actual_provider = str(resp.get("provider") or configured_provider).strip().lower()
+        actual_model = str(resp.get("model") or configured_model).strip()
+        provider_switched = bool(actual_provider and configured_provider and actual_provider != configured_provider)
+        model_switched = bool(actual_model and configured_model and actual_model != configured_model)
+        attempt_count = len(resp.get("attempts") or []) if isinstance(resp.get("attempts"), list) else 0
 
         used_fallback = False
         nodes = self._sanitize_nodes(raw_nodes, gaps)
@@ -768,14 +845,38 @@ class SelfHealingAgent:
             used_fallback = True
         validation = self._validate_patch_nodes(nodes)
 
+        llm_validation = validation if isinstance(validation, dict) else {"ok": True}
+        if raw_nodes and not bool(llm_validation.get("ok")):
+            fallback_nodes = self._fallback_nodes(gaps)
+            fallback_validation = self._validate_patch_nodes(fallback_nodes)
+            fallback_ok = bool(fallback_validation.get("ok"))
+            llm_issue_count = int(llm_validation.get("issues_count") or 0)
+            fallback_issue_count = int(fallback_validation.get("issues_count") or 0)
+            if fallback_ok or fallback_issue_count < llm_issue_count:
+                nodes = fallback_nodes
+                validation = fallback_validation
+                used_fallback = True
+            else:
+                validation = llm_validation
+        else:
+            validation = llm_validation
+
         return {
             "ok": True,
             "provider": str(resp.get("provider") or self.provider),
             "model": str(resp.get("model") or self.model),
             "llm_error": resp.get("error"),
-            "used_fallback": used_fallback or bool(resp.get("error")),
+            "used_fallback": (
+                bool(used_fallback)
+                or bool(resp.get("error"))
+                or provider_switched
+                or model_switched
+                or attempt_count > 1
+            ),
             "nodes": nodes,
             "validation": validation,
+            "llm_validation": llm_validation,
+            "attempts": resp.get("attempts") if isinstance(resp.get("attempts"), list) else [],
         }
 
     def persist_patch_nodes(

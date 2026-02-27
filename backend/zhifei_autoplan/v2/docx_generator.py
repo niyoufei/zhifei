@@ -60,6 +60,25 @@ def _resource_items(resource_requirements: Any) -> List[str]:
     return out
 
 
+def _evidence_grade_and_heat(section: Dict[str, Any]) -> Dict[str, str]:
+    hit = section.get("graph_hit") if isinstance(section.get("graph_hit"), dict) else {}
+    strength = hit.get("evidence_strength") if isinstance(hit.get("evidence_strength"), dict) else {}
+    grade = str(strength.get("grade") or "").strip().upper()
+    if not grade:
+        completeness = hit.get("evidence_completeness") if isinstance(hit.get("evidence_completeness"), dict) else {}
+        ratio = float(completeness.get("completeness_ratio") or 0.0)
+        if ratio >= 0.85:
+            grade = "A"
+        elif ratio >= 0.70:
+            grade = "B"
+        elif ratio >= 0.55:
+            grade = "C"
+        else:
+            grade = "D"
+    heat = "high" if grade in {"A", "B"} else "medium" if grade == "C" else "low"
+    return {"grade": grade, "heat": heat}
+
+
 def _render_visual_assets(doc: Document, visual_assets: List[Dict[str, Any]]) -> Dict[str, int]:
     if not visual_assets:
         return {"embedded": 0, "missing": 0}
@@ -82,6 +101,36 @@ def _render_visual_assets(doc: Document, visual_assets: List[Dict[str, Any]]) ->
         if caption:
             doc.add_paragraph(caption)
     return {"embedded": embedded, "missing": missing}
+
+
+def _render_evidence_heatmap(doc: Document, sections: List[Dict[str, Any]]) -> Dict[str, int]:
+    if not sections:
+        return {"rows": 0, "low_count": 0}
+    doc.add_page_break()
+    doc.add_heading("证据热力图", level=1)
+    table = doc.add_table(rows=1, cols=5)
+    table.style = "Table Grid"
+    hdr = table.rows[0].cells
+    hdr[0].text = "章节"
+    hdr[1].text = "节点ID"
+    hdr[2].text = "来源层级"
+    hdr[3].text = "证据等级"
+    hdr[4].text = "热度"
+    low_count = 0
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        hit = sec.get("graph_hit") if isinstance(sec.get("graph_hit"), dict) else {}
+        heat = _evidence_grade_and_heat(sec)
+        row = table.add_row().cells
+        row[0].text = str(sec.get("title") or "")
+        row[1].text = str(hit.get("node_id") or "")
+        row[2].text = str(hit.get("source_hierarchy") or "")
+        row[3].text = str(heat.get("grade") or "")
+        row[4].text = str(heat.get("heat") or "")
+        if heat.get("heat") == "low":
+            low_count += 1
+    return {"rows": len(sections), "low_count": low_count}
 
 
 def generate_v2_docx(
@@ -125,6 +174,8 @@ def generate_v2_docx(
 
         sec = section_by_title.get(dimension) or {}
         highlight = _is_auto_generated_section(sec)
+        evidence_heat = _evidence_grade_and_heat(sec)
+        low_evidence = evidence_heat.get("heat") == "low"
         if highlight:
             auto_generated_sections += 1
 
@@ -140,6 +191,17 @@ def generate_v2_docx(
         evidence_run = evidence_para.add_run(f"证据节点: {evidence_title}  来源文件: {evidence_file}")
         if highlight:
             evidence_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+            highlighted_paragraphs += 1
+        elif low_evidence:
+            evidence_run.font.highlight_color = WD_COLOR_INDEX.PINK
+            highlighted_paragraphs += 1
+
+        heat_para = doc.add_paragraph(
+            f"证据强度: {evidence_heat.get('grade')} | 热度: {evidence_heat.get('heat')}"
+        )
+        if low_evidence:
+            for run in heat_para.runs:
+                run.font.highlight_color = WD_COLOR_INDEX.PINK
             highlighted_paragraphs += 1
 
         resources = _resource_items(graph_hit.get("resource_requirements"))
@@ -159,6 +221,7 @@ def generate_v2_docx(
             warning_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
             highlighted_paragraphs += 1
 
+    heatmap_meta = _render_evidence_heatmap(doc, sections)
     visuals_meta = _render_visual_assets(doc, list(visual_assets or []))
     doc.save(str(out))
     return {
@@ -166,6 +229,8 @@ def generate_v2_docx(
         "saved_at": str(out),
         "highlighted_paragraphs": highlighted_paragraphs,
         "auto_generated_sections": auto_generated_sections,
+        "evidence_heatmap_rows": int(heatmap_meta["rows"]),
+        "low_evidence_sections": int(heatmap_meta["low_count"]),
         "visual_assets_embedded": int(visuals_meta["embedded"]),
         "visual_assets_missing": int(visuals_meta["missing"]),
     }
