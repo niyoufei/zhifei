@@ -508,6 +508,27 @@ def _arg_parser() -> argparse.ArgumentParser:
         default="system",
         help="审批与冻结签署人。",
     )
+    p.add_argument(
+        "--ab-experiment",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否启用A/B生成策略对比评测。",
+    )
+    p.add_argument(
+        "--hit-rate-dashboard-json",
+        default="build/Hit_Rate_Dashboard.json",
+        help="命中率看板JSON输出路径。",
+    )
+    p.add_argument(
+        "--hit-rate-dashboard-md",
+        default="build/Hit_Rate_Dashboard.md",
+        help="命中率看板Markdown输出路径。",
+    )
+    p.add_argument(
+        "--enrichment-draft",
+        default="build/Auto_KG_Enrichment_Draft.json",
+        help="知识盲区反向补图草案输出路径。",
+    )
     return p
 
 
@@ -561,6 +582,10 @@ async def _run(args: argparse.Namespace) -> int:
         create_release_freeze=bool(args.release_freeze),
         release_approver=str(args.release_approver),
         release_signature=f"{args.release_approver}-auto-sign",
+        enable_ab_experiment=bool(args.ab_experiment),
+        hit_rate_dashboard_json_path=Path(args.hit_rate_dashboard_json).expanduser().resolve(),
+        hit_rate_dashboard_md_path=Path(args.hit_rate_dashboard_md).expanduser().resolve(),
+        enrichment_draft_path=Path(args.enrichment_draft).expanduser().resolve(),
     )
     if output_path.exists():
         try:
@@ -594,6 +619,12 @@ async def _run(args: argparse.Namespace) -> int:
     )
     print(f"Diagnosis JSON: {result.get('saved_at')}")
     print(f"Missing_Knowledge_Report: {result.get('missing_knowledge_report')}")
+    print(
+        "Hit-Rate Dashboard: "
+        f"{(result.get('hit_rate_dashboard_saved') or {}).get('json_path')} | "
+        f"{(result.get('hit_rate_dashboard_saved') or {}).get('md_path')}"
+    )
+    print(f"Auto Enrichment Draft: {(result.get('auto_enrichment_draft') or {}).get('saved_at')}")
     print(f"Production DOCX: {result.get('docx_output')}")
     print(f"Strict Fail-Fast Intercepted: {result.get('intercepted')}")
     print(f"Score Coverage OK: {bool(score_audit.get('ok'))}")
@@ -640,9 +671,31 @@ async def _run(args: argparse.Namespace) -> int:
             f"ok={bool(chapter_plan.get('ok'))}, "
             f"chapters={int(chapter_plan.get('chapter_count') or 0)}"
         )
+    tactical = result.get("tactical_effects") if isinstance(result.get("tactical_effects"), dict) else {}
+    if tactical:
+        print(
+            "Tactical Effects: "
+            f"shield={int(tactical.get('shield_triggered_count') or 0)}, "
+            f"booster={int(tactical.get('booster_triggered_count') or 0)}, "
+            f"estimated_gain={float(tactical.get('estimated_score_gain') or 0.0):.2f}"
+        )
+    ab_report = result.get("ab_experiment") if isinstance(result.get("ab_experiment"), dict) else {}
+    if ab_report.get("enabled"):
+        print(
+            "A/B Experiment: "
+            f"winner={ab_report.get('winner')}, "
+            f"delta={float(ab_report.get('delta') or 0.0):.4f}"
+        )
     release = result.get("release_snapshot") if isinstance(result.get("release_snapshot"), dict) else {}
     if release.get("triggered"):
         print(f"Release Snapshot: {release.get('release_id')} | {release.get('release_dir')}")
+    release_strategy = result.get("release_strategy") if isinstance(result.get("release_strategy"), dict) else {}
+    if release_strategy:
+        print(
+            "Release Strategy: "
+            f"{release_strategy.get('strategy')} "
+            f"(reason={release_strategy.get('reason')}, canary={release_strategy.get('canary_ratio')})"
+        )
     evidence_stats = result.get("sentence_evidence_stats") or {}
     if evidence_stats:
         print(

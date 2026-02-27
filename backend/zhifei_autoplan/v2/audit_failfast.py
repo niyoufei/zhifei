@@ -23,6 +23,29 @@ def _normalize_dimension(value: str) -> str:
     return str(value or "").strip()
 
 
+SEVERITY_RANK = {"minor": 1, "major": 2, "blocker": 3}
+BLOCKER_DIMENSIONS = {"扣分点", "安全"}
+
+
+def _derive_point_severity(*, dimension: str, missing_keywords: List[str], match_mode: str, source: str) -> str:
+    dim = str(dimension or "").strip()
+    miss_count = len([x for x in (missing_keywords or []) if str(x).strip()])
+    mode = str(match_mode or "").strip().lower()
+    src = str(source or "").strip().lower()
+    if dim in BLOCKER_DIMENSIONS and (mode == "all" or src == "score_points"):
+        return "blocker"
+    if miss_count >= 2 or mode == "all":
+        return "major"
+    return "minor"
+
+
+def _max_severity(values: List[str]) -> str:
+    if not values:
+        return "minor"
+    ranked = sorted(values, key=lambda x: int(SEVERITY_RANK.get(str(x), 0)), reverse=True)
+    return str(ranked[0])
+
+
 def _extract_score_points(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     points: List[Dict[str, Any]] = []
     raw_points = item.get("score_points")
@@ -111,6 +134,16 @@ def audit_against_index_matrix(index_matrix: Dict[str, Any], sections: List[Dict
                 point.get("required_keywords") or [],
                 str(point.get("match_mode") or "any"),
             )
+            severity = (
+                "minor"
+                if ok
+                else _derive_point_severity(
+                    dimension=dimension,
+                    missing_keywords=missing,
+                    match_mode=str(point.get("match_mode") or "any"),
+                    source=str(point.get("source") or "keywords"),
+                )
+            )
             point_checks.append(
                 {
                     "point_id": point.get("point_id"),
@@ -120,6 +153,7 @@ def audit_against_index_matrix(index_matrix: Dict[str, Any], sections: List[Dict
                     "source": point.get("source") or "keywords",
                     "hit_keywords": hit,
                     "missing_keywords": missing,
+                    "severity": severity,
                     "ok": bool(ok),
                 }
             )
@@ -136,6 +170,7 @@ def audit_against_index_matrix(index_matrix: Dict[str, Any], sections: List[Dict
             (sum(1 for p in point_checks if p.get("ok")) / max(1, len(point_checks))),
             4,
         )
+        severity = _max_severity([str(p.get("severity") or "minor") for p in point_checks if not bool(p.get("ok"))])
         checks.append(
             {
                 "dimension": dimension,
@@ -147,14 +182,25 @@ def audit_against_index_matrix(index_matrix: Dict[str, Any], sections: List[Dict
                 "score_point_hit": sum(1 for p in point_checks if p.get("ok")),
                 "ok": ok,
                 "coverage_ratio": coverage_ratio,
+                "severity": severity if not ok else "minor",
             }
         )
 
     all_passed = all(check.get("ok") for check in checks) if checks else True
+    severity_summary = {"blocker": 0, "major": 0, "minor": 0}
+    for check in checks:
+        if bool(check.get("ok")):
+            continue
+        sev = str(check.get("severity") or "minor").strip().lower()
+        if sev not in severity_summary:
+            sev = "minor"
+        severity_summary[sev] += 1
     return {
         "ok": all_passed,
         "checks": checks,
         "failed_count": sum(1 for check in checks if not check.get("ok")),
+        "severity_summary": severity_summary,
+        "has_blocker": bool(severity_summary["blocker"] > 0),
     }
 
 
@@ -208,6 +254,8 @@ def enforce_fail_fast(
         "failed_dimensions": failed_dimensions,
         "failed_points_count": len(failed_points),
         "failed_points": failures,
+        "severity_summary": audit_result.get("severity_summary") or {},
+        "has_blocker": bool(audit_result.get("has_blocker")),
         "event": "fail_fast_retry",
     }
     _append_audit_log(record, log_path=log_path)

@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-27T23:47:49",
+    "updated_at": "2026-02-28T00:20:46",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -14,7 +14,7 @@
     "incremental_update": {
       "strategy": "fingerprint_diff",
       "node_fingerprint_count": 9,
-      "file_fingerprint": "5e0d9e16484f2512f2dacd4761a76d3a68f29b34"
+      "file_fingerprint": "0362b56443c6ca5e9d4e0ff008d5635888fadbaa"
     }
   },
   "knowledge_database": {
@@ -526,7 +526,7 @@
             "earthwork"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "JTG F80/1-2017"
@@ -553,7 +553,7 @@
             "next_review_due": "2019-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -562,9 +562,9 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
                 "status": "review_required"
               },
@@ -578,7 +578,7 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
+                "tier": "国标",
                 "effective_date": "2017-01-01",
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
@@ -652,78 +652,78 @@
             "parameters": [
               {
                 "parameter": "formula_result",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": null,
                 "source": "formula_expression"
               },
               {
                 "parameter": "hazard_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 3.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "risk_factor",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "defect_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "sample_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 100.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "measured_strength",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 38.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "target_strength",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 40.0,
                 "source": "kg_strengthen_v2_default"
               }
             ],
-            "dimension_coverage_ratio": 0.625,
+            "dimension_coverage_ratio": 0.125,
             "consistency_check": {
               "required": true,
               "status": "pass"
@@ -735,7 +735,7 @@
               "evidence_type": "numeric_source",
               "parameter": "formula_result",
               "value": "",
-              "unit": "",
+              "unit": "项",
               "source_text": "formula_expression",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -746,7 +746,7 @@
               "evidence_type": "numeric_source",
               "parameter": "hazard_count",
               "value": "3",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -757,7 +757,7 @@
               "evidence_type": "numeric_source",
               "parameter": "inspection_frequency_per_shift",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -768,7 +768,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -779,7 +779,7 @@
               "evidence_type": "numeric_source",
               "parameter": "defect_count",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -790,7 +790,7 @@
               "evidence_type": "numeric_source",
               "parameter": "sample_count",
               "value": "100",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -801,7 +801,7 @@
               "evidence_type": "numeric_source",
               "parameter": "measured_strength",
               "value": "38",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -812,7 +812,7 @@
               "evidence_type": "numeric_source",
               "parameter": "target_strength",
               "value": "40",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -866,7 +866,11 @@
             "reviewer_role": "质量员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "manual_signoff"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-28T00:30:19",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -912,12 +916,12 @@
               {
                 "parameter": "hazard_count",
                 "ifc_property": "Pset_Zhifei.hazard_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
                 "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "risk_factor",
@@ -927,12 +931,12 @@
               {
                 "parameter": "defect_count",
                 "ifc_property": "Pset_Zhifei.defect_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "sample_count",
                 "ifc_property": "Pset_Zhifei.sample_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               }
             ]
           },
@@ -951,14 +955,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "503f9a0882f363d5804b9cff92fbf64597759a99",
+          "incremental_fingerprint": "289fa631f4c17b93688e00d9906ecd0be5ba94b7",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "503f9a0882f363d5804b9cff92fbf64597759a99",
+            "fingerprint": "289fa631f4c17b93688e00d9906ecd0be5ba94b7",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -981,7 +985,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -1001,7 +1005,7 @@
                 "current_year": 2017,
                 "latest_code": "JTG F80/1-2017",
                 "latest_year": 2017,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               }
@@ -1904,7 +1908,7 @@
             "digital"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "JTG F80/1-2017",
@@ -1932,7 +1936,7 @@
             "next_review_due": "2019-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -1941,9 +1945,9 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
                 "status": "review_required"
               },
@@ -1957,7 +1961,7 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
+                "tier": "国标",
                 "effective_date": "2017-01-01",
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
@@ -2057,33 +2061,33 @@
               },
               {
                 "parameter": "hazard_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 3.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "risk_factor",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_default"
               }
             ],
-            "dimension_coverage_ratio": 1.0,
+            "dimension_coverage_ratio": 0.6,
             "consistency_check": {
               "required": true,
               "status": "pass"
@@ -2117,7 +2121,7 @@
               "evidence_type": "numeric_source",
               "parameter": "hazard_count",
               "value": "3",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -2128,7 +2132,7 @@
               "evidence_type": "numeric_source",
               "parameter": "inspection_frequency_per_shift",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -2139,7 +2143,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -2193,7 +2197,11 @@
             "reviewer_role": "安全员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "manual_signoff"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-28T00:30:19",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -2251,12 +2259,12 @@
               {
                 "parameter": "hazard_count",
                 "ifc_property": "Pset_Zhifei.hazard_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
                 "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "risk_factor",
@@ -2280,14 +2288,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "216dae706c58102140ae9c0e59ef1b26d2fe7945",
+          "incremental_fingerprint": "8d14505f68383412327e8e582cd66468412522df",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "216dae706c58102140ae9c0e59ef1b26d2fe7945",
+            "fingerprint": "8d14505f68383412327e8e582cd66468412522df",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -2310,7 +2318,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -2330,7 +2338,7 @@
                 "current_year": 2017,
                 "latest_code": "JTG F80/1-2017",
                 "latest_year": 2017,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -3337,7 +3345,7 @@
             "earthwork"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "JTG F80/1-2017",
@@ -3365,7 +3373,7 @@
             "next_review_due": "2019-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -3374,9 +3382,9 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
                 "status": "review_required"
               },
@@ -3390,7 +3398,7 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
+                "tier": "国标",
                 "effective_date": "2017-01-01",
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
@@ -3490,78 +3498,78 @@
               },
               {
                 "parameter": "hazard_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 3.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "risk_factor",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "delay_hours",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "planned_hours",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 12.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "crew_efficiency",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 0.9,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "productivity_per_day",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 240.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "work_volume",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 1200.0,
                 "source": "kg_strengthen_v2_default"
               }
             ],
-            "dimension_coverage_ratio": 0.5,
+            "dimension_coverage_ratio": 0.3,
             "consistency_check": {
               "required": true,
               "status": "pass"
@@ -3595,7 +3603,7 @@
               "evidence_type": "numeric_source",
               "parameter": "hazard_count",
               "value": "3",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -3606,7 +3614,7 @@
               "evidence_type": "numeric_source",
               "parameter": "inspection_frequency_per_shift",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -3617,7 +3625,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -3628,7 +3636,7 @@
               "evidence_type": "numeric_source",
               "parameter": "delay_hours",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -3639,7 +3647,7 @@
               "evidence_type": "numeric_source",
               "parameter": "planned_hours",
               "value": "12",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -3650,7 +3658,7 @@
               "evidence_type": "numeric_source",
               "parameter": "crew_efficiency",
               "value": "0.9",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -3661,7 +3669,7 @@
               "evidence_type": "numeric_source",
               "parameter": "productivity_per_day",
               "value": "240",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -3672,7 +3680,7 @@
               "evidence_type": "numeric_source",
               "parameter": "work_volume",
               "value": "1200",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -3726,7 +3734,11 @@
             "reviewer_role": "施工员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "manual_signoff"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-28T00:30:19",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -3784,12 +3796,12 @@
               {
                 "parameter": "hazard_count",
                 "ifc_property": "Pset_Zhifei.hazard_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
                 "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "risk_factor",
@@ -3818,14 +3830,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "0532ea9edaf2e184f3eb63fd69d0774111e6b8d6",
+          "incremental_fingerprint": "abbdc739d7003e9bd07c3c32a3e5d30702f1fb5e",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "0532ea9edaf2e184f3eb63fd69d0774111e6b8d6",
+            "fingerprint": "abbdc739d7003e9bd07c3c32a3e5d30702f1fb5e",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -3848,7 +3860,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -3868,7 +3880,7 @@
                 "current_year": 2017,
                 "latest_code": "JTG F80/1-2017",
                 "latest_year": 2017,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -3878,7 +3890,7 @@
                 "current_year": 2018,
                 "latest_code": "GB 50210-2018",
                 "latest_year": 2018,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               }
@@ -4862,7 +4874,7 @@
             "earthwork"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "JTG F80/1-2017",
@@ -4892,7 +4904,7 @@
             "next_review_due": "2019-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -4901,11 +4913,11 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
-                "review_cycle_years": 8,
-                "status": "review_required"
+                "tier": "答疑文件",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
               },
               {
                 "standard_code": "GB/T 50326-2017",
@@ -4917,26 +4929,18 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
-                "effective_date": "2017-01-01",
-                "expiry_date": "2025-12-31",
-                "review_cycle_years": 8,
-                "status": "review_required"
-              },
-              {
-                "standard_code": "GB 50210-2018",
-                "tier": "国标",
-                "effective_date": "2018-01-01",
-                "expiry_date": "2028-12-31",
-                "review_cycle_years": 10,
-                "status": "active"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
+                "tier": "答疑文件",
                 "effective_date": "2021-01-01",
                 "expiry_date": "2027-12-31",
                 "review_cycle_years": 6,
+                "status": "active"
+              },
+              {
+                "standard_code": "GB 50210-2018",
+                "tier": "答疑文件",
+                "effective_date": "2018-01-01",
+                "expiry_date": "2028-12-31",
+                "review_cycle_years": 10,
                 "status": "active"
               }
             ]
@@ -5017,69 +5021,69 @@
               },
               {
                 "parameter": "hazard_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 3.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "risk_factor",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "defect_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "sample_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 100.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "control_measures",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 8.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "risk_items",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 5.0,
                 "source": "kg_strengthen_v2_default"
               }
             ],
-            "dimension_coverage_ratio": 0.8889,
+            "dimension_coverage_ratio": 0.4444,
             "consistency_check": {
               "required": true,
               "status": "pass"
@@ -5113,7 +5117,7 @@
               "evidence_type": "numeric_source",
               "parameter": "hazard_count",
               "value": "3",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "答疑文件",
@@ -5124,7 +5128,7 @@
               "evidence_type": "numeric_source",
               "parameter": "inspection_frequency_per_shift",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "答疑文件",
@@ -5135,7 +5139,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "答疑文件",
@@ -5146,7 +5150,7 @@
               "evidence_type": "numeric_source",
               "parameter": "defect_count",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "答疑文件",
@@ -5157,7 +5161,7 @@
               "evidence_type": "numeric_source",
               "parameter": "sample_count",
               "value": "100",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "答疑文件",
@@ -5168,7 +5172,7 @@
               "evidence_type": "numeric_source",
               "parameter": "control_measures",
               "value": "8",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "答疑文件",
@@ -5179,7 +5183,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_items",
               "value": "5",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "答疑文件",
@@ -5233,7 +5237,11 @@
             "reviewer_role": "技术负责人",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "manual_signoff"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-28T00:30:19",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -5285,12 +5293,12 @@
               {
                 "parameter": "hazard_count",
                 "ifc_property": "Pset_Zhifei.hazard_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
                 "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "risk_factor",
@@ -5300,7 +5308,7 @@
               {
                 "parameter": "defect_count",
                 "ifc_property": "Pset_Zhifei.defect_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               }
             ]
           },
@@ -5319,14 +5327,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "84aa138e723d163d062daeea02d08dc88c88baed",
+          "incremental_fingerprint": "21258ee48b673dea3fa7592283572d37781de3ee",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "84aa138e723d163d062daeea02d08dc88c88baed",
+            "fingerprint": "21258ee48b673dea3fa7592283572d37781de3ee",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -6400,7 +6408,7 @@
             "earthwork"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "JTG F80/1-2017",
@@ -6428,7 +6436,7 @@
             "next_review_due": "2019-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -6437,9 +6445,9 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
                 "status": "review_required"
               },
@@ -6453,7 +6461,7 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
+                "tier": "国标",
                 "effective_date": "2017-01-01",
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
@@ -6545,87 +6553,87 @@
               },
               {
                 "parameter": "hazard_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 3.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "risk_factor",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "check_items",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 20.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "deviation_items",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 1.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "non_response_items",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 0.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "overdue_hours",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 1.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "penalty_weight",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "response_deadline_hours",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 4.0,
                 "source": "kg_strengthen_v2_default"
               }
             ],
-            "dimension_coverage_ratio": 0.4545,
+            "dimension_coverage_ratio": 0.2727,
             "consistency_check": {
               "required": true,
               "status": "pass"
@@ -6659,7 +6667,7 @@
               "evidence_type": "numeric_source",
               "parameter": "hazard_count",
               "value": "3",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6670,7 +6678,7 @@
               "evidence_type": "numeric_source",
               "parameter": "inspection_frequency_per_shift",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6681,7 +6689,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6692,7 +6700,7 @@
               "evidence_type": "numeric_source",
               "parameter": "check_items",
               "value": "20",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6703,7 +6711,7 @@
               "evidence_type": "numeric_source",
               "parameter": "deviation_items",
               "value": "1",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6714,7 +6722,7 @@
               "evidence_type": "numeric_source",
               "parameter": "non_response_items",
               "value": "0",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6725,7 +6733,7 @@
               "evidence_type": "numeric_source",
               "parameter": "overdue_hours",
               "value": "1",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6736,7 +6744,7 @@
               "evidence_type": "numeric_source",
               "parameter": "penalty_weight",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6747,7 +6755,7 @@
               "evidence_type": "numeric_source",
               "parameter": "response_deadline_hours",
               "value": "4",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -6801,7 +6809,11 @@
             "reviewer_role": "项目总工",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "manual_signoff"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-28T00:30:19",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -6865,12 +6877,12 @@
               {
                 "parameter": "hazard_count",
                 "ifc_property": "Pset_Zhifei.hazard_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
                 "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "risk_factor",
@@ -6899,14 +6911,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "2b8026d2d2541fb55ebc29000878c517be34f977",
+          "incremental_fingerprint": "14226a1b93b40f2d792bb4b096dfbf6e9417f012",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "2b8026d2d2541fb55ebc29000878c517be34f977",
+            "fingerprint": "14226a1b93b40f2d792bb4b096dfbf6e9417f012",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -6929,7 +6941,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -6949,7 +6961,7 @@
                 "current_year": 2017,
                 "latest_code": "JTG F80/1-2017",
                 "latest_year": 2017,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -8100,7 +8112,7 @@
             "GB/T 50326-2017",
             "GB 50202-2018",
             "JTG F80/1-2017",
-            "GB 50300-2013",
+            "GB 50300-2024",
             "GB 50303-2015"
           ],
           "reference_standard_count": 5,
@@ -8142,14 +8154,14 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
+                "tier": "国标",
                 "effective_date": "2017-01-01",
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
                 "status": "review_required"
               },
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -8250,78 +8262,78 @@
               },
               {
                 "parameter": "hazard_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 3.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "risk_factor",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "defect_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "sample_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 100.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "inspection_batches",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 6.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "pass_rate_percent",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 96.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "total_batches",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 6.0,
                 "source": "kg_strengthen_v2_default"
               }
             ],
-            "dimension_coverage_ratio": 0.7,
+            "dimension_coverage_ratio": 0.3,
             "consistency_check": {
               "required": true,
               "status": "pass"
@@ -8355,7 +8367,7 @@
               "evidence_type": "numeric_source",
               "parameter": "hazard_count",
               "value": "3",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -8366,7 +8378,7 @@
               "evidence_type": "numeric_source",
               "parameter": "inspection_frequency_per_shift",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -8377,7 +8389,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -8388,7 +8400,7 @@
               "evidence_type": "numeric_source",
               "parameter": "defect_count",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -8399,7 +8411,7 @@
               "evidence_type": "numeric_source",
               "parameter": "sample_count",
               "value": "100",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -8410,7 +8422,7 @@
               "evidence_type": "numeric_source",
               "parameter": "inspection_batches",
               "value": "6",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -8421,7 +8433,7 @@
               "evidence_type": "numeric_source",
               "parameter": "pass_rate_percent",
               "value": "96",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -8432,7 +8444,7 @@
               "evidence_type": "numeric_source",
               "parameter": "total_batches",
               "value": "6",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -8486,7 +8498,11 @@
             "reviewer_role": "质量员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "manual_signoff"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-28T00:30:19",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -8543,12 +8559,12 @@
               {
                 "parameter": "hazard_count",
                 "ifc_property": "Pset_Zhifei.hazard_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
                 "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "risk_factor",
@@ -8558,7 +8574,7 @@
               {
                 "parameter": "defect_count",
                 "ifc_property": "Pset_Zhifei.defect_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               }
             ]
           },
@@ -8577,14 +8593,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "ac9d157a892bc587e007e07ae34e735651a58ce4",
+          "incremental_fingerprint": "ca9e581b79ce8900028dfd78e4e884318713ecd5",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "ac9d157a892bc587e007e07ae34e735651a58ce4",
+            "fingerprint": "ca9e581b79ce8900028dfd78e4e884318713ecd5",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -8617,7 +8633,7 @@
                 "current_year": 2017,
                 "latest_code": "JTG F80/1-2017",
                 "latest_year": 2017,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -9610,7 +9626,7 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
+                "tier": "国标",
                 "effective_date": "2017-01-01",
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
@@ -9684,54 +9700,54 @@
             "parameters": [
               {
                 "parameter": "critical_path_lag_days",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 1.0,
                 "source": ""
               },
               {
                 "parameter": "crew_efficiency",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 0.9,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "productivity_per_day",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 240.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "work_volume",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 1200.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "daily_output",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 60.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "remaining_work",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 300.0,
                 "source": "kg_strengthen_v2_default"
@@ -9749,7 +9765,7 @@
               "evidence_type": "numeric_source",
               "parameter": "critical_path_lag_days",
               "value": "1",
-              "unit": "",
+              "unit": "项",
               "source_text": "",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -9760,7 +9776,7 @@
               "evidence_type": "numeric_source",
               "parameter": "crew_efficiency",
               "value": "0.9",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -9771,7 +9787,7 @@
               "evidence_type": "numeric_source",
               "parameter": "productivity_per_day",
               "value": "240",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -9782,7 +9798,7 @@
               "evidence_type": "numeric_source",
               "parameter": "work_volume",
               "value": "1200",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -9793,7 +9809,7 @@
               "evidence_type": "numeric_source",
               "parameter": "daily_output",
               "value": "60",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -9804,7 +9820,7 @@
               "evidence_type": "numeric_source",
               "parameter": "remaining_work",
               "value": "300",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "国标",
@@ -9943,14 +9959,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "eb996b08e2fd154cbc2a9b48a7d58bd4226f99b7",
+          "incremental_fingerprint": "7d63bf3666eb9cbfebc4c236732f65893e52d7ce",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "eb996b08e2fd154cbc2a9b48a7d58bd4226f99b7",
+            "fingerprint": "7d63bf3666eb9cbfebc4c236732f65893e52d7ce",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -9973,7 +9989,7 @@
                 "current_year": 2017,
                 "latest_code": "JTG F80/1-2017",
                 "latest_year": 2017,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               }
@@ -10928,7 +10944,7 @@
           "standard_validity_timeline": {
             "version": "v1",
             "rule": "答疑文件 > 设计图纸 > 国标 > 行标 > 企标",
-            "timeline_status": "review_required",
+            "timeline_status": "active",
             "primary_standard_code": "GB/T 50326-2017",
             "next_review_due": "2016-12-31",
             "records": [
@@ -10942,23 +10958,15 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
-                "effective_date": "2017-01-01",
-                "expiry_date": "2025-12-31",
-                "review_cycle_years": 8,
-                "status": "review_required"
+                "tier": "答疑文件",
+                "effective_date": "2021-01-01",
+                "expiry_date": "2027-12-31",
+                "review_cycle_years": 6,
+                "status": "active"
               },
               {
                 "standard_code": "CJJ 1-2008",
-                "tier": "行标",
-                "effective_date": "2008-01-01",
-                "expiry_date": "2016-12-31",
-                "review_cycle_years": 8,
-                "status": "review_required"
-              },
-              {
-                "standard_code": "Q&A-项目答疑纪要(以最新答疑为准)",
-                "tier": "企标",
+                "tier": "答疑文件",
                 "effective_date": "2021-01-01",
                 "expiry_date": "2027-12-31",
                 "review_cycle_years": 6,
@@ -11024,87 +11032,87 @@
             "parameters": [
               {
                 "parameter": "risk_trigger_threshold_percent",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 5.0,
                 "source": ""
               },
               {
                 "parameter": "complexity_index",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.4,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "risk_factor",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "specialist_workers",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 12.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "coordination_factor",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "interface_points",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 8.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "team_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 4.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "control_nodes",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 14.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "cross_operation_interfaces",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 10.0,
                 "source": "kg_strengthen_v2_default"
               }
             ],
-            "dimension_coverage_ratio": 0.4444,
+            "dimension_coverage_ratio": 0.3333,
             "consistency_check": {
               "required": true,
               "status": "pass"
@@ -11116,7 +11124,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_trigger_threshold_percent",
               "value": "5",
-              "unit": "",
+              "unit": "%",
               "source_text": "",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11127,7 +11135,7 @@
               "evidence_type": "numeric_source",
               "parameter": "complexity_index",
               "value": "1.4",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11138,7 +11146,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11149,7 +11157,7 @@
               "evidence_type": "numeric_source",
               "parameter": "specialist_workers",
               "value": "12",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11160,7 +11168,7 @@
               "evidence_type": "numeric_source",
               "parameter": "coordination_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11171,7 +11179,7 @@
               "evidence_type": "numeric_source",
               "parameter": "interface_points",
               "value": "8",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11182,7 +11190,7 @@
               "evidence_type": "numeric_source",
               "parameter": "team_count",
               "value": "4",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11193,7 +11201,7 @@
               "evidence_type": "numeric_source",
               "parameter": "control_nodes",
               "value": "14",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11204,7 +11212,7 @@
               "evidence_type": "numeric_source",
               "parameter": "cross_operation_interfaces",
               "value": "10",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB/T 50326-2017",
               "source_hierarchy": "答疑文件",
@@ -11343,14 +11351,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "bca1869895e0d68750d3629c217734ceccfd35fc",
+          "incremental_fingerprint": "380a9ee0d438356d73d0c913eba450ca62d601c5",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "bca1869895e0d68750d3629c217734ceccfd35fc",
+            "fingerprint": "380a9ee0d438356d73d0c913eba450ca62d601c5",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 3,
             "superseded_count": 0,
@@ -12313,7 +12321,7 @@
             "earthwork"
           ],
           "reference_standard_codes": [
-            "GB 50300-2013",
+            "GB 50300-2024",
             "JGJ 59-2011",
             "GB/T 50326-2017",
             "JTG F80/1-2017"
@@ -12340,7 +12348,7 @@
             "next_review_due": "2019-12-31",
             "records": [
               {
-                "standard_code": "GB 50300-2013",
+                "standard_code": "GB 50300-2024",
                 "tier": "国标",
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
@@ -12349,9 +12357,9 @@
               },
               {
                 "standard_code": "JGJ 59-2011",
-                "tier": "行标",
-                "effective_date": "2011-01-01",
-                "expiry_date": "2019-12-31",
+                "tier": "国标",
+                "effective_date": "2017-01-01",
+                "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
                 "status": "review_required"
               },
@@ -12365,7 +12373,7 @@
               },
               {
                 "standard_code": "JTG F80/1-2017",
-                "tier": "行标",
+                "tier": "国标",
                 "effective_date": "2017-01-01",
                 "expiry_date": "2025-12-31",
                 "review_cycle_years": 8,
@@ -12439,78 +12447,78 @@
             "parameters": [
               {
                 "parameter": "formula_result",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": null,
                 "source": "formula_expression"
               },
               {
                 "parameter": "hazard_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 3.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "risk_factor",
-                "unit": "",
+                "unit": "%",
                 "dimension": "ratio",
-                "canonical_unit": "ratio",
+                "canonical_unit": "%",
                 "si_factor": 1.0,
                 "parsed_value": 1.2,
                 "source": "kg_strengthen_default"
               },
               {
                 "parameter": "defect_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 2.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "sample_count",
-                "unit": "",
-                "dimension": "count",
-                "canonical_unit": "count",
+                "unit": "项",
+                "dimension": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 100.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "measured_strength",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 38.0,
                 "source": "kg_strengthen_v2_default"
               },
               {
                 "parameter": "target_strength",
-                "unit": "",
+                "unit": "项",
                 "dimension": "dimensionless",
-                "canonical_unit": "dimensionless",
+                "canonical_unit": "项",
                 "si_factor": 1.0,
                 "parsed_value": 40.0,
                 "source": "kg_strengthen_v2_default"
               }
             ],
-            "dimension_coverage_ratio": 0.625,
+            "dimension_coverage_ratio": 0.125,
             "consistency_check": {
               "required": true,
               "status": "pass"
@@ -12522,7 +12530,7 @@
               "evidence_type": "numeric_source",
               "parameter": "formula_result",
               "value": "",
-              "unit": "",
+              "unit": "项",
               "source_text": "formula_expression",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -12533,7 +12541,7 @@
               "evidence_type": "numeric_source",
               "parameter": "hazard_count",
               "value": "3",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -12544,7 +12552,7 @@
               "evidence_type": "numeric_source",
               "parameter": "inspection_frequency_per_shift",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -12555,7 +12563,7 @@
               "evidence_type": "numeric_source",
               "parameter": "risk_factor",
               "value": "1.2",
-              "unit": "",
+              "unit": "%",
               "source_text": "kg_strengthen_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -12566,7 +12574,7 @@
               "evidence_type": "numeric_source",
               "parameter": "defect_count",
               "value": "2",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -12577,7 +12585,7 @@
               "evidence_type": "numeric_source",
               "parameter": "sample_count",
               "value": "100",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -12588,7 +12596,7 @@
               "evidence_type": "numeric_source",
               "parameter": "measured_strength",
               "value": "38",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -12599,7 +12607,7 @@
               "evidence_type": "numeric_source",
               "parameter": "target_strength",
               "value": "40",
-              "unit": "",
+              "unit": "项",
               "source_text": "kg_strengthen_v2_default",
               "reference_standard_code": "GB 50300-2013",
               "source_hierarchy": "国标",
@@ -12695,7 +12703,11 @@
             "reviewer_role": "质量员",
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
-            "approval_source": "manual_signoff"
+            "approval_source": "manual_signoff",
+            "approved_at": "2026-02-28T00:30:19",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
+            "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
             "enabled": true,
@@ -12741,12 +12753,12 @@
               {
                 "parameter": "hazard_count",
                 "ifc_property": "Pset_Zhifei.hazard_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "inspection_frequency_per_shift",
                 "ifc_property": "Pset_Zhifei.inspection_frequency_per_shift",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "risk_factor",
@@ -12756,12 +12768,12 @@
               {
                 "parameter": "defect_count",
                 "ifc_property": "Pset_Zhifei.defect_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               },
               {
                 "parameter": "sample_count",
                 "ifc_property": "Pset_Zhifei.sample_count",
-                "dimension": "count"
+                "dimension": "dimensionless"
               }
             ]
           },
@@ -12780,14 +12792,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "ecd316a24d3ece453709caf9c39cc9b3283985a8",
+          "incremental_fingerprint": "49366f8c98766690fa3bb83be303539734526333",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "ecd316a24d3ece453709caf9c39cc9b3283985a8",
+            "fingerprint": "49366f8c98766690fa3bb83be303539734526333",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-27T12:50:23",
+            "checked_at": "2026-02-28T00:30:19",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -12810,7 +12822,7 @@
                 "current_year": 2011,
                 "latest_code": "JGJ 59-2011",
                 "latest_year": 2011,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               },
@@ -12830,7 +12842,7 @@
                 "current_year": 2017,
                 "latest_code": "JTG F80/1-2017",
                 "latest_year": 2017,
-                "tier": "答疑文件",
+                "tier": "国标",
                 "status": "active",
                 "replacement": ""
               }

@@ -4,6 +4,7 @@ import math
 import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 
@@ -35,6 +36,29 @@ DEFAULT_RULE = ProcessRule(("通用",), "综合收尾", 9, ("项目管理人员"
 
 
 class QuantitativeBoQEngine:
+    def __init__(self, calibration_profile: Dict[str, Any] | Path | str | None = None):
+        self.calibration_profile: Dict[str, Any] = {}
+        self.set_calibration_profile(calibration_profile)
+
+    def set_calibration_profile(self, calibration_profile: Dict[str, Any] | Path | str | None) -> None:
+        if calibration_profile in (None, ""):
+            self.calibration_profile = {}
+            return
+        if isinstance(calibration_profile, dict):
+            self.calibration_profile = dict(calibration_profile)
+            return
+        path = Path(calibration_profile).expanduser().resolve()
+        if not path.exists():
+            self.calibration_profile = {}
+            return
+        try:
+            import json
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.calibration_profile = payload if isinstance(payload, dict) else {}
+        except Exception:
+            self.calibration_profile = {}
+
     def _to_float(self, value: Any) -> float | None:
         if value is None:
             return None
@@ -54,10 +78,50 @@ class QuantitativeBoQEngine:
                 return rule
         return DEFAULT_RULE
 
-    def _estimate_duration_days(self, quantity: float | None, rule: ProcessRule) -> int:
+    def _get_calibrated_productivity(self, *, rule: ProcessRule, item_name: str) -> float:
+        profile = self.calibration_profile if isinstance(self.calibration_profile, dict) else {}
+        if not profile:
+            return float(rule.productivity_per_day)
+        proc_muls = profile.get("productivity_multipliers")
+        mul = 1.0
+        if isinstance(proc_muls, dict):
+            mul = float(proc_muls.get(rule.process_name) or 1.0)
+        keyword_boost = profile.get("keyword_multipliers")
+        if isinstance(keyword_boost, dict):
+            name = str(item_name or "")
+            for key, value in keyword_boost.items():
+                token = str(key or "").strip()
+                if token and token in name:
+                    mul *= float(value or 1.0)
+        mul = max(0.5, min(1.5, float(mul)))
+        return max(1.0, float(rule.productivity_per_day) * mul)
+
+    def _get_calibrated_resources(self, *, rule: ProcessRule, item_name: str) -> List[str]:
+        profile = self.calibration_profile if isinstance(self.calibration_profile, dict) else {}
+        base = list(rule.default_resources)
+        overrides = profile.get("resource_overrides")
+        if isinstance(overrides, dict):
+            val = overrides.get(rule.process_name)
+            if isinstance(val, list):
+                out = [str(x).strip() for x in val if str(x).strip()]
+                if out:
+                    return out
+        extra = profile.get("keyword_resource_boost")
+        if isinstance(extra, dict):
+            name = str(item_name or "")
+            for key, val in extra.items():
+                token = str(key or "").strip()
+                if token and token in name and isinstance(val, list):
+                    for item in val:
+                        text = str(item or "").strip()
+                        if text and text not in base:
+                            base.append(text)
+        return base
+
+    def _estimate_duration_days(self, quantity: float | None, productivity_per_day: float) -> int:
         if quantity is None or quantity <= 0:
             return 1
-        return max(1, int(math.ceil(quantity / max(1.0, rule.productivity_per_day))))
+        return max(1, int(math.ceil(quantity / max(1.0, productivity_per_day))))
 
     def build_mapping(self, boq_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         mapping: Dict[str, Dict[str, Any]] = {}
@@ -67,11 +131,12 @@ class QuantitativeBoQEngine:
             name = str(item.get("name") or f"item_{idx}").strip()
             rule = self._pick_rule(name)
             quantity = self._to_float(item.get("quantity"))
-            duration = self._estimate_duration_days(quantity, rule)
+            productivity = self._get_calibrated_productivity(rule=rule, item_name=name)
+            duration = self._estimate_duration_days(quantity, productivity)
 
             resources = [str(r).strip() for r in (item.get("resources") or []) if str(r).strip()]
             if not resources:
-                resources = list(rule.default_resources)
+                resources = self._get_calibrated_resources(rule=rule, item_name=name)
 
             mapping[name] = {
                 "boq_code": item.get("boq_code"),
@@ -80,6 +145,7 @@ class QuantitativeBoQEngine:
                 "process": rule.process_name,
                 "stage": rule.stage,
                 "duration_days": duration,
+                "productivity_per_day": round(float(productivity), 6),
                 "resources": resources,
                 "predecessors": [],
                 "successors": [],

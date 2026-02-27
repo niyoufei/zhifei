@@ -406,12 +406,271 @@
           "is_auto_generated": true,
           "formula_expression": "",
           "formula_variables": []
+        },
+        {
+          "node_id": "AUTO-质量-PARAM-1",
+          "name": "质量自动补全参数节点",
+          "node_type": "EngineeringNode",
+          "object_key": "auto_质量_param",
+          "source_hierarchy": "国标",
+          "qt_tag": [
+            "质量",
+            "auto_generated"
+          ],
+          "keywords": [
+            "质量",
+            "验收",
+            "合格",
+            "缺陷",
+            "工程竣工验收合格移交后",
+            "100%",
+            "如承包人提供经发包人认可的",
+            "合肥市建设工程质量保证金保函",
+            "保证保险",
+            "电子保函等",
+            "发包人将支付至最终审定价款的",
+            "97%",
+            "3%",
+            "如承包人未能提供经发包人认可的",
+            "合肥市",
+            "建设工程质量保证金保函",
+            "电子保",
+            "函等",
+            "hydraulic",
+            "存在招标文件第二章投标人须知第",
+            "1",
+            "4",
+            "3",
+            "项"
+          ],
+          "content": {
+            "action": "核验质量保证金保函与进度款支付比例执行，形成支付条件闭环记录。",
+            "checker": "合同管理员、质量员、造价工程师",
+            "parameter": {
+              "provided_quality_bond_payment_ratio_percent": 97,
+              "bond_retention_ratio_percent": 3,
+              "verification_deadline_hours": 24,
+              "checker_role": "合同管理员"
+            }
+          },
+          "applicable_conditions": {
+            "climate": "常温5-35C",
+            "geology": "一般地质条件"
+          },
+          "resource_requirements": {
+            "inspection_frequency_per_batch": 1,
+            "sampling_frequency_per_100m3": 1,
+            "checker_role": "质量员",
+            "acceptance_pass_rate_target_percent": 95
+          },
+          "safety_level": "medium",
+          "reference_standard": [
+            "GB 50300-2013",
+            "GB 50204-2015",
+            "JGJ 107-2016"
+          ],
+          "is_auto_generated": true,
+          "formula_expression": "",
+          "formula_variables": [],
+          "professional_domain": "hydraulic",
+          "numeric_sources": [
+            {
+              "parameter": "进度款支付比例(提供质量保证金保函)",
+              "value": 97,
+              "unit": "percent",
+              "clause_anchor": "第二章/投标人须知/1.4.3",
+              "source_hierarchy": "国标",
+              "effective_date": "2024-01-01",
+              "evidence_verified": true,
+              "evidence_origin": "tender_clause",
+              "source_file": "答疑文件.doc"
+            },
+            {
+              "parameter": "质量保证金比例(未提供保函)",
+              "value": 3,
+              "unit": "percent",
+              "clause_anchor": "第二章/投标人须知/1.4.4",
+              "source_hierarchy": "国标",
+              "effective_date": "2024-01-01",
+              "evidence_verified": true,
+              "evidence_origin": "tender_clause",
+              "source_file": "答疑文件.doc"
+            }
+          ],
+          "clause_locator": {
+            "enabled": true,
+            "anchor_hash": "AUTO-质量-PARAM-1-anchor-001",
+            "clause_path": "第二章/投标人须知/1.4.3-1.4.4",
+            "anchors": [
+              {
+                "anchor_id": "AUTO-质量-PARAM-1-anchor-001",
+                "clause_path": "第二章/投标人须知/1.4.3-1.4.4",
+                "source_file": "答疑文件.doc"
+              }
+            ]
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "AUTO-质量-PARAM-1-anchor-001",
+              "anchor_type": "clause",
+              "source_file": "答疑文件.doc",
+              "clause_path": "第二章/投标人须知/1.4.3-1.4.4"
+            }
+          ],
+          "standard_validity_timeline": {
+            "effective_date": "2024-01-01",
+            "timeline_status": "active",
+            "source_hierarchy": "国标",
+            "reference_standard": [
+              "GB 50300-2013",
+              "GB 50204-2015",
+              "JGJ 107-2016"
+            ]
+          },
+          "evidence_completeness": {
+            "completeness_ratio": 1.0,
+            "verification_ratio": 1.0,
+            "verification_status": "pass",
+            "status": "pass",
+            "has_clause_anchor": true,
+            "effective_date": "2024-01-01"
+          }
+        },
+        {
+          "node_id": "AUTO-质量-PARAM-2",
+          "name": "质量自动补全参数节点",
+          "node_type": "EngineeringNode",
+          "object_key": "auto_质量_param",
+          "source_hierarchy": "国标",
+          "qt_tag": [
+            "质量",
+            "auto_generated"
+          ],
+          "keywords": [
+            "质量",
+            "验收",
+            "合格",
+            "缺陷",
+            "工程竣工验收合格移交后",
+            "100%",
+            "如承包人提供经发包人认可的",
+            "合肥市建设工程质量保证金保函",
+            "保证保险",
+            "电子保函等",
+            "发包人将支付至最终审定价款的",
+            "97%",
+            "3%",
+            "如承包人未能提供经发包人认可的",
+            "合肥市",
+            "建设工程质量保证金保函",
+            "电子保",
+            "函等",
+            "hydraulic",
+            "存在招标文件第二章投标人须知第",
+            "1",
+            "4",
+            "3",
+            "项"
+          ],
+          "content": {
+            "action": "核验质量保证金保函与进度款支付比例执行，形成支付条件闭环记录。",
+            "checker": "合同管理员、质量员、造价工程师",
+            "parameter": {
+              "provided_quality_bond_payment_ratio_percent": 97,
+              "bond_retention_ratio_percent": 3,
+              "verification_deadline_hours": 24,
+              "checker_role": "合同管理员"
+            }
+          },
+          "applicable_conditions": {
+            "climate": "常温5-35C",
+            "geology": "一般地质条件"
+          },
+          "resource_requirements": {
+            "inspection_frequency_per_batch": 1,
+            "sampling_frequency_per_100m3": 1,
+            "checker_role": "质量员",
+            "acceptance_pass_rate_target_percent": 95
+          },
+          "safety_level": "medium",
+          "reference_standard": [
+            "GB 50300-2013",
+            "GB 50204-2015",
+            "JGJ 107-2016"
+          ],
+          "is_auto_generated": true,
+          "formula_expression": "",
+          "formula_variables": [],
+          "professional_domain": "hydraulic",
+          "numeric_sources": [
+            {
+              "parameter": "进度款支付比例(提供质量保证金保函)",
+              "value": 97,
+              "unit": "percent",
+              "clause_anchor": "第二章/投标人须知/1.4.3",
+              "source_hierarchy": "国标",
+              "effective_date": "2024-01-01",
+              "evidence_verified": true,
+              "evidence_origin": "tender_clause",
+              "source_file": "答疑文件.doc"
+            },
+            {
+              "parameter": "质量保证金比例(未提供保函)",
+              "value": 3,
+              "unit": "percent",
+              "clause_anchor": "第二章/投标人须知/1.4.4",
+              "source_hierarchy": "国标",
+              "effective_date": "2024-01-01",
+              "evidence_verified": true,
+              "evidence_origin": "tender_clause",
+              "source_file": "答疑文件.doc"
+            }
+          ],
+          "clause_locator": {
+            "enabled": true,
+            "anchor_hash": "AUTO-质量-PARAM-2-anchor-001",
+            "clause_path": "第二章/投标人须知/1.4.3-1.4.4",
+            "anchors": [
+              {
+                "anchor_id": "AUTO-质量-PARAM-2-anchor-001",
+                "clause_path": "第二章/投标人须知/1.4.3-1.4.4",
+                "source_file": "答疑文件.doc"
+              }
+            ]
+          },
+          "evidence_anchors": [
+            {
+              "anchor_id": "AUTO-质量-PARAM-2-anchor-001",
+              "anchor_type": "clause",
+              "source_file": "答疑文件.doc",
+              "clause_path": "第二章/投标人须知/1.4.3-1.4.4"
+            }
+          ],
+          "standard_validity_timeline": {
+            "effective_date": "2024-01-01",
+            "timeline_status": "active",
+            "source_hierarchy": "国标",
+            "reference_standard": [
+              "GB 50300-2013",
+              "GB 50204-2015",
+              "JGJ 107-2016"
+            ]
+          },
+          "evidence_completeness": {
+            "completeness_ratio": 1.0,
+            "verification_ratio": 1.0,
+            "verification_status": "pass",
+            "status": "pass",
+            "has_clause_anchor": true,
+            "effective_date": "2024-01-01"
+          }
         }
       ]
     }
   },
   "meta": {
     "is_auto_generated": true,
-    "node_count": 8
+    "node_count": 10,
+    "dual_validation_mode": "reference_standard + formula_replay"
   }
 }

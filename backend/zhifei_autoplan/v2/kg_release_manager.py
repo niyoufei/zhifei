@@ -368,6 +368,107 @@ def compare_release_snapshots(
     }
 
 
+def list_release_snapshots(
+    *,
+    release_root: Path | str = DEFAULT_RELEASE_ROOT,
+) -> Dict[str, Any]:
+    rel_root = Path(release_root).expanduser().resolve()
+    rel_root.mkdir(parents=True, exist_ok=True)
+    snapshots: List[Dict[str, Any]] = []
+    for child in sorted([p for p in rel_root.iterdir() if p.is_dir()], key=lambda p: p.name):
+        manifest_path = child / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+        snapshots.append(
+            {
+                "release_id": child.name,
+                "created_at": str((manifest or {}).get("created_at") or ""),
+                "files_total": int((manifest or {}).get("files_total") or 0),
+                "approver": str((manifest or {}).get("approver") or ""),
+                "manifest": str(manifest_path),
+            }
+        )
+    snapshots.sort(key=lambda x: str(x.get("release_id") or ""), reverse=True)
+    return {"ok": True, "release_root": str(rel_root), "total": len(snapshots), "snapshots": snapshots}
+
+
+def recommend_release_strategy(
+    *,
+    release_root: Path | str = DEFAULT_RELEASE_ROOT,
+    target_release_id: str,
+    base_release_id: str | None = None,
+    health_thresholds: Dict[str, float] | None = None,
+) -> Dict[str, Any]:
+    listing = list_release_snapshots(release_root=release_root)
+    snapshots = listing.get("snapshots") if isinstance(listing.get("snapshots"), list) else []
+    if not snapshots:
+        return {"ok": False, "error": "no_release_snapshots", "strategy": "hold"}
+    target_id = str(target_release_id or "").strip()
+    if not target_id:
+        return {"ok": False, "error": "target_release_id_missing", "strategy": "hold"}
+    available_ids = [str(x.get("release_id") or "").strip() for x in snapshots if isinstance(x, dict)]
+    if target_id not in available_ids:
+        return {"ok": False, "error": "target_release_not_found", "strategy": "hold", "target_release_id": target_id}
+
+    base_id = str(base_release_id or "").strip()
+    if not base_id:
+        for rid in available_ids:
+            if rid and rid != target_id:
+                base_id = rid
+                break
+    if not base_id:
+        return {
+            "ok": True,
+            "strategy": "canary",
+            "reason": "target_is_first_snapshot",
+            "target_release_id": target_id,
+            "base_release_id": "",
+        }
+    if base_id == target_id:
+        return {
+            "ok": True,
+            "strategy": "hold",
+            "reason": "base_equals_target",
+            "target_release_id": target_id,
+            "base_release_id": base_id,
+        }
+
+    compare = compare_release_snapshots(
+        release_root=release_root,
+        base_release_id=base_id,
+        target_release_id=target_id,
+        health_thresholds=health_thresholds,
+    )
+    health_gate = compare.get("health_gate") if isinstance(compare.get("health_gate"), dict) else {}
+    healthy = bool(health_gate.get("healthy"))
+    metrics = health_gate.get("metrics") if isinstance(health_gate.get("metrics"), dict) else {}
+    changed_ratio = float(metrics.get("changed_file_ratio") or 0.0)
+    strategy = "full"
+    reason = "healthy_release"
+    canary_ratio = 1.0
+    if not healthy:
+        strategy = "rollback_recommended"
+        reason = "health_gate_failed"
+        canary_ratio = 0.0
+    elif changed_ratio >= 0.20:
+        strategy = "canary"
+        reason = "large_change_requires_canary"
+        canary_ratio = 0.2
+    return {
+        "ok": True,
+        "strategy": strategy,
+        "reason": reason,
+        "canary_ratio": canary_ratio,
+        "target_release_id": target_id,
+        "base_release_id": base_id,
+        "comparison": compare,
+    }
+
+
 def _state_path(release_root: Path | str = DEFAULT_RELEASE_ROOT) -> Path:
     rel_root = Path(release_root).expanduser().resolve()
     rel_root.mkdir(parents=True, exist_ok=True)

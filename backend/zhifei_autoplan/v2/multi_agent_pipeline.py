@@ -36,10 +36,24 @@ from backend.zhifei_autoplan.v2.retrieval_weight_trainer import (
     train_retrieval_weight_profile,
 )
 from backend.zhifei_autoplan.v2.cross_discipline_solver import solve_cross_discipline_constraints
-from backend.zhifei_autoplan.v2.kg_release_manager import approve_auto_generated_nodes, create_release_snapshot
+from backend.zhifei_autoplan.v2.kg_release_manager import (
+    approve_auto_generated_nodes,
+    create_release_snapshot,
+    recommend_release_strategy,
+)
+from backend.zhifei_autoplan.v2.runtime_optimization import (
+    build_hit_rate_dashboard,
+    build_missing_enrichment_draft,
+    build_tactical_effects,
+    compare_ab_variants,
+    write_hit_rate_dashboard,
+)
 
 DEFAULT_PIPELINE_OUTPUT = Path("build/v2_multi_agent_output.json")
 DEFAULT_MISSING_REPORT = Path("build/Missing_Knowledge_Report.md")
+DEFAULT_HIT_RATE_DASHBOARD_JSON = Path("build/Hit_Rate_Dashboard.json")
+DEFAULT_HIT_RATE_DASHBOARD_MD = Path("build/Hit_Rate_Dashboard.md")
+DEFAULT_ENRICHMENT_DRAFT_JSON = Path("build/Auto_KG_Enrichment_Draft.json")
 FORMULA_REQUIRED_DIMENSIONS = {"进度", "重难点"}
 FORMULA_HINT_KEYWORDS = ("公式", "计算", "推算", "时长", "温控", "工期", "产能", "动力学")
 
@@ -709,6 +723,91 @@ class MultiAgentDocPipeline:
         )
         return {"sections": sections, "audit_result": audit_result}
 
+    def _derive_boq_calibration_profile(self, feedback_output_path: Path | str) -> Dict[str, Any]:
+        path = Path(feedback_output_path).expanduser().resolve()
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        nodes = payload.get("nodes")
+        if not isinstance(nodes, dict) or not nodes:
+            return {}
+
+        domain_score_sum: Dict[str, float] = {}
+        domain_score_cnt: Dict[str, int] = {}
+        for row in nodes.values():
+            if not isinstance(row, dict):
+                continue
+            pass_rate = float(row.get("pass_rate") or 0.0)
+            domains = row.get("domains")
+            if not isinstance(domains, dict):
+                continue
+            for domain in domains.keys():
+                d = str(domain or "").strip().lower()
+                if not d:
+                    continue
+                domain_score_sum[d] = float(domain_score_sum.get(d) or 0.0) + pass_rate
+                domain_score_cnt[d] = int(domain_score_cnt.get(d) or 0) + 1
+
+        if not domain_score_sum:
+            return {}
+        domain_pass_rate = {
+            d: float(domain_score_sum[d]) / max(int(domain_score_cnt.get(d) or 1), 1) for d in domain_score_sum.keys()
+        }
+        domain_to_processes = {
+            "building": ["主体结构", "装饰装修", "围护与建筑构造"],
+            "mep": ["机电安装"],
+            "earthwork": ["土方工程", "基础工程"],
+            "road": ["室外附属", "土方工程"],
+            "bridge": ["主体结构", "基础工程"],
+            "tunnel": ["主体结构", "基础工程"],
+            "hydraulic": ["基础工程", "室外附属"],
+            "general": ["综合收尾"],
+        }
+        process_mul: Dict[str, float] = {}
+        for domain, avg_pass in domain_pass_rate.items():
+            mul = 1.0
+            if avg_pass >= 0.9:
+                mul = 1.08
+            elif avg_pass >= 0.82:
+                mul = 1.03
+            elif avg_pass < 0.55:
+                mul = 0.92
+            elif avg_pass < 0.68:
+                mul = 0.96
+            for process in domain_to_processes.get(domain, []):
+                process_mul[process] = max(process_mul.get(process, 1.0), float(mul))
+
+        if not process_mul:
+            return {}
+        return {
+            "derived_from": str(path),
+            "strategy": "feedback_domain_pass_rate_to_process_productivity",
+            "productivity_multipliers": {k: round(v, 6) for k, v in process_mul.items()},
+        }
+
+    def _run_generation_variant(
+        self,
+        *,
+        index_matrix: Dict[str, Any],
+        quant_index: Dict[str, Any],
+        specialist_plan: Dict[str, Any],
+        strict_evidence_mode: bool,
+    ) -> Dict[str, Any]:
+        base_threshold = float(self.min_gemini_usefulness_score)
+        if strict_evidence_mode:
+            self.min_gemini_usefulness_score = min(95.0, base_threshold + 12.0)
+        try:
+            return self._run_generation_pass(
+                index_matrix=index_matrix,
+                quant_index=quant_index,
+                specialist_plan=specialist_plan,
+            )
+        finally:
+            self.min_gemini_usefulness_score = base_threshold
+
     def _apply_guardrails(self, sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         guarded: List[Dict[str, Any]] = []
 
@@ -1272,12 +1371,22 @@ class MultiAgentDocPipeline:
                 key_values.setdefault("工期", []).append({"value": value, "title": title, "domain": domain})
 
         inconsistencies: List[Dict[str, Any]] = []
+        blocker_keys = {"工期_vs_CPM", "标高", "高程", "坐标", "坐标X", "坐标Y", "关键线路"}
+
+        def _severity_for_key(key: str) -> str:
+            text = str(key or "").strip()
+            if text in blocker_keys:
+                return "blocker"
+            if "conflict" in text.lower() or "冲突" in text:
+                return "major"
+            return "minor"
+
         for key, refs in key_values.items():
             uniq_vals = sorted(
                 {str(r.get("value") or "").strip() for r in refs if str(r.get("value") or "").strip()}
             )
             if len(uniq_vals) > 1:
-                inconsistencies.append({"key": key, "values": uniq_vals, "refs": refs})
+                inconsistencies.append({"key": key, "values": uniq_vals, "refs": refs, "severity": _severity_for_key(key)})
 
         cpm = (quant_index.get("cpm") or {}) if isinstance(quant_index, dict) else {}
         project_duration = int(cpm.get("project_duration_days") or 0)
@@ -1298,6 +1407,7 @@ class MultiAgentDocPipeline:
                             "key": "工期_vs_CPM",
                             "values": [f"sections={min_day}-{max_day}天", f"cpm={project_duration}天"],
                             "refs": duration_refs,
+                            "severity": "blocker",
                         }
                     )
 
@@ -1310,16 +1420,24 @@ class MultiAgentDocPipeline:
             for item in solver.get("conflicts") or []:
                 if not isinstance(item, dict):
                     continue
-                inconsistencies.append(
-                    {
-                        "key": str(item.get("type") or "cross_conflict"),
-                        "values": item.get("values") or [],
-                        "refs": item.get("refs") or [],
-                        "severity": item.get("severity") or "medium",
-                    }
-                )
+                    inconsistencies.append(
+                        {
+                            "key": str(item.get("type") or "cross_conflict"),
+                            "values": item.get("values") or [],
+                            "refs": item.get("refs") or [],
+                            "severity": str(item.get("severity") or "major"),
+                        }
+                    )
 
         hard_fail = bool(inconsistencies or missing_graph_bindings)
+        severity_summary = {"blocker": 0, "major": 0, "minor": 0}
+        for item in inconsistencies:
+            sev = str(item.get("severity") or "minor").strip().lower()
+            if sev not in severity_summary:
+                sev = "minor"
+            severity_summary[sev] += 1
+        if missing_graph_bindings:
+            severity_summary["major"] += len(missing_graph_bindings)
         return {
             "ok": not hard_fail,
             "checked_sections": len(sections),
@@ -1328,6 +1446,7 @@ class MultiAgentDocPipeline:
             "missing_graph_bindings_count": len(missing_graph_bindings),
             "inconsistencies": inconsistencies,
             "inconsistency_count": len(inconsistencies),
+            "inconsistency_severity": severity_summary,
             "cpm_project_duration_days": project_duration,
             "constraint_solver": solver,
         }
@@ -1341,16 +1460,21 @@ class MultiAgentDocPipeline:
                 {
                     "type": "cross_domain_binding_missing",
                     "dimension": str(item.get("title") or "章节"),
+                    "severity": "major",
                     "required_keywords": [str(item.get("domain") or "general")],
                     "query": f"{item.get('domain') or 'general'} {item.get('title') or ''}".strip(),
                     "suggested_parameters": ["绑定图谱逻辑节点(node_id/title/source_path)"],
                 }
             )
         for item in compliance_audit.get("inconsistencies") or []:
+            severity = str(item.get("severity") or "major").strip().lower()
+            if severity not in {"blocker", "major", "minor"}:
+                severity = "major"
             gaps.append(
                 {
                     "type": "cross_domain_inconsistency",
                     "dimension": str(item.get("key") or "跨专业一致性"),
+                    "severity": severity,
                     "required_keywords": [str(x) for x in (item.get("values") or [])[:4]],
                     "query": str(item.get("key") or "consistency_check"),
                     "suggested_parameters": ["统一标高/坐标/工期等跨专业参数并回写"],
@@ -1388,6 +1512,15 @@ class MultiAgentDocPipeline:
             lines.append(
                 f"- Missing Graph Bindings: {int(compliance_audit.get('missing_graph_bindings_count') or 0)}"
             )
+            severity = compliance_audit.get("inconsistency_severity") if isinstance(
+                compliance_audit.get("inconsistency_severity"), dict
+            ) else {}
+            lines.append(
+                f"- Compliance Severity(blocker/major/minor): "
+                f"{int(severity.get('blocker') or 0)}/"
+                f"{int(severity.get('major') or 0)}/"
+                f"{int(severity.get('minor') or 0)}"
+            )
         if isinstance(sentence_evidence_stats, dict):
             lines.append(f"- Sentence Trace Total: {int(sentence_evidence_stats.get('total_sentences') or 0)}")
             lines.append(
@@ -1403,6 +1536,12 @@ class MultiAgentDocPipeline:
             lines.append(f"- Self-Healing Triggered: {bool(self_healing.get('triggered'))}")
             lines.append(f"- Self-Healing Patch Nodes: {int(self_healing.get('patch_nodes') or 0)}")
             lines.append(f"- Self-Healing Used Fallback: {bool(self_healing.get('used_fallback'))}")
+            validation = self_healing.get("validation") if isinstance(self_healing.get("validation"), dict) else {}
+            if validation:
+                lines.append(
+                    f"- Self-Healing Validation OK: {bool(validation.get('ok'))} "
+                    f"(issues={int(validation.get('issues_count') or 0)})"
+                )
             if self_healing.get("patch_file"):
                 lines.append(f"- Self-Healing Patch File: {self_healing.get('patch_file')}")
             if self_healing.get("llm_model"):
@@ -1419,14 +1558,17 @@ class MultiAgentDocPipeline:
         else:
             lines.append("## Gap List")
             lines.append("")
-            lines.append("| # | Gap Type | Dimension | Required Keywords | Suggested Parameters | Search Query |")
-            lines.append("|---|---|---|---|---|---|")
+            lines.append("| # | Severity | Gap Type | Dimension | Required Keywords | Suggested Parameters | Search Query |")
+            lines.append("|---|---|---|---|---|---|---|")
             for idx, gap in enumerate(gaps, start=1):
+                severity = str(gap.get("severity") or "major").strip().lower()
+                if severity not in {"blocker", "major", "minor"}:
+                    severity = "major"
                 keywords = "、".join([str(x) for x in (gap.get("required_keywords") or [])[:8]])
                 hints = "、".join([str(x) for x in (gap.get("suggested_parameters") or [])[:6]])
                 query = str(gap.get("query") or "").replace("|", "\\|")
                 lines.append(
-                    f"| {idx} | {gap.get('type')} | {gap.get('dimension')} | {keywords} | {hints} | `{query}` |"
+                    f"| {idx} | {severity} | {gap.get('type')} | {gap.get('dimension')} | {keywords} | {hints} | `{query}` |"
                 )
             lines.append("")
             lines.append("## KG Enrichment Action")
@@ -1527,6 +1669,7 @@ class MultiAgentDocPipeline:
         )
         built = await healer.build_patch_nodes(gaps)
         nodes = built.get("nodes") or []
+        validation = built.get("validation") if isinstance(built.get("validation"), dict) else {}
         persisted = healer.persist_patch_nodes(graph_root=graph_root, nodes=nodes)
 
         return {
@@ -1538,6 +1681,7 @@ class MultiAgentDocPipeline:
             "patch_nodes": len(nodes),
             "patch_file": persisted.get("saved_at"),
             "merged_node_count": persisted.get("merged_node_count"),
+            "validation": validation,
         }
 
     async def run(
@@ -1577,6 +1721,10 @@ class MultiAgentDocPipeline:
         release_signature: str = "system-sign",
         create_release_freeze: bool = False,
         release_root: Path | str = "build/kg_releases",
+        enable_ab_experiment: bool = True,
+        hit_rate_dashboard_json_path: Path | str = DEFAULT_HIT_RATE_DASHBOARD_JSON,
+        hit_rate_dashboard_md_path: Path | str = DEFAULT_HIT_RATE_DASHBOARD_MD,
+        enrichment_draft_path: Path | str = DEFAULT_ENRICHMENT_DRAFT_JSON,
     ) -> Dict[str, Any]:
         self.region_context = str(region_context or "").strip().upper() or None
         self.bid_date = str(bid_date or "").strip() or None
@@ -1657,6 +1805,10 @@ class MultiAgentDocPipeline:
 
         matrix_result = await build_index_matrix(tender_paths)
         index_matrix = matrix_result["matrix"]
+        boq_calibration_profile: Dict[str, Any] = {}
+        if enable_feedback_learning:
+            boq_calibration_profile = self._derive_boq_calibration_profile(feedback_output_path)
+        self.quant_engine.set_calibration_profile(boq_calibration_profile)
         quant_index = self.quant_engine.build_quantitative_index(boq_payload)
         specialist_plan = self._build_specialist_plan(index_matrix=index_matrix, tender_paths=tender_paths)
 
@@ -1685,6 +1837,25 @@ class MultiAgentDocPipeline:
                 quant_index=ctx.quant_index,
                 specialist_plan=specialist_plan,
             )
+        if bool(self_healing_result.get("triggered")):
+            validation = self_healing_result.get("validation") if isinstance(
+                self_healing_result.get("validation"), dict
+            ) else {}
+            if validation and not bool(validation.get("ok")):
+                final_pass.setdefault("gaps", []).append(
+                    {
+                        "type": "self_healing_validation_failed",
+                        "severity": "major",
+                        "dimension": "自愈补丁",
+                        "required_keywords": ["reference_standard", "formula_replay"],
+                        "query": "self_healing_patch_validation",
+                        "suggested_parameters": [
+                            "修复reference_standard规范号格式",
+                            "修复FormulaNode公式可回放执行",
+                        ],
+                    }
+                )
+                final_pass["intercepted"] = True
 
         benchmark_warning: Dict[str, Any] = {}
         if bool(retrieval_benchmark.get("triggered")) and not bool(retrieval_benchmark.get("ok")):
@@ -1710,6 +1881,57 @@ class MultiAgentDocPipeline:
             sections=final_pass.get("sections") or [],
         )
         sentence_evidence_stats = self._compute_sentence_evidence_stats(sentence_evidence_chain)
+        tactical_effects = build_tactical_effects(final_pass.get("sections") or [])
+
+        ab_experiment_report: Dict[str, Any] = {"enabled": False}
+        if enable_ab_experiment:
+            variant_b = self._run_generation_variant(
+                index_matrix=ctx.index_matrix,
+                quant_index=ctx.quant_index,
+                specialist_plan=specialist_plan,
+                strict_evidence_mode=True,
+            )
+            variant_b_sentence_stats = self._compute_sentence_evidence_stats(
+                self._build_sentence_evidence_chain(
+                    index_matrix=ctx.index_matrix,
+                    sections=variant_b.get("sections") or [],
+                )
+            )
+            ab_experiment_report = compare_ab_variants(
+                {
+                    "sections": final_pass.get("sections") or [],
+                    "graph_audit": final_pass.get("graph_audit") or {},
+                    "compliance_audit": final_pass.get("compliance_audit") or {},
+                    "sentence_evidence_stats": sentence_evidence_stats,
+                },
+                {
+                    "sections": variant_b.get("sections") or [],
+                    "graph_audit": variant_b.get("graph_audit") or {},
+                    "compliance_audit": variant_b.get("compliance_audit") or {},
+                    "sentence_evidence_stats": variant_b_sentence_stats,
+                },
+            )
+
+        hit_rate_dashboard = build_hit_rate_dashboard(
+            index_matrix=ctx.index_matrix,
+            audit_result=(final_pass.get("writing") or {}).get("audit_result") or {},
+            graph_audit=final_pass.get("graph_audit") or {},
+            compliance_audit=final_pass.get("compliance_audit") or {},
+            sentence_evidence_stats=sentence_evidence_stats,
+            sections=final_pass.get("sections") or [],
+            gaps=final_pass.get("gaps") or [],
+            pre_healing_gap_count=len(first_pass.get("gaps") or []),
+            self_healing=self_healing_result,
+        )
+        dashboard_saved = write_hit_rate_dashboard(
+            dashboard=hit_rate_dashboard,
+            out_json=hit_rate_dashboard_json_path,
+            out_md=hit_rate_dashboard_md_path,
+        )
+        enrichment_draft = build_missing_enrichment_draft(
+            gaps=final_pass.get("gaps") or [],
+            output_path=enrichment_draft_path,
+        )
 
         missing_report_saved = self._write_missing_knowledge_report(
             gaps=final_pass.get("gaps") or [],
@@ -1771,6 +1993,7 @@ class MultiAgentDocPipeline:
             }
 
         release_meta: Dict[str, Any] = {"triggered": False}
+        release_strategy: Dict[str, Any] = {"ok": False, "strategy": "hold", "reason": "release_not_triggered"}
         if create_release_freeze and not intercepted:
             try:
                 release_meta = {
@@ -1781,8 +2004,14 @@ class MultiAgentDocPipeline:
                         approver=release_approver,
                     ),
                 }
+                if bool(release_meta.get("ok")):
+                    release_strategy = recommend_release_strategy(
+                        release_root=release_root,
+                        target_release_id=str(release_meta.get("release_id") or ""),
+                    )
             except Exception as exc:
                 release_meta = {"triggered": True, "ok": False, "error": str(exc)}
+                release_strategy = {"ok": False, "strategy": "hold", "reason": str(exc)}
 
         output = {
             "ok": True,
@@ -1796,6 +2025,7 @@ class MultiAgentDocPipeline:
                     "cpm": ctx.quant_index.get("cpm"),
                     "indices": ctx.quant_index.get("indices"),
                     "chapter_structure": ctx.quant_index.get("chapter_structure"),
+                    "boq_calibration_profile": boq_calibration_profile,
                 },
                 "professional_agents": {
                     "status": "done",
@@ -1816,6 +2046,9 @@ class MultiAgentDocPipeline:
                 },
                 "self_healing_agent": {"status": "done" if self_healing_result.get("triggered") else "skipped"},
                 "gemini_context_agent": {"status": "done"},
+                "dashboard_agent": {"status": "done", "result": hit_rate_dashboard},
+                "tactical_agent": {"status": "done", "result": tactical_effects},
+                "ab_test_agent": {"status": "done" if enable_ab_experiment else "skipped", "result": ab_experiment_report},
                 "standard_update_agent": {"status": "done" if standard_update_report.get("triggered") else "skipped"},
                 "project_rule_agent": {"status": "done" if enable_project_rule_extraction else "skipped"},
                 "benchmark_gate_agent": {
@@ -1847,6 +2080,11 @@ class MultiAgentDocPipeline:
             "fail_fast_error": final_pass.get("fail_fast_error"),
             "sentence_evidence_stats": sentence_evidence_stats,
             "sentence_evidence_chain": sentence_evidence_chain,
+            "hit_rate_dashboard": hit_rate_dashboard,
+            "hit_rate_dashboard_saved": dashboard_saved,
+            "tactical_effects": tactical_effects,
+            "ab_experiment": ab_experiment_report,
+            "auto_enrichment_draft": enrichment_draft,
             "gemini_context_packets": self._build_gemini_context_packets(
                 index_matrix=ctx.index_matrix,
                 sections=final_pass.get("sections") or [],
@@ -1861,6 +2099,7 @@ class MultiAgentDocPipeline:
             "docx_output": docx_saved,
             "visual_output": visual_meta,
             "release_snapshot": release_meta,
+            "release_strategy": release_strategy,
             "pre_healing": {
                 "intercepted": bool(first_pass.get("intercepted")),
                 "knowledge_gaps": first_pass.get("gaps") or [],

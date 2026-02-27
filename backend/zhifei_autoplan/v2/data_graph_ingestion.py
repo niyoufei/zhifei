@@ -1971,6 +1971,61 @@ def _extract_evidence_completeness_profile(
     }
 
 
+def _grade_evidence_strength(
+    *,
+    evidence_completeness: Dict[str, Any],
+    source_hierarchy: str,
+    numeric_sources: List[Any],
+    clause_locator: Dict[str, Any],
+) -> Dict[str, Any]:
+    ratio = _safe_float((evidence_completeness or {}).get("completeness_ratio"), 0.0)
+    verification_ratio = _safe_float((evidence_completeness or {}).get("verification_ratio"), 0.0)
+    verification_status = str((evidence_completeness or {}).get("verification_status") or "").strip().lower()
+    source_w = int(SOURCE_HIERARCHY_WEIGHTS.get(str(source_hierarchy or "未知"), 0))
+    numeric_count = len(numeric_sources) if isinstance(numeric_sources, list) else 0
+    has_anchor = bool((evidence_completeness or {}).get("has_clause_anchor"))
+    if not has_anchor and isinstance(clause_locator, dict):
+        anchors = clause_locator.get("anchors")
+        if isinstance(anchors, list):
+            for item in anchors:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("anchor_hash") or "").strip() or str(item.get("clause_ref") or "").strip():
+                    has_anchor = True
+                    break
+
+    score = 0.0
+    score += ratio * 0.45
+    score += verification_ratio * 0.30
+    score += min(1.0, numeric_count / 6.0) * 0.10
+    score += min(1.0, source_w / 5.0) * 0.10
+    score += 0.05 if has_anchor else 0.0
+    if verification_status == "pass":
+        score += 0.05
+    elif verification_status in {"synthetic_only", "warn"}:
+        score -= 0.05
+    score = max(0.0, min(1.0, score))
+
+    if score >= 0.85 and verification_ratio >= 0.75 and has_anchor:
+        grade = "A"
+    elif score >= 0.70 and ratio >= 0.55:
+        grade = "B"
+    elif score >= 0.50:
+        grade = "C"
+    else:
+        grade = "D"
+    return {
+        "enabled": True,
+        "grade": grade,
+        "score": round(score, 6),
+        "completeness_ratio": round(ratio, 6),
+        "verification_ratio": round(verification_ratio, 6),
+        "has_clause_anchor": bool(has_anchor),
+        "source_hierarchy_weight": source_w,
+        "numeric_source_count": int(numeric_count),
+    }
+
+
 def _extract_activation_terms(signal_text: str) -> List[str]:
     text = str(signal_text or "").strip()
     if not text:
@@ -3135,6 +3190,47 @@ def _parse_ifc(path: Path) -> List[ParsedNode]:
                 edge_drafts=edge_drafts,
             )
         )
+
+    domain_distribution = payload.get("domain_distribution") if isinstance(payload.get("domain_distribution"), list) else []
+    for idx, item in enumerate(domain_distribution[:16], start=1):
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("professional_domain") or "").strip()
+        count = int(item.get("count") or 0)
+        if not domain:
+            continue
+        node_id = f"{path.stem}:ifc:domain:{idx}:{domain}"
+        edge_drafts = [
+            ParsedEdgeDraft(
+                from_ref=node_id,
+                to_ref=model_id,
+                edge_type=EDGE_BELONGS_TO,
+                edge_label="ifc_domain_model",
+            )
+        ]
+        nodes.append(
+            _build_parsed_node(
+                path=path,
+                node_id=node_id,
+                title=f"IFC专业语义 {domain}",
+                body=f"专业域: {domain}\n实体命中数: {count}",
+                tags=["ifc", "semantic", domain],
+                keywords=_tokenize(f"ifc {domain} {count}"),
+                payload={"type": "ifc_domain_distribution", "professional_domain": domain, "count": count},
+                node_type="EngineeringNode",
+                object_key=_normalize_alias(f"{path.stem}-ifc-domain-{domain}"),
+                applicable_conditions={},
+                resource_requirements={"entity_hit_count": count},
+                safety_level="unknown",
+                source_hierarchy=source_hierarchy,
+                formula_expression="",
+                formula_variables=[],
+                data_source_type="IFC",
+                spatial_context={"model_file": path.name, "context_type": "ifc_domain", "professional_domain": domain},
+                reference_keys=[node_id, domain],
+                edge_drafts=edge_drafts,
+            )
+        )
     return nodes
 
 
@@ -3215,6 +3311,47 @@ def _parse_rvt(path: Path) -> List[ParsedNode]:
                 data_source_type="RVT",
                 spatial_context={"model_file": path.name, "context_type": "revit_companion"},
                 reference_keys=[node_id, file_name],
+                edge_drafts=edge_drafts,
+            )
+        )
+
+    domain_distribution = payload.get("domain_distribution") if isinstance(payload.get("domain_distribution"), list) else []
+    for idx, item in enumerate(domain_distribution[:16], start=1):
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("professional_domain") or "").strip()
+        count = int(item.get("count") or 0)
+        if not domain:
+            continue
+        node_id = f"{path.stem}:rvt:domain:{idx}:{domain}"
+        edge_drafts = [
+            ParsedEdgeDraft(
+                from_ref=node_id,
+                to_ref=model_id,
+                edge_type=EDGE_BELONGS_TO,
+                edge_label="revit_domain_model",
+            )
+        ]
+        nodes.append(
+            _build_parsed_node(
+                path=path,
+                node_id=node_id,
+                title=f"Revit专业语义 {domain}",
+                body=f"专业域: {domain}\n语义命中: {count}",
+                tags=["revit", "semantic", domain],
+                keywords=_tokenize(f"revit {domain} {count}"),
+                payload={"type": "revit_domain_distribution", "professional_domain": domain, "count": count},
+                node_type="EngineeringNode",
+                object_key=_normalize_alias(f"{path.stem}-rvt-domain-{domain}"),
+                applicable_conditions={},
+                resource_requirements={"semantic_hit_count": count},
+                safety_level="unknown",
+                source_hierarchy=source_hierarchy,
+                formula_expression="",
+                formula_variables=[],
+                data_source_type="RVT",
+                spatial_context={"model_file": path.name, "context_type": "revit_domain", "professional_domain": domain},
+                reference_keys=[node_id, domain],
                 edge_drafts=edge_drafts,
             )
         )
@@ -3956,6 +4093,12 @@ class KnowledgeGraphIndex:
             deduction_counterexample_library = _coerce_dict(payload.get("deduction_counterexample_library"))
             formula_safety_profile = _coerce_dict(payload.get("formula_safety_profile"))
             evidence_completeness = _coerce_dict(payload.get("evidence_completeness"))
+            evidence_strength = _grade_evidence_strength(
+                evidence_completeness=evidence_completeness,
+                source_hierarchy=str(row["source_hierarchy"] or ""),
+                numeric_sources=numeric_sources if isinstance(numeric_sources, list) else [],
+                clause_locator=clause_locator,
+            )
             incremental_fingerprint = str(row["incremental_fingerprint"] or "").strip()
             incremental_update = _safe_json_load(row["incremental_update_json"], {})
             uncertainty_interval = _build_uncertainty_interval(
@@ -3972,24 +4115,41 @@ class KnowledgeGraphIndex:
             )
 
             score = 0.0
-            for tag in norm_tags:
-                if tag in tags_row:
-                    score += 10.0 * float(effective_weights.get("tag_weight") or 1.0)
-            for keyword in norm_keywords:
-                if keyword in keywords_row:
-                    score += 8.0 * float(effective_weights.get("keyword_exact_weight") or 1.0)
-                elif keyword in _normalize_term(title) or keyword in _normalize_term(body):
-                    score += 5.0 * float(effective_weights.get("keyword_fuzzy_weight") or 1.0)
-            if query_tokens:
-                merged = f"{title}\n{body}".lower()
-                score += sum(1.5 for token in query_tokens if token in merged) * float(
-                    effective_weights.get("query_token_weight") or 1.0
-                )
+            title_norm = _normalize_term(title)
+            body_norm = _normalize_term(body)
+            tag_hit_count = sum(1 for tag in norm_tags if tag in tags_row)
+            keyword_exact_hit_count = sum(1 for keyword in norm_keywords if keyword in keywords_row)
+            keyword_fuzzy_hit_count = sum(
+                1
+                for keyword in norm_keywords
+                if keyword not in keywords_row and (keyword in title_norm or keyword in body_norm)
+            )
+            merged = f"{title}\n{body}".lower()
+            query_token_hit_count = sum(1 for token in query_tokens if token in merged) if query_tokens else 0
+
+            tag_contrib = float(tag_hit_count) * 10.0 * float(effective_weights.get("tag_weight") or 1.0)
+            keyword_exact_contrib = (
+                float(keyword_exact_hit_count) * 8.0 * float(effective_weights.get("keyword_exact_weight") or 1.0)
+            )
+            keyword_fuzzy_contrib = (
+                float(keyword_fuzzy_hit_count) * 5.0 * float(effective_weights.get("keyword_fuzzy_weight") or 1.0)
+            )
+            query_token_contrib = (
+                float(query_token_hit_count) * 1.5 * float(effective_weights.get("query_token_weight") or 1.0)
+            )
+
+            score += tag_contrib
+            score += keyword_exact_contrib
+            score += keyword_fuzzy_contrib
+            score += query_token_contrib
+
             row_id = int(row["id"])
+            fts_contrib = 0.0
             if row_id in rank_map:
-                score += max(0.0, 20.0 - min(20.0, abs(rank_map[row_id]) * 4.0)) * float(
+                fts_contrib = max(0.0, 20.0 - min(20.0, abs(rank_map[row_id]) * 4.0)) * float(
                     effective_weights.get("fts_rank_weight") or 1.0
                 )
+                score += fts_contrib
 
             domain_score, domain_matches = _domain_match(
                 professional_domains=norm_domains,
@@ -4009,10 +4169,15 @@ class KnowledgeGraphIndex:
             )
             if norm_domains and not domain_matches and not bool(long_tail_match.get("matched")):
                 continue
+            domain_contrib = 0.0
             if domain_matches:
-                score += domain_score * float(effective_weights.get("domain_weight") or 1.0)
+                domain_contrib = domain_score * float(effective_weights.get("domain_weight") or 1.0)
+                score += domain_contrib
             elif bool(long_tail_match.get("matched")):
-                score += float(long_tail_match.get("score") or 0.0) * float(effective_weights.get("domain_weight") or 1.0)
+                domain_contrib = float(long_tail_match.get("score") or 0.0) * float(
+                    effective_weights.get("domain_weight") or 1.0
+                )
+                score += domain_contrib
 
             gemini_usefulness_score = _estimate_gemini_usefulness(
                 payload=payload,
@@ -4029,9 +4194,10 @@ class KnowledgeGraphIndex:
             )
             if gemini_usefulness_score < min_gemini_score:
                 continue
-            score += min(8.0, gemini_usefulness_score * 0.08) * float(
+            gemini_contrib = min(8.0, gemini_usefulness_score * 0.08) * float(
                 effective_weights.get("gemini_weight_scale") or 1.0
             )
+            score += gemini_contrib
 
             retrieval_quality_score = _safe_float(
                 retrieval_benchmark.get("quality_score") if isinstance(retrieval_benchmark, dict) else 0.0,
@@ -4039,17 +4205,22 @@ class KnowledgeGraphIndex:
             )
             if retrieval_quality_score < min_retrieval_quality:
                 continue
-            score += min(6.0, retrieval_quality_score * 0.06) * float(
+            retrieval_quality_contrib = min(6.0, retrieval_quality_score * 0.06) * float(
                 effective_weights.get("retrieval_quality_weight_scale") or 1.0
             )
+            score += retrieval_quality_contrib
 
             if isinstance(approval_workflow, dict):
                 is_required = bool(approval_workflow.get("required"))
                 wf_status = str(approval_workflow.get("status") or "").strip().lower()
                 if require_approved_auto and is_required and wf_status != "approved":
                     continue
+                approval_contrib = 0.0
                 if wf_status == "approved":
-                    score += 1.5 * float(effective_weights.get("approval_bonus_weight") or 1.0)
+                    approval_contrib = 1.5 * float(effective_weights.get("approval_bonus_weight") or 1.0)
+                    score += approval_contrib
+            else:
+                approval_contrib = 0.0
 
             if isinstance(standard_validity_timeline, dict):
                 status = str(standard_validity_timeline.get("timeline_status") or "").strip().lower()
@@ -4090,7 +4261,10 @@ class KnowledgeGraphIndex:
             )
             if norm_region and region_plugin and not bool(region_plugin_match.get("allow")):
                 continue
-            score += float(region_plugin_match.get("bonus") or 0.0) * float(effective_weights.get("region_weight") or 1.0)
+            region_plugin_contrib = float(region_plugin_match.get("bonus") or 0.0) * float(
+                effective_weights.get("region_weight") or 1.0
+            )
+            score += region_plugin_contrib
 
             if isinstance(process_parameter_pack, dict) and bool(process_parameter_pack.get("enabled")):
                 score += 0.8
@@ -4138,6 +4312,34 @@ class KnowledgeGraphIndex:
                 continue
 
             merged_domain_matches = sorted(set([str(x) for x in (domain_matches or []) + (long_tail_match.get("matches") or []) if str(x)]))
+            score_breakdown = {
+                "tag_contrib": round(tag_contrib, 6),
+                "keyword_exact_contrib": round(keyword_exact_contrib, 6),
+                "keyword_fuzzy_contrib": round(keyword_fuzzy_contrib, 6),
+                "query_token_contrib": round(query_token_contrib, 6),
+                "fts_contrib": round(fts_contrib, 6),
+                "domain_contrib": round(domain_contrib, 6),
+                "gemini_contrib": round(gemini_contrib, 6),
+                "retrieval_quality_contrib": round(retrieval_quality_contrib, 6),
+                "approval_contrib": round(approval_contrib, 6),
+                "region_plugin_contrib": round(region_plugin_contrib, 6),
+            }
+            retrieval_explainability = {
+                "enabled": True,
+                "query_tokens": query_tokens[:20],
+                "matched_query_tokens": [token for token in query_tokens if token in merged][:20],
+                "matched_tags": [tag for tag in norm_tags if tag in tags_row][:20],
+                "matched_keywords_exact": [kw for kw in norm_keywords if kw in keywords_row][:20],
+                "matched_keywords_fuzzy": [
+                    kw for kw in norm_keywords if kw not in keywords_row and (kw in title_norm or kw in body_norm)
+                ][:20],
+                "domain_matches": merged_domain_matches,
+                "long_tail_match": long_tail_match,
+                "query_dimensions": query_dimensions,
+                "timeline_match_state": timeline_match.get("state"),
+                "regional_plugin_reasons": region_plugin_match.get("reasons") if isinstance(region_plugin_match, dict) else [],
+                "score_breakdown": score_breakdown,
+            }
             result_item = {
                 "node_id": row["node_uid"],
                 "title": title,
@@ -4193,11 +4395,13 @@ class KnowledgeGraphIndex:
                 "deduction_counterexample_library": deduction_counterexample_library,
                 "formula_safety_profile": formula_safety_profile,
                 "evidence_completeness": evidence_completeness,
+                "evidence_strength": evidence_strength,
                 "uncertainty_profile": uncertainty_profile,
                 "uncertainty_interval": uncertainty_interval,
                 "incremental_fingerprint": incremental_fingerprint,
                 "incremental_update": incremental_update,
                 "professional_domain_matches": merged_domain_matches,
+                "retrieval_explainability": retrieval_explainability,
                 "gemini_usefulness_score": gemini_usefulness_score,
                 "retrieval_quality_score": retrieval_quality_score,
                 "score": round(score, 4),
@@ -4212,6 +4416,8 @@ class KnowledgeGraphIndex:
                     "timeline_match_state": timeline_match.get("state"),
                     "entity_master_key": entity_master_key,
                     "evidence_completeness_ratio": _safe_float(evidence_completeness.get("completeness_ratio"), 0.0),
+                    "evidence_strength_grade": str(evidence_strength.get("grade") or ""),
+                    "evidence_strength_score": _safe_float(evidence_strength.get("score"), 0.0),
                     "uncertainty_confidence_level": _safe_float(uncertainty_profile.get("confidence_level"), 0.0),
                     "long_tail_specialty_tag": str(long_tail_profile.get("specialty_tag") or ""),
                 },
@@ -4261,6 +4467,15 @@ class KnowledgeGraphIndex:
                 "rule": SOURCE_HIERARCHY_RULE,
                 "before": before,
                 "after": len(results),
+            },
+            "explainability": {
+                "enabled": True,
+                "includes": [
+                    "retrieval_explainability.score_breakdown",
+                    "retrieval_explainability.matched_terms",
+                    "source_provenance",
+                    "evidence_strength",
+                ],
             },
         }
 
