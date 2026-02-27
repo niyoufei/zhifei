@@ -4,6 +4,7 @@ Tests for backend/zhifei_autoplan/exporter.py
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
@@ -13,6 +14,7 @@ from docx import Document
 
 from backend.zhifei_autoplan.exporter import (
     _apply_style,
+    _auto_density_images_for_pages,
     export_autoplan_docx,
     export_autoplan_compare_docx,
     export_autoplan_docx_from_file,
@@ -466,6 +468,67 @@ class TestExportAutoplanDocx:
         doc = Document(str(output_path))
         text = "\n".join(p.text for p in doc.paragraphs)
         assert "章节" in text  # Default title
+
+    def test_auto_density_image_rule_under_200_and_skip_overview(self, temp_dir):
+        output_path = Path(temp_dir) / "auto_density_under_200.docx"
+        data = {
+            "topic": "测试",
+            "style": {
+                "chart_policy": {
+                    "enabled": True,
+                    "mode": "page_density_auto",
+                    "position": "chapter",
+                }
+            },
+            "chapter_pages": {
+                "工程概况": 1,
+                "主要施工方法": 2,
+            },
+            "sections": [
+                {"title": "工程概况", "content": "项目概况章节。"},
+                {"title": "主要施工方法", "content": "控制间距900mm，抽检频次2次/班，风险-控制-验证闭环。"},
+            ],
+        }
+        export_autoplan_docx(data, str(output_path))
+        doc = Document(str(output_path))
+        captions = [p.text for p in doc.paragraphs if re.match(r"^图\d+：", str(p.text or ""))]
+        # <=200页：每页2图；本例仅第二章生效，2页=>4图
+        assert len(captions) >= 4
+        assert all("工程概况" not in c for c in captions)
+        assert any("思维导图" in c for c in captions)
+
+    def test_auto_density_image_rule_over_200(self, temp_dir):
+        output_path = Path(temp_dir) / "auto_density_over_200.docx"
+        data = {
+            "topic": "测试",
+            "style": {
+                "chart_policy": {
+                    "enabled": True,
+                    "mode": "page_density_auto",
+                    "position": "chapter",
+                }
+            },
+            "chapter_pages": {
+                "工程概况": 199,  # 仅用于触发 total_pages > 200
+                "主要施工方法": 4,
+            },
+            "sections": [
+                {"title": "工程概况", "content": "项目概况章节。"},
+                {"title": "主要施工方法", "content": "控制间距900mm，抽检频次2次/班，风险-控制-验证闭环。"},
+            ],
+        }
+        export_autoplan_docx(data, str(output_path))
+        doc = Document(str(output_path))
+        captions = [p.text for p in doc.paragraphs if re.match(r"^图\d+：", str(p.text or ""))]
+        # >200页：每2页2图（等价每页1图）；本例第二章4页=>4图
+        assert len(captions) >= 4
+        assert len(captions) < 8
+
+
+class TestAutoDensityRules:
+    def test_auto_density_images_for_pages(self):
+        assert _auto_density_images_for_pages(3, 150) == 6
+        assert _auto_density_images_for_pages(3, 260) == 3
 
 
 # =============================================================================

@@ -343,7 +343,7 @@ def _resolve_style_for_ui(user_style: dict[str, Any] | None, tender_style: dict[
             "title_size": 16,
             "line_spacing_pt": 22.0,
             "margins_cm": {"top": 2.5, "right": 2.0, "bottom": 2.0, "left": 2.0},
-            "chart_policy": {"enabled": True, "every_n_chapters": 2, "position": "chapter"},
+            "chart_policy": {"enabled": True, "mode": "page_density_auto", "every_n_chapters": 2, "position": "chapter"},
         }
 
 
@@ -442,6 +442,7 @@ def _apply_style_to_session(style: dict[str, Any], *, queue_only: bool = True) -
 
     cp = style.get("chart_policy") if isinstance(style.get("chart_policy"), dict) else {}
     _set("chart_enabled", bool(cp.get("enabled", True)))
+    _set("chart_mode", str(cp.get("mode") or "page_density_auto"))
     try:
         _set("chart_every_n", int(cp.get("every_n_chapters") or 2))
     except Exception:
@@ -738,6 +739,7 @@ def _init_state() -> None:
         "enforce_chapter_pages": False,
         "chapter_start_new_page": False,
         "chart_enabled": True,
+        "chart_mode": "page_density_auto",
         "chart_every_n": 2,
         "chart_position": "chapter",
         "auto_refresh": True,
@@ -1505,7 +1507,7 @@ with st.expander("精细化排版渲染引擎", expanded=True):
         st.checkbox("章节另起新页", key="chapter_start_new_page")
     with p7:
         st.checkbox("启用图表策略", key="chart_enabled")
-        st.number_input("图表频率（每N章）", min_value=1, max_value=10, key="chart_every_n")
+        st.caption("自动策略：总页数<=200时每页2图；>200时每2页2图；“项目概况/工程概况”章节自动排除。")
         st.selectbox("图表位置", options=["chapter", "end"], key="chart_position", format_func=lambda x: "按章节插入" if x == "chapter" else "文末集中")
 
     st.markdown("**页边距（cm）**")
@@ -1630,6 +1632,7 @@ if run_btn:
             "enforce_chapter_pages": bool(st.session_state.get("enforce_chapter_pages")),
             "chart_policy": {
                 "enabled": bool(st.session_state.get("chart_enabled")),
+                "mode": str(st.session_state.get("chart_mode") or "page_density_auto"),
                 "every_n_chapters": int(st.session_state.get("chart_every_n") or 2),
                 "position": str(st.session_state.get("chart_position") or "chapter"),
             },
@@ -1718,8 +1721,9 @@ if run_btn:
             f"章节并行={mode_params['agent_parallelism']}，方案并行={mode_params['variant_parallelism']}"
         )
         if isinstance(style.get("chart_policy"), dict):
+            style["chart_policy"]["mode"] = "page_density_auto"
             style["chart_policy"]["every_n_chapters"] = int(chart_n)
-        _append_log(f"图表分布频率已自动建议：每{int(chart_n)}章")
+        _append_log("图表策略已启用：<=200页每页2图；>200页每2页2图；项目概况章节不插图。")
         pb.progress(20)
 
         _append_log("步骤 2/6: 解析工程量清单")

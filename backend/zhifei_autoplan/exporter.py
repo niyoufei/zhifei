@@ -4,17 +4,19 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm
 from docx.shared import Pt
 from docx.oxml.ns import qn
+from backend.zhifei_autoplan.media import generate_section_visuals
 from backend.zhifei_autoplan.terminology_guard import load_global_terminology, normalize_text_terminology
 
 
 _AUTOFIX_MARK_RE = re.compile(r"【自动补充】(?P<name>[^\n]{1,80}?)(?:：|:)")
+_OVERVIEW_SECTION_RE = re.compile(r"(工程概况|项目概况)")
 
 
 def _strip_internal_autofix_markers(text: str) -> str:
@@ -326,6 +328,25 @@ def _estimate_content_pages(content: str, chars_per_page: int) -> int:
     return max(1, math.ceil(len(text) / max(1, chars_per_page)))
 
 
+def _is_overview_section(title: str) -> bool:
+    return bool(_OVERVIEW_SECTION_RE.search(str(title or "").strip()))
+
+
+def _auto_density_images_for_pages(chapter_pages: int, total_pages: int) -> int:
+    """
+    Auto image density policy:
+    - total <= 200: 2 images per page
+    - total > 200: 2 images per 2 pages (i.e. 1 image per page)
+    """
+    cp = max(0, int(chapter_pages or 0))
+    tp = max(0, int(total_pages or 0))
+    if cp <= 0:
+        return 0
+    if tp <= 200:
+        return cp * 2
+    return cp
+
+
 def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
     style_raw = data.get("style") or {}
     style_cfg = _normalize_style(style_raw)
@@ -432,8 +453,28 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
     media_all = data.get("media") or []
     chart_policy = style_raw.get("chart_policy") if isinstance(style_raw, dict) and isinstance(style_raw.get("chart_policy"), dict) else {}
     chart_enabled = _to_bool(chart_policy.get("enabled"), True)
+    chart_mode = str(chart_policy.get("mode") or "").strip().lower()
     chart_position = str(chart_policy.get("position") or "end").strip().lower()  # end|chapter
     chart_every_n = max(1, _to_int(chart_policy.get("every_n_chapters"), 2))
+    chart_mode_auto_density = chart_mode in {"page_density_auto", "page_density", "auto_density"}
+    if not chart_enabled:
+        chart_mode_auto_density = False
+
+    # Planned total pages are used for automatic image density policy.
+    def _effective_pages_for_section(title: str, content_doc: str, section_style_cfg: Dict[str, Any]) -> int:
+        t = _extract_chapter_page_target(chapter_pages, title)
+        if t:
+            return int(t)
+        chars_per_page = _estimate_chars_per_page(section_style_cfg)
+        return _estimate_content_pages(content_doc, chars_per_page)
+
+    total_planned_pages = 0
+    for sec in sections:
+        title = str(sec.get("title") or "章节")
+        content = _strip_internal_autofix_markers(sec.get("content") or "")
+        total_planned_pages += _effective_pages_for_section(title, content, style_cfg)
+    total_planned_pages = max(1, int(total_planned_pages))
+
     media_cursor = 0
     media_index = 0
     chapter_media_started = False
@@ -515,9 +556,37 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             if style_cfg.get("enforce_chapter_pages") and estimated_pages < target_pages:
                 for _ in range(target_pages - estimated_pages):
                     doc.add_page_break()
+        else:
+            chars_per_page = _estimate_chars_per_page(section_style_cfg)
+            estimated_pages = _estimate_content_pages(content_doc, chars_per_page)
 
-        # Chapter-level chart insertion policy (best-effort).
-        if media_all and chart_enabled and chart_position in {"chapter", "per_chapter", "by_chapter"}:
+        # Auto density policy: image count follows planned pages and excludes overview chapters.
+        if chart_mode_auto_density and chart_position in {"chapter", "per_chapter", "by_chapter"}:
+            if not _is_overview_section(title):
+                effective_pages = target_pages if target_pages else estimated_pages
+                need_images = _auto_density_images_for_pages(effective_pages, total_planned_pages)
+                if need_images > 0:
+                    if not chapter_media_started:
+                        hmc = doc.add_heading("图表与插图（按页密度自动分布）", level=2)
+                        apply_paragraph(hmc, is_title=True)
+                        chapter_media_started = True
+                    # Generate a small section-specific image pool, then reuse cyclically to meet page density.
+                    pool_size = max(2, min(8, need_images))
+                    section_pool = generate_section_visuals(
+                        title=title,
+                        content=content_doc,
+                        image_count=pool_size,
+                        include_mindmap=True,
+                    )
+                    if section_pool:
+                        for k in range(need_images):
+                            _append_media_item(section_pool[k % len(section_pool)])
+                    elif media_all:
+                        for _ in range(need_images):
+                            _append_media_item(media_all[media_cursor % len(media_all)])
+                            media_cursor += 1
+        # Legacy chapter frequency policy (backward compatibility).
+        elif media_all and chart_enabled and chart_position in {"chapter", "per_chapter", "by_chapter"}:
             if ((idx + 1) % chart_every_n == 0) and media_cursor < len(media_all):
                 if not chapter_media_started:
                     hmc = doc.add_heading("图表与插图（按章节分布）", level=2)
@@ -714,7 +783,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             row[2].text = chs
 
     # Remaining chart/images (default: append at end, or chapter mode leftover).
-    remaining_media = media_all[media_cursor:] if isinstance(media_all, list) else []
+    remaining_media = [] if chart_mode_auto_density else (media_all[media_cursor:] if isinstance(media_all, list) else [])
     if remaining_media:
         doc.add_page_break()
         hm = doc.add_heading("图表与插图", level=1)

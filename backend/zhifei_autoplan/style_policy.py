@@ -18,6 +18,7 @@ DEFAULT_STYLE: Dict[str, Any] = {
     },
     "chart_policy": {
         "enabled": True,
+        "mode": "page_density_auto",
         "every_n_chapters": 2,
         "position": "chapter",
     },
@@ -115,4 +116,3 @@ def resolve_style(
         merged = _merge_dict(merged, normalize_style_input(tender_style))
         src = "tender_override"
     return merged, src
-

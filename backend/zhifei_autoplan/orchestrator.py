@@ -532,12 +532,17 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     # 图表策略：若调用方未设置频率，按章页权重自动建议。
     chart_policy = style.get("chart_policy") if isinstance(style.get("chart_policy"), dict) else {}
-    if "every_n_chapters" not in chart_policy:
-        chart_policy = dict(chart_policy)
-        chart_policy["enabled"] = bool(chart_policy.get("enabled", True))
-        chart_policy["every_n_chapters"] = recommend_chart_every_n(outline, chapter_pages)
-        chart_policy["position"] = chart_policy.get("position") or "chapter"
-        style["chart_policy"] = chart_policy
+    chart_policy = dict(chart_policy or {})
+    chart_policy["enabled"] = bool(chart_policy.get("enabled", True))
+    chart_policy["mode"] = str(chart_policy.get("mode") or "page_density_auto").strip() or "page_density_auto"
+    chart_policy["position"] = chart_policy.get("position") or "chapter"
+    # Backward-compatibility: legacy chapter-frequency mode still works.
+    if chart_policy["mode"] in {"chapter_frequency", "legacy_every_n"}:
+        if "every_n_chapters" not in chart_policy:
+            chart_policy["every_n_chapters"] = recommend_chart_every_n(outline, chapter_pages)
+    else:
+        chart_policy["every_n_chapters"] = int(chart_policy.get("every_n_chapters") or 2)
+    style["chart_policy"] = chart_policy
     if total_pages_limit:
         tender_globals.append(f"总页数不超过{total_pages_limit}页。")
     if style_source == "tender_override":

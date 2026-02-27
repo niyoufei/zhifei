@@ -196,3 +196,29 @@ class TestMediaDir:
         from backend.zhifei_autoplan.media import MEDIA_DIR
         
         assert isinstance(MEDIA_DIR, Path)
+
+
+class TestGenerateSectionVisuals:
+    """Tests for section-level colorful visual generation."""
+
+    def test_generate_section_visuals_basic(self, tmp_path):
+        from backend.zhifei_autoplan import media
+
+        original_media_dir = media.MEDIA_DIR
+        media.MEDIA_DIR = tmp_path
+        try:
+            rows = media.generate_section_visuals(
+                title="主要施工方法",
+                content="控制间距900mm，抽检频次2次/班，风险-控制-验证闭环。",
+                image_count=3,
+                include_mindmap=True,
+            )
+            assert isinstance(rows, list)
+            assert len(rows) == 3
+            assert any("思维导图" in str(x.get("caption") or "") for x in rows)
+            for item in rows:
+                p = Path(str(item.get("path") or ""))
+                assert p.exists()
+                assert p.suffix.lower() == ".png"
+        finally:
+            media.MEDIA_DIR = original_media_dir

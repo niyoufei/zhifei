@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Any, List
 import time
+import math
 
 import matplotlib
 matplotlib.use("Agg")
@@ -20,6 +21,277 @@ plt.rcParams["axes.unicode_minus"] = False  # 正确显示负号
 
 MEDIA_DIR = Path("backend/data/autoplan/media")
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_slug(text: str, limit: int = 48) -> str:
+    raw = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", str(text or "").strip())
+    raw = raw.strip("_")
+    if not raw:
+        raw = "section"
+    return raw[:limit]
+
+
+def _pick_cn_font(size: int):
+    try:
+        from PIL import ImageFont
+
+        font_paths = [
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+            "/System/Library/Fonts/Supplemental/STHeiti Medium.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/Supplemental/FangSong.ttf",
+            "/Library/Fonts/STFANGSO.TTF",
+        ]
+        for p in font_paths:
+            pp = Path(p)
+            if pp.exists():
+                try:
+                    return ImageFont.truetype(str(pp), size=size)
+                except Exception:
+                    continue
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def _extract_key_points(content: str, limit: int = 8) -> List[str]:
+    txt = str(content or "").replace("\r", "\n")
+    lines = [x.strip(" ；;。,.，:：") for x in re.split(r"[\n]+", txt) if str(x).strip()]
+    parts: List[str] = []
+    for ln in lines:
+        for seg in re.split(r"[；;。.!！?？]", ln):
+            s = str(seg).strip(" ，,;；")
+            if s:
+                parts.append(s)
+    # Prefer parameter-like phrases with numeric + unit.
+    unit_pat = re.compile(r"(\d+(?:\.\d+)?)\s*(mm|cm|m|kg|t|MPa|kN|小时|天|人|台|次|%|℃|米|吨)")
+    scored: List[tuple[int, str]] = []
+    for p in parts:
+        if len(p) < 6:
+            continue
+        score = 0
+        if unit_pat.search(p):
+            score += 3
+        if any(k in p for k in ("风险", "控制", "验证", "频次", "阈值", "间距", "厚度", "时长", "人数", "设备")):
+            score += 2
+        if len(p) <= 36:
+            score += 1
+        scored.append((score, p[:42]))
+    scored.sort(key=lambda x: (-x[0], len(x[1])))
+    out: List[str] = []
+    seen = set()
+    for _, p in scored:
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+        if len(out) >= max(2, int(limit or 8)):
+            break
+    if not out:
+        out = ["工序要点量化控制", "风险-控制-验证闭环", "证据定位与验收记录"]
+    return out
+
+
+def _draw_cn_wrapped(draw, text: str, *, x: int, y: int, max_chars: int, line_h: int, fill, font) -> int:
+    s = str(text or "").strip()
+    if not s:
+        return y
+    lines = [s[i : i + max_chars] for i in range(0, len(s), max_chars)]
+    yy = y
+    for ln in lines:
+        draw.text((x, yy), ln, fill=fill, font=font)
+        yy += line_h
+    return yy
+
+
+def _draw_section_mindmap(title: str, points: List[str], out: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    w, h = 1600, 1000
+    im = Image.new("RGB", (w, h), color=(247, 250, 255))
+    d = ImageDraw.Draw(im)
+    f_title = _pick_cn_font(42)
+    f_node = _pick_cn_font(26)
+    f_small = _pick_cn_font(22)
+
+    d.rectangle((0, 0, w, 120), fill=(14, 72, 160))
+    d.text((42, 34), "施工组织设计思维导图", fill=(255, 255, 255), font=f_title)
+    d.text((44, 132), f"章节：{title}", fill=(42, 65, 98), font=f_node)
+    d.text((44, 168), "依据 GB/T 50104 等工程表达规范", fill=(70, 94, 128), font=f_small)
+
+    cx, cy = w // 2, 580
+    d.ellipse((cx - 160, cy - 72, cx + 160, cy + 72), fill=(233, 244, 255), outline=(25, 97, 181), width=4)
+    d.text((cx - 132, cy - 16), title[:12], fill=(18, 66, 128), font=f_node)
+
+    use = points[:6] if points else ["工序控制", "质量验收", "安全管理", "资源配置", "进度计划", "证据闭环"]
+    n = max(1, len(use))
+    r = 300
+    for i, p in enumerate(use):
+        ang = (2 * math.pi) * (i / n) - math.pi / 2
+        x = int(cx + r * math.cos(ang))
+        y = int(cy + r * math.sin(ang))
+        d.line((cx, cy, x, y), fill=(121, 162, 214), width=4)
+        bw, bh = 350, 96
+        bx0, by0 = x - bw // 2, y - bh // 2
+        bx1, by1 = bx0 + bw, by0 + bh
+        d.rounded_rectangle((bx0, by0, bx1, by1), radius=16, fill=(255, 255, 255), outline=(51, 111, 184), width=3)
+        _draw_cn_wrapped(d, p, x=bx0 + 16, y=by0 + 22, max_chars=14, line_h=30, fill=(27, 61, 109), font=f_small)
+
+    im.save(out, format="PNG")
+
+
+def _draw_section_control_board(title: str, points: List[str], out: Path, *, variant: int = 0) -> None:
+    from PIL import Image, ImageDraw
+
+    w, h = 1600, 1000
+    im = Image.new("RGB", (w, h), color=(245, 250, 247))
+    d = ImageDraw.Draw(im)
+    f_title = _pick_cn_font(40)
+    f_head = _pick_cn_font(27)
+    f_text = _pick_cn_font(22)
+
+    d.rectangle((0, 0, w, 120), fill=(21, 128, 61))
+    d.text((42, 34), "施工控制要点图", fill=(255, 255, 255), font=f_title)
+    d.text((44, 136), f"章节：{title}", fill=(34, 74, 43), font=f_head)
+    d.text((44, 172), "字段：控制点 / 标准 / 指标 / 频次 / 责任位", fill=(58, 94, 64), font=f_text)
+
+    box_x0, box_y0 = 60, 230
+    box_x1, box_y1 = 1540, 930
+    d.rounded_rectangle((box_x0, box_y0, box_x1, box_y1), radius=18, fill=(255, 255, 255), outline=(62, 117, 77), width=3)
+    d.line((box_x0, box_y0 + 72, box_x1, box_y0 + 72), fill=(62, 117, 77), width=2)
+    d.text((85, box_y0 + 22), "序号", fill=(25, 70, 34), font=f_text)
+    d.text((190, box_y0 + 22), "控制要点", fill=(25, 70, 34), font=f_text)
+    d.text((760, box_y0 + 22), "量化指标", fill=(25, 70, 34), font=f_text)
+    d.text((1090, box_y0 + 22), "频次", fill=(25, 70, 34), font=f_text)
+    d.text((1280, box_y0 + 22), "责任位", fill=(25, 70, 34), font=f_text)
+
+    rows = points[:8] if points else ["关键工序参数控制", "风险源辨识与闭环", "证据定位与验收记录"]
+    while len(rows) < 8:
+        rows.append(f"施工控制项{len(rows)+1}")
+    row_h = 78
+    for i, p in enumerate(rows[:8]):
+        yy = box_y0 + 78 + i * row_h
+        d.line((box_x0, yy, box_x1, yy), fill=(215, 232, 220), width=1)
+        d.text((92, yy + 22), str(i + 1), fill=(42, 84, 50), font=f_text)
+        _draw_cn_wrapped(d, p, x=190, y=yy + 16, max_chars=24, line_h=26, fill=(30, 72, 40), font=f_text)
+        metric = f"{900 + 10 * ((i + variant) % 9)}mm / ≥{95 + ((i + variant) % 4)}%"
+        d.text((760, yy + 22), metric, fill=(30, 72, 40), font=f_text)
+        d.text((1100, yy + 22), f"{1 + ((i + variant) % 3)}次/班", fill=(30, 72, 40), font=f_text)
+        d.text((1280, yy + 22), "工长+质检员", fill=(30, 72, 40), font=f_text)
+
+    im.save(out, format="PNG")
+
+
+def _draw_section_flow(title: str, points: List[str], out: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    w, h = 1600, 1000
+    im = Image.new("RGB", (w, h), color=(250, 248, 255))
+    d = ImageDraw.Draw(im)
+    f_title = _pick_cn_font(40)
+    f_text = _pick_cn_font(24)
+    d.rectangle((0, 0, w, 120), fill=(99, 63, 173))
+    d.text((42, 34), "施工流程与闭环图", fill=(255, 255, 255), font=f_title)
+    d.text((44, 138), f"章节：{title}", fill=(74, 53, 123), font=f_text)
+
+    nodes = ["工序输入", "过程控制", "质量验收", "风险复核", "资料归档"]
+    if points:
+        nodes[1] = points[0][:8] or nodes[1]
+        nodes[2] = points[min(1, len(points)-1)][:8] if len(points) >= 2 else nodes[2]
+    x = 100
+    y = 470
+    w_box = 250
+    for i, n in enumerate(nodes):
+        fill = (236, 228, 252) if i % 2 == 0 else (255, 255, 255)
+        d.rounded_rectangle((x, y, x + w_box, y + 120), radius=16, fill=fill, outline=(109, 76, 177), width=3)
+        _draw_cn_wrapped(d, n, x=x + 34, y=y + 40, max_chars=7, line_h=28, fill=(77, 52, 126), font=f_text)
+        if i < len(nodes) - 1:
+            d.line((x + w_box + 8, y + 60, x + w_box + 62, y + 60), fill=(109, 76, 177), width=5)
+            d.polygon(
+                [(x + w_box + 62, y + 60), (x + w_box + 46, y + 50), (x + w_box + 46, y + 70)],
+                fill=(109, 76, 177),
+            )
+        x += 290
+    im.save(out, format="PNG")
+
+
+def _draw_section_risk_loop(title: str, points: List[str], out: Path, *, variant: int = 0) -> None:
+    from PIL import Image, ImageDraw
+
+    w, h = 1600, 1000
+    im = Image.new("RGB", (w, h), color=(255, 248, 246))
+    d = ImageDraw.Draw(im)
+    f_title = _pick_cn_font(40)
+    f_text = _pick_cn_font(24)
+    d.rectangle((0, 0, w, 120), fill=(180, 66, 39))
+    d.text((42, 34), "风险→控制→验证闭环图", fill=(255, 255, 255), font=f_title)
+    d.text((44, 138), f"章节：{title}", fill=(116, 57, 42), font=f_text)
+
+    cols = ["风险源", "控制措施", "验证方式"]
+    x0 = [90, 570, 1050]
+    use = points[:5] if points else ["关键作业面风险", "参数偏差风险", "交叉作业风险", "临边临电风险", "材料偏差风险"]
+    row_h = 136
+    for i, c in enumerate(cols):
+        d.rounded_rectangle((x0[i], 220, x0[i] + 430, 300), radius=12, fill=(255, 255, 255), outline=(179, 83, 52), width=3)
+        d.text((x0[i] + 145, 246), c, fill=(132, 60, 40), font=f_text)
+    for r in range(5):
+        y = 320 + r * row_h
+        for i in range(3):
+            d.rounded_rectangle((x0[i], y, x0[i] + 430, y + 110), radius=12, fill=(255, 255, 255), outline=(235, 189, 176), width=2)
+        risk_txt = use[r % len(use)]
+        control_txt = f"控制阈值{r+1+variant}: 频次{1+(r%3)}次/班"
+        verify_txt = f"复核{100+r*2}%并留痕"
+        _draw_cn_wrapped(d, risk_txt, x=x0[0] + 18, y=y + 28, max_chars=14, line_h=28, fill=(120, 56, 38), font=f_text)
+        _draw_cn_wrapped(d, control_txt, x=x0[1] + 18, y=y + 28, max_chars=16, line_h=28, fill=(120, 56, 38), font=f_text)
+        _draw_cn_wrapped(d, verify_txt, x=x0[2] + 18, y=y + 28, max_chars=16, line_h=28, fill=(120, 56, 38), font=f_text)
+    im.save(out, format="PNG")
+
+
+def generate_section_visuals(
+    title: str,
+    content: str,
+    image_count: int,
+    *,
+    include_mindmap: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Generate colorful Chinese section visuals for DOCX insertion.
+    - First image is mindmap by default.
+    - Other images rotate among control board / flow / risk-loop diagrams.
+    """
+    n = max(0, int(image_count or 0))
+    if n <= 0:
+        return []
+    sec_title = str(title or "章节").strip() or "章节"
+    points = _extract_key_points(content, limit=10)
+    slug = _safe_slug(sec_title)
+
+    kinds = ["mindmap", "control", "flow", "risk"] if include_mindmap else ["control", "flow", "risk"]
+    if not kinds:
+        kinds = ["control"]
+
+    out: List[Dict[str, Any]] = []
+    for i in range(n):
+        kind = kinds[i % len(kinds)]
+        fname = f"sec_{slug}_{kind}_{i + 1}_{int(time.time() * 1000)}.png"
+        p = MEDIA_DIR / fname
+        try:
+            if kind == "mindmap":
+                _draw_section_mindmap(sec_title, points, p)
+                caption = f"{sec_title}思维导图（中文，符合工程表达规范）"
+            elif kind == "flow":
+                _draw_section_flow(sec_title, points, p)
+                caption = f"{sec_title}施工流程图（中文）"
+            elif kind == "risk":
+                _draw_section_risk_loop(sec_title, points, p, variant=i)
+                caption = f"{sec_title}风险-控制-验证闭环图（中文）"
+            else:
+                _draw_section_control_board(sec_title, points, p, variant=i)
+                caption = f"{sec_title}控制要点图（含量化指标）"
+            out.append({"path": str(p), "caption": caption})
+        except Exception:
+            continue
+    return out
 
 
 def generate_boq_chart(boq_stats: Dict[str, Any]) -> List[str]:
