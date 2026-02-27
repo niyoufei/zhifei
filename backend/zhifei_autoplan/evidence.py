@@ -7,9 +7,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Any, List, Iterable
 
+_TEXT_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]+")
+
 
 def _tokenize_query(query: str) -> list[str]:
-    tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]+", query or "")
+    tokens = _TEXT_TOKEN_RE.findall(query or "")
     uniq: list[str] = []
     seen = set()
     for t in tokens:
@@ -43,6 +45,30 @@ def _load_extract_text(extract_path: str, mtime_ns: int) -> str:
     if not p.exists() or not p.is_file():
         return ""
     return p.read_text(encoding="utf-8", errors="ignore")
+
+
+@lru_cache(maxsize=128)
+def _load_extract_token_offsets(extract_path: str, mtime_ns: int) -> dict[str, int]:
+    """
+    Build per-document token -> first_offset index.
+    This avoids scanning full text for each query token repeatedly.
+    """
+    text = _load_extract_text(extract_path, mtime_ns)
+    if not text:
+        return {}
+    offsets: dict[str, int] = {}
+    # Guard memory growth on super-large files.
+    token_cap = 120_000
+    for m in _TEXT_TOKEN_RE.finditer(text):
+        tok = m.group(0).strip()
+        if len(tok) < 2:
+            continue
+        key = tok.lower()
+        if key not in offsets:
+            offsets[key] = int(m.start())
+            if len(offsets) >= token_cap:
+                break
+    return offsets
 
 
 def format_hit_locator(hit: Dict[str, Any]) -> str:
@@ -123,21 +149,29 @@ def search_ingested_docs(
         text = _load_extract_text(str(p), p_mtime_ns)
         if not text:
             continue
-        lower = text.lower()
+        offsets = _load_extract_token_offsets(str(p), p_mtime_ns)
+        if not offsets:
+            continue
+        lower_text = ""
         for tok in uniq:
-            if tok.lower() not in lower:
-                continue
-            m = re.search(re.escape(tok), text, flags=re.IGNORECASE)
-            if not m:
-                continue
-            start = max(0, m.start() - 80)
-            end = min(len(text), m.end() + 160)
+            m_start = offsets.get(tok.lower())
+            if m_start is None:
+                # Chinese continuous text may be indexed as long phrase tokens;
+                # fallback to direct substring search to keep recall.
+                if not lower_text:
+                    lower_text = text.lower()
+                idx = lower_text.find(tok.lower())
+                if idx < 0:
+                    continue
+                m_start = int(idx)
+            start = max(0, int(m_start) - 80)
+            end = min(len(text), int(m_start) + len(tok) + 160)
             snippet = text[start:end].replace("\n", " ").replace("\f", " ")
             page = None
             try:
                 # Page boundary is stored as form-feed in extract text.
                 if "\f" in text:
-                    page = text[: m.start()].count("\f") + 1
+                    page = text[: int(m_start)].count("\f") + 1
             except Exception:
                 page = None
             hits.append(
@@ -145,13 +179,14 @@ def search_ingested_docs(
                     "filename": rec.get("filename"),
                     "sha256": rec.get("sha256"),
                     "extract_saved_as": str(p),
-                    "offset": m.start(),
+                    "offset": int(m_start),
                     "page": page,
                     "snippet": snippet,
                 }
             )
             if len(hits) >= limit:
                 return hits
+            break
     return hits
 
 

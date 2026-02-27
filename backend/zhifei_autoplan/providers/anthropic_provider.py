@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, Any
 import anthropic
 
@@ -14,10 +15,15 @@ class AnthropicProvider(BaseProvider):
         self.model = model
 
     async def complete(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        msg = self.client.messages.create(
-            model=self.model,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = msg.content[0].text if msg and msg.content else ""
-        return {"provider": self.name, "model": self.model, "text": text}
+        timeout_sec = float(kwargs.get("timeout_sec", kwargs.get("timeout", 180)))
+
+        def _call() -> Dict[str, Any]:
+            msg = self.client.messages.create(
+                model=self.model,
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = msg.content[0].text if msg and msg.content else ""
+            return {"provider": self.name, "model": self.model, "text": text}
+
+        return await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout_sec)

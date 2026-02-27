@@ -17,6 +17,7 @@ _NUMERIC_UNIT_RE = re.compile(
 )
 _ASCII_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{1,}")
 _PROJECT_KG_GLOB = "ZF-KG-*.json"
+_PACK_SIG_LAST: str | None = None
 _ZF_ALIAS_MAP: Dict[str, List[str]] = {
     "housing": ["房建", "建筑工程", "主体结构"],
     "hospital": ["医院", "医疗", "医疗建筑"],
@@ -331,8 +332,14 @@ def _graph_display_name(filename: str, obj: Any) -> str:
     return Path(filename).stem
 
 
-@lru_cache(maxsize=1)
-def _load_domain_map() -> Dict[str, Any]:
+def _safe_mtime_ns(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except Exception:
+        return 0
+
+
+def _domain_map_signature() -> str:
     path: Path | None = None
     try:
         path = kg_loader.get_domain_map_path()
@@ -340,7 +347,18 @@ def _load_domain_map() -> Dict[str, Any]:
         fallback = Path("backend/SuperKG-DOMAIN-MAP.json")
         if fallback.exists():
             path = fallback
-    if not path or not path.exists():
+    if not path:
+        return "none"
+    return f"{path}:{_safe_mtime_ns(path)}"
+
+
+@lru_cache(maxsize=8)
+def _load_domain_map_cached(signature: str) -> Dict[str, Any]:
+    path_str = str(signature or "").split(":", 1)[0]
+    if not path_str:
+        return {"knowledge_graph_library": []}
+    path = Path(path_str)
+    if not path.exists():
         return {"knowledge_graph_library": []}
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -348,8 +366,46 @@ def _load_domain_map() -> Dict[str, Any]:
         return {"knowledge_graph_library": []}
 
 
-@lru_cache(maxsize=1)
-def _load_pack_index() -> Dict[str, Dict[str, Any]]:
+def _load_domain_map() -> Dict[str, Any]:
+    return _load_domain_map_cached(_domain_map_signature())
+
+
+def _pack_index_signature() -> str:
+    parts: List[str] = []
+    cfg_path = getattr(kg_loader, "CONFIG_PATH", None)
+    if isinstance(cfg_path, Path):
+        parts.append(f"cfg:{cfg_path}:{_safe_mtime_ns(cfg_path)}")
+    try:
+        cfg = kg_loader.load_kg_config()
+        for p in kg_loader.get_base_pack_paths(cfg):
+            parts.append(f"bp:{p}:{_safe_mtime_ns(p)}")
+    except Exception:
+        for p in [
+            Path("backend/Universal_Base_Pack.json"),
+            Path("backend/Civil_Basic_Pack.json"),
+            Path("backend/Transport_Infra_Pack.json"),
+            Path("backend/Energy_Industrial_Pack.json"),
+            Path("backend/Risk_Specialist_Pack.json"),
+            Path("backend/Special_Medical_Pack.json"),
+        ]:
+            parts.append(f"bp:{p}:{_safe_mtime_ns(p)}")
+    for root in _iter_project_kg_roots():
+        parts.append(f"root:{root}:{_safe_mtime_ns(root)}")
+        count = 0
+        latest = 0
+        for fp in root.rglob(_PROJECT_KG_GLOB):
+            if not fp.is_file():
+                continue
+            count += 1
+            mt = _safe_mtime_ns(fp)
+            if mt > latest:
+                latest = mt
+        parts.append(f"kg:{root}:{count}:{latest}")
+    return "|".join(parts)
+
+
+@lru_cache(maxsize=8)
+def _load_pack_index_cached(signature: str) -> Dict[str, Dict[str, Any]]:
     cfg: Dict[str, Any] | None = None
     try:
         cfg = kg_loader.load_kg_config()
@@ -430,6 +486,33 @@ def _load_pack_index() -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def _load_pack_index() -> Dict[str, Dict[str, Any]]:
+    global _PACK_SIG_LAST
+    sig = _pack_index_signature()
+    idx = _load_pack_index_cached(sig)
+    if _PACK_SIG_LAST != sig:
+        # Pack changes invalidate per-graph extracted-doc cache.
+        _docs_for_graph_file.cache_clear()
+        _PACK_SIG_LAST = sig
+    return idx
+
+
+def _clear_domain_map_cache() -> None:
+    _load_domain_map_cached.cache_clear()
+
+
+def _clear_pack_index_cache() -> None:
+    global _PACK_SIG_LAST
+    _load_pack_index_cached.cache_clear()
+    _docs_for_graph_file.cache_clear()
+    _PACK_SIG_LAST = None
+
+
+# Backward-compatible cache control hooks used in tests/tools.
+setattr(_load_domain_map, "cache_clear", _clear_domain_map_cache)
+setattr(_load_pack_index, "cache_clear", _clear_pack_index_cache)
+
+
 def _extract_graph_docs(
     obj: Any,
     *,
@@ -489,8 +572,11 @@ def _extract_graph_docs(
     return docs
 
 
-@lru_cache(maxsize=256)
-def _docs_for_graph_file(graph_file: str, graph_name: str) -> List[Dict[str, Any]]:
+@lru_cache(maxsize=512)
+def _docs_for_graph_file(graph_file: str, graph_name: str, pack_sig: str = "") -> List[Dict[str, Any]]:
+    # `pack_sig` is part of cache key to force refresh when graph pack changes.
+    # Actual source still goes through _load_pack_index() so monkeypatch/tests keep working.
+    _ = pack_sig
     meta = _load_pack_index().get(graph_file) or {}
     content = meta.get("content")
     if content is None:
@@ -811,6 +897,7 @@ def search_dispatch_graphs(
     top_k: int = 8,
     allowed_domains: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
+    pack_sig = _pack_index_signature()
     tokens = _tokenize(query)
     if not tokens:
         return []
@@ -824,7 +911,7 @@ def search_dispatch_graphs(
         graph_domains = _normalize_domain_keys(g.get("domain_tags") or [])
         if normalized_allowed_domains and graph_domains and not _domains_overlap(graph_domains, normalized_allowed_domains):
             continue
-        docs = _docs_for_graph_file(fn, gn)
+        docs = _docs_for_graph_file(fn, gn, pack_sig)
         if not docs:
             continue
         g_keywords = [str(x).strip() for x in (g.get("keywords") or []) if str(x).strip()]

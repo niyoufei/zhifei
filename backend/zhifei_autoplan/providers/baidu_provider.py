@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, Any
 import requests
 
@@ -24,10 +25,16 @@ class BaiduProvider(BaseProvider):
         return resp.json().get("access_token", "")
 
     async def complete(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        token = self._get_token()
-        url = f"https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/{self.model}?access_token={token}"
-        payload = {"messages": [{"role": "user", "content": prompt}]}
-        resp = requests.post(url, json=payload, timeout=60)
-        data = resp.json()
-        text = data.get("result", "")
-        return {"provider": self.name, "model": self.model, "text": text}
+        timeout_sec = float(kwargs.get("timeout_sec", kwargs.get("timeout", 180)))
+        request_timeout = min(60.0, timeout_sec)
+
+        def _call() -> Dict[str, Any]:
+            token = self._get_token()
+            url = f"https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat/{self.model}?access_token={token}"
+            payload = {"messages": [{"role": "user", "content": prompt}]}
+            resp = requests.post(url, json=payload, timeout=request_timeout)
+            data = resp.json()
+            text = data.get("result", "")
+            return {"provider": self.name, "model": self.model, "text": text}
+
+        return await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout_sec)

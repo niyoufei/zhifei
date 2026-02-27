@@ -456,6 +456,8 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
     chart_mode = str(chart_policy.get("mode") or "").strip().lower()
     chart_position = str(chart_policy.get("position") or "end").strip().lower()  # end|chapter
     chart_every_n = max(1, _to_int(chart_policy.get("every_n_chapters"), 2))
+    max_images_total = _to_int(chart_policy.get("max_images_total"), 0)
+    image_budget_remaining = int(max_images_total) if max_images_total and max_images_total > 0 else None
     chart_mode_auto_density = chart_mode in {"page_density_auto", "page_density", "auto_density"}
     if not chart_enabled:
         chart_mode_auto_density = False
@@ -565,6 +567,9 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             if not _is_overview_section(title):
                 effective_pages = target_pages if target_pages else estimated_pages
                 need_images = _auto_density_images_for_pages(effective_pages, total_planned_pages)
+                if image_budget_remaining is not None:
+                    need_images = min(need_images, max(0, int(image_budget_remaining)))
+                    image_budget_remaining = max(0, int(image_budget_remaining) - int(need_images))
                 if need_images > 0:
                     if not chapter_media_started:
                         hmc = doc.add_heading("图表与插图（按页密度自动分布）", level=2)
@@ -588,12 +593,16 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         # Legacy chapter frequency policy (backward compatibility).
         elif media_all and chart_enabled and chart_position in {"chapter", "per_chapter", "by_chapter"}:
             if ((idx + 1) % chart_every_n == 0) and media_cursor < len(media_all):
+                if image_budget_remaining is not None and int(image_budget_remaining) <= 0:
+                    continue
                 if not chapter_media_started:
                     hmc = doc.add_heading("图表与插图（按章节分布）", level=2)
                     apply_paragraph(hmc, is_title=True)
                     chapter_media_started = True
                 _append_media_item(media_all[media_cursor])
                 media_cursor += 1
+                if image_budget_remaining is not None:
+                    image_budget_remaining = max(0, int(image_budget_remaining) - 1)
 
     # 图纸证据索引（可追溯）
     drawing_index = data.get("drawing_index") or {}

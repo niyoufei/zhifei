@@ -4,11 +4,13 @@ import asyncio
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, UploadFile, File
+from fastapi import APIRouter, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
 
@@ -298,6 +300,17 @@ def _normalize_selected_templates(raw: Any) -> List[str]:
     return out
 
 
+def _spawn_generate_worker(job_id: str) -> int:
+    cmd = [sys.executable, "-m", "backend.zhifei_autoplan.job_worker", str(job_id)]
+    proc = subprocess.Popen(  # noqa: S603,S607
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return int(proc.pid)
+
+
 def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
     pid = str(payload.get("project_id") or "").strip() or None
     selected = _normalize_selected_templates(payload.get("selected_templates"))
@@ -393,6 +406,26 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
         payload["variant_parallelism"] = 1
         ap = _to_positive_int(payload.get("agent_parallelism")) or 4
         payload["agent_parallelism"] = max(1, min(16, int(ap)))
+
+    # Image strategy tiers:
+    # - quality_200: keep full auto density
+    # - hq_speed_500: keep auto density but add a sensible default total-image budget for speed stability
+    style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
+    chart_policy = style.get("chart_policy") if isinstance(style.get("chart_policy"), dict) else {}
+    if mode == "quality_200":
+        chart_policy.setdefault("enabled", True)
+        chart_policy.setdefault("mode", "page_density_auto")
+        chart_policy.setdefault("position", "chapter")
+    elif mode == "hq_speed_500":
+        chart_policy.setdefault("enabled", True)
+        chart_policy.setdefault("mode", "page_density_auto")
+        chart_policy.setdefault("position", "chapter")
+        if "max_images_total" not in chart_policy:
+            # Tuned for large-volume generation: keeps visual density while bounding export time.
+            chart_policy["max_images_total"] = max(240, min(900, pages))
+    if chart_policy:
+        style["chart_policy"] = chart_policy
+        payload["style"] = style
 
     payload["generation_mode"] = mode
     payload["_mode_policy"] = {
@@ -1097,7 +1130,6 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
 @router.post("/generate_async")
 async def actions_generate_async(
     req: ActionsGenerateRequest,
-    background_tasks: BackgroundTasks,
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
@@ -1107,252 +1139,24 @@ async def actions_generate_async(
     payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
     payload["variants"] = len(variant_plan) if variant_plan else int(payload.get("variants") or 1)
     job_id = create_job(payload, user_id=None)
-
-    def _run_job(_job_id: str, _payload: dict):
-        try:
-            local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
-
-            def _clamp_int(v: Any, default: int, lo: int, hi: int) -> int:
-                try:
-                    n = int(v)
-                except Exception:
-                    n = int(default)
-                return max(lo, min(hi, n))
-
-            variants_total = _clamp_int(local_payload.get("variants") or 1, 1, 1, 5)
-            agent_parallelism = _clamp_int(local_payload.get("agent_parallelism") or 4, 4, 1, 16)
-            variant_parallelism = _clamp_int(local_payload.get("variant_parallelism") or 1, 1, 1, 5)
-            local_payload["agent_parallelism"] = agent_parallelism
-            local_payload["variant_parallelism"] = variant_parallelism
-
-            agent_runtime = {
-                "mode": "parallel",
-                "master_agent": "主控Agent",
-                "compliance_agent": "合规Agent",
-                "agent_parallelism": agent_parallelism,
-                "variant_parallelism": variant_parallelism,
-                "variants_total": variants_total,
-                "variants_done": 0,
-            }
-
-            def _update_progress(percent: int, stage: str, detail: str = "") -> None:
-                p = max(0, min(100, int(percent)))
-                update_job(
-                    _job_id,
-                    progress={
-                        "percent": p,
-                        "stage": str(stage or ""),
-                        "detail": str(detail or ""),
-                        "variants_total": variants_total,
-                        "variants_done": int(agent_runtime.get("variants_done") or 0),
-                    },
-                    agent_runtime=agent_runtime,
-                )
-
-            def _is_cancelled() -> bool:
-                j = get_job(_job_id) or {}
-                return str(j.get("status") or "").strip().lower() == "cancelled"
-
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            update_job(_job_id, status="running", agent_runtime=agent_runtime)
-            _update_progress(5, "job_started", "任务已启动，正在分配多Agent")
-            mode_policy = local_payload.get("_mode_policy") if isinstance(local_payload.get("_mode_policy"), dict) else {}
-            mode_name = str(mode_policy.get("mode_effective") or local_payload.get("generation_mode") or "quality_200")
-            pages_planned = int(mode_policy.get("planned_total_pages") or 0)
-            if bool(mode_policy.get("auto_switched")):
-                _update_progress(
-                    8,
-                    "mode_switch",
-                    f"页数规划={pages_planned}，已自动切换到高质量加速模式（{mode_name}）",
-                )
-            else:
-                _update_progress(
-                    8,
-                    "mode_ready",
-                    f"生成模式={mode_name}，页数规划={pages_planned}",
-                )
-            variant_plan = local_payload.get("_variant_plan")
-            normalized_plan: List[Dict[str, Any]] = []
-            if isinstance(variant_plan, list) and variant_plan:
-                for it in variant_plan:
-                    if not isinstance(it, dict):
-                        continue
-                    try:
-                        vid = int(it.get("variant_id") or 0)
-                    except Exception:
-                        vid = 0
-                    if vid <= 0:
-                        continue
-                    rec: Dict[str, Any] = {"variant_id": vid}
-                    tid = _normalize_logic_template_id(it.get("logic_template_id"))
-                    if tid:
-                        rec["logic_template_id"] = tid
-                    normalized_plan.append(rec)
-            if not normalized_plan:
-                variants = variants_total
-                variant_ids = local_payload.get("_variant_ids")
-                if not isinstance(variant_ids, list) or not variant_ids:
-                    variant_ids = reserve_variant_ids(
-                        project_id=str(local_payload.get("project_id") or "").strip() or None,
-                        count=max(1, variants),
-                        explicit_variant_id=local_payload.get("variant_id"),
-                        explicit_template_id=local_payload.get("logic_template_id") or local_payload.get("logic_template"),
-                    )
-                for vid in variant_ids:
-                    try:
-                        normalized_plan.append({"variant_id": int(vid)})
-                    except Exception:
-                        continue
-            if not normalized_plan:
-                normalized_plan = [{"variant_id": 1}]
-            variant_plan = normalized_plan
-            variants_total = max(1, len(variant_plan))
-            agent_runtime["variants_total"] = variants_total
-            if variant_parallelism > variants_total:
-                variant_parallelism = variants_total
-                local_payload["variant_parallelism"] = variant_parallelism
-                agent_runtime["variant_parallelism"] = variant_parallelism
-            _update_progress(
-                10,
-                "agent_ready",
-                f"多Agent协作已启用：章节并行={agent_parallelism}，方案并行={variant_parallelism}",
-            )
-
-            async def _run_variants_parallel() -> list[dict]:
-                sem = asyncio.Semaphore(max(1, int(variant_parallelism)))
-                lock = asyncio.Lock()
-                done_count = 0
-                ordered: list[dict | None] = [None for _ in range(len(variant_plan))]
-
-                async def _run_one(pos: int, item: Dict[str, Any]):
-                    nonlocal done_count
-                    if _is_cancelled():
-                        return
-                    vid = int(item.get("variant_id") or 1)
-                    tid = _normalize_logic_template_id(item.get("logic_template_id"))
-                    lp = json.loads(json.dumps(local_payload))
-                    lp["variant_id"] = int(vid)
-                    if tid:
-                        lp["logic_template_id"] = tid
-                    lp["agent_parallelism"] = agent_parallelism
-                    async with sem:
-                        if _is_cancelled():
-                            return
-                        detail = f"正在并行编制方案 v{int(vid)}"
-                        if tid:
-                            detail += f"（模板{tid}）"
-                        _update_progress(
-                            15 + int((done_count / max(1, variants_total)) * 65),
-                            "variant_running",
-                            detail,
-                        )
-                        res = await run_autoplan(lp)
-                        ordered[pos] = res
-                    async with lock:
-                        done_count += 1
-                        agent_runtime["variants_done"] = int(done_count)
-                        _update_progress(
-                            15 + int((done_count / max(1, variants_total)) * 65),
-                            "variant_running",
-                            f"方案完成进度：{done_count}/{variants_total}",
-                        )
-
-                await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(variant_plan)])
-                return [x for x in ordered if isinstance(x, dict)]
-
-            results = asyncio.run(_run_variants_parallel())
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort.
-            if len(results) >= 2:
-                try:
-                    from backend.zhifei_autoplan.variant_similarity import compute_variant_similarity
-                    from backend.zhifei_autoplan.diversity_autofix import apply_diversity_autofix
-
-                    params = load_params()
-                    overrides = local_payload.get("params_override")
-                    if isinstance(overrides, dict) and overrides:
-                        for k, v in overrides.items():
-                            if isinstance(v, dict) and isinstance(params.get(k), dict):
-                                merged = dict(params.get(k) or {})
-                                merged.update(v)
-                                params[k] = merged
-                            else:
-                                params[k] = v
-                    div_cfg = params.get("variant_diversity") if isinstance(params.get("variant_diversity"), dict) else {}
-                    def _run_report():
-                        return compute_variant_similarity(
-                            results,
-                            chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
-                            overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
-                            min_chars=int(div_cfg.get("min_chars") or 800),
-                            ignore_title_keywords=(div_cfg.get("ignore_title_keywords") if isinstance(div_cfg.get("ignore_title_keywords"), list) else None),
-                            relaxed_title_keywords=(div_cfg.get("relaxed_title_keywords") if isinstance(div_cfg.get("relaxed_title_keywords"), list) else None),
-                            relaxed_chapter_threshold=(float(div_cfg.get("relaxed_chapter_threshold")) if div_cfg.get("relaxed_chapter_threshold") is not None else None),
-                        )
-
-                    report = _run_report()
-
-                    # Auto-fix: deterministic reshape for flagged chapters (do not change tender outline).
-                    max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
-                    if max_rounds < 0:
-                        max_rounds = 0
-                    rounds = 0
-                    while rounds < max_rounds and report.get("ok") is False and report.get("flagged"):
-                        changed_any = False
-                        for f in (report.get("flagged") or [])[:24]:
-                            title = str(f.get("title") or "").strip()
-                            pair = str(f.get("pair") or "").strip()
-                            m = re.match(r"^v(\\d+)_v(\\d+)$", pair)
-                            if not m or not title:
-                                continue
-                            a = int(m.group(1))
-                            b = int(m.group(2))
-                            target_idx = max(a, b)
-                            if target_idx <= 1 or target_idx > len(results):
-                                continue
-                            target = results[target_idx - 1]
-                            secs = target.get("sections") if isinstance(target, dict) else None
-                            if not isinstance(secs, list):
-                                continue
-                            for sec in secs:
-                                if not isinstance(sec, dict):
-                                    continue
-                                if str(sec.get("title") or "").strip() != title:
-                                    continue
-                                if apply_diversity_autofix(sec, params=params, evidence_hint=str(pair)):
-                                    changed_any = True
-                                break
-                        if not changed_any:
-                            break
-                        report = _run_report()
-                        rounds += 1
-                    _update_progress(86, "cross_variant_check", "正在执行跨方案一致性与差异性审计")
-                    _rebuild_postprocessed_artifacts(results, payload=local_payload, report=report, params=params)
-                except Exception:
-                    pass
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            _update_progress(92, "exporting", "正在导出 DOCX / 对照稿 / 问题清单")
-            outputs = _save_outputs(f"actions_{_job_id}", results)
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
-                return
-            _update_progress(100, "done", "任务完成")
-            update_job(_job_id, status="done", result=outputs, agent_runtime=agent_runtime)
-        except Exception as e:
-            update_job(
-                _job_id,
-                status="failed",
-                error=repr(e),
-                progress={"percent": 100, "stage": "failed", "detail": repr(e)},
-            )
-
-    background_tasks.add_task(_run_job, job_id, payload)
+    try:
+        worker_pid = _spawn_generate_worker(job_id)
+        update_job(
+            job_id,
+            worker={
+                "mode": "subprocess",
+                "pid": int(worker_pid),
+            },
+            progress={"percent": 0, "stage": "queued", "detail": "任务已入队，等待Worker执行"},
+        )
+    except Exception as e:
+        update_job(
+            job_id,
+            status="failed",
+            error=f"worker_spawn_failed: {e!r}",
+            progress={"percent": 100, "stage": "failed", "detail": f"worker_spawn_failed: {e!r}"},
+        )
+        raise HTTPException(status_code=500, detail="worker spawn failed")
     return {"ok": True, "job_id": job_id, "status": "queued"}
 
 
@@ -1368,6 +1172,13 @@ async def actions_job_cancel(req: ActionsJobCancelRequest, x_actions_key: str | 
     status = str(job.get("status") or "").strip().lower()
     if status in {"done", "failed", "cancelled"}:
         return {"ok": True, "job_id": job_id, "status": status}
+    worker = job.get("worker") if isinstance(job.get("worker"), dict) else {}
+    pid = worker.get("pid")
+    try:
+        if pid:
+            os.kill(int(pid), 15)
+    except Exception:
+        pass
     update_job(job_id, status="cancelled", error="cancelled_by_user")
     return {"ok": True, "job_id": job_id, "status": "cancelled"}
 
@@ -1386,6 +1197,7 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
         "updated_at": job.get("updated_at"),
         "progress": job.get("progress") if isinstance(job.get("progress"), dict) else {},
         "agent_runtime": job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {},
+        "worker": job.get("worker") if isinstance(job.get("worker"), dict) else {},
     }
     result = job.get("result") or {}
     if isinstance(result, dict):

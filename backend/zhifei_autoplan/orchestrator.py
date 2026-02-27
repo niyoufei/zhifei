@@ -269,7 +269,7 @@ def _resolve_provider_api_key(
     1) explicit_key (provider_chain per-slot key)
     2) payload.api_keys[slot_id] (slot-scoped key)
     3) payload.api_keys[provider]
-    4) payload.api_key
+    4) payload.api_key（仅当provider一致，避免跨Provider误用）
     5) provider-specific env vars
     """
     if isinstance(explicit_key, str) and explicit_key.strip():
@@ -292,7 +292,9 @@ def _resolve_provider_api_key(
 
     v2 = payload.get("api_key")
     if isinstance(v2, str) and v2.strip():
-        return v2.strip()
+        default_provider = str(payload.get("provider") or "").strip().lower()
+        if not default_provider or default_provider == p:
+            return v2.strip()
 
     env_map = {
         "openai": ("OPENAI_API_KEY", "ZF_OPENAI_API_KEY"),
@@ -388,6 +390,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     if provider_chain:
         provider = provider_chain[0].get("provider") or provider
         model = provider_chain[0].get("model") or model
+    has_llm_runtime = bool(provider_chain or providers or (provider and model))
     dry_run = bool(payload.get("dry_run", False))
     generate_images = bool(payload.get("generate_images", True))
     strict_quality = bool(payload.get("quality_strict", True))
@@ -703,22 +706,33 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         else:
             tries.append((provider, model, None, None))
         tries = tries[:5]
-        kg_hits = search_kg(f"{topic} {title} 施工组织 质量 安全 工期", top_k=4)
-        doc_hits = search_ingested_docs(
+        kg_task = asyncio.to_thread(
+            search_kg,
+            f"{topic} {title} 施工组织 质量 安全 工期",
+            top_k=4,
+        )
+        doc_task = asyncio.to_thread(
+            search_ingested_docs,
             f"{topic} {title} 招标 清单 图纸 质量 安全 工期",
             limit=6,
             project_id=project_id,
         )
         # Prefer enterprise standards / work instructions when provided (to raise output quality and reduce hallucination).
         # Only do this when project_id is set, otherwise global audit may cross-contaminate between projects.
-        standard_hits = []
+        standard_task = None
         if project_id:
-            standard_hits = search_ingested_docs(
+            standard_task = asyncio.to_thread(
+                search_ingested_docs,
                 f"{topic} {title} 企业标准 工法 作业指导 标准化 质量验收",
                 limit=3,
                 project_id=project_id,
                 require_tags=["standard"],
             )
+        if standard_task is not None:
+            kg_hits, doc_hits, standard_hits = await asyncio.gather(kg_task, doc_task, standard_task)
+        else:
+            kg_hits, doc_hits = await asyncio.gather(kg_task, doc_task)
+            standard_hits = []
         kg_evidence = [f"{r.get('title')}: {r.get('text')}" for r in kg_hits.get("results", [])]
         # Include a lightweight evidence locator (sha@offset) to make "【证据:...】" traceable.
         doc_evidence = []
@@ -792,12 +806,23 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             section_requirements.append(f"危险品材料清单：{'；'.join(boq_focus.get('hazardous_materials')[:10])}")
         if boq_focus.get("ppe_items"):
             section_requirements.append(f"劳保用品清单：{'；'.join(boq_focus.get('ppe_items')[:10])}")
-        graph_ctx = multi_agent_plan.chapter_graph_context(
-            title=title,
-            query=f"{topic} {title} 施工组织 质量 安全 工期 图纸 清单",
-            section_requirements=section_requirements,
-            top_k=6,
-        )
+        if has_llm_runtime:
+            graph_ctx = await asyncio.to_thread(
+                multi_agent_plan.chapter_graph_context,
+                title=title,
+                query=f"{topic} {title} 施工组织 质量 安全 工期 图纸 清单",
+                section_requirements=section_requirements,
+                top_k=6,
+            )
+        else:
+            # Fast path for no-model dry/template runs: avoid heavy graph dispatch scanning.
+            graph_ctx = {
+                "hits": [],
+                "node_bindings": [],
+                "experience_values": [],
+                "need_experience": False,
+                "agents": multi_agent_plan.chapter_agents(title),
+            }
         graph_hits = graph_ctx.get("hits") or []
         for gh in graph_hits[:6]:
             gname = str(gh.get("graph_name") or gh.get("graph_file") or "图谱").strip()
@@ -816,12 +841,16 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         compliance_domains = [str(x).strip() for x in (graph_ctx.get("agents", {}).get("domain_tags") or []) if str(x).strip()]
         if not compliance_domains:
             compliance_domains = [str(x).strip() for x in (multi_agent_plan.dispatch.get("involved_domains") or []) if str(x).strip()]
-        compliance_hits = query_compliance(
-            f"{topic} {title} 质量 安全 工期 验收 允许偏差 抽检 频次",
-            domain_tags=compliance_domains or None,
-            top_k=4,
-            prefer_latest=True,
-        )
+        if has_llm_runtime:
+            compliance_hits = await asyncio.to_thread(
+                query_compliance,
+                f"{topic} {title} 质量 安全 工期 验收 允许偏差 抽检 频次",
+                domain_tags=compliance_domains or None,
+                top_k=4,
+                prefer_latest=True,
+            )
+        else:
+            compliance_hits = []
         if compliance_hits:
             section_requirements.append("本章应优先引用适配专业且最新版本的规范条款（禁止跨专业串用规范）。")
             for ch in compliance_hits[:4]:

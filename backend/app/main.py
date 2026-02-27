@@ -5,8 +5,8 @@ import os, json
 from pathlib import Path
 from datetime import datetime
 
-from compose_engine import Composer
-from utils_write_docx import write_compose_to_docx
+from backend.compose_engine import Composer
+from backend.utils_write_docx import write_compose_to_docx
 
 app = FastAPI()
 

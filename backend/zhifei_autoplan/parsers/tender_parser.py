@@ -480,6 +480,33 @@ class TenderParser:
 
             return max(pool, key=_score)
 
+        canonical_review_items: list[tuple[str, tuple[str, ...]]] = [
+            ("工程概况", ("工程概况", "项目概况")),
+            ("主要施工方法", ("主要施工方法", "施工方法", "主要施工工艺", "施工工艺")),
+            ("拟投入的主要物资计划", ("拟投入的主要物资计划", "主要物资计划", "物资计划", "材料计划")),
+            ("拟投入的主要施工机械、设备计划", ("拟投入的主要施工机械、设备计划", "施工机械、设备计划", "主要施工机械", "设备计划")),
+            ("劳动力安排计划", ("劳动力安排计划", "劳动力计划", "人员安排计划", "劳动力配置计划")),
+            ("确保工程质量的技术组织措施", ("确保工程质量的技术组织措施", "质量的技术组织措施", "质量保证措施", "工程质量措施")),
+            ("确保安全生产的技术组织措施", ("确保安全生产的技术组织措施", "安全生产的技术组织措施", "安全保证措施", "安全生产措施")),
+            ("确保工期的技术组织措施", ("确保工期的技术组织措施", "工期的技术组织措施", "工期保证措施", "进度保证措施")),
+            ("确保文明施工的技术组织措施", ("确保文明施工的技术组织措施", "文明施工的技术组织措施", "文明施工措施")),
+            ("施工总平面布置图", ("施工总平面布置图", "总平面布置图", "施工平面布置图")),
+        ]
+
+        def _normalize_review_item(title: str) -> str:
+            t = _norm(title)
+            t = re.sub(r"技术文件.*$", "", t).strip()
+            t = re.sub(r"评审标准.*$", "", t).strip()
+            t = re.sub(r"施工组织设.*$", "", t).strip()
+            t = re.sub(r"[0-9A-Za-z_]{2,}$", "", t).strip()
+            t = re.sub(r"[：:;；,，。]+$", "", t).strip()
+            if not t:
+                return ""
+            for canonical, aliases in canonical_review_items:
+                if any(k and k in t for k in aliases):
+                    return canonical
+            return t
+
         def _extract_by_precise_anchor(compact_text: str) -> list[str]:
             """
             精确锚点抽取：先定位“施工组织设计...评审...包括但不限于以下内容”，
@@ -547,7 +574,22 @@ class TenderParser:
             return []
 
         best = _pick_best(candidates)
-        return best if len(best) >= 3 else []
+        if len(best) < 3:
+            return []
+        normalized: list[str] = []
+        seen = set()
+        canonical_hits = 0
+        for raw in best:
+            t = _normalize_review_item(raw)
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            normalized.append(t)
+            if any(t == c for c, _ in canonical_review_items):
+                canonical_hits += 1
+        if canonical_hits >= 6:
+            return normalized
+        return best
 
     def _parse_outline_lines(self, lines: list[str]) -> list[str]:
         out: list[str] = []

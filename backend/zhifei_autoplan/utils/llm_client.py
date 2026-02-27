@@ -29,7 +29,7 @@ class LLMClient:
         secret_key: Optional[str] = None,
         token_url: Optional[str] = None,
     ):
-        self.provider = provider
+        self.provider = str(provider or "").strip().lower()
         self.model = model
         self.api_key = api_key
         self.base_url = base_url

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, Any
 import requests
 
@@ -15,10 +16,16 @@ class DeepSeekProvider(BaseProvider):
         self.base_url = base_url
 
     async def complete(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        url = f"{self.base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        payload = {"model": self.model, "messages": [{"role": "user", "content": prompt}]}
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        data = resp.json()
-        text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        return {"provider": self.name, "model": self.model, "text": text}
+        timeout_sec = float(kwargs.get("timeout_sec", kwargs.get("timeout", 180)))
+        request_timeout = min(60.0, timeout_sec)
+
+        def _call() -> Dict[str, Any]:
+            url = f"{self.base_url}/chat/completions"
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            payload = {"model": self.model, "messages": [{"role": "user", "content": prompt}]}
+            resp = requests.post(url, headers=headers, json=payload, timeout=request_timeout)
+            data = resp.json()
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return {"provider": self.name, "model": self.model, "text": text}
+
+        return await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout_sec)
