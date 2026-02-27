@@ -11,6 +11,7 @@ from backend.zhifei_autoplan.providers.deepseek_provider import DeepSeekProvider
 from backend.zhifei_autoplan.providers.baidu_provider import BaiduProvider
 from backend.zhifei_autoplan.providers.iflytek_provider import IflytekProvider
 from backend.zhifei_autoplan.providers.tencent_provider import TencentProvider
+from backend.zhifei_autoplan.providers.grok_provider import GrokProvider
 
 
 class LLMClient:
@@ -35,7 +36,35 @@ class LLMClient:
         self.secret_key = secret_key
         self.token_url = token_url
 
-        self._impl = self._init_provider()
+        self._impl = None
+        self._init_error = None
+        cred_err = self._check_required_credentials()
+        if cred_err:
+            self._impl = None
+            self._init_error = cred_err
+            return
+        try:
+            self._impl = self._init_provider()
+        except Exception as e:
+            # Never crash caller on provider init error.
+            # This allows orchestrator to rotate to next provider.
+            self._impl = None
+            self._init_error = repr(e)
+
+    def _check_required_credentials(self) -> str | None:
+        p = str(self.provider or "").strip().lower()
+        api = str(self.api_key or "").strip()
+        sec = str(self.secret_key or "").strip()
+        # Most providers require API key; short-circuit to avoid slow remote failures.
+        key_required = {"openai", "grok", "anthropic", "google", "zhipu", "qwen", "deepseek", "iflytek", "tencent"}
+        if p in key_required and not api:
+            return "api_key_missing"
+        if p == "baidu":
+            if not api:
+                return "api_key_missing"
+            if not sec:
+                return "secret_key_missing"
+        return None
 
     @staticmethod
     def load_defaults() -> dict:
@@ -52,6 +81,8 @@ class LLMClient:
     def _init_provider(self):
         if self.provider == "openai":
             return OpenAIProvider(self.api_key or "", self.model)
+        if self.provider == "grok":
+            return GrokProvider(self.api_key or "", self.model, self.base_url or "https://api.x.ai/v1")
         if self.provider == "anthropic":
             return AnthropicProvider(self.api_key or "", self.model)
         if self.provider == "google":
@@ -72,7 +103,12 @@ class LLMClient:
 
     async def complete(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         if self._impl is None:
-            return {"provider": self.provider, "model": self.model, "text": "", "error": "provider_not_configured"}
+            return {
+                "provider": self.provider,
+                "model": self.model,
+                "text": "",
+                "error": self._init_error or "provider_not_configured",
+            }
         try:
             return await self._impl.complete(prompt, **kwargs)
         except TimeoutError:

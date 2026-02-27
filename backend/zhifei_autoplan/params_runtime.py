@@ -39,7 +39,7 @@ def _default_params() -> Dict[str, Any]:
             "model": "gemini-2.5-flash-image",
             "aspect_ratio": "16:9",
         },
-        # Multi-variant (A/B/C) anti-paraphrase gate (editable).
+        # Multi-variant (A/B/C/D/E) anti-paraphrase gate (editable).
         # - chapter_threshold: flag a chapter when any pair >= threshold
         # - overall_threshold: fail gate when avg(max_pair_similarity) >= threshold
         "variant_diversity": {

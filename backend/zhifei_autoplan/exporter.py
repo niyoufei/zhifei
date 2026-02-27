@@ -11,6 +11,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm
 from docx.shared import Pt
 from docx.oxml.ns import qn
+from backend.zhifei_autoplan.terminology_guard import load_global_terminology, normalize_text_terminology
 
 
 _AUTOFIX_MARK_RE = re.compile(r"【自动补充】(?P<name>[^\n]{1,80}?)(?:：|:)")
@@ -91,21 +92,21 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
         style.get("body_font")
         or (style.get("font") if isinstance(style.get("font"), str) else None)
         or font_cfg.get("eastAsia")
-        or "SimSun"
+        or "宋体"
     )
     body_latin_font = style.get("body_latin_font") or font_cfg.get("latin") or body_font
     body_size = _to_float(
-        style.get("body_size") or style.get("font_size") or font_cfg.get("size_pt") or 12,
-        12.0,
+        style.get("body_size") or style.get("font_size") or font_cfg.get("size_pt") or 14,
+        14.0,
     )
     line_spacing = _to_float(style.get("line_spacing") or font_cfg.get("line_spacing") or 1.5, 1.5)
-    line_spacing_pt = style.get("line_spacing_pt") or font_cfg.get("line_spacing_pt")
+    line_spacing_pt = style.get("line_spacing_pt") or font_cfg.get("line_spacing_pt") or 22.0
     try:
         line_spacing_pt = float(line_spacing_pt) if line_spacing_pt is not None else None
     except Exception:
         line_spacing_pt = None
     if line_spacing_pt is not None and line_spacing_pt <= 0:
-        line_spacing_pt = None
+        line_spacing_pt = 22.0
 
     title_font = style.get("title_font") or headings_cfg.get("eastAsia") or body_font
     title_latin_font = style.get("title_latin_font") or headings_cfg.get("latin") or body_latin_font
@@ -116,10 +117,10 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     margins_list = style.get("margins") if isinstance(style.get("margins"), list) else []
-    top = _to_float(margins_cfg.get("top"), _to_float(margins_list[0] if len(margins_list) > 0 else 2.54, 2.54))
-    right = _to_float(margins_cfg.get("right"), _to_float(margins_list[1] if len(margins_list) > 1 else 2.5, 2.5))
-    bottom = _to_float(margins_cfg.get("bottom"), _to_float(margins_list[2] if len(margins_list) > 2 else 2.54, 2.54))
-    left = _to_float(margins_cfg.get("left"), _to_float(margins_list[3] if len(margins_list) > 3 else 3.0, 3.0))
+    top = _to_float(margins_cfg.get("top"), _to_float(margins_list[0] if len(margins_list) > 0 else 2.5, 2.5))
+    right = _to_float(margins_cfg.get("right"), _to_float(margins_list[1] if len(margins_list) > 1 else 2.0, 2.0))
+    bottom = _to_float(margins_cfg.get("bottom"), _to_float(margins_list[2] if len(margins_list) > 2 else 2.0, 2.0))
+    left = _to_float(margins_cfg.get("left"), _to_float(margins_list[3] if len(margins_list) > 3 else 2.0, 2.0))
 
     return {
         "paper": str(style.get("paper") or style.get("paper_size") or "A4"),
@@ -153,10 +154,10 @@ def _apply_page_setup(doc: Document, style_cfg: Dict[str, Any]):
         if paper == "A4":
             section.page_width = Cm(21.0)
             section.page_height = Cm(29.7)
-        section.top_margin = Cm(_to_float(margins.get("top"), 2.54))
-        section.right_margin = Cm(_to_float(margins.get("right"), 2.5))
-        section.bottom_margin = Cm(_to_float(margins.get("bottom"), 2.54))
-        section.left_margin = Cm(_to_float(margins.get("left"), 3.0))
+        section.top_margin = Cm(_to_float(margins.get("top"), 2.5))
+        section.right_margin = Cm(_to_float(margins.get("right"), 2.0))
+        section.bottom_margin = Cm(_to_float(margins.get("bottom"), 2.0))
+        section.left_margin = Cm(_to_float(margins.get("left"), 2.0))
 
 
 def _set_run_font(run, east_font: str, latin_font: str, size_pt: float):
@@ -219,7 +220,7 @@ def _apply_branding_header(doc: Document, style_cfg: Dict[str, Any], *, topic: s
     if not company and not logo:
         return
 
-    font_east = str(style_cfg.get("body_font") or "SimSun")
+    font_east = str(style_cfg.get("body_font") or "宋体")
     font_latin = str(style_cfg.get("body_latin_font") or font_east)
     size_pt = 9.0
 
@@ -297,7 +298,7 @@ def _extract_chapter_page_target(chapter_pages: Dict[str, Any], title: str) -> i
 
 
 def _estimate_chars_per_page(style_cfg: Dict[str, Any]) -> int:
-    body_size = _to_float(style_cfg.get("body_size"), 12.0)
+    body_size = _to_float(style_cfg.get("body_size"), 14.0)
     line_spacing = _to_float(style_cfg.get("line_spacing"), 1.5)
     line_spacing_pt = style_cfg.get("line_spacing_pt")
     if line_spacing_pt is not None:
@@ -306,10 +307,10 @@ def _estimate_chars_per_page(style_cfg: Dict[str, Any]) -> int:
         except Exception:
             pass
     margins = style_cfg.get("margins_cm") or {}
-    left = _to_float(margins.get("left"), 3.0)
-    right = _to_float(margins.get("right"), 2.5)
-    top = _to_float(margins.get("top"), 2.54)
-    bottom = _to_float(margins.get("bottom"), 2.54)
+    left = _to_float(margins.get("left"), 2.0)
+    right = _to_float(margins.get("right"), 2.0)
+    top = _to_float(margins.get("top"), 2.5)
+    bottom = _to_float(margins.get("bottom"), 2.0)
 
     width_factor = 5.5 / max(2.0, left + right)
     height_factor = 5.0 / max(2.0, top + bottom)
@@ -427,12 +428,57 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
 
     layout_receipts = []
     sections = data.get("sections") or []
+    terminology_entries = load_global_terminology()
+    media_all = data.get("media") or []
+    chart_policy = style_raw.get("chart_policy") if isinstance(style_raw, dict) and isinstance(style_raw.get("chart_policy"), dict) else {}
+    chart_enabled = _to_bool(chart_policy.get("enabled"), True)
+    chart_position = str(chart_policy.get("position") or "end").strip().lower()  # end|chapter
+    chart_every_n = max(1, _to_int(chart_policy.get("every_n_chapters"), 2))
+    media_cursor = 0
+    media_index = 0
+    chapter_media_started = False
+
+    def _append_media_item(item: Any):
+        nonlocal media_index
+        path = item.get("path") if isinstance(item, dict) else item
+        caption = item.get("caption") if isinstance(item, dict) else None
+        try:
+            branded_path = _brand_image_with_logo(str(path))
+            path_to_add = branded_path or str(path)
+            doc.add_picture(str(path_to_add), width=Cm(14))
+            try:
+                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                pass
+            media_index += 1
+            if not caption:
+                try:
+                    name = Path(str(path)).name
+                except Exception:
+                    name = str(path)
+                if "boq_stats_" in str(name):
+                    caption = "BoQ 统计概览"
+                else:
+                    caption = name
+            pc = doc.add_paragraph(f"图{media_index}：{caption}")
+            apply_paragraph(pc)
+            try:
+                pc.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                pass
+        except Exception:
+            pe = doc.add_paragraph(f"图片加载失败：{path}")
+            apply_paragraph(pe)
 
     # 目录/章节内容
     for idx, sec in enumerate(sections):
         title = sec.get("title") or "章节"
         content = sec.get("content") or ""
         content_doc = _strip_internal_autofix_markers(content)
+        try:
+            content_doc, _ = normalize_text_terminology(content_doc, terminology_entries)
+        except Exception:
+            pass
         role = sec.get("agent_role")
 
         apply_this = apply_paragraph
@@ -469,6 +515,16 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             if style_cfg.get("enforce_chapter_pages") and estimated_pages < target_pages:
                 for _ in range(target_pages - estimated_pages):
                     doc.add_page_break()
+
+        # Chapter-level chart insertion policy (best-effort).
+        if media_all and chart_enabled and chart_position in {"chapter", "per_chapter", "by_chapter"}:
+            if ((idx + 1) % chart_every_n == 0) and media_cursor < len(media_all):
+                if not chapter_media_started:
+                    hmc = doc.add_heading("图表与插图（按章节分布）", level=2)
+                    apply_paragraph(hmc, is_title=True)
+                    chapter_media_started = True
+                _append_media_item(media_all[media_cursor])
+                media_cursor += 1
 
     # 图纸证据索引（可追溯）
     drawing_index = data.get("drawing_index") or {}
@@ -657,45 +713,14 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             row[1].text = val
             row[2].text = chs
 
-    # 图表/图片
-    media = data.get("media") or []
-    if media:
+    # Remaining chart/images (default: append at end, or chapter mode leftover).
+    remaining_media = media_all[media_cursor:] if isinstance(media_all, list) else []
+    if remaining_media:
         doc.add_page_break()
         hm = doc.add_heading("图表与插图", level=1)
         apply_paragraph(hm, is_title=True)
-        img_no = 0
-        for item in media:
-            path = item.get("path") if isinstance(item, dict) else item
-            caption = item.get("caption") if isinstance(item, dict) else None
-            try:
-                # Corner branding for all images (except the logo image itself).
-                branded_path = _brand_image_with_logo(str(path))
-                path_to_add = branded_path or str(path)
-                doc.add_picture(str(path_to_add), width=Cm(14))
-                # Center the picture paragraph (best-effort).
-                try:
-                    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                except Exception:
-                    pass
-                img_no += 1
-                if not caption:
-                    try:
-                        name = Path(str(path)).name
-                    except Exception:
-                        name = str(path)
-                    if "boq_stats_" in str(name):
-                        caption = "BoQ 统计概览"
-                    else:
-                        caption = name
-                pc = doc.add_paragraph(f"图{img_no}：{caption}")
-                apply_paragraph(pc)
-                try:
-                    pc.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                except Exception:
-                    pass
-            except Exception:
-                pe = doc.add_paragraph(f"图片加载失败：{path}")
-                apply_paragraph(pe)
+        for item in remaining_media:
+            _append_media_item(item)
 
     # 章节版式回执
     if layout_receipts:
@@ -1030,6 +1055,7 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
     recs = qc.get("auto_revision_suggestions") if isinstance(qc.get("auto_revision_suggestions"), list) else []
     param_trace = data.get("param_trace") if isinstance(data.get("param_trace"), dict) else {}
     plan_consistency = data.get("plan_consistency") if isinstance(data.get("plan_consistency"), dict) else {}
+    cpm_receipt = plan_consistency.get("cpm") if isinstance(plan_consistency.get("cpm"), dict) else {}
     boq_focus = data.get("boq_focus") if isinstance(data.get("boq_focus"), dict) else {}
     four_new_recs = boq_focus.get("four_new_recommendations") if isinstance(boq_focus.get("four_new_recommendations"), list) else []
     variant_similarity = data.get("variant_similarity") if isinstance(data.get("variant_similarity"), dict) else {}
@@ -1058,6 +1084,7 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
     receipt_keys = receipt.get("keys") if isinstance(receipt.get("keys"), dict) else {}
 
     has_plan_consistency = bool(plan_consistency and (plan_consistency.get("canonical") or plan_consistency.get("changed")))
+    has_cpm_receipt = bool(cpm_receipt and (cpm_receipt.get("computed") or cpm_receipt.get("activities")))
     has_variant_similarity = bool(variant_similarity and int(variant_similarity.get("variant_count") or 0) >= 2)
 
     # Sync variant-similarity findings into issues/revision sheets so reviewers don't need JSON.
@@ -1183,6 +1210,7 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
         or four_new_recs
         or receipt_keys
         or has_plan_consistency
+        or has_cpm_receipt
         or has_variant_similarity
         or has_drawing_index
         or has_standard_index
@@ -1306,6 +1334,19 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
                 ("variant_similarity_relaxed_flagged_count", variant_similarity.get("relaxed_flagged_count")),
             ]
         )
+    if has_cpm_receipt:
+        computed = cpm_receipt.get("computed") if isinstance(cpm_receipt.get("computed"), dict) else {}
+        cpm_conflicts = cpm_receipt.get("conflicts") if isinstance(cpm_receipt.get("conflicts"), list) else []
+        summary_pairs.extend(
+            [
+                ("cpm_ok", bool(cpm_receipt.get("ok"))),
+                ("cpm_algorithm", str(cpm_receipt.get("algorithm") or "")),
+                ("cpm_duration_days", computed.get("project_duration_days")),
+                ("cpm_resource_peak", computed.get("resource_peak")),
+                ("cpm_critical_interval_days", computed.get("critical_interval_days")),
+                ("cpm_conflict_count", len(cpm_conflicts)),
+            ]
+        )
 
     for k, v in summary_pairs:
         _write(ws, row, 1, str(k), header=True)
@@ -1396,18 +1437,39 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
     if has_drawing_index:
         if drawings:
             ws = wb.create_sheet("drawings")
-            headers = ["filename", "sha256", "pages", "keywords", "preview"]
+            headers = [
+                "filename",
+                "sha256",
+                "pages",
+                "keywords",
+                "topology_nodes",
+                "topology_edges",
+                "topology_components",
+                "topology_endpoints",
+                "topology_trunk_length",
+                "topology_suggested_flow_segments",
+                "topology_confidence",
+                "preview",
+            ]
             for c, h in enumerate(headers, start=1):
                 _write(ws, 1, c, h, header=True)
             for r, d in enumerate(drawings[:300], start=2):
                 if not isinstance(d, dict):
                     continue
                 kws = _join_list(d.get("keywords") or [], sep="、", limit=12)
+                topo = d.get("topology") if isinstance(d.get("topology"), dict) else {}
                 vals = [
                     str(d.get("filename") or ""),
                     str(d.get("sha256") or "")[:12],
                     _fmt_num(d.get("pages")),
                     kws,
+                    _fmt_num(topo.get("nodes_count")),
+                    _fmt_num(topo.get("edges_count")),
+                    _fmt_num(topo.get("components_count")),
+                    _fmt_num(topo.get("endpoint_count")),
+                    _fmt_num(topo.get("trunk_length")),
+                    _fmt_num(topo.get("suggested_flow_segments")),
+                    str(topo.get("topology_confidence") or ""),
                     str(d.get("preview") or ""),
                 ]
                 for c, v in enumerate(vals, start=1):
@@ -1416,7 +1478,14 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
             _set_width(ws, 2, 18)
             _set_width(ws, 3, 10)
             _set_width(ws, 4, 48)
-            _set_width(ws, 5, 78)
+            _set_width(ws, 5, 12)
+            _set_width(ws, 6, 12)
+            _set_width(ws, 7, 12)
+            _set_width(ws, 8, 12)
+            _set_width(ws, 9, 14)
+            _set_width(ws, 10, 16)
+            _set_width(ws, 11, 14)
+            _set_width(ws, 12, 78)
 
         if drawing_binds:
             ws = wb.create_sheet("drawing_bindings")
@@ -1563,6 +1632,93 @@ def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
         _write(ws, row, 2, "；".join(ch_titles[:60]))
         _set_width(ws, 1, 24)
         _set_width(ws, 2, 90)
+
+    # CPM deterministic schedule receipt (NetworkX DAG + critical path)
+    if has_cpm_receipt:
+        ws = wb.create_sheet("cpm")
+        row = 1
+        computed = cpm_receipt.get("computed") if isinstance(cpm_receipt.get("computed"), dict) else {}
+        mentioned = cpm_receipt.get("mentioned") if isinstance(cpm_receipt.get("mentioned"), dict) else {}
+        graph = cpm_receipt.get("graph") if isinstance(cpm_receipt.get("graph"), dict) else {}
+        critical_path = cpm_receipt.get("critical_path") if isinstance(cpm_receipt.get("critical_path"), list) else []
+        conflict_rows = cpm_receipt.get("conflicts") if isinstance(cpm_receipt.get("conflicts"), list) else []
+        for k, v in [
+            ("ok", bool(cpm_receipt.get("ok"))),
+            ("algorithm", str(cpm_receipt.get("algorithm") or "")),
+            ("mentioned_工期", mentioned.get("工期")),
+            ("mentioned_资源峰值", mentioned.get("资源峰值")),
+            ("mentioned_关键线路间隔", mentioned.get("关键线路间隔")),
+            ("computed_project_duration_days", computed.get("project_duration_days")),
+            ("computed_resource_peak", computed.get("resource_peak")),
+            ("computed_critical_interval_days", computed.get("critical_interval_days")),
+            ("critical_path", " -> ".join([str(x) for x in critical_path[:40]])),
+            ("graph_node_count", graph.get("node_count")),
+            ("graph_edge_count", graph.get("edge_count")),
+            ("cycle_edges_removed", _join_list(graph.get("cycle_edges_removed") or [], sep="；", limit=20)),
+            ("conflict_count", len(conflict_rows)),
+        ]:
+            _write(ws, row, 1, str(k), header=True)
+            _write(ws, row, 2, v if not isinstance(v, (dict, list)) else _join_list(v))
+            row += 1
+        row += 1
+        _write(ws, row, 1, "metric", header=True)
+        _write(ws, row, 2, "mentioned", header=True)
+        _write(ws, row, 3, "computed", header=True)
+        _write(ws, row, 4, "tolerance", header=True)
+        _write(ws, row, 5, "delta", header=True)
+        row += 1
+        for c in conflict_rows[:60]:
+            if not isinstance(c, dict):
+                continue
+            _write(ws, row, 1, str(c.get("metric") or ""))
+            _write(ws, row, 2, _fmt_num(c.get("mentioned")))
+            _write(ws, row, 3, _fmt_num(c.get("computed")))
+            _write(ws, row, 4, _fmt_num(c.get("tolerance")))
+            _write(ws, row, 5, _fmt_num(c.get("delta")))
+            row += 1
+        row += 1
+        _write(ws, row, 1, "activity_id", header=True)
+        _write(ws, row, 2, "name", header=True)
+        _write(ws, row, 3, "deps", header=True)
+        _write(ws, row, 4, "duration_days", header=True)
+        _write(ws, row, 5, "resource_units", header=True)
+        _write(ws, row, 6, "ES", header=True)
+        _write(ws, row, 7, "EF", header=True)
+        _write(ws, row, 8, "LS", header=True)
+        _write(ws, row, 9, "LF", header=True)
+        _write(ws, row, 10, "total_float", header=True)
+        _write(ws, row, 11, "critical", header=True)
+        row += 1
+        for act in (cpm_receipt.get("activities") or [])[:600]:
+            if not isinstance(act, dict):
+                continue
+            vals = [
+                str(act.get("id") or ""),
+                str(act.get("name") or ""),
+                _join_list(act.get("deps") or [], sep="、", limit=20),
+                _fmt_num(act.get("duration_days")),
+                _fmt_num(act.get("resource_units")),
+                _fmt_num(act.get("es")),
+                _fmt_num(act.get("ef")),
+                _fmt_num(act.get("ls")),
+                _fmt_num(act.get("lf")),
+                _fmt_num(act.get("total_float")),
+                "Y" if act.get("critical") else "N",
+            ]
+            for c, v in enumerate(vals, start=1):
+                _write(ws, row, c, v)
+            row += 1
+        _set_width(ws, 1, 18)
+        _set_width(ws, 2, 28)
+        _set_width(ws, 3, 22)
+        _set_width(ws, 4, 12)
+        _set_width(ws, 5, 12)
+        _set_width(ws, 6, 10)
+        _set_width(ws, 7, 10)
+        _set_width(ws, 8, 10)
+        _set_width(ws, 9, 10)
+        _set_width(ws, 10, 12)
+        _set_width(ws, 11, 10)
 
     # Four-new recommendations (editable library + BoQ/process matching)
     if isinstance(four_new_recs, list) and four_new_recs:
@@ -1820,3 +1976,401 @@ def export_autoplan_docx_from_file(json_path: str, output_path: str) -> str:
     if isinstance(data, dict) and isinstance(data.get("variants"), list) and data["variants"]:
         return export_autoplan_docx(data["variants"][0], output_path)
     return export_autoplan_docx(data, output_path)
+
+
+def export_scoring_evidence_overview_xlsx(data: Dict[str, Any], output_path: str) -> str:
+    """
+    评分点覆盖与证据引用总览
+    - 评分点覆盖: score_mapping item_cards
+    - 段落证据链: evidence_tracking rows
+    - 评分点×证据矩阵: 便于评审定位“第几页用哪条证据响应了哪个评分点”
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except Exception:
+        return ""
+
+    evidence_tracking = data.get("evidence_tracking") if isinstance(data.get("evidence_tracking"), dict) else {}
+    rows = evidence_tracking.get("rows") if isinstance(evidence_tracking.get("rows"), list) else []
+    summary = evidence_tracking.get("summary") if isinstance(evidence_tracking.get("summary"), dict) else {}
+    score_mapping = data.get("score_mapping") if isinstance(data.get("score_mapping"), dict) else {}
+    item_cards = score_mapping.get("item_cards") if isinstance(score_mapping.get("item_cards"), list) else []
+    high_risk_items = score_mapping.get("high_risk_items") if isinstance(score_mapping.get("high_risk_items"), list) else []
+
+    def _s(v: Any) -> str:
+        return str(v or "").strip()
+
+    def _join_list(v: Any, sep: str = "；", limit: int = 20) -> str:
+        if isinstance(v, list):
+            out = [_s(x) for x in v if _s(x)]
+            return sep.join(out[: max(1, int(limit or 1))])
+        return _s(v)
+
+    def _sheet_set_width(ws, col: int, width: float) -> None:
+        try:
+            ws.column_dimensions[get_column_letter(int(col))].width = float(width)
+        except Exception:
+            pass
+
+    def _infer_src_type(src: str, typed: Dict[str, Any]) -> str:
+        s = _s(src).lower()
+        if not s:
+            return ""
+        graph_nodes = [_s(x) for x in (typed.get("graph_nodes") or []) if _s(x)]
+        drawing_refs = [_s(x) for x in (typed.get("drawing_refs") or []) if _s(x)]
+        standard_refs = [_s(x) for x in (typed.get("standard_refs") or []) if _s(x)]
+        if src in drawing_refs:
+            return "drawing_dxf"
+        if src in standard_refs:
+            return "standard"
+        if src in graph_nodes or s.startswith("图谱节点:"):
+            return "graph"
+        return "other"
+
+    wb = Workbook()
+    hdr_font = Font(bold=True)
+    hdr_fill = PatternFill("solid", fgColor="F2F2F2")
+    wrap = Alignment(wrap_text=True, vertical="top")
+
+    def _write(ws, r: int, c: int, v: Any, *, header: bool = False):
+        cell = ws.cell(row=r, column=c, value=v)
+        cell.alignment = wrap
+        if header:
+            cell.font = hdr_font
+            cell.fill = hdr_fill
+        return cell
+
+    # 1) summary
+    ws = wb.active
+    ws.title = "summary"
+    meta_rows = [
+        ("topic", _s(data.get("topic"))),
+        ("project_id", _s(data.get("project_id"))),
+        ("paragraph_count", int(summary.get("paragraph_count") or 0)),
+        ("score_point_bound_rows", int(summary.get("score_point_bound_rows") or 0)),
+        ("evidence_bound_rows", int(summary.get("evidence_bound_rows") or 0)),
+        ("traceable_locator_rows", int(summary.get("traceable_locator_rows") or 0)),
+        ("score_item_count", len(item_cards)),
+        ("high_risk_item_count", len(high_risk_items)),
+    ]
+    for i, (k, v) in enumerate(meta_rows, start=1):
+        _write(ws, i, 1, k, header=True)
+        _write(ws, i, 2, v)
+    _sheet_set_width(ws, 1, 32)
+    _sheet_set_width(ws, 2, 80)
+
+    # 2) 评分点覆盖
+    ws = wb.create_sheet("score_items")
+    headers = [
+        "item_id",
+        "dimension",
+        "keywords",
+        "matched_keywords",
+        "missing_keywords",
+        "coverage_ratio",
+        "estimated_score",
+        "deduction_risk",
+        "matched_sections",
+    ]
+    for c, h in enumerate(headers, start=1):
+        _write(ws, 1, c, h, header=True)
+    for r, it in enumerate(item_cards[:800], start=2):
+        if not isinstance(it, dict):
+            continue
+        values = [
+            _s(it.get("item_id")),
+            _s(it.get("dimension")),
+            _join_list(it.get("keywords"), sep="、", limit=50),
+            _join_list(it.get("matched_keywords"), sep="、", limit=50),
+            _join_list(it.get("missing_keywords"), sep="、", limit=50),
+            it.get("coverage_ratio"),
+            it.get("estimated_score"),
+            it.get("deduction_risk"),
+            _join_list(it.get("matched_sections"), sep="；", limit=50),
+        ]
+        for c, v in enumerate(values, start=1):
+            _write(ws, r, c, v)
+    _sheet_set_width(ws, 1, 14)
+    _sheet_set_width(ws, 2, 18)
+    _sheet_set_width(ws, 3, 42)
+    _sheet_set_width(ws, 4, 42)
+    _sheet_set_width(ws, 5, 42)
+    _sheet_set_width(ws, 6, 14)
+    _sheet_set_width(ws, 7, 14)
+    _sheet_set_width(ws, 8, 14)
+    _sheet_set_width(ws, 9, 40)
+
+    # 3) 评分点 × 证据矩阵
+    ws = wb.create_sheet("score_evidence_matrix")
+    headers = [
+        "score_rule_id",
+        "score_dimension",
+        "matched_keywords",
+        "page_estimate",
+        "section_title",
+        "paragraph_id",
+        "evidence_source",
+        "evidence_type",
+        "response_excerpt",
+    ]
+    for c, h in enumerate(headers, start=1):
+        _write(ws, 1, c, h, header=True)
+
+    row_no = 2
+    for rec in rows[:8000]:
+        if not isinstance(rec, dict):
+            continue
+        score_hits = rec.get("tender_score_points") if isinstance(rec.get("tender_score_points"), list) else []
+        score_hits = score_hits or [{"rule_id": "", "dimension": "", "matched_keywords": []}]
+        sources = rec.get("evidence_sources") if isinstance(rec.get("evidence_sources"), list) else []
+        sources = sources or [""]
+        typed = rec.get("evidence_typed") if isinstance(rec.get("evidence_typed"), dict) else {}
+        excerpt = _s(rec.get("system_response"))[:400]
+        for sp in score_hits:
+            if not isinstance(sp, dict):
+                continue
+            for src in sources:
+                values = [
+                    _s(sp.get("rule_id")),
+                    _s(sp.get("dimension")),
+                    _join_list(sp.get("matched_keywords"), sep="、", limit=20),
+                    rec.get("page_estimate"),
+                    _s(rec.get("section_title")),
+                    _s(rec.get("paragraph_id")),
+                    _s(src),
+                    _infer_src_type(_s(src), typed),
+                    excerpt,
+                ]
+                for c, v in enumerate(values, start=1):
+                    _write(ws, row_no, c, v)
+                row_no += 1
+
+    _sheet_set_width(ws, 1, 16)
+    _sheet_set_width(ws, 2, 20)
+    _sheet_set_width(ws, 3, 32)
+    _sheet_set_width(ws, 4, 12)
+    _sheet_set_width(ws, 5, 28)
+    _sheet_set_width(ws, 6, 16)
+    _sheet_set_width(ws, 7, 68)
+    _sheet_set_width(ws, 8, 16)
+    _sheet_set_width(ws, 9, 90)
+
+    # 4) 段落证据链明细
+    ws = wb.create_sheet("paragraph_evidence")
+    headers = [
+        "paragraph_id",
+        "section_title",
+        "paragraph_index",
+        "page_estimate",
+        "tender_score_points",
+        "evidence_sources",
+        "graph_nodes",
+        "drawing_refs",
+        "standard_refs",
+        "other_refs",
+        "system_response",
+    ]
+    for c, h in enumerate(headers, start=1):
+        _write(ws, 1, c, h, header=True)
+    for r, rec in enumerate(rows[:4000], start=2):
+        if not isinstance(rec, dict):
+            continue
+        typed = rec.get("evidence_typed") if isinstance(rec.get("evidence_typed"), dict) else {}
+        score_points = rec.get("tender_score_points") if isinstance(rec.get("tender_score_points"), list) else []
+        score_text = []
+        for sp in score_points:
+            if not isinstance(sp, dict):
+                continue
+            score_text.append(f"{_s(sp.get('rule_id'))}|{_s(sp.get('dimension'))}|{_join_list(sp.get('matched_keywords'), sep='、', limit=10)}")
+        values = [
+            _s(rec.get("paragraph_id")),
+            _s(rec.get("section_title")),
+            rec.get("paragraph_index"),
+            rec.get("page_estimate"),
+            _join_list(score_text, sep="\n", limit=100),
+            _join_list(rec.get("evidence_sources"), sep="\n", limit=100),
+            _join_list(typed.get("graph_nodes"), sep="\n", limit=100),
+            _join_list(typed.get("drawing_refs"), sep="\n", limit=100),
+            _join_list(typed.get("standard_refs"), sep="\n", limit=100),
+            _join_list(typed.get("other_refs"), sep="\n", limit=100),
+            _s(rec.get("system_response"))[:800],
+        ]
+        for c, v in enumerate(values, start=1):
+            _write(ws, r, c, v)
+    _sheet_set_width(ws, 1, 16)
+    _sheet_set_width(ws, 2, 24)
+    _sheet_set_width(ws, 3, 10)
+    _sheet_set_width(ws, 4, 10)
+    _sheet_set_width(ws, 5, 48)
+    _sheet_set_width(ws, 6, 48)
+    _sheet_set_width(ws, 7, 36)
+    _sheet_set_width(ws, 8, 36)
+    _sheet_set_width(ws, 9, 36)
+    _sheet_set_width(ws, 10, 36)
+    _sheet_set_width(ws, 11, 90)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(output_path))
+    return str(output_path)
+
+
+def export_expert_review_brief_docx(data: Dict[str, Any], output_path: str) -> str:
+    """
+    10%专家复核提要版
+    仅保留: 工期关键节点、资源峰值、重大安质风控、加分策略触发摘要。
+    """
+    style_raw = data.get("style") if isinstance(data.get("style"), dict) else {}
+    style_cfg = _normalize_style(style_raw)
+    doc = Document()
+    _apply_page_setup(doc, style_cfg)
+    apply_paragraph = _apply_style(doc, style_raw)
+
+    topic = str(data.get("topic") or "施工组织设计").strip()
+    h1 = doc.add_heading(f"{topic} - 专家复核提要版", level=1)
+    apply_paragraph(h1, is_title=True)
+    p_intro = doc.add_paragraph("本稿为高浓度复核摘要，仅保留关键指标、闭环措施与加分策略触发信息。")
+    apply_paragraph(p_intro)
+
+    sections = data.get("sections") if isinstance(data.get("sections"), list) else []
+    quality_checks = data.get("quality_checks") if isinstance(data.get("quality_checks"), dict) else {}
+    plan_consistency = data.get("plan_consistency") if isinstance(data.get("plan_consistency"), dict) else {}
+    boq_wbs_cpm = data.get("boq_wbs_cpm") if isinstance(data.get("boq_wbs_cpm"), dict) else {}
+    cpm = plan_consistency.get("cpm") if isinstance(plan_consistency.get("cpm"), dict) else {}
+    cpm_summary = boq_wbs_cpm.get("summary") if isinstance(boq_wbs_cpm.get("summary"), dict) else {}
+    cpm_critical_names = [str(x).strip() for x in (cpm_summary.get("critical_path_names") or []) if str(x).strip()]
+    if not cpm_critical_names:
+        cpm_critical_names = [str(x).strip() for x in (cpm.get("critical_path") or []) if str(x).strip()]
+
+    duration_days = cpm_summary.get("project_duration_days")
+    if duration_days in (None, ""):
+        duration_days = ((cpm.get("computed") or {}).get("project_duration_days") if isinstance(cpm.get("computed"), dict) else None)
+    resource_peak = cpm_summary.get("resource_peak")
+    if resource_peak in (None, ""):
+        resource_peak = ((cpm.get("computed") or {}).get("resource_peak") if isinstance(cpm.get("computed"), dict) else None)
+    critical_gap = cpm_summary.get("critical_interval_days")
+    if critical_gap in (None, ""):
+        critical_gap = ((cpm.get("computed") or {}).get("critical_interval_days") if isinstance(cpm.get("computed"), dict) else None)
+
+    h = doc.add_heading("1. 核心工期网络节点", level=2)
+    apply_paragraph(h, is_title=True)
+    for line in [
+        f"- 项目总工期(天): {duration_days if duration_days not in (None, '') else '未提取'}",
+        f"- 关键线路最小间隔(天): {critical_gap if critical_gap not in (None, '') else '未提取'}",
+        f"- 关键线路节点: {' -> '.join(cpm_critical_names[:20]) if cpm_critical_names else '未提取'}",
+    ]:
+        p = doc.add_paragraph(line)
+        apply_paragraph(p)
+
+    h = doc.add_heading("2. 资源投入峰值", level=2)
+    apply_paragraph(h, is_title=True)
+    for line in [
+        f"- 资源峰值: {resource_peak if resource_peak not in (None, '') else '未提取'}",
+        f"- WBS工序数量: {len(boq_wbs_cpm.get('wbs') or []) if isinstance(boq_wbs_cpm, dict) else 0}",
+    ]:
+        p = doc.add_paragraph(line)
+        apply_paragraph(p)
+
+    h = doc.add_heading("3. 重大安全/质量风控闭环", level=2)
+    apply_paragraph(h, is_title=True)
+    issue_list = quality_checks.get("issue_list") if isinstance(quality_checks.get("issue_list"), list) else []
+    picked = []
+    for it in issue_list:
+        if not isinstance(it, dict):
+            continue
+        sev = str(it.get("severity") or "").strip().lower()
+        txt = f"{it.get('title') or '章节'}|{it.get('type') or ''}|{it.get('problem') or ''}|{it.get('suggestion') or ''}"
+        if sev in {"high", "critical"} or ("安全" in txt) or ("质量" in txt) or ("风险" in txt):
+            picked.append(it)
+    if not picked:
+        p = doc.add_paragraph("- 当前质量审计未检出高风险问题。")
+        apply_paragraph(p)
+    else:
+        for it in picked[:12]:
+            line = (
+                f"- [{it.get('severity') or 'medium'}] {it.get('title') or '章节'}: "
+                f"{it.get('problem') or ''}；建议: {it.get('suggestion') or ''}"
+            )
+            p = doc.add_paragraph(line)
+            apply_paragraph(p)
+
+    h = doc.add_heading("4. qt_score_booster 加分策略触发", level=2)
+    apply_paragraph(h, is_title=True)
+    booster_hits = []
+    # 1) 从章节内容中捕捉显式触发
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        title = str(sec.get("title") or "").strip() or "章节"
+        txt = str(sec.get("content") or "")
+        if "qt_score_booster" in txt or "加分项" in txt or "加分策略" in txt:
+            booster_hits.append(f"{title}: 命中章节文本策略标记")
+        m = re.findall(r"(?:\+|加分)\s*(\d+(?:\.\d+)?)\s*分", txt)
+        if m:
+            booster_hits.append(f"{title}: 检测到分值表达 {','.join(m[:3])} 分")
+    # 2) 从图谱调度摘要补充
+    multi_agent = data.get("multi_agent") if isinstance(data.get("multi_agent"), dict) else {}
+    selected_graphs = multi_agent.get("selected_graphs") if isinstance(multi_agent.get("selected_graphs"), list) else []
+    for g in selected_graphs:
+        if not isinstance(g, dict):
+            continue
+        booster = g.get("qt_score_booster") if isinstance(g.get("qt_score_booster"), dict) else {}
+        if booster:
+            gname = str(g.get("graph_name") or g.get("filename") or "图谱").strip()
+            booster_hits.append(
+                f"{gname}: {str(booster.get('strategy') or booster.get('score_weight') or booster.get('weight') or '已配置加分策略')}"
+            )
+    # 去重
+    dedup = []
+    for x in booster_hits:
+        if x not in dedup:
+            dedup.append(x)
+    if dedup:
+        for ln in dedup[:16]:
+            p = doc.add_paragraph(f"- {ln}")
+            apply_paragraph(p)
+    else:
+        p = doc.add_paragraph("- 未检测到显式 qt_score_booster 触发项（建议在图谱节点或章节中补充加分策略表达）。")
+        apply_paragraph(p)
+
+    # 10%章节摘录（供总工快速定位）
+    h = doc.add_heading("5. 10%章节快速摘录", level=2)
+    apply_paragraph(h, is_title=True)
+    if not sections:
+        p = doc.add_paragraph("- 无章节数据。")
+        apply_paragraph(p)
+    else:
+        ranked = []
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            title = str(sec.get("title") or "").strip()
+            content = str(sec.get("content") or "")
+            score = 0
+            for kw, w in [
+                ("工期", 3),
+                ("进度", 3),
+                ("关键线路", 4),
+                ("资源", 3),
+                ("质量", 3),
+                ("安全", 3),
+                ("风险", 3),
+                ("控制", 2),
+                ("验证", 2),
+            ]:
+                if kw in content or kw in title:
+                    score += w
+            score += min(6, int(len(content) / 800))
+            ranked.append((score, title, content))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        keep = max(1, min(12, math.ceil(len(ranked) * 0.10)))
+        for _, title, content in ranked[:keep]:
+            p1 = doc.add_paragraph(f"- {title}")
+            apply_paragraph(p1)
+            p2 = doc.add_paragraph((content[:360] + "...") if len(content) > 360 else content)
+            apply_paragraph(p2)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    doc.save(output_path)
+    return str(output_path)

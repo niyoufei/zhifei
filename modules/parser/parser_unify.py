@@ -81,11 +81,28 @@ class UnifiedParser:
         if isinstance(blocks, dict):
             for k, v in sorted(blocks.items(), key=lambda x: x[1], reverse=True)[:8]:
                 top_blocks.append(f"{k}:{v}")
+        topo_text = ""
+        try:
+            from modules.parser.drawing_topology import topology_summary_text
+
+            topo_text = topology_summary_text(meta.get("topology") if isinstance(meta.get("topology"), dict) else {})
+        except Exception:
+            topo_text = ""
+        topo_line = f"\n{topo_text}" if topo_text else ""
+        sem = meta.get("semantics") if isinstance(meta.get("semantics"), dict) else {}
+        comp_n = len(sem.get("component_anchors") or []) if isinstance(sem, dict) else 0
+        dim_n = len(sem.get("dimension_anchors") or []) if isinstance(sem, dict) else 0
+        elev_n = len(sem.get("elevation_anchors") or []) if isinstance(sem, dict) else 0
+        sem_line = ""
+        if comp_n or dim_n or elev_n:
+            sem_line = f"\n空间锚点: 构件{comp_n}个 | 尺寸{dim_n}个 | 标高{elev_n}个"
         return (
             f"CAD图纸信息\n"
             f"图层数量: {meta.get('layers_count')}\n"
             f"实体数量: {meta.get('entities_count')}\n"
             f"块引用: {'; '.join(top_blocks)}"
+            f"{topo_line}"
+            f"{sem_line}"
         )
 
     def parse(self) -> Dict[str, Any]:

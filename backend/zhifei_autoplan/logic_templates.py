@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 TEMPLATES_PATH = Path("backend/data/autoplan/logic_templates.json")
 _KNOWN_DOMAINS = {"general", "qse"}
+_TEMPLATE_IDS = {"A", "B", "C", "D", "E"}
 
 
 @dataclass(frozen=True)
@@ -119,7 +120,31 @@ def _builtin_templates_general() -> Dict[str, LogicTemplate]:
         ),
         fallback_headings=["控制指标矩阵", "人机料法环落地", "风险→控制→验证（按维度）", "信息化与台账", "证据定位"],
     )
-    return {t.template_id: t for t in (a, b, c)}
+    d = LogicTemplate(
+        template_id="D",
+        name="资源节拍驱动",
+        prompt_rules=(
+            "章内逻辑模版D（资源节拍驱动）：\n"
+            "- 先输出“资源-工序耦合表”：每道工序写班组人数/设备型号/单段时长/衔接条件。\n"
+            "- 再写“接口冲突清单”：交叉作业位置、冲突条件、避让窗口、责任岗位。\n"
+            "- 再写“关键路径纠偏卡”：触发阈值、纠偏动作、时限、复核标准。\n"
+            "- 每个小节都必须落地风险→控制→验证，并绑定证据定位符。\n"
+        ),
+        fallback_headings=["资源-工序耦合表", "接口冲突清单", "关键路径纠偏卡", "风险→控制→验证（资源视角）", "证据回填"],
+    )
+    e = LogicTemplate(
+        template_id="E",
+        name="场景分区驱动",
+        prompt_rules=(
+            "章内逻辑模版E（场景分区驱动）：\n"
+            "- 先按施工场区/作业面拆成场景卡片，每个场景写适用范围与边界。\n"
+            "- 每个场景必须有“参数对照表”（频次/阈值/间距/厚度/时长/人数/设备型号）。\n"
+            "- 每个场景给“验收样表”字段，明确谁验收、何时验收、留存什么记录。\n"
+            "- 风险闭环按场景输出，禁止跨场景泛化表述。\n"
+        ),
+        fallback_headings=["实施场景卡片", "参数对照表", "验收样表", "风险→控制→验证（场景）", "证据与归档"],
+    )
+    return {t.template_id: t for t in (a, b, c, d, e)}
 
 def _builtin_templates_qse() -> Dict[str, LogicTemplate]:
     """
@@ -160,7 +185,31 @@ def _builtin_templates_qse() -> Dict[str, LogicTemplate]:
         ),
         fallback_headings=["指标矩阵", "数据闭环", "处置与复核", "证据定位"],
     )
-    return {t.template_id: t for t in (a, b, c)}
+    d = LogicTemplate(
+        template_id="D",
+        name="红线管控闭环（质量/安全/环保）",
+        prompt_rules=(
+            "章内逻辑模版D（质量/安全/文明环保红线管控闭环）：\n"
+            "- 先输出“监管红线清单”：红线条款、触发条件、停工阈值、责任岗位。\n"
+            "- 再输出“岗位联签链”：发现人→处置人→复核人→批准关闭人。\n"
+            "- 再输出“闭环时限表”：高风险/中风险/一般风险的处置与复核时限。\n"
+            "- 每条红线都要写证据定位与记录表字段。\n"
+        ),
+        fallback_headings=["监管红线清单", "岗位联签链", "闭环时限表", "证据定位"],
+    )
+    e = LogicTemplate(
+        template_id="E",
+        name="网格巡检闭环（质量/安全/环保）",
+        prompt_rules=(
+            "章内逻辑模版E（质量/安全/文明环保网格巡检闭环）：\n"
+            "- 先按区域网格输出巡检责任图（网格编号、责任岗位、巡检频次）。\n"
+            "- 再输出“班组行为清单”：必须执行动作、禁止动作、抽查阈值。\n"
+            "- 再输出“红黄牌处置”：触发条件、停工条件、整改时限、复工验证。\n"
+            "- 所有闭环必须有记录载体和复核销项条件。\n"
+        ),
+        fallback_headings=["区域网格", "班组行为清单", "红黄牌处置", "复核与销项"],
+    )
+    return {t.template_id: t for t in (a, b, c, d, e)}
 
 
 def _parse_templates_dict(obj: Dict[str, Any]) -> Dict[str, LogicTemplate]:
@@ -169,7 +218,7 @@ def _parse_templates_dict(obj: Dict[str, Any]) -> Dict[str, LogicTemplate]:
         if not isinstance(v, dict):
             continue
         tid = str(v.get("id") or k or "").strip().upper()
-        if tid not in {"A", "B", "C"}:
+        if tid not in _TEMPLATE_IDS:
             continue
         name = str(v.get("name") or "").strip() or tid
         rules = str(v.get("prompt_rules") or "").strip()
@@ -209,7 +258,7 @@ def _load_templates_from_file(domain: str) -> Dict[str, LogicTemplate]:
 def load_logic_templates(domain: str = "general") -> Dict[str, LogicTemplate]:
     """
     Load templates from optional JSON file; fallback to built-ins.
-    The system always guarantees A/B/C exist.
+    The system always guarantees A/B/C/D/E exist.
     """
     dom = (domain or "general").strip().lower()
     if dom not in _KNOWN_DOMAINS:
@@ -230,16 +279,24 @@ def normalize_template_id(tid: str | None) -> str | None:
     s = tid.strip().upper()
     if not s:
         return None
-    if s in {"A", "B", "C"}:
+    if s in _TEMPLATE_IDS:
         return s
     # Accept common aliases
     alias = {
         "TEMPLATE_A": "A",
         "TEMPLATE_B": "B",
         "TEMPLATE_C": "C",
+        "TEMPLATE_D": "D",
+        "TEMPLATE_E": "E",
         "方案A": "A",
         "方案B": "B",
         "方案C": "C",
+        "方案D": "D",
+        "方案E": "E",
+        # user shorthand compatibility
+        "S": "C",
+        "方案S": "C",
+        "TEMPLATE_S": "C",
     }
     return alias.get(s)
 
@@ -251,9 +308,9 @@ def pick_logic_template(
     domain: str = "general",
 ) -> LogicTemplate:
     """
-    Pick A/B/C deterministically.
+    Pick A/B/C/D/E deterministically.
     - If explicit_template_id is provided, honor it.
-    - Else pick by variant_id order: 1->A, 2->B, 3->C, 4->A...
+    - Else pick by variant_id order: 1->A, 2->B, 3->C, 4->D, 5->E, 6->A...
     """
     tmpls = load_logic_templates(domain=domain)
     exp = normalize_template_id(explicit_template_id)
@@ -265,6 +322,6 @@ def pick_logic_template(
         vid = 1
     if vid <= 0:
         vid = 1
-    order = ["A", "B", "C"]
-    key = order[(vid - 1) % 3]
+    order = ["A", "B", "C", "D", "E"]
+    key = order[(vid - 1) % 5]
     return tmpls[key]

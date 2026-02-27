@@ -53,7 +53,7 @@ class TestLLMClientInit:
         """初始化时调用 _init_provider"""
         mock_provider = MagicMock()
         with patch.object(LLMClient, "_init_provider", return_value=mock_provider) as mock_init:
-            client = LLMClient(provider="openai", model="gpt-4")
+            client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             mock_init.assert_called_once()
             assert client._impl == mock_provider
 
@@ -118,6 +118,25 @@ class TestInitProvider:
             client = LLMClient(provider="anthropic", model="claude-3", api_key="test-key")
             mock.assert_called_once_with("test-key", "claude-3")
 
+    def test_init_grok_provider(self):
+        """初始化 Grok provider"""
+        with patch("backend.zhifei_autoplan.utils.llm_client.GrokProvider") as mock:
+            mock.return_value = MagicMock()
+            client = LLMClient(provider="grok", model="grok-4-1-fast-reasoning", api_key="test-key")
+            mock.assert_called_once_with("test-key", "grok-4-1-fast-reasoning", "https://api.x.ai/v1")
+
+    def test_init_grok_provider_custom_url(self):
+        """初始化 Grok provider（自定义 URL）"""
+        with patch("backend.zhifei_autoplan.utils.llm_client.GrokProvider") as mock:
+            mock.return_value = MagicMock()
+            client = LLMClient(
+                provider="grok",
+                model="grok-4-1-fast-reasoning",
+                api_key="test-key",
+                base_url="https://custom.x.ai/v1",
+            )
+            mock.assert_called_once_with("test-key", "grok-4-1-fast-reasoning", "https://custom.x.ai/v1")
+
     def test_init_google_provider(self):
         """初始化 Google Gemini provider"""
         with patch("backend.zhifei_autoplan.utils.llm_client.GeminiProvider") as mock:
@@ -172,11 +191,12 @@ class TestInitProvider:
             mock.assert_called_once_with("test-key", "test-secret", "ernie-bot", "https://token.url")
 
     def test_init_baidu_provider_default_values(self):
-        """初始化百度文心 provider（默认值）"""
+        """百度 provider 缺少 secret_key 时短路。"""
         with patch("backend.zhifei_autoplan.utils.llm_client.BaiduProvider") as mock:
-            mock.return_value = MagicMock()
             client = LLMClient(provider="baidu", model="ernie-bot", api_key="test-key")
-            mock.assert_called_once_with("test-key", "", "ernie-bot", "")
+            mock.assert_not_called()
+            assert client._impl is None
+            assert client._init_error == "secret_key_missing"
 
     def test_init_iflytek_provider(self):
         """初始化讯飞星火 provider"""
@@ -222,11 +242,19 @@ class TestInitProvider:
         assert client._impl is None
 
     def test_init_provider_with_none_api_key(self):
-        """api_key 为 None 时使用空字符串"""
+        """缺少必需密钥时应短路，不触发 provider 初始化。"""
         with patch("backend.zhifei_autoplan.utils.llm_client.OpenAIProvider") as mock:
-            mock.return_value = MagicMock()
             client = LLMClient(provider="openai", model="gpt-4", api_key=None)
-            mock.assert_called_once_with("", "gpt-4")
+            mock.assert_not_called()
+            assert client._impl is None
+            assert client._init_error == "api_key_missing"
+
+    def test_init_provider_exception_does_not_raise(self):
+        """Provider 初始化异常不应向上抛出，需由 client 返回 error。"""
+        with patch("backend.zhifei_autoplan.utils.llm_client.GeminiProvider", side_effect=ValueError("missing api key")):
+            client = LLMClient(provider="google", model="gemini-3-pro-preview", api_key="test-key")
+            assert client._impl is None
+            assert "missing api key" in str(client._init_error or "")
 
 
 # ==============================================================================
@@ -248,13 +276,22 @@ class TestComplete:
         assert result["text"] == ""
 
     @pytest.mark.asyncio
+    async def test_complete_returns_init_error_when_provider_init_failed(self):
+        """Provider 初始化失败时 complete 返回初始化错误信息。"""
+        with patch("backend.zhifei_autoplan.utils.llm_client.GeminiProvider", side_effect=ValueError("missing api key")):
+            client = LLMClient(provider="google", model="gemini-3-pro-preview", api_key="test-key")
+            result = await client.complete("test prompt")
+            assert "missing api key" in str(result.get("error") or "")
+            assert result["provider"] == "google"
+
+    @pytest.mark.asyncio
     async def test_complete_success(self):
         """成功调用 provider"""
         mock_impl = MagicMock()
         mock_impl.complete = AsyncMock(return_value={"text": "response", "provider": "test"})
         
         with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
-            client = LLMClient(provider="openai", model="gpt-4")
+            client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             result = await client.complete("test prompt", temperature=0.7)
             
             mock_impl.complete.assert_called_once_with("test prompt", temperature=0.7)
@@ -267,7 +304,7 @@ class TestComplete:
         mock_impl.complete = AsyncMock(side_effect=TimeoutError())
         
         with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
-            client = LLMClient(provider="openai", model="gpt-4")
+            client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             result = await client.complete("test prompt")
             
             assert result["error"] == "timeout"
@@ -281,7 +318,7 @@ class TestComplete:
         mock_impl.complete = AsyncMock(side_effect=ValueError("test error"))
         
         with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
-            client = LLMClient(provider="openai", model="gpt-4")
+            client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             result = await client.complete("test prompt")
             
             assert "ValueError" in result["error"]
@@ -296,7 +333,7 @@ class TestComplete:
         mock_impl.complete = AsyncMock(return_value={"text": "response"})
         
         with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
-            client = LLMClient(provider="openai", model="gpt-4")
+            client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             await client.complete("test", max_tokens=100, temperature=0.5, top_p=0.9)
             
             mock_impl.complete.assert_called_once_with(

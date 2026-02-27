@@ -8,6 +8,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
+from backend.zhifei_autoplan.terminology_guard import load_global_terminology, normalize_text_terminology
 
 
 def _setup_doc_style(doc: Document) -> None:
@@ -108,6 +109,7 @@ def generate_v2_docx(
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     section_by_title: Dict[str, Dict[str, Any]] = {}
+    terminology_entries = load_global_terminology()
     for sec in sections:
         key = str(sec.get("title") or "").strip()
         if key and key not in section_by_title:
@@ -129,6 +131,10 @@ def generate_v2_docx(
             auto_generated_sections += 1
 
         content = str(sec.get("content") or "").strip()
+        try:
+            content, _ = normalize_text_terminology(content, terminology_entries)
+        except Exception:
+            pass
         _render_section_paragraph(doc, text=content or "该章节暂无可用内容。", highlight=highlight)
         if highlight:
             highlighted_paragraphs += 1

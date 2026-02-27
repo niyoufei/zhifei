@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -28,13 +28,14 @@ from backend.zhifei_autoplan.media import generate_boq_chart, generate_ingested_
 from backend.zhifei_autoplan.params_runtime import load_params, get_image_defaults, save_params
 from backend.zhifei_autoplan.four_new_tech import recommend_four_new
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
+from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
 
 
 router = APIRouter(prefix="/actions", tags=["Actions Bridge"])
 
 
 def _auth_actions_key(x_actions_key: str | None):
-    expected = os.environ.get("ZF_ACTIONS_KEY", "").strip()
+    expected = os.environ.get("ZF_ACTIONS_KEY", "zf-webui-key").strip()
     if not expected:
         raise HTTPException(status_code=503, detail="actions key not configured")
     if (x_actions_key or "").strip() != expected:
@@ -45,16 +46,25 @@ class ActionsGenerateRequest(BaseModel):
     topic: str
     project_id: str | None = None
     project_type: str | None = None
+    generation_mode: str | None = None
     outline: List[str] = []
     requirements: List[str] = []
     global_instruction: str | None = None
     chapter_requirements: dict | None = None
     provider: str | None = None
     model: str | None = None
+    provider_chain: List[dict] | None = None
     providers: List[str] = []
     model_map: dict | None = None
     style: dict | None = None
     variants: int = 1
+    # 可选模板（A/B/C/D/E）；若提供则按所选模板逐份生成。
+    selected_templates: List[str] | None = None
+    # 并行控制：章节级 Agent 并行数（单份方案内），以及多份方案并行数（A/B/C/D/E 之间）。
+    agent_parallelism: int | None = None
+    variant_parallelism: int | None = None
+    strict_tender_outline: bool | None = None
+    total_pages_target: int | None = None
     chapter_pages: dict | None = None
     quality_strict: bool | None = True
     auto_remediate: bool = True
@@ -63,6 +73,7 @@ class ActionsGenerateRequest(BaseModel):
     compare_max_chars: int = 1200
     compare_titles: list[str] | None = None
     api_key: str | None = None
+    api_keys: dict | None = None
     base_url: str | None = None
     secret_key: str | None = None
     token_url: str | None = None
@@ -85,8 +96,12 @@ class ActionsPlanRequest(BaseModel):
     outline: List[str]
     style: dict = {}
     project_type: str | None = None
+    generation_mode: str | None = None
     global_instruction: str | None = None
     variants: int = 1
+    selected_templates: List[str] | None = None
+    strict_tender_outline: bool | None = None
+    total_pages_target: int | None = None
     chapter_requirements: dict = {}
     chapter_pages: dict = {}
     quality_strict: bool = True
@@ -140,6 +155,19 @@ class ActionsParamsDiffRequest(BaseModel):
 
 class ActionsJobCancelRequest(BaseModel):
     job_id: str
+
+
+class ActionsReviewDecision(BaseModel):
+    issue_id: str
+    apply: bool = True
+    replacement: str | None = None
+
+
+class ActionsReviewApplyRequest(BaseModel):
+    job_id: str
+    variant: int = 1
+    apply_all: bool = False
+    decisions: List[ActionsReviewDecision] = []
 
 
 @router.get("/params/get")
@@ -222,6 +250,159 @@ def _safe_project_scope(raw: str | None) -> str | None:
     return s[:96] or None
 
 
+def _to_positive_int(v: Any) -> int | None:
+    try:
+        n = int(float(v))
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def _normalize_logic_template_id(raw: Any) -> str | None:
+    s = str(raw or "").strip().upper()
+    if not s:
+        return None
+    if s in {"A", "B", "C", "D", "E"}:
+        return s
+    alias = {
+        "TEMPLATE_A": "A",
+        "TEMPLATE_B": "B",
+        "TEMPLATE_C": "C",
+        "TEMPLATE_D": "D",
+        "TEMPLATE_E": "E",
+        "方案A": "A",
+        "方案B": "B",
+        "方案C": "C",
+        "方案D": "D",
+        "方案E": "E",
+        # Compatibility: users may input S as C.
+        "S": "C",
+        "方案S": "C",
+        "TEMPLATE_S": "C",
+    }
+    return alias.get(s)
+
+
+def _normalize_selected_templates(raw: Any) -> List[str]:
+    arr = raw if isinstance(raw, list) else ([raw] if raw is not None else [])
+    out: List[str] = []
+    seen = set()
+    for x in arr:
+        tid = _normalize_logic_template_id(x)
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        out.append(tid)
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
+    pid = str(payload.get("project_id") or "").strip() or None
+    selected = _normalize_selected_templates(payload.get("selected_templates"))
+    explicit_variant_id = payload.get("variant_id")
+    explicit_template_id = _normalize_logic_template_id(payload.get("logic_template_id") or payload.get("logic_template"))
+
+    if selected:
+        variant_ids = reserve_variant_ids(
+            project_id=pid,
+            count=max(1, len(selected)),
+            explicit_variant_id=explicit_variant_id,
+            explicit_template_id=None,
+        )
+        payload["selected_templates"] = selected
+        payload["variants"] = len(selected)
+        return [
+            {"variant_id": int(variant_ids[i]), "logic_template_id": selected[i]}
+            for i in range(min(len(variant_ids), len(selected)))
+        ]
+
+    try:
+        variants = int(payload.get("variants") or 1)
+    except Exception:
+        variants = 1
+    variants = max(1, min(5, variants))
+    variant_ids = reserve_variant_ids(
+        project_id=pid,
+        count=variants,
+        explicit_variant_id=explicit_variant_id,
+        explicit_template_id=explicit_template_id,
+    )
+    if explicit_template_id:
+        return [{"variant_id": int(vid), "logic_template_id": explicit_template_id} for vid in variant_ids]
+    return [{"variant_id": int(vid)} for vid in variant_ids]
+
+
+def _page_target_value(v: Any) -> int | None:
+    if isinstance(v, dict):
+        v = v.get("target") or v.get("pages") or v.get("page_target") or v.get("count")
+    return _to_positive_int(v)
+
+
+def _planned_total_pages(payload: dict) -> int:
+    hard = _to_positive_int(payload.get("total_pages_target"))
+    if hard:
+        return int(hard)
+    chapter_pages = payload.get("chapter_pages") if isinstance(payload.get("chapter_pages"), dict) else {}
+    if not chapter_pages:
+        return 0
+    s = 0
+    for _, raw in chapter_pages.items():
+        n = _page_target_value(raw)
+        if n:
+            s += int(n)
+    return int(s)
+
+
+def _apply_generation_mode_policy(payload: dict) -> dict:
+    mode = str(payload.get("generation_mode") or "quality_200").strip()
+    if not mode:
+        mode = "quality_200"
+    pages = _planned_total_pages(payload)
+    auto_switched = False
+
+    if mode == "quality_200" and pages > 500:
+        mode = "hq_speed_500"
+        auto_switched = True
+
+    if mode == "quality_200":
+        payload["quality_strict"] = True
+        payload["auto_remediate"] = True
+        payload["variant_parallelism"] = 1
+        if str(payload.get("remediate_mode") or "").strip() not in {"template", "llm"}:
+            payload["remediate_mode"] = "template"
+        ap = _to_positive_int(payload.get("agent_parallelism")) or 4
+        payload["agent_parallelism"] = max(1, min(16, int(ap)))
+    elif mode == "hq_speed_500":
+        payload["quality_strict"] = True
+        payload["auto_remediate"] = True
+        payload["remediate_mode"] = "template"
+        ap = _to_positive_int(payload.get("agent_parallelism")) or 6
+        payload["agent_parallelism"] = max(6, min(16, int(ap)))
+        vp = _to_positive_int(payload.get("variant_parallelism")) or 1
+        payload["variant_parallelism"] = max(1, min(5, int(vp)))
+        if payload.get("generate_images") is None:
+            payload["generate_images"] = False
+        if payload.get("compare_max_chars") is None:
+            payload["compare_max_chars"] = 800
+    else:
+        mode = "quality_200"
+        payload["quality_strict"] = True
+        payload["auto_remediate"] = True
+        payload["variant_parallelism"] = 1
+        ap = _to_positive_int(payload.get("agent_parallelism")) or 4
+        payload["agent_parallelism"] = max(1, min(16, int(ap)))
+
+    payload["generation_mode"] = mode
+    payload["_mode_policy"] = {
+        "mode_effective": mode,
+        "auto_switched": bool(auto_switched),
+        "planned_total_pages": int(pages),
+    }
+    return payload
+
+
 def _merge_plan_defaults(payload: dict) -> dict:
     pid = str(payload.get("project_id") or "").strip() or None
     plan = load_plan(project_id=pid) or {}
@@ -242,6 +423,8 @@ def _merge_plan_defaults(payload: dict) -> dict:
         payload["chapter_pages"] = plan.get("chapter_pages") or {}
     if not payload.get("chapter_pages"):
         payload["chapter_pages"] = tender.get("chapter_pages") or {}
+    if payload.get("total_pages_target") is None:
+        payload["total_pages_target"] = plan.get("total_pages_target")
     if payload.get("quality_strict") is None:
         payload["quality_strict"] = plan.get("quality_strict", True)
     if payload.get("auto_remediate") is None:
@@ -254,13 +437,22 @@ def _merge_plan_defaults(payload: dict) -> dict:
         payload["compare_max_chars"] = plan.get("compare_max_chars", 1200)
     if payload.get("compare_titles") is None:
         payload["compare_titles"] = plan.get("compare_titles")
+    if payload.get("selected_templates") is None:
+        payload["selected_templates"] = plan.get("selected_templates")
+    payload["selected_templates"] = _normalize_selected_templates(payload.get("selected_templates"))
+    if payload.get("selected_templates"):
+        payload["variants"] = len(payload["selected_templates"])
     if not payload.get("variants"):
         payload["variants"] = plan.get("variants") or 1
+    if payload.get("strict_tender_outline") is None:
+        payload["strict_tender_outline"] = plan.get("strict_tender_outline", False)
     if not payload.get("project_type"):
         payload["project_type"] = plan.get("project_type")
+    if payload.get("generation_mode") is None:
+        payload["generation_mode"] = plan.get("generation_mode")
     if payload.get("global_instruction") is None:
         payload["global_instruction"] = plan.get("global_instruction")
-    return payload
+    return _apply_generation_mode_policy(payload)
 
 
 def _save_outputs(base_name: str, results: list[dict]) -> dict:
@@ -271,6 +463,8 @@ def _save_outputs(base_name: str, results: list[dict]) -> dict:
     docx_files = []
     compare_files = []
     focus_xlsx_files = []
+    score_overview_xlsx_files = []
+    expert_review_docx_files = []
     for i, variant in enumerate(results):
         out_docx = build_dir / f"{base_name}_v{i + 1}.docx"
         export_autoplan_docx(variant, str(out_docx))
@@ -284,7 +478,31 @@ def _save_outputs(base_name: str, results: list[dict]) -> dict:
         except Exception:
             focus_path = ""
         focus_xlsx_files.append(str(focus_path) if focus_path else None)
-    return {"json": str(out_json), "docx": docx_files, "compare_docx": compare_files, "focus_xlsx": focus_xlsx_files}
+        out_overview = build_dir / f"{base_name}_评分点覆盖与证据引用总览_v{i + 1}.xlsx"
+        try:
+            from backend.zhifei_autoplan.exporter import export_scoring_evidence_overview_xlsx
+
+            overview_path = export_scoring_evidence_overview_xlsx(variant, str(out_overview))
+        except Exception:
+            overview_path = ""
+        score_overview_xlsx_files.append(str(overview_path) if overview_path else None)
+
+        out_review = build_dir / f"{base_name}_专家复核提要版_v{i + 1}.docx"
+        try:
+            from backend.zhifei_autoplan.exporter import export_expert_review_brief_docx
+
+            review_path = export_expert_review_brief_docx(variant, str(out_review))
+        except Exception:
+            review_path = ""
+        expert_review_docx_files.append(str(review_path) if review_path else None)
+    return {
+        "json": str(out_json),
+        "docx": docx_files,
+        "compare_docx": compare_files,
+        "focus_xlsx": focus_xlsx_files,
+        "score_overview_xlsx": score_overview_xlsx_files,
+        "expert_review_docx": expert_review_docx_files,
+    }
 
 
 def _rebuild_postprocessed_artifacts(
@@ -436,6 +654,104 @@ def _rebuild_postprocessed_artifacts(
             )
         except Exception:
             pass
+        try:
+            v["evidence_tracking"] = build_evidence_tracking(
+                sections=sections,
+                tender=tender,
+                chapter_pages=v.get("chapter_pages") if isinstance(v.get("chapter_pages"), dict) else {},
+            )
+        except Exception:
+            v["evidence_tracking"] = {"rows": [], "summary": {}}
+
+
+def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if str(job.get("status") or "").strip() != "done":
+        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
+    result = job.get("result") or {}
+    json_path = str(result.get("json") or "").strip()
+    if not json_path or not Path(json_path).exists():
+        raise HTTPException(status_code=404, detail="result json not found")
+    data = json.loads(Path(json_path).read_text(encoding="utf-8", errors="ignore"))
+    variants = data.get("variants") if isinstance(data.get("variants"), list) else []
+    if not variants:
+        raise HTTPException(status_code=404, detail="empty result variants")
+    return job, result, data, variants
+
+
+def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> list[dict]:
+    qc = variant_rec.get("quality_checks") if isinstance(variant_rec.get("quality_checks"), dict) else {}
+    issues = qc.get("issue_list") if isinstance(qc.get("issue_list"), list) else []
+    recs = qc.get("auto_revision_suggestions") if isinstance(qc.get("auto_revision_suggestions"), list) else []
+    sections = variant_rec.get("sections") if isinstance(variant_rec.get("sections"), list) else []
+
+    title_to_excerpt: Dict[str, str] = {}
+    for s in sections:
+        if not isinstance(s, dict):
+            continue
+        t = str(s.get("title") or "").strip()
+        if not t or t in title_to_excerpt:
+            continue
+        c = str(s.get("content") or "").strip()
+        title_to_excerpt[t] = c[:max_excerpt] + ("..." if len(c) > max_excerpt else "")
+
+    out: list[dict] = []
+    severity_rank = {"high": 3, "medium": 2, "low": 1}
+    for i, it in enumerate(issues, start=1):
+        if not isinstance(it, dict):
+            continue
+        title = str(it.get("title") or "").strip() or "章节"
+        source = "issue_list"
+        issue_id = f"I{i:04d}"
+        out.append(
+            {
+                "issue_id": issue_id,
+                "source": source,
+                "title": title,
+                "type": str(it.get("type") or "issue"),
+                "severity": str(it.get("severity") or "medium"),
+                "severity_rank": severity_rank.get(str(it.get("severity") or "").lower(), 2),
+                "problem": str(it.get("problem") or ""),
+                "suggestion": str(it.get("suggestion") or ""),
+                "section_excerpt": title_to_excerpt.get(title, ""),
+                "apply": True,
+                "replacement": "",
+            }
+        )
+
+    # Add recs not already covered by issue_list.
+    seen = {(str(x.get("title")), str(x.get("type")), str(x.get("suggestion"))) for x in out}
+    rid = 0
+    for rec in recs:
+        if not isinstance(rec, dict):
+            continue
+        title = str(rec.get("title") or "").strip() or "章节"
+        rtype = str(rec.get("type") or "issue")
+        sugg = str(rec.get("suggestion") or "")
+        key = (title, rtype, sugg)
+        if key in seen:
+            continue
+        seen.add(key)
+        rid += 1
+        out.append(
+            {
+                "issue_id": f"R{rid:04d}",
+                "source": "auto_revision_suggestions",
+                "title": title,
+                "type": rtype,
+                "severity": "medium",
+                "severity_rank": 2,
+                "problem": "",
+                "suggestion": sugg,
+                "section_excerpt": title_to_excerpt.get(title, ""),
+                "apply": True,
+                "replacement": "",
+            }
+        )
+    out.sort(key=lambda x: (-int(x.get("severity_rank") or 0), str(x.get("title") or ""), str(x.get("type") or "")))
+    return out
 
 
 @router.post("/plan/save")
@@ -541,6 +857,13 @@ async def actions_export_docx(req: ActionsExportRequest, x_actions_key: str | No
     sections = [s.model_dump() for s in req.sections]
     for s in sections:
         s["content"] = strip_nonconcrete_language(s.get("content") or "")
+    plan_receipt = None
+    try:
+        from backend.zhifei_autoplan.plan_consistency import normalize_metrics_in_sections
+
+        plan_receipt = normalize_metrics_in_sections(sections)
+    except Exception:
+        plan_receipt = None
     outline = req.outline or [s.get("title") for s in sections]
     # Four-new recommendations for realism (used by focus_xlsx + downstream remediation).
     try:
@@ -592,7 +915,16 @@ async def actions_export_docx(req: ActionsExportRequest, x_actions_key: str | No
         "drawing_index": drawing_index,
         "standard_index": standard_index,
         "cross_index": cross_index,
+        "plan_consistency": plan_receipt,
     }
+    try:
+        payload["evidence_tracking"] = build_evidence_tracking(
+            sections=sections,
+            tender=tender,
+            chapter_pages={},
+        )
+    except Exception:
+        payload["evidence_tracking"] = {"rows": [], "summary": {}}
     if bool(req.generate_images):
         stats = boq.get("stats") if isinstance(boq, dict) else None
         media = []
@@ -675,17 +1007,17 @@ async def actions_export_docx(req: ActionsExportRequest, x_actions_key: str | No
 async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
-    variants = int(payload.get("variants") or 1)
-    variant_ids = reserve_variant_ids(
-        project_id=str(payload.get("project_id") or "").strip() or None,
-        count=max(1, variants),
-        explicit_variant_id=payload.get("variant_id"),
-        explicit_template_id=payload.get("logic_template_id") or payload.get("logic_template"),
-    )
+    variant_plan = _build_variant_plan(payload)
+    payload["_variant_plan"] = variant_plan
+    payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
     results = []
-    for vid in variant_ids:
-        payload["variant_id"] = int(vid)
-        results.append(await run_autoplan(payload))
+    for item in variant_plan:
+        local_payload = json.loads(json.dumps(payload))
+        local_payload["variant_id"] = int(item.get("variant_id") or 1)
+        tid = _normalize_logic_template_id(item.get("logic_template_id"))
+        if tid:
+            local_payload["logic_template_id"] = tid
+        results.append(await run_autoplan(local_payload))
     # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort; does not change outline.
     if len(results) >= 2:
         try:
@@ -717,7 +1049,7 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
             report = _run_report()
 
             # Auto-fix: reshape only flagged chapters (do not change tender outline).
-            # This is deterministic and avoids "换词" by switching to A/B/C structural blocks.
+            # This is deterministic and avoids "换词" by switching to A/B/C/D/E structural blocks.
             max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
             if max_rounds < 0:
                 max_rounds = 0
@@ -770,18 +1102,53 @@ async def actions_generate_async(
 ):
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
-    variants = int(payload.get("variants") or 1)
-    payload["_variant_ids"] = reserve_variant_ids(
-        project_id=str(payload.get("project_id") or "").strip() or None,
-        count=max(1, variants),
-        explicit_variant_id=payload.get("variant_id"),
-        explicit_template_id=payload.get("logic_template_id") or payload.get("logic_template"),
-    )
+    variant_plan = _build_variant_plan(payload)
+    payload["_variant_plan"] = variant_plan
+    payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
+    payload["variants"] = len(variant_plan) if variant_plan else int(payload.get("variants") or 1)
     job_id = create_job(payload, user_id=None)
 
     def _run_job(_job_id: str, _payload: dict):
         try:
-            local_payload = json.loads(json.dumps(_payload))
+            local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
+
+            def _clamp_int(v: Any, default: int, lo: int, hi: int) -> int:
+                try:
+                    n = int(v)
+                except Exception:
+                    n = int(default)
+                return max(lo, min(hi, n))
+
+            variants_total = _clamp_int(local_payload.get("variants") or 1, 1, 1, 5)
+            agent_parallelism = _clamp_int(local_payload.get("agent_parallelism") or 4, 4, 1, 16)
+            variant_parallelism = _clamp_int(local_payload.get("variant_parallelism") or 1, 1, 1, 5)
+            local_payload["agent_parallelism"] = agent_parallelism
+            local_payload["variant_parallelism"] = variant_parallelism
+
+            agent_runtime = {
+                "mode": "parallel",
+                "master_agent": "主控Agent",
+                "compliance_agent": "合规Agent",
+                "agent_parallelism": agent_parallelism,
+                "variant_parallelism": variant_parallelism,
+                "variants_total": variants_total,
+                "variants_done": 0,
+            }
+
+            def _update_progress(percent: int, stage: str, detail: str = "") -> None:
+                p = max(0, min(100, int(percent)))
+                update_job(
+                    _job_id,
+                    progress={
+                        "percent": p,
+                        "stage": str(stage or ""),
+                        "detail": str(detail or ""),
+                        "variants_total": variants_total,
+                        "variants_done": int(agent_runtime.get("variants_done") or 0),
+                    },
+                    agent_runtime=agent_runtime,
+                )
+
             def _is_cancelled() -> bool:
                 j = get_job(_job_id) or {}
                 return str(j.get("status") or "").strip().lower() == "cancelled"
@@ -789,23 +1156,113 @@ async def actions_generate_async(
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user")
                 return
-            update_job(_job_id, status="running")
-            variants = int(local_payload.get("variants") or 1)
-            variant_ids = local_payload.get("_variant_ids")
-            if not isinstance(variant_ids, list) or not variant_ids:
-                variant_ids = reserve_variant_ids(
-                    project_id=str(local_payload.get("project_id") or "").strip() or None,
-                    count=max(1, variants),
-                    explicit_variant_id=local_payload.get("variant_id"),
-                    explicit_template_id=local_payload.get("logic_template_id") or local_payload.get("logic_template"),
+            update_job(_job_id, status="running", agent_runtime=agent_runtime)
+            _update_progress(5, "job_started", "任务已启动，正在分配多Agent")
+            mode_policy = local_payload.get("_mode_policy") if isinstance(local_payload.get("_mode_policy"), dict) else {}
+            mode_name = str(mode_policy.get("mode_effective") or local_payload.get("generation_mode") or "quality_200")
+            pages_planned = int(mode_policy.get("planned_total_pages") or 0)
+            if bool(mode_policy.get("auto_switched")):
+                _update_progress(
+                    8,
+                    "mode_switch",
+                    f"页数规划={pages_planned}，已自动切换到高质量加速模式（{mode_name}）",
                 )
-            results = []
-            for vid in variant_ids:
-                if _is_cancelled():
-                    update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                    return
-                local_payload["variant_id"] = int(vid)
-                results.append(asyncio.run(run_autoplan(local_payload)))
+            else:
+                _update_progress(
+                    8,
+                    "mode_ready",
+                    f"生成模式={mode_name}，页数规划={pages_planned}",
+                )
+            variant_plan = local_payload.get("_variant_plan")
+            normalized_plan: List[Dict[str, Any]] = []
+            if isinstance(variant_plan, list) and variant_plan:
+                for it in variant_plan:
+                    if not isinstance(it, dict):
+                        continue
+                    try:
+                        vid = int(it.get("variant_id") or 0)
+                    except Exception:
+                        vid = 0
+                    if vid <= 0:
+                        continue
+                    rec: Dict[str, Any] = {"variant_id": vid}
+                    tid = _normalize_logic_template_id(it.get("logic_template_id"))
+                    if tid:
+                        rec["logic_template_id"] = tid
+                    normalized_plan.append(rec)
+            if not normalized_plan:
+                variants = variants_total
+                variant_ids = local_payload.get("_variant_ids")
+                if not isinstance(variant_ids, list) or not variant_ids:
+                    variant_ids = reserve_variant_ids(
+                        project_id=str(local_payload.get("project_id") or "").strip() or None,
+                        count=max(1, variants),
+                        explicit_variant_id=local_payload.get("variant_id"),
+                        explicit_template_id=local_payload.get("logic_template_id") or local_payload.get("logic_template"),
+                    )
+                for vid in variant_ids:
+                    try:
+                        normalized_plan.append({"variant_id": int(vid)})
+                    except Exception:
+                        continue
+            if not normalized_plan:
+                normalized_plan = [{"variant_id": 1}]
+            variant_plan = normalized_plan
+            variants_total = max(1, len(variant_plan))
+            agent_runtime["variants_total"] = variants_total
+            if variant_parallelism > variants_total:
+                variant_parallelism = variants_total
+                local_payload["variant_parallelism"] = variant_parallelism
+                agent_runtime["variant_parallelism"] = variant_parallelism
+            _update_progress(
+                10,
+                "agent_ready",
+                f"多Agent协作已启用：章节并行={agent_parallelism}，方案并行={variant_parallelism}",
+            )
+
+            async def _run_variants_parallel() -> list[dict]:
+                sem = asyncio.Semaphore(max(1, int(variant_parallelism)))
+                lock = asyncio.Lock()
+                done_count = 0
+                ordered: list[dict | None] = [None for _ in range(len(variant_plan))]
+
+                async def _run_one(pos: int, item: Dict[str, Any]):
+                    nonlocal done_count
+                    if _is_cancelled():
+                        return
+                    vid = int(item.get("variant_id") or 1)
+                    tid = _normalize_logic_template_id(item.get("logic_template_id"))
+                    lp = json.loads(json.dumps(local_payload))
+                    lp["variant_id"] = int(vid)
+                    if tid:
+                        lp["logic_template_id"] = tid
+                    lp["agent_parallelism"] = agent_parallelism
+                    async with sem:
+                        if _is_cancelled():
+                            return
+                        detail = f"正在并行编制方案 v{int(vid)}"
+                        if tid:
+                            detail += f"（模板{tid}）"
+                        _update_progress(
+                            15 + int((done_count / max(1, variants_total)) * 65),
+                            "variant_running",
+                            detail,
+                        )
+                        res = await run_autoplan(lp)
+                        ordered[pos] = res
+                    async with lock:
+                        done_count += 1
+                        agent_runtime["variants_done"] = int(done_count)
+                        _update_progress(
+                            15 + int((done_count / max(1, variants_total)) * 65),
+                            "variant_running",
+                            f"方案完成进度：{done_count}/{variants_total}",
+                        )
+
+                await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(variant_plan)])
+                return [x for x in ordered if isinstance(x, dict)]
+
+            results = asyncio.run(_run_variants_parallel())
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user")
                 return
@@ -873,19 +1330,27 @@ async def actions_generate_async(
                             break
                         report = _run_report()
                         rounds += 1
+                    _update_progress(86, "cross_variant_check", "正在执行跨方案一致性与差异性审计")
                     _rebuild_postprocessed_artifacts(results, payload=local_payload, report=report, params=params)
                 except Exception:
                     pass
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user")
                 return
+            _update_progress(92, "exporting", "正在导出 DOCX / 对照稿 / 问题清单")
             outputs = _save_outputs(f"actions_{_job_id}", results)
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
                 return
-            update_job(_job_id, status="done", result=outputs)
+            _update_progress(100, "done", "任务完成")
+            update_job(_job_id, status="done", result=outputs, agent_runtime=agent_runtime)
         except Exception as e:
-            update_job(_job_id, status="failed", error=repr(e))
+            update_job(
+                _job_id,
+                status="failed",
+                error=repr(e),
+                progress={"percent": 100, "stage": "failed", "detail": repr(e)},
+            )
 
     background_tasks.add_task(_run_job, job_id, payload)
     return {"ok": True, "job_id": job_id, "status": "queued"}
@@ -919,6 +1384,8 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
         "error": job.get("error"),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
+        "progress": job.get("progress") if isinstance(job.get("progress"), dict) else {},
+        "agent_runtime": job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {},
     }
     result = job.get("result") or {}
     if isinstance(result, dict):
@@ -933,9 +1400,152 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
                     bool((v.get("quality_checks") or {}).get("structure", {}).get("ok"))
                     for v in variants
                 ]
+                if variants and isinstance(variants[0], dict):
+                    ma = variants[0].get("multi_agent")
+                    if isinstance(ma, dict):
+                        out["multi_agent"] = ma
             except Exception:
                 pass
     return {"ok": True, "job": out}
+
+
+@router.get("/review/issues")
+async def actions_review_issues(
+    job_id: str,
+    variant: int = 1,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    _, _, _, variants = _load_done_job_variants(job_id)
+    v = max(1, int(variant or 1))
+    rec = variants[v - 1] if v <= len(variants) else variants[0]
+    items = _review_items_for_variant(rec)
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "variant": int(v if v <= len(variants) else 1),
+        "count": len(items),
+        "items": items,
+    }
+
+
+@router.post("/review/apply")
+async def actions_review_apply(
+    req: ActionsReviewApplyRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    job_id = str(req.job_id or "").strip()
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id required")
+    job, _, data, variants = _load_done_job_variants(job_id)
+
+    v = max(1, int(req.variant or 1))
+    idx = (v - 1) if v <= len(variants) else 0
+    target = variants[idx]
+    if not isinstance(target, dict):
+        raise HTTPException(status_code=400, detail="invalid variant record")
+
+    items = _review_items_for_variant(target)
+    item_map = {str(it.get("issue_id") or ""): it for it in items}
+
+    selected: list[dict] = []
+    if bool(req.apply_all) and not req.decisions:
+        selected = [it for it in items]
+    else:
+        for d in req.decisions or []:
+            iid = str(d.issue_id or "").strip()
+            if not iid:
+                continue
+            base = item_map.get(iid)
+            if not base or not bool(d.apply):
+                continue
+            rec = dict(base)
+            rep = str(d.replacement or "").strip()
+            if rep:
+                rec["replacement"] = rep
+            selected.append(rec)
+
+    if not selected:
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "variant": idx + 1,
+            "applied_count": 0,
+            "message": "no selected items",
+        }
+
+    sections = target.get("sections") if isinstance(target.get("sections"), list) else []
+    if not isinstance(sections, list):
+        raise HTTPException(status_code=400, detail="variant sections missing")
+
+    remediation = []
+    replacement_count = 0
+    for it in selected:
+        title = str(it.get("title") or "").strip()
+        rtype = str(it.get("type") or "issue").strip()
+        suggestion = str(it.get("suggestion") or it.get("problem") or "").strip()
+        replacement = str(it.get("replacement") or "").strip()
+        if replacement and title:
+            for sec in sections:
+                if not isinstance(sec, dict):
+                    continue
+                if str(sec.get("title") or "").strip() == title:
+                    sec["original_content"] = sec.get("content") or ""
+                    sec["content"] = replacement
+                    sec["auto_remediated"] = "review_apply"
+                    replacement_count += 1
+                    break
+            continue
+        remediation.append({"title": title, "type": rtype, "suggestion": suggestion})
+
+    pid = str(target.get("project_id") or (job.get("payload") or {}).get("project_id") or "").strip() or None
+    boq_focus = target.get("boq_focus") if isinstance(target.get("boq_focus"), dict) else {}
+    params = load_params()
+    payload_obj = (job.get("payload") or {}) if isinstance(job.get("payload"), dict) else {}
+    overrides = payload_obj.get("params_override")
+    if isinstance(overrides, dict) and overrides:
+        for k, v in overrides.items():
+            if isinstance(v, dict) and isinstance(params.get(k), dict):
+                merged = dict(params.get(k) or {})
+                merged.update(v)
+                params[k] = merged
+            else:
+                params[k] = v
+
+    if remediation:
+        apply_remediation(
+            sections,
+            remediation,
+            project_id=pid,
+            boq_focus=boq_focus,
+            params=params,
+        )
+    for sec in sections:
+        if isinstance(sec, dict):
+            sec["content"] = strip_nonconcrete_language(str(sec.get("content") or ""))
+
+    # Rebuild receipts/QC/cross-index for this variant after manual confirmation.
+    _rebuild_postprocessed_artifacts([target], payload=payload_obj, report=None, params=params)
+
+    # Persist all variants back to output files and refresh job result paths.
+    out = _save_outputs(f"actions_{job_id}", variants)
+    update_job(job_id, status="done", result=out, error=None)
+    data["variants"] = variants
+    try:
+        Path(out["json"]).write_text(json.dumps({"variants": variants}, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "variant": idx + 1,
+        "applied_count": len(selected),
+        "template_applied_count": len(remediation),
+        "replacement_count": replacement_count,
+        "files": out,
+    }
 
 
 @router.get("/result")
@@ -978,6 +1588,12 @@ async def actions_result(
             "focus_xlsx": (result.get("focus_xlsx") or [None])[v - 1]
             if isinstance(result.get("focus_xlsx"), list)
             else result.get("focus_xlsx"),
+            "score_overview_xlsx": (result.get("score_overview_xlsx") or [None])[v - 1]
+            if isinstance(result.get("score_overview_xlsx"), list)
+            else result.get("score_overview_xlsx"),
+            "expert_review_docx": (result.get("expert_review_docx") or [None])[v - 1]
+            if isinstance(result.get("expert_review_docx"), list)
+            else result.get("expert_review_docx"),
         },
     }
     if include_sections:
@@ -995,7 +1611,7 @@ async def actions_result(
 @router.get("/download")
 async def actions_download(
     job_id: str,
-    kind: str = "docx",  # docx|compare_docx|json|focus_xlsx
+    kind: str = "docx",  # docx|compare_docx|json|focus_xlsx|score_overview_xlsx|expert_review_docx
     variant: int = 1,
     x_actions_key: str | None = Header(default=None),
 ):
@@ -1007,7 +1623,7 @@ async def actions_download(
         raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
     result = job.get("result") or {}
     path = result.get(kind)
-    if kind in ("docx", "compare_docx", "focus_xlsx") and isinstance(path, list):
+    if kind in ("docx", "compare_docx", "focus_xlsx", "score_overview_xlsx", "expert_review_docx") and isinstance(path, list):
         v = max(1, int(variant or 1))
         path = path[v - 1] if v <= len(path) else None
     if not path or not Path(path).exists():
@@ -1018,6 +1634,12 @@ async def actions_download(
     elif kind == "focus_xlsx":
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         filename = f"autoplan_{job_id}_focus_v{max(1, int(variant or 1))}.xlsx"
+    elif kind == "score_overview_xlsx":
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{max(1, int(variant or 1))}.xlsx"
+    elif kind == "expert_review_docx":
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename = f"autoplan_{job_id}_专家复核提要版_v{max(1, int(variant or 1))}.docx"
     elif kind == "compare_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         filename = f"autoplan_{job_id}_compare_v{max(1, int(variant or 1))}.docx"

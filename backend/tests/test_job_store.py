@@ -613,6 +613,38 @@ class TestCleanupJobs:
             
             assert not result_file.exists()
 
+    def test_cleanup_jobs_removes_new_artifact_files(self, tmp_path):
+        """Test cleanup_jobs removes score_overview_xlsx / expert_review_docx artifacts."""
+        from backend.zhifei_autoplan import job_store
+
+        job_dir = tmp_path / "jobs"
+        job_dir.mkdir()
+
+        score_file = tmp_path / "score_overview.xlsx"
+        review_file = tmp_path / "expert_review.docx"
+        score_file.write_text("dummy")
+        review_file.write_text("dummy")
+
+        with patch.object(job_store, "JOB_DIR", job_dir):
+            job_id = job_store.create_job({"action": "test"})
+            job_store.update_job(
+                job_id,
+                result={
+                    "score_overview_xlsx": str(score_file),
+                    "expert_review_docx": str(review_file),
+                },
+            )
+
+            job_file = job_dir / f"{job_id}.json"
+            rec = json.loads(job_file.read_text(encoding="utf-8"))
+            rec["updated_at"] = time.time() - 10 * 24 * 3600
+            job_file.write_text(json.dumps(rec), encoding="utf-8")
+
+            job_store.cleanup_jobs(older_than_seconds=7 * 24 * 3600)
+
+            assert not score_file.exists()
+            assert not review_file.exists()
+
     def test_cleanup_jobs_removes_json_list(self, tmp_path):
         """Test cleanup_jobs removes list of JSON files in result."""
         from backend.zhifei_autoplan import job_store

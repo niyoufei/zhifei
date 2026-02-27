@@ -418,6 +418,47 @@ def _check_evidence_traceability_by_section(sections: List[Dict[str, Any]], requ
     return results
 
 
+def _check_core_conclusion_evidence_by_section(sections: List[Dict[str, Any]]):
+    """
+    Core conclusions (带约束/阈值/必须动作) must carry traceable evidence markers.
+    """
+    core_kw = ("必须", "应", "需", "禁止", "风险", "控制", "验证", "工期", "关键线路", "资源峰值", "合格率", "偏差")
+    results = []
+    for s in sections:
+        title = s.get("title") or ""
+        text = str(s.get("content") or "")
+        fragments = [x.strip() for x in re.split(r"[。；;\n]+", text) if x.strip()]
+        core_total = 0
+        covered = 0
+        missing_snippets: List[str] = []
+        for frag in fragments:
+            is_core = any(k in frag for k in core_kw) and (
+                bool(re.search(r"\d", frag))
+                or any(x in frag for x in ("频次", "阈值", "间距", "厚度", "时长", "人数", "设备型号"))
+            )
+            if not is_core:
+                continue
+            core_total += 1
+            has_marker = "【证据:" in frag
+            has_traceable = bool(re.search(r"#(?:p\d+_)?[0-9a-f]{6,}@\d+", frag, flags=re.IGNORECASE))
+            if has_marker and has_traceable:
+                covered += 1
+            else:
+                if len(missing_snippets) < 6:
+                    missing_snippets.append(frag[:80])
+        ok = (core_total == 0) or (covered >= max(1, int(core_total * 0.7)))
+        results.append(
+            {
+                "title": title,
+                "ok": ok,
+                "core_total": core_total,
+                "covered": covered,
+                "missing_snippets": missing_snippets,
+            }
+        )
+    return results
+
+
 def _is_key_process_chapter(title: str) -> bool:
     t = str(title or "")
     keys = ("施工方法", "施工工艺", "施工方案", "主要施工", "工序", "专项", "技术措施", "作业方法", "工艺流程")
@@ -485,6 +526,28 @@ def _check_drawing_evidence_by_section(sections: List[Dict[str, Any]], drawing_n
                 "ok": ok,
                 "required": required,
                 "has_drawing_evidence": bool(has_ev) if required else None,
+            }
+        )
+    return results
+
+
+def _check_drawing_anchor_binding_by_section(sections: List[Dict[str, Any]], drawing_names: List[str]) -> List[Dict[str, Any]]:
+    has_drawings = bool(drawing_names)
+    results = []
+    for s in sections:
+        title = s.get("title") or ""
+        text = str(s.get("content") or "")
+        required = has_drawings and _is_key_process_chapter(str(title))
+        has_space = "【空间锚点:" in text
+        has_dim = "【尺寸锚点:" in text
+        ok = (not required) or (has_space and has_dim)
+        results.append(
+            {
+                "title": title,
+                "ok": ok,
+                "required": required,
+                "has_spatial_anchor": has_space if required else None,
+                "has_dimension_anchor": has_dim if required else None,
             }
         )
     return results
@@ -608,7 +671,33 @@ def _check_consistency(sections: List[Dict[str, Any]]):
     for metric, values in metric_values.items():
         if len(values) > 1:
             conflicts.append({"metric": metric, "values": values})
-    return {"ok": len(conflicts) == 0, "conflicts": conflicts}
+
+    cpm_receipt = None
+    try:
+        from backend.zhifei_autoplan.schedule_cpm import build_cpm_receipt
+
+        cpm_receipt = build_cpm_receipt(sections, canonical={})
+        cpm_conflicts = cpm_receipt.get("conflicts") if isinstance(cpm_receipt, dict) else []
+        if isinstance(cpm_conflicts, list):
+            for c in cpm_conflicts:
+                if not isinstance(c, dict):
+                    continue
+                conflicts.append(
+                    {
+                        "metric": c.get("metric"),
+                        "values": {
+                            "mentioned": c.get("mentioned"),
+                            "computed": c.get("computed"),
+                            "tolerance": c.get("tolerance"),
+                            "delta": c.get("delta"),
+                        },
+                        "source": "cpm",
+                    }
+                )
+    except Exception:
+        cpm_receipt = None
+
+    return {"ok": len(conflicts) == 0, "conflicts": conflicts, "cpm": cpm_receipt}
 
 
 def _check_boq_focus_coverage(boq_focus: Dict[str, Any], all_text: str):
@@ -621,11 +710,28 @@ def _check_boq_focus_coverage(boq_focus: Dict[str, Any], all_text: str):
     return {"ok": ok, "missing": missing[:20], "covered": covered[:20]}
 
 
+def _triplet_has_operational_fields(snippet: str) -> Dict[str, bool]:
+    text = str(snippet or "")
+    has_freq = bool(re.search(r"\d+(?:\.\d+)?\s*(?:次/日|次/班|次/周|次)", text)) or ("频次" in text)
+    has_threshold = bool(re.search(r"(?:≤|>=|≥|<|>)\s*\d+(?:\.\d+)?", text)) or ("阈值" in text) or ("偏差" in text)
+    has_resp = any(k in text for k in ("责任", "岗位", "负责人", "安全员", "质量员", "工长", "监理"))
+    has_record = any(k in text for k in ("记录", "台账", "检查表", "复核单"))
+    has_deviation_limit = bool(re.search(r"(?:整改|处置|复验|复核|关闭).{0,8}(?:\d+(?:\.\d+)?\s*(?:h|小时|天)|时限)", text))
+    return {
+        "has_frequency": has_freq,
+        "has_threshold": has_threshold,
+        "has_responsibility": has_resp,
+        "has_record": has_record,
+        "has_deviation_limit": has_deviation_limit,
+    }
+
+
 def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict[str, Any]]):
     """
     对“清单重点项”做更强约束：不仅要出现，还要在出现的章节里给出
     - 量化指标（>=3 个关键字 + 有单位数值）
-    - 至少 1 条风险→控制→验证 三元组
+    - 至少 2 条风险→控制→验证 三元组
+    - 三元组必须包含：频次、阈值、责任、记录、偏差处置时限
     - 至少 1 个证据标记
     """
     items = (boq_focus or {}).get("must_cover_keywords") or []
@@ -657,13 +763,46 @@ def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict
                 end = min(len(text), pos + len(name) + window)
                 snippet = text[start:end]
                 triplets = _extract_risk_triplets(snippet)
+                full_triplets = 0
+                full_triplet_flags = {
+                    "has_frequency": False,
+                    "has_threshold": False,
+                    "has_responsibility": False,
+                    "has_record": False,
+                    "has_deviation_limit": False,
+                }
+                for t in triplets:
+                    try:
+                        ss = int(t.get("span_start") or 0)
+                        ee = int(t.get("span_end") or 0)
+                    except Exception:
+                        ss, ee = 0, 0
+                    if ee <= ss:
+                        continue
+                    ts = max(0, ss - 40)
+                    te = min(len(snippet), ee + 220)
+                    t_snip = snippet[ts:te]
+                    flags = _triplet_has_operational_fields(t_snip)
+                    for k, v in flags.items():
+                        full_triplet_flags[k] = bool(full_triplet_flags.get(k)) or bool(v)
+                    if all(flags.values()):
+                        full_triplets += 1
                 hit_keys = [k for k in QUANT_KEYS if k in snippet]
                 has_units = bool(QUANT_UNIT_RE.search(snippet))
                 evidence_cnt = _count_good_evidence(snippet)
-                if (len(triplets) > 0) and (len(hit_keys) >= 3) and has_units and (evidence_cnt >= 1):
+                if (
+                    (len(triplets) >= 2)
+                    and (full_triplets >= 2)
+                    and (len(hit_keys) >= 3)
+                    and has_units
+                    and (evidence_cnt >= 1)
+                    and all(full_triplet_flags.values())
+                ):
                     ok = True
                     best = {
                         "triplet_count": len(triplets),
+                        "full_triplet_count": int(full_triplets),
+                        **full_triplet_flags,
                         "hit_keys": hit_keys,
                         "has_units": has_units,
                         "evidence_count": evidence_cnt,
@@ -678,6 +817,8 @@ def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict
                 ):
                     best = {
                         "triplet_count": len(triplets),
+                        "full_triplet_count": int(full_triplets),
+                        **full_triplet_flags,
                         "hit_keys": hit_keys,
                         "has_units": has_units,
                         "evidence_count": evidence_cnt,
@@ -689,6 +830,12 @@ def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict
                     "title": title,
                     "ok": ok,
                     "triplet_count": best["triplet_count"],
+                    "full_triplet_count": best.get("full_triplet_count"),
+                    "has_frequency": best.get("has_frequency"),
+                    "has_threshold": best.get("has_threshold"),
+                    "has_responsibility": best.get("has_responsibility"),
+                    "has_record": best.get("has_record"),
+                    "has_deviation_limit": best.get("has_deviation_limit"),
                     "hit_keys": best["hit_keys"],
                     "has_units": best["has_units"],
                     "evidence_count": best["evidence_count"],
@@ -933,11 +1080,11 @@ def _check_qse_closed_loop_by_section(sections: List[Dict[str, Any]]):
 
 def _check_logic_template_adherence_by_section(sections: List[Dict[str, Any]]):
     """
-    Ensure each section reflects the chosen A/B/C intra-chapter logic template.
+    Ensure each section reflects the chosen A/B/C/D/E intra-chapter logic template.
     This prevents "three variants but only synonym swaps": variants must differ by reasoning structure.
 
     This is a soft check and only runs when metadata exists:
-    - section.logic_template_id in {A,B,C}
+    - section.logic_template_id in {A,B,C,D,E}
     - section.chapter_domain in {general,qse} (or inferred from title)
     """
     try:
@@ -950,7 +1097,7 @@ def _check_logic_template_adherence_by_section(sections: List[Dict[str, Any]]):
         title = str(s.get("title") or "").strip() or "章节"
         text = str(s.get("content") or "")
         tid = str(s.get("logic_template_id") or "").strip().upper()
-        if tid not in {"A", "B", "C"}:
+        if tid not in {"A", "B", "C", "D", "E"}:
             continue
         dom = str(s.get("chapter_domain") or "").strip().lower()
         if dom not in {"general", "qse"}:
@@ -965,15 +1112,23 @@ def _check_logic_template_adherence_by_section(sections: List[Dict[str, Any]]):
                 anchors = ["闭环清单", "闭环卡片"]
             elif tid == "B":
                 anchors = ["场景拆分", "检查频次总表", "记录表清单"]
-            else:
+            elif tid == "C":
                 anchors = ["指标矩阵", "数据闭环"]
+            elif tid == "D":
+                anchors = ["监管红线清单", "岗位联签链", "闭环时限表"]
+            else:
+                anchors = ["区域网格", "班组行为清单", "红黄牌处置"]
         else:
             if tid == "A":
                 anchors = ["本章交付物", "交付物", "约束条件"]
             elif tid == "B":
                 anchors = ["工序流程", "步骤控制点"]
-            else:
+            elif tid == "C":
                 anchors = ["控制指标矩阵", "人机料法环", "指标矩阵"]
+            elif tid == "D":
+                anchors = ["资源-工序耦合表", "接口冲突清单", "关键路径纠偏卡"]
+            else:
+                anchors = ["实施场景卡片", "参数对照表", "验收样表"]
 
         ok = any(a in text for a in anchors)
         results.append(
@@ -1123,7 +1278,9 @@ def apply_remediation(
         "required_topic_detail_gap": "【自动补充】专项可执行细则",
         "evidence_gap": "【自动补充】证据标注",
         "evidence_traceability_gap": "【自动补充】证据可追溯定位",
+        "core_conclusion_evidence_gap": "【自动补充】核心结论证据补齐",
         "drawing_evidence_gap": "【自动补充】图纸证据定位",
+        "drawing_anchor_gap": "【自动补充】图纸空间锚点",
         "standard_evidence_gap": "【自动补充】企业标准/工法引用与落地",
     }
 
@@ -1230,10 +1387,10 @@ def apply_remediation(
             # Title-aware closed-loop cards for 质量/安全/文明环保章节.
             t = str(sec_title or "")
             tid = str(rec.get("template_id") or sec.get("logic_template_id") or "").strip().upper() or "A"
-            if tid not in {"A", "B", "C"}:
+            if tid not in {"A", "B", "C", "D", "E"}:
                 tid = "A"
             content += "\n\n【自动补充】质量/安全/文明环保闭环卡片：\n"
-            # Add template-specific anchors so v1/v2/v3 differ by chapter logic (not synonym swapping).
+            # Add template-specific anchors so multi-variant differences come from structure (not synonym swapping).
             if tid == "B":
                 # Scene-driven structure
                 scenes = []
@@ -1257,6 +1414,28 @@ def apply_remediation(
                     "- 判定：按阈值；超限即触发处置。\n"
                     "- 处置：写清动作+时限；复核达标后关闭。\n"
                     "- 归档：台账字段齐全率=100%+上传频次=1次/日。\n"
+                    "【闭环卡片】\n"
+                )
+            elif tid == "D":
+                content += (
+                    "【监管红线清单】\n"
+                    "- 高处作业未防护即作业（触发即停工）。\n"
+                    "- 临时用电漏保失效继续运行（触发即停用）。\n"
+                    "- 危化品混放/无MSDS（触发即封存整改）。\n"
+                    "【岗位联签链】\n"
+                    "- 发现人=班组长；处置人=施工员/电工；复核人=安全员/质检员；关闭批准=项目经理。\n"
+                    "【闭环时限表】\n"
+                    "- 高风险=10min启动处置+2h复核关闭；一般风险=2h启动处置+24h复核关闭。\n"
+                    "【闭环卡片】\n"
+                )
+            elif tid == "E":
+                content += (
+                    "【区域网格】\n"
+                    "- 网格A=主体作业区；网格B=材料与危化品区；网格C=临电设备区。\n"
+                    "【班组行为清单】\n"
+                    "- 必做：班前交底/PPE自检/作业许可；禁做：无证上岗/危化品混放。\n"
+                    "【红黄牌处置】\n"
+                    "- 黄牌=2h内整改复核；红牌=立即停工并经项目经理签批后复工。\n"
                     "【闭环卡片】\n"
                 )
             # Common fields: risk -> control -> verify -> record -> deviation handling.
@@ -1339,6 +1518,30 @@ def apply_remediation(
                         prefix = "场景=材料到货；"
                     else:
                         prefix = "场景=过程管控；"
+                elif tid == "D":
+                    if "临时用电" in str(raw) or "漏保" in str(raw):
+                        prefix = "红线=临时用电；"
+                    elif "高处" in str(raw) or "临边" in str(raw):
+                        prefix = "红线=高处作业；"
+                    elif "危化品" in str(raw):
+                        prefix = "红线=危化品管理；"
+                    elif "噪声" in str(raw) or "扬尘" in str(raw):
+                        prefix = "红线=环保超限；"
+                    else:
+                        prefix = "红线=一般管控；"
+                elif tid == "E":
+                    if "扬尘" in str(raw):
+                        prefix = "网格=环保区；"
+                    elif "噪声" in str(raw):
+                        prefix = "网格=夜施区；"
+                    elif "临时用电" in str(raw) or "漏保" in str(raw):
+                        prefix = "网格=临电区；"
+                    elif "高处" in str(raw) or "临边" in str(raw):
+                        prefix = "网格=高处区；"
+                    elif "材料" in str(raw) or "复验" in str(raw):
+                        prefix = "网格=材料区；"
+                    else:
+                        prefix = "网格=主体区；"
                 content += "- " + (prefix + str(raw)).format(ev=ev_src) + "\n"
             if tid == "B":
                 content += (
@@ -1348,6 +1551,16 @@ def apply_remediation(
                     "- 月检：1次/月（联合检查）。\n"
                     "【记录表清单】\n"
                     "- 《巡检表》/《监测记录》/《整改闭环单》/《台账》。\n"
+                )
+            elif tid == "D":
+                content += (
+                    "【联签记录要求】\n"
+                    "- 每条红线事件必须包含：发现人/处置人/复核人/关闭批准人及时间戳。\n"
+                )
+            elif tid == "E":
+                content += (
+                    "【网格巡检要求】\n"
+                    "- 每网格至少1条闭环卡片；红黄牌状态必须同步到《网格巡检台账》。\n"
                 )
         elif rtype == "logic_template_adherence_gap":
             tid = str(rec.get("template_id") or sec.get("logic_template_id") or "").strip().upper() or "A"
@@ -1371,6 +1584,20 @@ def apply_remediation(
                         f"- 【闭环卡片】风险：扬尘超限；控制：喷淋=2次/日+车辆冲洗=1次/车；"
                         f"验证：PM10{_qse.get('PM10阈值','≤150ug/m3')}，记录=《扬尘监测+巡检台账》；偏差处置：超限≤15min启动加密喷淋并2h内复测达标。【证据:{ev_src}】\n"
                     )
+                elif tid == "D":
+                    content += (
+                        "- 【监管红线清单】高处防护/临时用电/危化品管理三条红线逐条列出触发条件。\n"
+                        "- 【岗位联签链】发现人->处置人->复核人->关闭批准人，四级责任不可缺失。\n"
+                        "- 【闭环时限表】高风险10min启动处置+2h复核关闭；一般风险2h启动处置+24h复核关闭。\n"
+                        f"- 【闭环卡片】风险：临时用电漏保失效；控制：停用+更换+复测；验证：试跳记录齐全率=100%，记录=《红线联签闭环单》。【证据:{ev_src}】\n"
+                    )
+                elif tid == "E":
+                    content += (
+                        "- 【区域网格】网格A主体区/网格B材料区/网格C临电区，逐网格定义责任岗位和巡检频次。\n"
+                        "- 【班组行为清单】必做动作（交底/PPE/许可）与禁止动作（无证上岗/危化品混放）并列。\n"
+                        "- 【红黄牌处置】黄牌2h内整改复核；红牌立即停工并经项目经理签批复工。\n"
+                        f"- 【复核与销项】风险：PPE不规范；控制：班前检查=1次/班；验证：抽查{_quant['频次']}，记录=《网格巡检台账》。【证据:{ev_src}】\n"
+                    )
                 else:
                     content += (
                         "- 【闭环清单】字段固定：风险/问题->控制(岗位+频次)->验证(阈值+方法)->记录->偏差处置(时限)。\n"
@@ -1391,6 +1618,20 @@ def apply_remediation(
                         f"- 【控制指标矩阵】频次={_quant['频次']}；阈值={_quant['阈值']}；间距={_quant['间距']}；厚度={_quant['厚度']}；时长={_quant['时长']}；人数={_quant['人数']}；设备型号={_quant['设备型号']}。\n"
                         "- 【人机料法环落地】人=责任岗位写到人；机=进场点检=1次/日；料=到货验收=1次/批；法=首件确认=1次/工序；环=扬尘/噪声按阈值监测。\n"
                         f"- 【信息化与台账】字段齐全率=100%+上传频次=1次/日；记录=《台账》。【证据:{ev_src}】\n"
+                    )
+                elif tid == "D":
+                    content += (
+                        f"- 【资源-工序耦合表】工序对应班组人数={_quant['人数']}、设备={_quant['设备型号']}、节拍={_quant['时长']}。\n"
+                        "- 【接口冲突清单】交叉作业冲突位/避让窗口/责任岗位逐条列出。\n"
+                        "- 【关键路径纠偏卡】触发阈值、纠偏动作、时限、复核标准逐条闭环。\n"
+                        f"- 【风险→控制→验证（资源视角）】风险：资源错配；控制：日排产+交接清单；验证：偏差{_quant['阈值']}，记录=《资源耦合检查表》。【证据:{ev_src}】\n"
+                    )
+                elif tid == "E":
+                    content += (
+                        "- 【实施场景卡片】按作业面/材料区/交叉区拆分场景并定义边界。\n"
+                        f"- 【参数对照表】频次={_quant['频次']}；阈值={_quant['阈值']}；间距={_quant['间距']}；厚度={_quant['厚度']}；时长={_quant['时长']}。\n"
+                        "- 【验收样表】字段=场景编号/责任岗位/实测值/结论/整改时限/复核人/证据定位。\n"
+                        f"- 【风险→控制→验证（场景）】风险：参数超差；控制：首件确认+过程抽检；验证：合格率{_card['合格率阈值']}，记录=《场景验收样表》。【证据:{ev_src}】\n"
                     )
                 else:
                     content += (
@@ -1602,6 +1843,12 @@ def apply_remediation(
                 "\n\n【自动补充】证据可追溯定位：\n"
                 f"- 本章至少保留 1 条带定位符的证据（示例：{ev_src}）。【证据:{ev_src}】\n"
             )
+        elif rtype == "core_conclusion_evidence_gap":
+            content += (
+                "\n\n【自动补充】核心结论证据补齐：\n"
+                f"- 对含“频次/阈值/时限/人数/型号/工期”等结论句逐条补“【证据:{ev_src}】”。\n"
+                f"- 示例：抽检频次=每100m2 1次，偏差≤5mm，偏差处置时限≤4h，责任岗位=质量员，记录=《抽检台账》。【证据:{ev_src}】\n"
+            )
         elif rtype == "drawing_evidence_gap":
             draw_src = ev_src
             try:
@@ -1622,6 +1869,15 @@ def apply_remediation(
             content += (
                 "\n\n【自动补充】图纸证据定位：\n"
                 f"- 本章至少绑定 1 条图纸证据定位符：{draw_src}。【证据:{draw_src}】\n"
+            )
+        elif rtype == "drawing_anchor_gap":
+            draw_src = ev_src
+            content += (
+                "\n\n【自动补充】图纸空间锚点：\n"
+                "- 空间锚点：构件定位（坐标X/Y 或轴网）+标高；\n"
+                "- 尺寸锚点：关键尺寸（厚度/间距/长度）并对应验收阈值；\n"
+                f"- 示例：构件=承台A1，坐标=(102.5,85.3)，标高=+3.20m【空间锚点:承台A1@102.5,85.3,+3.20m】；"
+                f"桩径=1000mm【尺寸锚点:桩径1000mm】。【证据:{draw_src}】\n"
             )
         elif rtype == "standard_evidence_gap":
             std_src = ev_src
@@ -1792,8 +2048,10 @@ def run_quality_checks(
     trades = _check_trades_by_section(sections)
     evidence_quality_by_section = _check_evidence_quality_by_section(sections)
     evidence_traceability_by_section = _check_evidence_traceability_by_section(sections, require_traceable=has_ingested_docs)
+    core_conclusion_evidence_by_section = _check_core_conclusion_evidence_by_section(sections)
     drawing_names = _load_drawing_filenames(project_id=project_id, limit=80) if has_ingested_docs else []
     drawing_evidence_by_section = _check_drawing_evidence_by_section(sections, drawing_names)
+    drawing_anchor_by_section = _check_drawing_anchor_binding_by_section(sections, drawing_names)
     standard_names = _load_standard_filenames(project_id=project_id, limit=80) if has_ingested_docs else []
     standard_evidence = _check_standard_evidence_by_section(sections, standard_names)
     boq_focus_item_typed_evidence = _check_boq_focus_item_typed_evidence(
@@ -2113,6 +2371,27 @@ def run_quality_checks(
                 }
                 )
 
+        # 核心结论（带约束/阈值/动作）必须带可追溯证据
+        for s in core_conclusion_evidence_by_section:
+            if s.get("ok"):
+                continue
+            title = s.get("title") or "章节"
+            rec = {
+                "title": title,
+                "type": "core_conclusion_evidence_gap",
+                "suggestion": "核心结论句（含频次/阈值/时限等）需逐条补齐“【证据:文件名#p页_sha@offset】”。",
+            }
+            remediation.append(rec)
+            issue_list.append(
+                {
+                    "title": title,
+                    "type": "core_conclusion_evidence_gap",
+                    "severity": "high",
+                    "problem": f"核心结论证据覆盖不足（已覆盖{s.get('covered')}/{s.get('core_total')}）。",
+                    "suggestion": rec["suggestion"],
+                }
+            )
+
         # 图纸证据：若本项目存在图纸资料，则关键工序章节至少绑定 1 条图纸证据定位符
         for s in drawing_evidence_by_section:
             if s.get("ok"):
@@ -2132,6 +2411,29 @@ def run_quality_checks(
                     "type": "drawing_evidence_gap",
                     "severity": "high",
                     "problem": "存在图纸资料但本章未绑定图纸证据定位符。",
+                    "suggestion": rec["suggestion"],
+                }
+            )
+
+        # 图纸空间语义锚点：关键工序章节需至少有“空间锚点+尺寸锚点”
+        for s in drawing_anchor_by_section:
+            if s.get("ok"):
+                continue
+            if not s.get("required"):
+                continue
+            title = s.get("title") or "章节"
+            rec = {
+                "title": title,
+                "type": "drawing_anchor_gap",
+                "suggestion": "补齐图纸空间锚点与尺寸锚点（示例：构件坐标/标高/尺寸），并保留证据定位符。",
+            }
+            remediation.append(rec)
+            issue_list.append(
+                {
+                    "title": title,
+                    "type": "drawing_anchor_gap",
+                    "severity": "high",
+                    "problem": "关键工序章节缺少图纸空间锚点或尺寸锚点。",
                     "suggestion": rec["suggestion"],
                 }
             )
@@ -2223,11 +2525,19 @@ def run_quality_checks(
             "ok": all(s.get("ok") for s in evidence_traceability_by_section),
             "by_section": evidence_traceability_by_section,
         },
+        "core_conclusion_evidence": {
+            "ok": all(s.get("ok") for s in core_conclusion_evidence_by_section),
+            "by_section": core_conclusion_evidence_by_section,
+        },
         "drawing_evidence": {
             "ok": all(s.get("ok") for s in drawing_evidence_by_section),
             "drawing_count": len(drawing_names),
             "drawings": drawing_names[:12],
             "by_section": drawing_evidence_by_section,
+        },
+        "drawing_anchor_binding": {
+            "ok": all(s.get("ok") for s in drawing_anchor_by_section),
+            "by_section": drawing_anchor_by_section,
         },
         "standard_evidence": standard_evidence,
         "template_style": _check_template_style(all_text),

@@ -210,7 +210,7 @@ def _print_quality(qc: dict):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base-url", default="http://127.0.0.1:8000", help="Backend base URL")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8010", help="Backend base URL")
     ap.add_argument("--actions-key", default=os.environ.get("ZF_ACTIONS_KEY", ""), help="X-Actions-Key (or set env ZF_ACTIONS_KEY)")
     ap.add_argument("--topic", required=True, help="Project topic")
     ap.add_argument("--project-id", default="", help="Optional project_id for per-project storage/evidence scoping")
@@ -315,7 +315,13 @@ def main() -> int:
     deadline = time.time() + int(args.timeout_sec)
     status = ""
     while time.time() < deadline:
-        js = _get_json(base, "/actions/job_status", args.actions_key, params={"job_id": job_id})
+        try:
+            js = _get_json(base, "/actions/job_status", args.actions_key, params={"job_id": job_id})
+        except Exception as e:
+            # Backend may briefly restart/reset during long jobs; keep polling until timeout.
+            print(f"[WARN] poll transient error: {e}")
+            time.sleep(float(args.poll_sec))
+            continue
         job = js.get("job") or {}
         status = job.get("status") or ""
         if status in ("done", "failed"):
@@ -345,7 +351,36 @@ def main() -> int:
                 _download(base, args.actions_key, job_id, "focus_xlsx", v, out_dir / f"autoplan_{job_id}_focus_v{v}.xlsx")
             except Exception:
                 pass
+            try:
+                _download(
+                    base,
+                    args.actions_key,
+                    job_id,
+                    "score_overview_xlsx",
+                    v,
+                    out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx",
+                )
+            except Exception:
+                pass
+            try:
+                _download(
+                    base,
+                    args.actions_key,
+                    job_id,
+                    "expert_review_docx",
+                    v,
+                    out_dir / f"autoplan_{job_id}_专家复核提要版_v{v}.docx",
+                )
+            except Exception:
+                pass
         print(f"saved_to={out_dir}")
+        for v in range(1, variants + 1):
+            p1 = out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx"
+            p2 = out_dir / f"autoplan_{job_id}_专家复核提要版_v{v}.docx"
+            if p1.exists():
+                print(f"评分点覆盖与证据引用总览.xlsx={p1}")
+            if p2.exists():
+                print(f"专家复核提要版.docx={p2}")
 
     # simple gate
     hard_keys = [

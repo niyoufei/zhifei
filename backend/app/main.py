@@ -64,6 +64,8 @@ def health():
         "ok": True,
         "version": "autoplan-0.1.0",
         "service": "文档生成系统",
+        "system_id": os.environ.get("ZF_SYSTEM_ID", "docgen-system"),
+        "workspace_root": str(Path(".").resolve()),
         "config_mtime": cfg_mtime,
         "config_version": cfg_version,
         "config_version_auto": cfg_version_auto,

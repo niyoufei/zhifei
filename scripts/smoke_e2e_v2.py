@@ -8,7 +8,7 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
-BASE = "http://127.0.0.1:8000"
+BASE = "http://127.0.0.1:8010"
 
 def http_get_json(path: str, timeout: int = 10):
     url = BASE + path

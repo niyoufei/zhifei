@@ -406,12 +406,58 @@
           "is_auto_generated": true,
           "formula_expression": "",
           "formula_variables": []
+        },
+        {
+          "node_id": "AUTO-interface_domain_missing-PARAM-1",
+          "name": "interface_domain_missing自动补全参数节点",
+          "node_type": "EngineeringNode",
+          "object_key": "auto_interface_domain_missing_param",
+          "source_hierarchy": "国标",
+          "qt_tag": [
+            "interface_domain_missing",
+            "auto_generated"
+          ],
+          "keywords": [
+            "{'title': '质量', 'domain': 'hydraulic', 'with_domain': 'management', 'severity': 'medium'}",
+            "{'title': '安全', 'domain': 'mep', 'with_domain': 'building', 'severity': 'medium'}",
+            "{'title': '安全', 'domain': 'mep', 'with_domain': 'management', 'severity': 'medium'}",
+            "{'title': '进度', 'domain': 'earthwork', 'with_domain': 'building', 'severity': 'medium'}"
+          ],
+          "content": {
+            "action": "执行interface_domain_missing控制措施",
+            "checker": "专业工程师",
+            "parameter": {
+              "inspection_frequency_per_batch": 1,
+              "sampling_frequency_per_100m3": 1,
+              "checker_role": "质量员",
+              "acceptance_pass_rate_target_percent": 95
+            }
+          },
+          "applicable_conditions": {
+            "climate": "常温5-35C",
+            "geology": "一般地质条件"
+          },
+          "resource_requirements": {
+            "inspection_frequency_per_batch": 1,
+            "sampling_frequency_per_100m3": 1,
+            "checker_role": "质量员",
+            "acceptance_pass_rate_target_percent": 95
+          },
+          "safety_level": "medium",
+          "reference_standard": [
+            "GB 50300-2013",
+            "GB 50204-2015",
+            "JGJ 107-2016"
+          ],
+          "is_auto_generated": true,
+          "formula_expression": "",
+          "formula_variables": []
         }
       ]
     }
   },
   "meta": {
     "is_auto_generated": true,
-    "node_count": 8
+    "node_count": 9
   }
 }

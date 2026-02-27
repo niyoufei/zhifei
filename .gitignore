@@ -31,6 +31,15 @@ __pycache__/
 .bin/
 .cursor/
 .coverage
+.runtime/**
+.streamlit/**
+
+# ===== Local sample/test packs (single-user local assets) =====
+/01_真实项目测试/**
+/02_规范测试入库/**
+/03_系统核心规则与字典/**
+/knowledge_graph/**
+/文档生成系统.app/**
 
 # ===== Generated outputs (non-source artifacts) =====
 /build/**

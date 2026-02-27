@@ -9330,3 +9330,12 @@ ERROR: SecItemCopyMatching failed -50
 ERROR: SecItemCopyMatching failed -50
 [2026-02-04T12:52:10+0800] Continue in 2s...
 [2026-02-04T12:52:12+0800] === ITERATION START ===
+
+## 2026-02-18 Web 控制台脱离终端
+[ACTION] 用户需求：系统不需依托终端运行
+[CHANGE] 新增 scripts/install_web_ui_launchd.sh - launchd 安装后端(8010)+Streamlit(8501)
+[CHANGE] 新增 scripts/uninstall_web_ui_launchd.sh - 卸载 Web UI launchd
+[CHANGE] 修改 scripts/run_web_ui.sh - 支持 -b/--background 后台运行+自动打开浏览器
+[CHANGE] 新增 启动文档生成系统.command - 双击启动器
+[CHANGE] README.md 新增「Web 控制台（不需终端）」章节
+[RESULT] 用户可通过：1) 双击 .command 2) launchd 常驻 3) run_web_ui.sh -b 三种方式脱离终端使用

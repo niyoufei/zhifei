@@ -195,6 +195,40 @@ def _normalize_domain(value: str) -> str:
     return re.sub(r"[^a-z0-9_]+", "", str(value or "").strip().lower())
 
 
+def _extract_domain_tag_from_path(path: Path, *, root: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except Exception:
+        try:
+            rel = path.relative_to(root)
+        except Exception:
+            return "通用"
+    parts = list(rel.parts)
+    if len(parts) >= 2:
+        candidate = str(parts[0]).strip()
+        if candidate:
+            return candidate
+    return "通用"
+
+
+def _inject_domain_tag(node: ParsedNode, *, domain_tag: str) -> ParsedNode:
+    domain = str(domain_tag or "").strip() or "通用"
+    payload = _safe_json_load(node.payload_json, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["domain_tag"] = domain
+
+    tags = list(node.tags or [])
+    tags.extend([domain, f"domain:{domain}"])
+    keywords = list(node.keywords or [])
+    keywords.extend(_extract_terms(domain))
+
+    node.tags = _dedupe_terms(tags)[:24]
+    node.keywords = _dedupe_terms(keywords)[:32]
+    node.payload_json = _ensure_ascii_json(payload)
+    return node
+
+
 def _domain_match(
     *,
     professional_domains: List[str],
@@ -1976,6 +2010,8 @@ class KnowledgeGraphIndex:
                     doc_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
                 nodes = self._parse_file(path)
+                domain_tag = _extract_domain_tag_from_path(path, root=root)
+                nodes = [_inject_domain_tag(node, domain_tag=domain_tag) for node in nodes]
                 inserted = 0
                 edge_count = 0
                 local_alias_map: Dict[str, int] = {}
@@ -2387,6 +2423,7 @@ class KnowledgeGraphIndex:
                 "numeric_sources": numeric_sources,
                 "schedule_constraints": _safe_json_load(row["schedule_constraints_json"], {}),
                 "professional_domain_matches": domain_matches,
+                "domain_tag": payload.get("domain_tag"),
                 "gemini_usefulness_score": gemini_usefulness_score,
                 "score": round(score, 4),
                 "payload": payload,

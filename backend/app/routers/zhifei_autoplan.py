@@ -326,6 +326,7 @@ class GenerateRequest(BaseModel):
     chapter_requirements: dict | None = None
     provider: str | None = None
     model: str | None = None
+    provider_chain: List[dict] | None = None
     providers: List[str] = []
     model_map: dict | None = None
     style: dict | None = None

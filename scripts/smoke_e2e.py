@@ -7,7 +7,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-BASE = "http://127.0.0.1:8000"
+BASE = "http://127.0.0.1:8010"
 
 def http_request(method: str, path: str, payload=None, timeout=60):
     url = BASE + path

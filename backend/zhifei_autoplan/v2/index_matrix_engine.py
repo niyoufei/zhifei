@@ -125,6 +125,22 @@ DIMENSION_WEIGHTS: Dict[str, float] = {
     "扣分点": 0.10,
 }
 
+DOMAIN_SNIFFER_RULES: Dict[str, List[str]] = {
+    "房建工程": ["房建", "主体结构", "砌体", "二次结构", "幕墙", "装配式"],
+    "装修工程": ["装修", "装饰", "精装修", "吊顶", "墙面", "地面"],
+    "市政道路工程": ["市政道路", "道路工程", "路基", "路面", "沥青", "交通导改"],
+    "市政桥梁工程": ["市政桥梁", "桥梁", "箱梁", "盖梁", "桥墩", "挂篮"],
+    "市政排水工程": ["市政排水", "雨污", "雨水", "污水", "排水管网", "检查井"],
+    "市政燃气工程": ["燃气", "燃气管线", "调压", "燃气阀井", "中压", "次高压"],
+    "河道治理": ["河道", "护岸", "清淤", "堤防", "驳岸", "水生态"],
+    "水利水电": ["水利", "水电", "泵站", "闸门", "引水", "泄洪"],
+    "公路工程": ["公路", "高速", "互通", "服务区", "路基路面", "隧道"],
+    "机电安装": ["机电", "电气", "暖通", "消防", "弱电", "智能化"],
+    "绿色建造": ["绿色建造", "绿色施工", "双碳", "节能减排", "扬尘治理", "环保"],
+    "BIM/数字化建造": ["BIM", "数字化建造", "智慧工地", "数字孪生", "三维建模", "信息化管理"],
+    "深基坑工程(危大)": ["深基坑", "支护", "降水", "危大工程", "监测点", "变形监测"],
+}
+
 MANDATORY_MARKERS: Tuple[str, ...] = (
     "必须",
     "应当",
@@ -171,6 +187,36 @@ MIXED_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-./%]{1,24}")
 NUMERIC_TERM_RE = re.compile(
     r"\d+(?:\.\d+)?(?:%|‰|dB|MPa|kPa|mm|cm|m|km|天|h|小时|分钟|min|次/日|次/班|次|m3|m²|m2|t|kg|ug/m3|μg/m3)?"
 )
+
+
+def _sniff_involved_domains(text: str, matrix_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    matrix_terms: List[str] = []
+    for item in matrix_items:
+        matrix_terms.extend([str(x) for x in (item.get("keywords") or []) if str(x).strip()])
+        for chunk in item.get("support_chunks") or []:
+            if isinstance(chunk, dict):
+                matrix_terms.extend([str(x) for x in (chunk.get("matched_keywords") or []) if str(x).strip()])
+                matrix_terms.extend([str(x) for x in (chunk.get("semantic_tags") or []) if str(x).strip()])
+    corpus = f"{text}\n" + "\n".join(matrix_terms)
+
+    ranked: List[Tuple[str, float, List[str]]] = []
+    for domain, seeds in DOMAIN_SNIFFER_RULES.items():
+        hits = [seed for seed in seeds if seed and seed in corpus]
+        if not hits:
+            continue
+        density = len(hits) / max(len(seeds), 1)
+        score = round(min(1.0, 0.55 + density * 0.45), 4)
+        ranked.append((domain, score, hits))
+
+    ranked.sort(key=lambda x: (x[1], len(x[2]), len(x[0])), reverse=True)
+    involved_domains = [x[0] for x in ranked]
+    confidence = {x[0]: x[1] for x in ranked}
+    evidence = {x[0]: x[2][:8] for x in ranked}
+    return {
+        "involved_domains": involved_domains,
+        "confidence": confidence,
+        "evidence": evidence,
+    }
 
 
 def _normalize_keywords(values: List[str]) -> List[str]:
@@ -346,8 +392,10 @@ class IndexMatrixEngine:
 
         merged_text = "\n\n".join((doc["text"] or "") for doc in docs)
         meta = _extract_project_meta(merged_text)
+        sniffer = _sniff_involved_domains(merged_text, final.get("index_matrix") or [])
         final["project_name"] = meta.get("project_name")
         final["project_code"] = meta.get("project_code")
+        final["involved_domains"] = sniffer.get("involved_domains") or []
         final.setdefault("meta", {})
         final["meta"].update(
             {
@@ -356,6 +404,8 @@ class IndexMatrixEngine:
                 "qa_source_count": len(qa_docs),
                 "qa_override_applied": bool(qa_docs),
                 "source_files": [doc["path"] for doc in docs],
+                "involved_domains_confidence": sniffer.get("confidence") or {},
+                "involved_domains_evidence": sniffer.get("evidence") or {},
             }
         )
         return final

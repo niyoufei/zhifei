@@ -60,15 +60,28 @@ def _meta_to_text(parsed_type: str | None, parsed_meta: Any) -> str:
         layers = parsed_meta.get("layers_count")
         entities = parsed_meta.get("entities_count")
         inserts = parsed_meta.get("insert_blocks") or {}
+        topo = parsed_meta.get("topology") if isinstance(parsed_meta.get("topology"), dict) else {}
         top_blocks = []
         if isinstance(inserts, dict):
             for k, v in sorted(inserts.items(), key=lambda x: x[1], reverse=True)[:8]:
                 top_blocks.append(f"{k}:{v}")
+        topo_lines = []
+        if topo:
+            topo_lines.append(f"拓扑节点: {topo.get('nodes_count')}")
+            topo_lines.append(f"拓扑边: {topo.get('edges_count')}")
+            topo_lines.append(f"连通分量: {topo.get('components_count')}")
+            topo_lines.append(f"端点: {topo.get('endpoint_count')}")
+            topo_lines.append(f"主干长度: {topo.get('trunk_length')}")
+            topo_lines.append(f"建议流水段: {topo.get('suggested_flow_segments')}")
+            if topo.get("topology_confidence"):
+                topo_lines.append(f"拓扑置信度: {topo.get('topology_confidence')}")
+        topo_text = ("\n" + "\n".join(topo_lines)) if topo_lines else ""
         return (
             f"图纸类型: CAD(DXF ASCII)\n"
             f"图层数量: {layers}\n"
             f"实体数量: {entities}\n"
             f"块引用: {'; '.join(top_blocks)}"
+            f"{topo_text}"
         )
     if parsed_type == "image" and isinstance(parsed_meta, dict):
         return (
@@ -81,12 +94,50 @@ def _meta_to_text(parsed_type: str | None, parsed_meta: Any) -> str:
     return ""
 
 
-def _classify_tags(filename: str | None, ext: str, parsed_type: str | None) -> list[str]:
+def _normalize_source_hint(source_hint: str | None) -> str:
+    raw = str(source_hint or "").strip().lower()
+    if not raw:
+        return ""
+    aliases = {
+        "tender": "tender_qa",
+        "qa": "tender_qa",
+        "answer": "tender_qa",
+        "答疑": "tender_qa",
+        "招标": "tender_qa",
+        "boq": "boq",
+        "quantity": "boq",
+        "drawing": "drawing_standard",
+        "cad": "drawing_standard",
+        "standard": "drawing_standard",
+        "图纸": "drawing_standard",
+        "标准": "drawing_standard",
+        "photo": "site_photo",
+        "site_photo": "site_photo",
+        "现场照片": "site_photo",
+    }
+    return aliases.get(raw, raw)
+
+
+def _classify_tags(filename: str | None, ext: str, parsed_type: str | None, source_hint: str | None = None) -> list[str]:
     name = (filename or "").lower()
     tags = []
+    hint = _normalize_source_hint(source_hint)
+    is_site_photo = hint == "site_photo"
+
+    if hint == "tender_qa":
+        tags.extend(["tender", "qa"])
+    elif hint == "boq":
+        tags.append("boq")
+    elif hint == "drawing_standard":
+        # Keep file-name/extension heuristics for precise split between drawing vs standard.
+        # Do not force both tags on every file in this mixed upload group.
+        pass
+    elif hint == "site_photo":
+        tags.append("site_photo")
+
     if any(k in name for k in ("logo", "标志", "标识", "徽标")):
         tags.append("logo")
-    if any(k in name for k in ("图", "图纸", "施工图", "平面", "剖面", "大样", "节点", "cad", "dwg", "dxf")):
+    if (not is_site_photo) and any(k in name for k in ("图", "图纸", "施工图", "平面", "剖面", "大样", "节点", "cad", "dwg", "dxf")):
         tags.append("drawing")
     if any(k in name for k in ("清单", "工程量清单", "boq")):
         tags.append("boq")
@@ -94,13 +145,21 @@ def _classify_tags(filename: str | None, ext: str, parsed_type: str | None) -> l
         tags.append("tender")
     if any(k in name for k in ("企业标准", "工法", "作业指导", "标准化", "技术标准", "标准图集", "管理标准")):
         tags.append("standard")
-    if ext in {"dxf", "dwg"} or parsed_type in {"cad", "dwg"}:
+    if (not is_site_photo) and (ext in {"dxf", "dwg"} or parsed_type in {"cad", "dwg"}):
         if "drawing" not in tags:
             tags.append("drawing")
-    if ext in {"png", "jpg", "jpeg"} and "drawing" not in tags:
+    if (not is_site_photo) and ext in {"png", "jpg", "jpeg"} and "drawing" not in tags:
         # 纯图片无法判断用途，默认打上 drawing，便于后续人工筛选
         tags.append("drawing")
-    return tags
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for t in tags:
+        tt = str(t).strip()
+        if not tt or tt in seen:
+            continue
+        seen.add(tt)
+        dedup.append(tt)
+    return dedup
 
 
 def _make_preview_image(src_path: Path, dst_path: Path, max_width: int = 1400) -> str | None:
@@ -188,7 +247,7 @@ async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> str | Non
             return None
     return None
 
-async def _handle_upload(files: List[UploadFile], project_id: str | None = None):
+async def _handle_upload(files: List[UploadFile], project_id: str | None = None, source_hint: str | None = None):
     if not files:
         raise HTTPException(status_code=400, detail="no files uploaded")
 
@@ -198,6 +257,7 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None)
 
     records = []
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
+    normalized_hint = _normalize_source_hint(source_hint)
     for uf in files:
         content = await uf.read()
         if not content:
@@ -271,7 +331,8 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None)
             **parsed,
             "parsed_type": parsed_type,
             "parsed_meta": parsed_meta,
-            "tags": _classify_tags(uf.filename, ext, parsed_type),
+            "source_hint": normalized_hint or None,
+            "tags": _classify_tags(uf.filename, ext, parsed_type, normalized_hint),
         }
         records.append(rec)
         with (AUDIT_DIR / "ingest.jsonl").open("a", encoding="utf-8") as f:
@@ -288,10 +349,10 @@ async def ping():
 
 
 @router.post("/upload")
-async def upload(files: List[UploadFile] = File(...), project_id: str | None = None):
-    return await _handle_upload(files, project_id=project_id)
+async def upload(files: List[UploadFile] = File(...), project_id: str | None = None, source_hint: str | None = None):
+    return await _handle_upload(files, project_id=project_id, source_hint=source_hint)
 
 
 @router.post("/ingest")
-async def ingest(files: List[UploadFile] = File(...), project_id: str | None = None):
-    return await _handle_upload(files, project_id=project_id)
+async def ingest(files: List[UploadFile] = File(...), project_id: str | None = None, source_hint: str | None = None):
+    return await _handle_upload(files, project_id=project_id, source_hint=source_hint)

@@ -70,7 +70,14 @@ def cleanup_jobs(older_than_seconds: int = 7 * 24 * 3600) -> int:
             if now - float(ts) > older_than_seconds:
                 # 删除关联产物
                 result = rec.get("result") or {}
-                for k in ("json", "docx", "compare_docx"):
+                for k in (
+                    "json",
+                    "docx",
+                    "compare_docx",
+                    "focus_xlsx",
+                    "score_overview_xlsx",
+                    "expert_review_docx",
+                ):
                     f = result.get(k)
                     if isinstance(f, list):
                         for pi in f:

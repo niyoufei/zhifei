@@ -51,6 +51,7 @@ async def test_parse_tender_builds_all_dimensions(tmp_path: Path) -> None:
     assert matrix["meta"]["qa_override_applied"] is False
     assert matrix["project_name"] == "测试工程"
     assert matrix["project_code"] == "T-2026-001"
+    assert isinstance(matrix.get("involved_domains"), list)
 
 
 @pytest.mark.asyncio
@@ -128,6 +129,27 @@ async def test_build_index_matrix_saves_json(tmp_path: Path) -> None:
     assert out.exists()
     loaded = json.loads(out.read_text(encoding="utf-8"))
     assert "index_matrix" in loaded
+
+
+@pytest.mark.asyncio
+async def test_parse_tender_outputs_involved_domains(tmp_path: Path) -> None:
+    tender = tmp_path / "招标文件.txt"
+    tender.write_text(
+        """
+        本项目为市政桥梁工程，包含桥墩、盖梁与挂篮施工。
+        同步建设智能化弱电系统，并落实绿色施工与扬尘治理。
+        """,
+        encoding="utf-8",
+    )
+
+    engine = IndexMatrixEngine()
+    matrix = await engine.parse_files([str(tender)])
+
+    involved = set(matrix.get("involved_domains") or [])
+    assert "市政桥梁工程" in involved
+    assert "机电安装" in involved
+    assert "绿色建造" in involved
+    assert isinstance(matrix.get("meta", {}).get("involved_domains_confidence"), dict)
 
 
 def test_save_index_matrix(tmp_path: Path) -> None:

@@ -52,13 +52,11 @@ def extract_canonical_metrics(sections: List[Dict[str, Any]]) -> Dict[str, str]:
 
 def normalize_metrics_in_sections(sections: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Enforce that all occurrences use the canonical value (if any).
-    Returns a small receipt of what was changed.
+    Enforce canonical metric wording and run deterministic CPM consistency check.
+    Returns a receipt used by focus_xlsx / QA review.
     """
     canonical = extract_canonical_metrics(sections)
     changed = []
-    if not canonical:
-        return {"ok": True, "canonical": {}, "changed": []}
 
     def _norm(text: str) -> str:
         out = text or ""
@@ -78,5 +76,22 @@ def normalize_metrics_in_sections(sections: List[Dict[str, Any]]) -> Dict[str, A
             sec["content"] = after
             changed.append({"title": title})
 
-    return {"ok": True, "canonical": canonical, "changed": changed}
+    cpm_receipt = None
+    cpm_conflicts = []
+    try:
+        from backend.zhifei_autoplan.schedule_cpm import build_cpm_receipt
 
+        cpm_receipt = build_cpm_receipt(sections, canonical=canonical)
+        cpm_conflicts = cpm_receipt.get("conflicts") if isinstance(cpm_receipt, dict) else []
+        if not isinstance(cpm_conflicts, list):
+            cpm_conflicts = []
+    except Exception:
+        cpm_receipt = None
+        cpm_conflicts = []
+
+    return {
+        "ok": len(cpm_conflicts) == 0,
+        "canonical": canonical,
+        "changed": changed,
+        "cpm": cpm_receipt,
+    }

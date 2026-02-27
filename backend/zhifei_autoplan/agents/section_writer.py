@@ -57,11 +57,17 @@ class SectionWriter:
         four_new_text = "\n".join(four_new_lines)
         standard_trades = "、".join(context.get("standard_trades") or [])
         role = context.get("agent_role") or "总负责人"
+        master_agent = str(context.get("master_agent") or "").strip()
+        specialist_agents = [str(x).strip() for x in (context.get("specialist_agents") or []) if str(x).strip()]
+        compliance_agent = str(context.get("compliance_agent") or "").strip()
+        graph_nodes = [str(x).strip() for x in (context.get("graph_nodes") or []) if str(x).strip()]
         variant_id = context.get("variant_id")
         try:
             variant_id = int(variant_id or 1)
         except Exception:
             variant_id = 1
+        project_type = str(context.get("project_type") or "").strip()
+        global_instruction = str(context.get("global_instruction") or "").strip()
 
         logic = context.get("logic_template") if isinstance(context.get("logic_template"), dict) else {}
         logic_id = str(logic.get("id") or "").strip() or ""
@@ -91,6 +97,7 @@ class SectionWriter:
         quant = params.get("quant_defaults") if isinstance(params.get("quant_defaults"), dict) else {}
         focus_card = params.get("boq_focus_card") if isinstance(params.get("boq_focus_card"), dict) else {}
         qse_defaults = params.get("qse_defaults") if isinstance(params.get("qse_defaults"), dict) else {}
+        labor_hint = context.get("labor_hint") if isinstance(context.get("labor_hint"), dict) else {}
         chapter_domain = str(context.get("chapter_domain") or "").strip().lower()
         param_lines = []
         if quant:
@@ -108,17 +115,54 @@ class SectionWriter:
                 "质量/安全/环保默认阈值："
                 + "；".join([f"{k}={str(v).strip()}" for k, v in qse_defaults.items() if str(k).strip() and str(v).strip()][:10])
             )
+        if labor_hint:
+            skill_ratio = labor_hint.get("skill_ratio") if isinstance(labor_hint.get("skill_ratio"), dict) else {}
+            trade_ratio = labor_hint.get("trade_ratio") if isinstance(labor_hint.get("trade_ratio"), dict) else {}
+            param_lines.append(
+                f"劳动力矩阵：项目类型={labor_hint.get('project_type')}；规模={labor_hint.get('size')}；阶段={labor_hint.get('stage')}；阶段说明={labor_hint.get('stage_detail')}"
+            )
+            if skill_ratio:
+                param_lines.append(
+                    "技能等级比例："
+                    + "；".join([f"{k}={str(v).strip()}" for k, v in skill_ratio.items() if str(k).strip() and str(v).strip()][:8])
+                )
+            if trade_ratio:
+                param_lines.append(
+                    "工种配置比例："
+                    + "；".join([f"{k}={str(v).strip()}" for k, v in trade_ratio.items() if str(k).strip() and str(v).strip()][:10])
+                )
         params_text = "\n".join([f"- {ln}" for ln in param_lines if ln.strip()])
+        project_type_block = f"【项目类型】{project_type}\n" if project_type else ""
+        global_instruction_block = (
+            f"【系统全局指令（必须无条件执行）】\n{global_instruction}\n" if global_instruction else ""
+        )
+        agent_block = ""
+        if master_agent or specialist_agents or compliance_agent:
+            agent_block += "【多Agent协作】\n"
+            if master_agent:
+                agent_block += f"- 主控：{master_agent}\n"
+            if specialist_agents:
+                agent_block += f"- 专业：{'；'.join(specialist_agents[:6])}\n"
+            if compliance_agent:
+                agent_block += f"- 合规：{compliance_agent}\n"
+        graph_node_block = ""
+        if graph_nodes:
+            graph_node_block += "【图谱逻辑节点（必须绑定）】\n"
+            graph_node_block += "\n".join([f"- {x}" for x in graph_nodes[:8]]) + "\n"
         return f"""你是资深施工组织设计专家，请根据证据生成高分章节内容。
 角色定位：{role}
 章节标题：{title}
 方案版本：v{variant_id}
+{project_type_block}
+{global_instruction_block}
+{agent_block}
 
 【可编辑参数（优先采用；若招标/图纸/清单有明确要求，则以证据为准）】
 {params_text}
 
 {logic_block}
 {bp_block}
+{graph_node_block}
 
 【编制要求】
 {req}
@@ -159,6 +203,8 @@ class SectionWriter:
    - 若涉及“四新/新技术/新工艺/新材料/新设备/信息化/绿色施工”，优先从“候选清单”中选2-4条落地：适用/投入/步骤/验收指标 + 风险→控制→验证 + 记录 + 偏差处置
 10) 全文禁止官话、套话、空话，不得出现“加强、确保、严格、压实责任、形成合力、高质量推进”等词
 11) 清单重点项必须逐项写清：工程量/材料要点/资源配置 + 量化指标 + 风险→控制→验证 + 证据标注
+12) 每节至少绑定1个图谱逻辑节点，正文中以“【图谱节点:xxx】”标注
+13) 当采用经验值补位时，必须写明“【经验值:同类工程】”及“【图谱经验值:来源】”
 """
 
     def _fallback(self, title: str, context: Dict[str, Any]) -> str:
@@ -215,9 +261,12 @@ class SectionWriter:
             pass
 
         role = context.get("agent_role") or "技术负责人"
+        project_type = str(context.get("project_type") or "").strip()
+        global_instruction = str(context.get("global_instruction") or "").strip()
         target_pages = context.get("chapter_target_pages")
         logic = context.get("logic_template") if isinstance(context.get("logic_template"), dict) else {}
         logic_id = str(logic.get("id") or "").strip().upper() or "A"
+        is_qse_title = any(k in str(title) for k in ("质量", "安全", "文明", "环保", "环境", "绿色", "应急", "消防"))
         bp = context.get("chapter_blueprint") if isinstance(context.get("chapter_blueprint"), dict) else {}
         bp_id = str(bp.get("id") or "").strip().upper()
         bp_name = str(bp.get("name") or "").strip()
@@ -226,6 +275,23 @@ class SectionWriter:
 
         lines = []
         lines.append(f"【范围】本章：{title}；负责人：{role}；逻辑模版={logic_id}。")
+        if project_type:
+            lines.append(f"【项目类型】{project_type}。")
+        if global_instruction:
+            lines.append(f"【系统全局指令】{global_instruction}。")
+        master_agent = str(context.get("master_agent") or "").strip()
+        specialist_agents = [str(x).strip() for x in (context.get("specialist_agents") or []) if str(x).strip()]
+        compliance_agent = str(context.get("compliance_agent") or "").strip()
+        if master_agent or specialist_agents or compliance_agent:
+            lines.append(
+                "【多Agent】"
+                + f"主控={master_agent or '主控Agent'}；"
+                + f"专业={'/'.join(specialist_agents[:4]) if specialist_agents else '专业Agent:通用施工'}；"
+                + f"合规={compliance_agent or '合规Agent'}。"
+            )
+        graph_nodes = [str(x).strip() for x in (context.get("graph_nodes") or []) if str(x).strip()]
+        if graph_nodes:
+            lines.append(f"【图谱节点绑定】{';'.join(graph_nodes[:4])}。")
         if bp_name:
             lines.append(f"【章节结构蓝图】{bp_name}。")
         if focus:
@@ -247,6 +313,8 @@ class SectionWriter:
         )
         # Keep a stable heading for downstream checks/tests.
         lines.append("【量化指标】" + metric_line)
+        for exp in [str(x).strip() for x in (context.get("graph_experience_values") or []) if str(x).strip()][:3]:
+            lines.append(f"【经验值:同类工程】{exp}")
 
         # Blueprint anchors (only when matched): ensure chapter follows the user-provided structure.
         # Keep content minimal but executable so dry-run can still pass quality gates.
@@ -339,6 +407,56 @@ class SectionWriter:
             lines.append(
                 f"- 环保风险：扬尘/噪声超标；控制：喷淋2次/日+噪声监测；验证：夜间噪声≤55dB。【证据:环保监测记录】"
             )
+        elif logic_id == "D":
+            if is_qse_title:
+                lines.append("【监管红线清单】")
+                lines.append("- 红线1：高处/临边防护缺失即停工。")
+                lines.append("- 红线2：临时用电漏保失效即停用。")
+                lines.append("- 红线3：危化品混放即封存整改。")
+                lines.append("【岗位联签链】")
+                lines.append("- 发现人=班组长；处置人=施工员/电工；复核人=安全员；关闭批准=项目经理。")
+                lines.append("【闭环时限表】")
+                lines.append("- 高风险：10min启动处置+2h复核关闭；一般风险：2h启动处置+24h关闭。")
+                lines.append("【风险→控制→验证】")
+                lines.append(
+                    f"- 风险：临时用电漏保失效；控制：停用+更换+复测；验证：试跳记录齐全率=100%，记录=《红线联签闭环单》。【证据:{evidence_src}】"
+                )
+            else:
+                lines.append("【资源-工序耦合表】")
+                lines.append(f"- 工序=测量复核；班组人数={quant['人数']}；设备={quant['设备型号']}；节拍={quant['时长']}。")
+                lines.append(f"- 工序=关键作业；频次={quant['频次']}；阈值={quant['阈值']}；抽检={card_defaults['抽检频次']}。")
+                lines.append("【接口冲突清单】")
+                lines.append("- 冲突：交叉作业抢占作业面；控制：错峰2h+封控线2m。")
+                lines.append("- 冲突：吊装与地面作业交叉；控制：分区封锁+专人指挥1人/班。")
+                lines.append("【关键路径纠偏卡】")
+                lines.append("- 触发：节点滞后>1天；动作：增配1班组；时限：24h内；复核：次日兑现率≥95%。")
+                lines.append("【风险→控制→验证（资源视角）】")
+                lines.append(
+                    f"- 风险：资源错配导致返工；控制：班组-工序绑定+交接清单；验证：偏差{quant['阈值']}，记录=《资源耦合检查表》。【证据:{evidence_src}】"
+                )
+        elif logic_id == "E":
+            if is_qse_title:
+                lines.append("【区域网格】")
+                lines.append("- 网格A=主体区；网格B=材料区；网格C=临电区。")
+                lines.append("【班组行为清单】")
+                lines.append("- 必做：班前交底/PPE自检/作业许可；禁做：无证上岗/危化品混放。")
+                lines.append("【红黄牌处置】")
+                lines.append("- 黄牌：2h内整改复核；红牌：立即停工并经项目经理签批复工。")
+                lines.append("【复核与销项】")
+                lines.append(
+                    f"- 风险：PPE佩戴不规范；控制：班前检查=1次/班；验证：抽查{quant['频次']}，记录=《网格巡检台账》。【证据:{evidence_src}】"
+                )
+            else:
+                lines.append("【实施场景卡片】")
+                lines.append("- 场景1：主体作业面；场景2：材料中转区；场景3：交叉作业区。")
+                lines.append("【参数对照表】")
+                lines.append(f"- 频次={quant['频次']}；阈值={quant['阈值']}；间距={quant['间距']}；厚度={quant['厚度']}；时长={quant['时长']}。")
+                lines.append("【验收样表】")
+                lines.append("- 字段：场景编号/责任岗位/实测值/结论/整改时限/复核人/证据定位。")
+                lines.append("【风险→控制→验证（场景）】")
+                lines.append(
+                    f"- 风险：场景参数超差；控制：首件确认+过程抽检；验证：合格率{card_defaults['合格率阈值']}，记录=《场景验收样表》。【证据:{evidence_src}】"
+                )
         else:
             # Template A (default): deliverable-first
             lines.append("【本章交付物】")

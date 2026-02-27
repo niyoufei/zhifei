@@ -102,6 +102,44 @@ def test_reindex_skips_unchanged_file(tmp_path: Path) -> None:
     assert second["files_skipped"] == 4
 
 
+def test_ingestion_stamps_domain_tag_from_first_level_directory(tmp_path: Path) -> None:
+    root = tmp_path / "知识图谱"
+    domain_dir = root / "市政道路工程"
+    domain_dir.mkdir(parents=True, exist_ok=True)
+    (domain_dir / "road.json").write_text(
+        json.dumps(
+            {
+                "name": "RoadDomainKG",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "R-001",
+                                "name": "路基压实控制",
+                                "keywords": ["路基", "压实度", "检测频次"],
+                                "content": {"operation_desc_premium": {"desc": "每层压实后复检。"}},
+                            }
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(query="路基 压实", db_path=db_path, resolve_authority=False, top_k=5)
+    assert result["total"] >= 1
+    top = result["results"][0]
+    assert top.get("domain_tag") == "市政道路工程"
+    assert "市政道路工程" in (top.get("tags") or [])
+
+
 def test_real_desktop_kg_path_can_be_scanned_if_exists(tmp_path: Path) -> None:
     desktop_path = Path("/Users/youfeini/Desktop/文档生成系统/知识图谱")
     if not desktop_path.exists():

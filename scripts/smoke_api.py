@@ -3,14 +3,14 @@
 快速接口冒烟：只检查 /health、/capabilities、/config 是否可用（无需登录）。
 用法：先启动服务，再运行
   python3 scripts/smoke_api.py
-  python3 scripts/smoke_api.py http://127.0.0.1:8000
+  python3 scripts/smoke_api.py http://127.0.0.1:8010
 """
 import sys
 import urllib.request
 import urllib.error
 
 def main():
-    base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+    base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8010"
     base = base.rstrip("/")
     ok = True
     for path in ["/health", "/capabilities", "/config"]:

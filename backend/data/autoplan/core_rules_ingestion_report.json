@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "input_dir": "/Users/youfeini/Desktop/文档生成系统/03_系统核心规则与字典",
+  "term_pdf": "/Users/youfeini/Desktop/文档生成系统/03_系统核心规则与字典/《建筑术语标准++（征求意见稿）》20220705.pdf",
+  "labor_pdf": "/Users/youfeini/Desktop/文档生成系统/03_系统核心规则与字典/安徽《房屋建筑和市政基础设施工程项目施工现场技能工人配备标准（试行）》建市函〔2022〕554号.pdf",
+  "global_terminology_path": "/Users/youfeini/Desktop/文档生成系统/backend/data/autoplan/global_terminology.json",
+  "labor_allocation_matrix_path": "/Users/youfeini/Desktop/文档生成系统/backend/data/autoplan/labor_allocation_matrix.json",
+  "terminology_entry_count": 385,
+  "labor_matrix_row_count": 18,
+  "error_count": 0,
+  "errors": []
+}

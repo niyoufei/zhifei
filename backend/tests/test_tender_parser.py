@@ -285,6 +285,52 @@ class TestExtractProjectMeta:
         assert meta.get("source") == "review_standard"
         assert outline[:2] == ["工程概况", "主要施工方法"]
 
+    def test_extract_outline_review_standard_not_polluted_by_other_numbered_rules(self, parser):
+        text = """技术文件详细评审标准
+依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
+1）工程概况2）主要施工方法3）拟投入的主要物资计划4）拟投入的主要施工机械、设备计划
+5）劳动力安排计划6）确保工程质量的技术组织措施7）确保安全生产的技术组织措施
+8）确保工期的技术组织措施9）确保文明施工的技术组织措施10）施工总平面布置图
+一般得0分<F≤60分，良好得60分<F<90分，优秀得90分≤F≤100分。未提供的，不得分。
+注：施工组织设计编制建议……
+评标程序：
+1项、第2项、第3项；投标文件在符合性、响应性等方面存在的偏差；
+2否决投标的其他情形；3投标文件澄清与说明。"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert len(outline) == 10
+        assert outline[0] == "工程概况"
+        assert outline[-1] == "施工总平面布置图"
+
+    def test_extract_outline_review_standard_not_polluted_by_contract_list(self, parser):
+        text = """技术文件详细评审标准
+依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
+1）工程概况
+2）主要施工方法
+3）拟投入的主要物资计划
+4）拟投入的主要施工机械、设备计划
+5）劳动力安排计划
+6）确保工程质量的技术组织措施
+7）确保安全生产的技术组织措施
+8）确保工期的技术组织措施
+9）确保文明施工的技术组织措施
+10）施工总平面布置图
+注：未提供的，不得分。
+
+合同文件构成包括但不限于以下内容：
+1）中标通知书
+2）投标函及其附录
+3）专用合同条款及其附件
+4）通用合同条款
+5）图纸
+6）已标价工程量清单或预算书
+"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert len(outline) == 10
+        assert "中标通知书" not in outline
+        assert "投标函及其附录" not in outline
+
 
 # ==============================================================================
 # _read_pdf tests (with mocking)
