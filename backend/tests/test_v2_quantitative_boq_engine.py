@@ -60,6 +60,7 @@ def test_build_quantitative_index_contains_mapping_and_cpm() -> None:
 
     optimization = result.get("optimization") or {}
     assert optimization.get("enabled") is True
+    assert optimization.get("supports_extended_objectives") is True
     assert int(optimization.get("scenario_total") or 0) >= 2
     assert isinstance(optimization.get("pareto_front_ids"), list)
     best = optimization.get("best_scenario") or {}
@@ -70,14 +71,30 @@ def test_build_quantitative_index_contains_mapping_and_cpm() -> None:
 def test_optimize_execution_plan_respects_objective_weights() -> None:
     engine = QuantitativeBoQEngine()
     payload = _sample_boq_payload()
-    result = engine.optimize_execution_plan(payload, objective_weights={"duration": 0.7, "risk": 0.2, "resource_density": 0.1})
+    result = engine.optimize_execution_plan(
+        payload,
+        objective_weights={
+            "duration": 0.5,
+            "risk": 0.2,
+            "resource_density": 0.1,
+            "cost": 0.1,
+            "carbon": 0.05,
+            "night_restriction": 0.05,
+        },
+    )
     assert result["enabled"] is True
     assert int(result["scenario_total"]) >= 2
     weights = result["objective_weights"]
-    assert pytest.approx(sum(float(weights[k]) for k in ("duration", "risk", "resource_density")), rel=1e-6) == 1.0
+    assert pytest.approx(
+        sum(float(weights[k]) for k in ("duration", "risk", "resource_density", "cost", "carbon", "night_restriction")),
+        rel=1e-6,
+    ) == 1.0
     best = result["best_scenario"]
     assert float(best["composite_score"]) <= 1.0
     assert float(best["composite_score"]) >= 0.0
+    assert "cost_index" in best
+    assert "carbon_index" in best
+    assert "night_restriction_index" in best
 
 
 def test_assert_paragraph_quantitative_support_passes() -> None:

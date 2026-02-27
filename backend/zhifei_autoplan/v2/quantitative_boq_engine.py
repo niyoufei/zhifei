@@ -338,9 +338,12 @@ class QuantitativeBoQEngine:
 
     def _normalize_objective_weights(self, objective_weights: Dict[str, Any] | None = None) -> Dict[str, float]:
         base = {
-            "duration": 0.40,
-            "risk": 0.35,
-            "resource_density": 0.25,
+            "duration": 0.32,
+            "risk": 0.26,
+            "resource_density": 0.16,
+            "cost": 0.12,
+            "carbon": 0.08,
+            "night_restriction": 0.06,
         }
         if isinstance(objective_weights, dict):
             for key in base.keys():
@@ -353,7 +356,14 @@ class QuantitativeBoQEngine:
                         base[key] = value
         s = sum(base.values())
         if s <= 0:
-            return {"duration": 0.40, "risk": 0.35, "resource_density": 0.25}
+            return {
+                "duration": 0.32,
+                "risk": 0.26,
+                "resource_density": 0.16,
+                "cost": 0.12,
+                "carbon": 0.08,
+                "night_restriction": 0.06,
+            }
         return {k: round(v / s, 6) for k, v in base.items()}
 
     def _pareto_front(self, scenarios: List[Dict[str, Any]]) -> List[str]:
@@ -424,6 +434,30 @@ class QuantitativeBoQEngine:
                 1.0,
                 max(0.0, float(base_indices.get("resource_density_index") or 0.0) * float(resource_factor)),
             )
+            base_duration = max(int(base_cpm.get("project_duration_days") or 0), 1)
+            duration_ratio = float(duration_days) / float(base_duration)
+            cost_index = min(
+                1.0,
+                max(
+                    0.05,
+                    0.45 + 0.35 * float(resource_factor) + 0.20 * max(0.2, (1.0 / max(float(productivity_factor), 0.2))),
+                ),
+            )
+            utilization = min(1.2, float(resource_factor))
+            carbon_index = min(
+                1.0,
+                max(
+                    0.05,
+                    0.35 + 0.25 * float(resource_factor) + 0.20 * float(duration_ratio) + 0.20 * float(utilization),
+                ),
+            )
+            night_restriction_index = min(
+                1.0,
+                max(
+                    0.0,
+                    (max(0.0, duration_ratio - 1.0) * 0.7) + (max(0.0, float(resource_factor) - 1.0) * 0.3),
+                ),
+            )
             scenarios.append(
                 {
                     "scenario_id": f"S{idx}",
@@ -433,6 +467,9 @@ class QuantitativeBoQEngine:
                     "duration_days": duration_days,
                     "risk_index": round(risk_index, 6),
                     "resource_density_index": round(resource_density, 6),
+                    "cost_index": round(cost_index, 6),
+                    "carbon_index": round(carbon_index, 6),
+                    "night_restriction_index": round(night_restriction_index, 6),
                     "critical_path": cpm.get("critical_path") or [],
                 }
             )
@@ -440,23 +477,38 @@ class QuantitativeBoQEngine:
         max_duration = max((int(s.get("duration_days") or 0) for s in scenarios), default=1)
         max_risk = max((float(s.get("risk_index") or 0.0) for s in scenarios), default=1.0)
         max_density = max((float(s.get("resource_density_index") or 0.0) for s in scenarios), default=1.0)
+        max_cost = max((float(s.get("cost_index") or 0.0) for s in scenarios), default=1.0)
+        max_carbon = max((float(s.get("carbon_index") or 0.0) for s in scenarios), default=1.0)
+        max_night = max((float(s.get("night_restriction_index") or 0.0) for s in scenarios), default=1.0)
         max_duration = max(max_duration, 1)
         max_risk = max(max_risk, 1e-6)
         max_density = max(max_density, 1e-6)
+        max_cost = max(max_cost, 1e-6)
+        max_carbon = max(max_carbon, 1e-6)
+        max_night = max(max_night, 1e-6)
 
         for scenario in scenarios:
             duration_cost = float(scenario.get("duration_days") or 0.0) / float(max_duration)
             risk_cost = float(scenario.get("risk_index") or 0.0) / float(max_risk)
             density_cost = float(scenario.get("resource_density_index") or 0.0) / float(max_density)
+            cost_cost = float(scenario.get("cost_index") or 0.0) / float(max_cost)
+            carbon_cost = float(scenario.get("carbon_index") or 0.0) / float(max_carbon)
+            night_cost = float(scenario.get("night_restriction_index") or 0.0) / float(max_night)
             composite_score = (
                 weights["duration"] * (1.0 - duration_cost)
                 + weights["risk"] * (1.0 - risk_cost)
                 + weights["resource_density"] * (1.0 - density_cost)
+                + weights["cost"] * (1.0 - cost_cost)
+                + weights["carbon"] * (1.0 - carbon_cost)
+                + weights["night_restriction"] * (1.0 - night_cost)
             )
             scenario["objective_vector"] = {
                 "duration_cost": round(duration_cost, 6),
                 "risk_cost": round(risk_cost, 6),
                 "resource_density_cost": round(density_cost, 6),
+                "cost_cost": round(cost_cost, 6),
+                "carbon_cost": round(carbon_cost, 6),
+                "night_restriction_cost": round(night_cost, 6),
             }
             scenario["composite_score"] = round(composite_score, 6)
 
@@ -474,6 +526,7 @@ class QuantitativeBoQEngine:
             "base_duration_days": int(base_cpm.get("project_duration_days") or 0),
             "base_risk_index": float(base_cpm.get("risk_index") or 0.0),
             "base_resource_density_index": float(base_indices.get("resource_density_index") or 0.0),
+            "supports_extended_objectives": True,
         }
 
     def build_quantitative_index(self, boq_payload: Dict[str, Any]) -> Dict[str, Any]:
