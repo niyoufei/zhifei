@@ -69,7 +69,17 @@ def _base_node(node_id: str) -> dict:
         "process_parameter_pack": {"enabled": True, "steps": [{"seq": 1, "parameter": "a"}]},
         "resource_productivity_model": {"enabled": True, "unit_output_per_day": 100},
         "risk_trigger_matrix": {"enabled": True, "items": [{"trigger_id": "R1"}]},
-        "clause_locator": {"enabled": True, "anchors": [{"clause_ref": "第1条"}]},
+        "clause_locator": {
+            "enabled": True,
+            "anchors": [
+                {
+                    "clause_ref": "第1条",
+                    "clause_path": "GB/T 50326-2017/第1条/S1.0/P1",
+                    "source_excerpt": "第1条 项目管理基本要求",
+                    "anchor_hash": "abc123ef45678900",
+                }
+            ],
+        },
         "cross_discipline_interface_contract": {"enabled": True, "interfaces": [{"with_domain": "mep"}]},
         "optimization_objectives_ext": {"enabled": True, "objectives": {"duration": 0.4, "risk": 0.6}},
         "online_learning_profile": {"enabled": True, "strategy": "ema_feedback_v1"},

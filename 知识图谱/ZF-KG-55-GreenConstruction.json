@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-26T16:00:45",
+    "updated_at": "2026-02-27T12:46:20",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -14,7 +14,7 @@
     "incremental_update": {
       "strategy": "fingerprint_diff",
       "node_fingerprint_count": 8,
-      "file_fingerprint": "f40c795604b66ad90089753adf7be72fc231dfd4"
+      "file_fingerprint": "8389bab53199c69139b14ee613af77090b9a6633"
     }
   },
   "knowledge_database": {
@@ -555,7 +555,35 @@
                 "policy_code": "MANAGEMENT-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "质量",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                },
+                "BJ": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -839,9 +867,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:24",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -927,14 +955,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "a075a8e684cabd5c0a1e2be7b0b5c5f000179a0e",
+          "incremental_fingerprint": "c56549b809f13e0095d8a214ec1a6928f6e5747c",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "a075a8e684cabd5c0a1e2be7b0b5c5f000179a0e",
+            "fingerprint": "c56549b809f13e0095d8a214ec1a6928f6e5747c",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -992,6 +1020,240 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "management",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "deviation_limit_mm",
+                "default_value": 3,
+                "unit": "mm",
+                "checker": "质量员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "defect_trigger_percent",
+                "default_value": 2,
+                "unit": "%",
+                "checker": "质量员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recheck_frequency_per_shift",
+                "default_value": 2,
+                "unit": "次/班",
+                "checker": "质量员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "management",
+            "dimension": "质量",
+            "unit_output_per_day": 180.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.87,
+            "material_loss_rate_percent": 1.0,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "质量",
+            "items": [
+              {
+                "trigger_id": "质量-RISK-1",
+                "risk": "质量偏差",
+                "trigger_parameter": "deviation_limit_mm",
+                "threshold": 3,
+                "unit": "mm",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "质量-RISK-2",
+                "risk": "抽检不达标",
+                "trigger_parameter": "acceptance_pass_rate_percent",
+                "threshold": 95,
+                "unit": "%",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "15.0",
+                "page_hint": 35,
+                "paragraph_hint": 35,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-F5BBEF5C10",
+                "clause_path": "GB 50300-2013/第1条/S15.0/P35",
+                "source_excerpt": "第1条 第一步（定义）：执行施工全过程碳足迹LCA计算引擎安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（",
+                "anchor_hash": "1097570750773ab2"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "management",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "bridge",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "tunnel",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "railway",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "hydraulic",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "earthwork",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "digital",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.1,
+              "carbon": 0.05,
+              "night_restriction": 0.05
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -1559,7 +1821,35 @@
                 "policy_code": "MANAGEMENT-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "进度",
+              "active_values": {
+                "min_process_interval_days": 1,
+                "milestone_delay_alarm_days": 2,
+                "deviation_response_hours": 4
+              },
+              "national_values": {
+                "min_process_interval_days": 1,
+                "milestone_delay_alarm_days": 2,
+                "deviation_response_hours": 4
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "min_process_interval_days": 1,
+                  "milestone_delay_alarm_days": 1,
+                  "deviation_response_hours": 3
+                },
+                "BJ": {
+                  "min_process_interval_days": 1,
+                  "milestone_delay_alarm_days": 1,
+                  "deviation_response_hours": 3
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -1843,9 +2133,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:24",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -1931,14 +2221,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "6c9bb10a40a487deff4cfc1abae0909889e194e3",
+          "incremental_fingerprint": "71c07370c4cfdf2e47237747b94c90656b4ec52c",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "6c9bb10a40a487deff4cfc1abae0909889e194e3",
+            "fingerprint": "71c07370c4cfdf2e47237747b94c90656b4ec52c",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -1996,6 +2286,240 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "进度",
+            "domain": "management",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "planned_duration_days",
+                "default_value": 30,
+                "unit": "天",
+                "checker": "施工员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "milestone_delay_alarm_days",
+                "default_value": 2,
+                "unit": "天",
+                "checker": "施工员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recovery_window_hours",
+                "default_value": 24,
+                "unit": "h",
+                "checker": "施工员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "management",
+            "dimension": "进度",
+            "unit_output_per_day": 198.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.87,
+            "material_loss_rate_percent": 1.0,
+            "peak_resource_estimate": {
+              "workers": 12,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "进度",
+            "items": [
+              {
+                "trigger_id": "进度-RISK-1",
+                "risk": "关键节点延误",
+                "trigger_parameter": "milestone_delay_alarm_days",
+                "threshold": 2,
+                "unit": "天",
+                "checker": "施工员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "进度-RISK-2",
+                "risk": "工序衔接中断",
+                "trigger_parameter": "min_process_interval_days",
+                "threshold": 2,
+                "unit": "天",
+                "checker": "施工员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "11.0",
+                "page_hint": 116,
+                "paragraph_hint": 47,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-5A78B784D4",
+                "clause_path": "GB 50300-2013/第1条/S11.0/P47",
+                "source_excerpt": "第1条 第一步（定义）：执行进度响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围",
+                "anchor_hash": "fa94617c1e557527"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "进度",
+            "domain": "management",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "bridge",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "tunnel",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "railway",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "hydraulic",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "earthwork",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "digital",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.45,
+              "risk": 0.25,
+              "resource_density": 0.15,
+              "cost": 0.08,
+              "carbon": 0.03,
+              "night_restriction": 0.04
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -2575,7 +3099,27 @@
                 "policy_code": "MANAGEMENT-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "重难点",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {},
+                "BJ": {}
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -2899,9 +3443,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:24",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -2987,14 +3531,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "67217f6e59e891e7431f8ae2ab0c99c2b13b84b5",
+          "incremental_fingerprint": "69757f9e991e9c5f0174cbda7b5c29552ce12f43",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "67217f6e59e891e7431f8ae2ab0c99c2b13b84b5",
+            "fingerprint": "69757f9e991e9c5f0174cbda7b5c29552ce12f43",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -3052,6 +3596,240 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "重难点",
+            "domain": "management",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "critical_interface_count",
+                "default_value": 8,
+                "unit": "处",
+                "checker": "技术负责人"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "risk_trigger_percent",
+                "default_value": 5,
+                "unit": "%",
+                "checker": "技术负责人"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "expert_team_size",
+                "default_value": 9,
+                "unit": "人",
+                "checker": "技术负责人"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "management",
+            "dimension": "重难点",
+            "unit_output_per_day": 158.4,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.87,
+            "material_loss_rate_percent": 1.0,
+            "peak_resource_estimate": {
+              "workers": 12,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "重难点",
+            "items": [
+              {
+                "trigger_id": "重难点-RISK-1",
+                "risk": "接口冲突",
+                "trigger_parameter": "critical_interface_count",
+                "threshold": 8,
+                "unit": "处",
+                "checker": "技术负责人",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              },
+              {
+                "trigger_id": "重难点-RISK-2",
+                "risk": "专项工序失控",
+                "trigger_parameter": "risk_trigger_percent",
+                "threshold": 5,
+                "unit": "%",
+                "checker": "技术负责人",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "18.0",
+                "page_hint": 119,
+                "paragraph_hint": 33,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-10B4780DD1",
+                "clause_path": "GB 50300-2013/第1条/S18.0/P33",
+                "source_excerpt": "第1条 第一步（定义）：执行重难点响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：",
+                "anchor_hash": "1c17d7e575a87cb6"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "重难点",
+            "domain": "management",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "high"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "bridge",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "high"
+              },
+              {
+                "with_domain": "tunnel",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "high"
+              },
+              {
+                "with_domain": "railway",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "high"
+              },
+              {
+                "with_domain": "hydraulic",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "earthwork",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "digital",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.08,
+              "carbon": 0.04,
+              "night_restriction": 0.08
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -3619,7 +4397,27 @@
                 "policy_code": "MANAGEMENT-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "扣分点",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {},
+                "BJ": {}
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -3903,9 +4701,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:24",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -3991,14 +4789,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "6ab194342d9d7dc9480f6a3deda92c0aa4a61f76",
+          "incremental_fingerprint": "1ecd19aec623e1498073d288e745f27baa8d06d8",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "6ab194342d9d7dc9480f6a3deda92c0aa4a61f76",
+            "fingerprint": "1ecd19aec623e1498073d288e745f27baa8d06d8",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -4056,6 +4854,240 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "扣分点",
+            "domain": "management",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "required_response_items",
+                "default_value": 30,
+                "unit": "项",
+                "checker": "项目总工"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "missing_clause_count",
+                "default_value": 1,
+                "unit": "项",
+                "checker": "项目总工"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "response_deadline_hours",
+                "default_value": 4,
+                "unit": "h",
+                "checker": "项目总工"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "management",
+            "dimension": "扣分点",
+            "unit_output_per_day": 172.8,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.87,
+            "material_loss_rate_percent": 1.0,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "扣分点",
+            "items": [
+              {
+                "trigger_id": "扣分点-RISK-1",
+                "risk": "响应不完整",
+                "trigger_parameter": "missing_clause_count",
+                "threshold": 1,
+                "unit": "项",
+                "checker": "项目总工",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "扣分点-RISK-2",
+                "risk": "逾期响应",
+                "trigger_parameter": "response_deadline_hours",
+                "threshold": 4,
+                "unit": "h",
+                "checker": "项目总工",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "4.0",
+                "page_hint": 9,
+                "paragraph_hint": 3,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-AA54F87C75",
+                "clause_path": "GB 50300-2013/第1条/S4.0/P3",
+                "source_excerpt": "第1条 第一步（定义）：执行扣分点响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：",
+                "anchor_hash": "018500a37f43b214"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "扣分点",
+            "domain": "management",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "high"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "bridge",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "high"
+              },
+              {
+                "with_domain": "tunnel",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "high"
+              },
+              {
+                "with_domain": "railway",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "high"
+              },
+              {
+                "with_domain": "hydraulic",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "earthwork",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "digital",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.2,
+              "risk": 0.4,
+              "resource_density": 0.1,
+              "cost": 0.1,
+              "carbon": 0.05,
+              "night_restriction": 0.15
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -4775,7 +5807,35 @@
                 "policy_code": "MEP-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "质量",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                },
+                "BJ": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -5077,9 +6137,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:24",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -5171,14 +6231,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "a9de96221e34c68887328f3746dc42c5b023c402",
+          "incremental_fingerprint": "1cad5667bf7d517bfc53186f2d36ba6b1ebff072",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "a9de96221e34c68887328f3746dc42c5b023c402",
+            "fingerprint": "1cad5667bf7d517bfc53186f2d36ba6b1ebff072",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -5236,6 +6296,163 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "mep",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "deviation_limit_mm",
+                "default_value": 3,
+                "unit": "mm",
+                "checker": "质量员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "defect_trigger_percent",
+                "default_value": 2,
+                "unit": "%",
+                "checker": "质量员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recheck_frequency_per_shift",
+                "default_value": 2,
+                "unit": "次/班",
+                "checker": "质量员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "mep",
+            "dimension": "质量",
+            "unit_output_per_day": 260.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.8,
+            "material_loss_rate_percent": 1.8,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "质量",
+            "items": [
+              {
+                "trigger_id": "质量-RISK-1",
+                "risk": "质量偏差",
+                "trigger_parameter": "deviation_limit_mm",
+                "threshold": 3,
+                "unit": "mm",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "质量-RISK-2",
+                "risk": "抽检不达标",
+                "trigger_parameter": "acceptance_pass_rate_percent",
+                "threshold": 95,
+                "unit": "%",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB/T 50326-2017",
+                "section_hint": "5.0",
+                "page_hint": 60,
+                "paragraph_hint": 28,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-C761E819AE",
+                "clause_path": "GB/T 50326-2017/第1条/S5.0/P28",
+                "source_excerpt": "第1条 第一步（定义）：执行清单-工序-资源映射补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分",
+                "anchor_hash": "13f6af70b64ebc80"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "mep",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.1,
+              "carbon": 0.05,
+              "night_restriction": 0.05
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -5772,7 +6989,35 @@
                 "policy_code": "MANAGEMENT-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "进度",
+              "active_values": {
+                "min_process_interval_days": 1,
+                "milestone_delay_alarm_days": 2,
+                "deviation_response_hours": 4
+              },
+              "national_values": {
+                "min_process_interval_days": 1,
+                "milestone_delay_alarm_days": 2,
+                "deviation_response_hours": 4
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "min_process_interval_days": 1,
+                  "milestone_delay_alarm_days": 1,
+                  "deviation_response_hours": 3
+                },
+                "BJ": {
+                  "min_process_interval_days": 1,
+                  "milestone_delay_alarm_days": 1,
+                  "deviation_response_hours": 3
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -6160,14 +7405,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "a592427445d115687221cc75c94cf20ab2c8580b",
+          "incremental_fingerprint": "c21ea2c6a51c723320a44d32f8c9d912dc06a78b",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "a592427445d115687221cc75c94cf20ab2c8580b",
+            "fingerprint": "c21ea2c6a51c723320a44d32f8c9d912dc06a78b",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -6195,6 +7440,240 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "进度",
+            "domain": "management",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "planned_duration_days",
+                "default_value": 30,
+                "unit": "天",
+                "checker": "施工员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "milestone_delay_alarm_days",
+                "default_value": 2,
+                "unit": "天",
+                "checker": "施工员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recovery_window_hours",
+                "default_value": 24,
+                "unit": "h",
+                "checker": "施工员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "management",
+            "dimension": "进度",
+            "unit_output_per_day": 198.0,
+            "crew_size_baseline": 13,
+            "equipment_utilization": 0.87,
+            "material_loss_rate_percent": 1.0,
+            "peak_resource_estimate": {
+              "workers": 15,
+              "machines": 3
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "进度",
+            "items": [
+              {
+                "trigger_id": "进度-RISK-1",
+                "risk": "关键节点延误",
+                "trigger_parameter": "milestone_delay_alarm_days",
+                "threshold": 2,
+                "unit": "天",
+                "checker": "施工员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "进度-RISK-2",
+                "risk": "工序衔接中断",
+                "trigger_parameter": "min_process_interval_days",
+                "threshold": 2,
+                "unit": "天",
+                "checker": "施工员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB/T 50326-2017",
+                "section_hint": "12.0",
+                "page_hint": 140,
+                "paragraph_hint": 40,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-AB0CA529A1",
+                "clause_path": "GB/T 50326-2017/第1条/S12.0/P40",
+                "source_excerpt": "第1条 第一步（定义）：执行进度动态计算节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质",
+                "anchor_hash": "a78f1dcffaa03d5b"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "进度",
+            "domain": "management",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "bridge",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "tunnel",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "railway",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "hydraulic",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "earthwork",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "digital",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.45,
+              "risk": 0.25,
+              "resource_density": 0.15,
+              "cost": 0.08,
+              "carbon": 0.03,
+              "night_restriction": 0.04
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -6698,7 +8177,27 @@
                 "policy_code": "MANAGEMENT-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "重难点",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {},
+                "BJ": {}
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -7012,14 +8511,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "5dc234706915c685a32f615305daf946ac1bee6b",
+          "incremental_fingerprint": "5d577480d0414a07d1491b446f4c8e34bf507d27",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "5dc234706915c685a32f615305daf946ac1bee6b",
+            "fingerprint": "5d577480d0414a07d1491b446f4c8e34bf507d27",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -7047,6 +8546,240 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "重难点",
+            "domain": "management",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "critical_interface_count",
+                "default_value": 8,
+                "unit": "处",
+                "checker": "技术负责人"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "risk_trigger_percent",
+                "default_value": 5,
+                "unit": "%",
+                "checker": "技术负责人"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "expert_team_size",
+                "default_value": 9,
+                "unit": "人",
+                "checker": "技术负责人"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "management",
+            "dimension": "重难点",
+            "unit_output_per_day": 158.4,
+            "crew_size_baseline": 12,
+            "equipment_utilization": 0.87,
+            "material_loss_rate_percent": 1.0,
+            "peak_resource_estimate": {
+              "workers": 14,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "重难点",
+            "items": [
+              {
+                "trigger_id": "重难点-RISK-1",
+                "risk": "接口冲突",
+                "trigger_parameter": "critical_interface_count",
+                "threshold": 8,
+                "unit": "处",
+                "checker": "技术负责人",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              },
+              {
+                "trigger_id": "重难点-RISK-2",
+                "risk": "专项工序失控",
+                "trigger_parameter": "risk_trigger_percent",
+                "threshold": 5,
+                "unit": "%",
+                "checker": "技术负责人",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB/T 50326-2017",
+                "section_hint": "18.0",
+                "page_hint": 111,
+                "paragraph_hint": 40,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-B3D4345B9C",
+                "clause_path": "GB/T 50326-2017/第1条/S18.0/P40",
+                "source_excerpt": "第1条 第一步（定义）：执行重难点动态计算节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕",
+                "anchor_hash": "31535c93c34b8de4"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "重难点",
+            "domain": "management",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "high"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "bridge",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "high"
+              },
+              {
+                "with_domain": "tunnel",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "high"
+              },
+              {
+                "with_domain": "railway",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "high"
+              },
+              {
+                "with_domain": "hydraulic",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "earthwork",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "digital",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.08,
+              "carbon": 0.04,
+              "night_restriction": 0.08
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         }
       ]
@@ -7590,7 +9323,35 @@
                 "policy_code": "MANAGEMENT-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "质量",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                },
+                "BJ": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -7854,9 +9615,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:24",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -7942,14 +9703,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "446bf242fc78bc1446e900892054d9ea86eab420",
+          "incremental_fingerprint": "f4dd73cd765cdc9be1d7ec955519036bf4a909cd",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "446bf242fc78bc1446e900892054d9ea86eab420",
+            "fingerprint": "f4dd73cd765cdc9be1d7ec955519036bf4a909cd",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -8007,6 +9768,240 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "management",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "deviation_limit_mm",
+                "default_value": 3,
+                "unit": "mm",
+                "checker": "质量员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "defect_trigger_percent",
+                "default_value": 2,
+                "unit": "%",
+                "checker": "质量员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recheck_frequency_per_shift",
+                "default_value": 2,
+                "unit": "次/班",
+                "checker": "质量员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "management",
+            "dimension": "质量",
+            "unit_output_per_day": 180.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.87,
+            "material_loss_rate_percent": 1.0,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "质量",
+            "items": [
+              {
+                "trigger_id": "质量-RISK-1",
+                "risk": "质量偏差",
+                "trigger_parameter": "deviation_limit_mm",
+                "threshold": 3,
+                "unit": "mm",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "质量-RISK-2",
+                "risk": "抽检不达标",
+                "trigger_parameter": "acceptance_pass_rate_percent",
+                "threshold": 95,
+                "unit": "%",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "19.0",
+                "page_hint": 86,
+                "paragraph_hint": 25,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-23235EC7CC",
+                "clause_path": "GB 50300-2013/第1条/S19.0/P25",
+                "source_excerpt": "第1条 第一步（定义）：执行碳资产开发与绿证交易服务安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）",
+                "anchor_hash": "effb56c74e58c987"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "management",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "mep",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "bridge",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "tunnel",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "railway",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "high"
+              },
+              {
+                "with_domain": "hydraulic",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "earthwork",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "digital",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.1,
+              "carbon": 0.05,
+              "night_restriction": 0.05
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         }
       ]

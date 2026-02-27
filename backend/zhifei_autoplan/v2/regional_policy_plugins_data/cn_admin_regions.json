@@ -1,0 +1,274 @@
+[
+  {
+    "plugin_name": "BeijingPolicyPlugin",
+    "region_code": "BJ",
+    "aliases": ["北京", "北京市", "11"],
+    "region_bonus": 1.2,
+    "prefer_policy_codes": ["DB11", "DB11/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "TianjinPolicyPlugin",
+    "region_code": "TJ",
+    "aliases": ["天津", "天津市", "12"],
+    "region_bonus": 1.2,
+    "prefer_policy_codes": ["DB12", "DB12/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "HebeiPolicyPlugin",
+    "region_code": "HE",
+    "aliases": ["河北", "河北省", "13"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB13", "DB13/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "ShanxiPolicyPlugin",
+    "region_code": "SX",
+    "aliases": ["山西", "山西省", "14"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB14", "DB14/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "InnerMongoliaPolicyPlugin",
+    "region_code": "NM",
+    "aliases": ["内蒙古", "内蒙古自治区", "15"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB15", "DB15/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "LiaoningPolicyPlugin",
+    "region_code": "LN",
+    "aliases": ["辽宁", "辽宁省", "21"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB21", "DB21/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "JilinPolicyPlugin",
+    "region_code": "JL",
+    "aliases": ["吉林", "吉林省", "22"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB22", "DB22/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "HeilongjiangPolicyPlugin",
+    "region_code": "HL",
+    "aliases": ["黑龙江", "黑龙江省", "23"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB23", "DB23/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "ShanghaiPolicyPlugin",
+    "region_code": "SH",
+    "aliases": ["上海", "上海市", "31"],
+    "region_bonus": 1.2,
+    "prefer_policy_codes": ["DB31", "DB31/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "JiangsuPolicyPlugin",
+    "region_code": "JS",
+    "aliases": ["江苏", "江苏省", "32"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB32", "DB32/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "ZhejiangPolicyPlugin",
+    "region_code": "ZJ",
+    "aliases": ["浙江", "浙江省", "33"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB33", "DB33/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "AnhuiPolicyPlugin",
+    "region_code": "AH",
+    "aliases": ["安徽", "安徽省", "34"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB34", "DB34/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "FujianPolicyPlugin",
+    "region_code": "FJ",
+    "aliases": ["福建", "福建省", "35"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB35", "DB35/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "JiangxiPolicyPlugin",
+    "region_code": "JX",
+    "aliases": ["江西", "江西省", "36"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB36", "DB36/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "ShandongPolicyPlugin",
+    "region_code": "SD",
+    "aliases": ["山东", "山东省", "37"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB37", "DB37/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "HenanPolicyPlugin",
+    "region_code": "HA",
+    "aliases": ["河南", "河南省", "41"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB41", "DB41/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "HubeiPolicyPlugin",
+    "region_code": "HB",
+    "aliases": ["湖北", "湖北省", "42"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB42", "DB42/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "HunanPolicyPlugin",
+    "region_code": "HN",
+    "aliases": ["湖南", "湖南省", "43"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB43", "DB43/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "GuangdongPolicyPlugin",
+    "region_code": "GD",
+    "aliases": ["广东", "广东省", "44"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB44", "DB44/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "GuangxiPolicyPlugin",
+    "region_code": "GX",
+    "aliases": ["广西", "广西壮族自治区", "45"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB45", "DB45/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "HainanPolicyPlugin",
+    "region_code": "HI",
+    "aliases": ["海南", "海南省", "46"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB46", "DB46/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "ChongqingPolicyPlugin",
+    "region_code": "CQ",
+    "aliases": ["重庆", "重庆市", "50"],
+    "region_bonus": 1.2,
+    "prefer_policy_codes": ["DB50", "DB50/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "SichuanPolicyPlugin",
+    "region_code": "SC",
+    "aliases": ["四川", "四川省", "51"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB51", "DB51/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "GuizhouPolicyPlugin",
+    "region_code": "GZ",
+    "aliases": ["贵州", "贵州省", "52"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB52", "DB52/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "YunnanPolicyPlugin",
+    "region_code": "YN",
+    "aliases": ["云南", "云南省", "53"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB53", "DB53/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "XizangPolicyPlugin",
+    "region_code": "XZ",
+    "aliases": ["西藏", "西藏自治区", "54"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB54", "DB54/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "ShaanxiPolicyPlugin",
+    "region_code": "SN",
+    "aliases": ["陕西", "陕西省", "61"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB61", "DB61/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "GansuPolicyPlugin",
+    "region_code": "GS",
+    "aliases": ["甘肃", "甘肃省", "62"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB62", "DB62/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "QinghaiPolicyPlugin",
+    "region_code": "QH",
+    "aliases": ["青海", "青海省", "63"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB63", "DB63/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "NingxiaPolicyPlugin",
+    "region_code": "NX",
+    "aliases": ["宁夏", "宁夏回族自治区", "64"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB64", "DB64/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "XinjiangPolicyPlugin",
+    "region_code": "XJ",
+    "aliases": ["新疆", "新疆维吾尔自治区", "65"],
+    "region_bonus": 1.1,
+    "prefer_policy_codes": ["DB65", "DB65/T"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "HongKongPolicyPlugin",
+    "region_code": "HK",
+    "aliases": ["香港", "香港特别行政区", "81"],
+    "region_bonus": 1.05,
+    "prefer_policy_codes": ["HK", "HKSAR"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "MacaoPolicyPlugin",
+    "region_code": "MO",
+    "aliases": ["澳门", "澳门特别行政区", "82"],
+    "region_bonus": 1.05,
+    "prefer_policy_codes": ["MO", "MSAR"],
+    "source_hierarchy_min": "行标"
+  },
+  {
+    "plugin_name": "TaiwanPolicyPlugin",
+    "region_code": "TW",
+    "aliases": ["台湾", "台湾省", "71"],
+    "region_bonus": 1.05,
+    "prefer_policy_codes": ["CNS", "TW"],
+    "source_hierarchy_min": "行标"
+  }
+]

@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .kg_online_learning_writeback import writeback_online_learning_profile
+
 DEFAULT_FEEDBACK_PATH = Path("build/kg_project_feedback_memory.json")
 
 
@@ -32,10 +34,21 @@ def _load_feedback(path: Path) -> Dict[str, Any]:
 
 def _node_id_from_section(section: Dict[str, Any]) -> str:
     trace = section.get("source_trace") if isinstance(section.get("source_trace"), dict) else {}
+    kg_node_ref = str(trace.get("kg_node_ref") or "").strip()
+    if kg_node_ref:
+        return kg_node_ref
+    payload = trace.get("payload") if isinstance(trace.get("payload"), dict) else {}
+    payload_node_id = str(payload.get("node_id") or "").strip()
+    if payload_node_id:
+        return payload_node_id
+    hit = section.get("graph_hit") if isinstance(section.get("graph_hit"), dict) else {}
+    hit_payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
+    hit_payload_node_id = str(hit_payload.get("node_id") or "").strip()
+    if hit_payload_node_id:
+        return hit_payload_node_id
     node_id = str(trace.get("node_id") or "").strip()
     if node_id:
         return node_id
-    hit = section.get("graph_hit") if isinstance(section.get("graph_hit"), dict) else {}
     return str(hit.get("node_id") or "").strip()
 
 
@@ -43,6 +56,8 @@ def update_feedback_memory(
     *,
     result_payload: Dict[str, Any],
     output_path: Path | str = DEFAULT_FEEDBACK_PATH,
+    writeback_graph: bool = False,
+    graph_root: Path | str | None = None,
 ) -> Dict[str, Any]:
     out = Path(output_path).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -59,6 +74,7 @@ def update_feedback_memory(
     project_ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
     node_updates = 0
+    touched_node_ids = set()
     for section in sections:
         if not isinstance(section, dict):
             continue
@@ -107,10 +123,30 @@ def update_feedback_memory(
 
         nodes[node_id] = rec
         node_updates += 1
+        touched_node_ids.add(node_id)
 
     memory["projects_total"] = int(memory.get("projects_total") or 0) + 1
     memory["updated_at"] = project_ts
     out.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    writeback_report: Dict[str, Any] = {"triggered": False}
+    if writeback_graph:
+        node_feedback: Dict[str, Any] = {}
+        for node_id in sorted(touched_node_ids):
+            row = nodes.get(node_id)
+            if isinstance(row, dict):
+                node_feedback[node_id] = row
+        if graph_root in (None, ""):
+            writeback_report = {"triggered": True, "ok": False, "error": "graph_root_missing"}
+        else:
+            writeback_report = {
+                "triggered": True,
+                **writeback_online_learning_profile(
+                    graph_root=graph_root,
+                    node_feedback=node_feedback,
+                    timestamp=project_ts,
+                ),
+            }
 
     return {
         "ok": True,
@@ -118,5 +154,5 @@ def update_feedback_memory(
         "projects_total": int(memory.get("projects_total") or 0),
         "nodes_total": len(nodes),
         "node_updates": node_updates,
+        "writeback": writeback_report,
     }
-

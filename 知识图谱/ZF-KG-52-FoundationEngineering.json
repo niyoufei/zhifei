@@ -3,7 +3,7 @@
   "meta": {
     "version": "V20.1 DNA-Lock",
     "activation_key": "智飞工程",
-    "updated_at": "2026-02-26T16:00:45",
+    "updated_at": "2026-02-27T12:46:20",
     "authority_chain": [
       "答疑文件",
       "设计图纸",
@@ -14,7 +14,7 @@
     "incremental_update": {
       "strategy": "fingerprint_diff",
       "node_fingerprint_count": 9,
-      "file_fingerprint": "c25260d6b19b29382911f4d87fdb0ba4f527a77c"
+      "file_fingerprint": "28782587d632fe378bc52b6b1d31d1c9c36202b5"
     }
   },
   "knowledge_database": {
@@ -532,7 +532,35 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "质量",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                },
+                "BJ": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -720,9 +748,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:23",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -807,14 +835,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "4e9535b4e269c6439c9d7cd8f708e82877f359c5",
+          "incremental_fingerprint": "c2aef3b1a032ef8b7c586bdc58620441d01a1ac0",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "4e9535b4e269c6439c9d7cd8f708e82877f359c5",
+            "fingerprint": "c2aef3b1a032ef8b7c586bdc58620441d01a1ac0",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -862,6 +890,174 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "deviation_limit_mm",
+                "default_value": 3,
+                "unit": "mm",
+                "checker": "质量员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "defect_trigger_percent",
+                "default_value": 2,
+                "unit": "%",
+                "checker": "质量员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recheck_frequency_per_shift",
+                "default_value": 2,
+                "unit": "次/班",
+                "checker": "质量员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "质量",
+            "unit_output_per_day": 500.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "质量",
+            "items": [
+              {
+                "trigger_id": "质量-RISK-1",
+                "risk": "质量偏差",
+                "trigger_parameter": "deviation_limit_mm",
+                "threshold": 3,
+                "unit": "mm",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "质量-RISK-2",
+                "risk": "抽检不达标",
+                "trigger_parameter": "acceptance_pass_rate_percent",
+                "threshold": 95,
+                "unit": "%",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "11.0",
+                "page_hint": 150,
+                "paragraph_hint": 12,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-EBE442236B",
+                "clause_path": "GB 50300-2013/第1条/S11.0/P12",
+                "source_excerpt": "第1条 第一步（定义）：执行桩端后注浆智能控制系统安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：",
+                "anchor_hash": "7c11b763c48e5252"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.1,
+              "carbon": 0.05,
+              "night_restriction": 0.05
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -1412,7 +1608,35 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "进度",
+              "active_values": {
+                "min_process_interval_days": 1,
+                "milestone_delay_alarm_days": 2,
+                "deviation_response_hours": 4
+              },
+              "national_values": {
+                "min_process_interval_days": 1,
+                "milestone_delay_alarm_days": 2,
+                "deviation_response_hours": 4
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "min_process_interval_days": 1,
+                  "milestone_delay_alarm_days": 1,
+                  "deviation_response_hours": 3
+                },
+                "BJ": {
+                  "min_process_interval_days": 1,
+                  "milestone_delay_alarm_days": 1,
+                  "deviation_response_hours": 3
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -1660,9 +1884,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:23",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -1747,14 +1971,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "b851d9259c4dfe9b5007b754487b6b8280b6163f",
+          "incremental_fingerprint": "ba5aef05ed8a9fbceecdf367381bf516d21a26e5",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "b851d9259c4dfe9b5007b754487b6b8280b6163f",
+            "fingerprint": "ba5aef05ed8a9fbceecdf367381bf516d21a26e5",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -1802,6 +2026,174 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "进度",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "planned_duration_days",
+                "default_value": 30,
+                "unit": "天",
+                "checker": "施工员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "milestone_delay_alarm_days",
+                "default_value": 2,
+                "unit": "天",
+                "checker": "施工员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recovery_window_hours",
+                "default_value": 24,
+                "unit": "h",
+                "checker": "施工员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "进度",
+            "unit_output_per_day": 550.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 12,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "进度",
+            "items": [
+              {
+                "trigger_id": "进度-RISK-1",
+                "risk": "关键节点延误",
+                "trigger_parameter": "milestone_delay_alarm_days",
+                "threshold": 2,
+                "unit": "天",
+                "checker": "施工员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "进度-RISK-2",
+                "risk": "工序衔接中断",
+                "trigger_parameter": "min_process_interval_days",
+                "threshold": 2,
+                "unit": "天",
+                "checker": "施工员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "11.0",
+                "page_hint": 44,
+                "paragraph_hint": 5,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-375984BEA1",
+                "clause_path": "GB 50300-2013/第1条/S11.0/P5",
+                "source_excerpt": "第1条 第一步（定义）：执行进度响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围",
+                "anchor_hash": "4c56700193b64131"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "进度",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.45,
+              "risk": 0.25,
+              "resource_density": 0.15,
+              "cost": 0.08,
+              "carbon": 0.03,
+              "night_restriction": 0.04
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -2368,7 +2760,35 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "环保",
+              "active_values": {
+                "pm10_limit_ug_m3": 150,
+                "noise_day_db": 70,
+                "noise_night_db": 55
+              },
+              "national_values": {
+                "pm10_limit_ug_m3": 150,
+                "noise_day_db": 70,
+                "noise_night_db": 55
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "pm10_limit_ug_m3": 120,
+                  "noise_day_db": 70,
+                  "noise_night_db": 55
+                },
+                "BJ": {
+                  "pm10_limit_ug_m3": 120,
+                  "noise_day_db": 70,
+                  "noise_night_db": 55
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -2616,9 +3036,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:23",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -2703,14 +3123,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "38446def5cd801eee11a67e2580a332c4b098d24",
+          "incremental_fingerprint": "086014eeae7d839e2e62a1f277b8acd7bc996f0f",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "38446def5cd801eee11a67e2580a332c4b098d24",
+            "fingerprint": "086014eeae7d839e2e62a1f277b8acd7bc996f0f",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -2768,6 +3188,174 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "环保",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "pm10_limit_ug_m3",
+                "default_value": 150,
+                "unit": "ug/m3",
+                "checker": "环保员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "noise_day_db",
+                "default_value": 70,
+                "unit": "dB",
+                "checker": "环保员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "spray_frequency_per_day",
+                "default_value": 6,
+                "unit": "次/日",
+                "checker": "环保员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "环保",
+            "unit_output_per_day": 460.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "环保",
+            "items": [
+              {
+                "trigger_id": "环保-RISK-1",
+                "risk": "扬尘超标",
+                "trigger_parameter": "pm10_limit_ug_m3",
+                "threshold": 150,
+                "unit": "ug/m3",
+                "checker": "环保员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              },
+              {
+                "trigger_id": "环保-RISK-2",
+                "risk": "夜间噪声超标",
+                "trigger_parameter": "noise_night_db",
+                "threshold": 55,
+                "unit": "dB",
+                "checker": "环保员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "4.0",
+                "page_hint": 101,
+                "paragraph_hint": 15,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-15A8A7D6C3",
+                "clause_path": "GB 50300-2013/第1条/S4.0/P15",
+                "source_excerpt": "第1条 第一步（定义）：执行环保响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围",
+                "anchor_hash": "74392e619fa9193b"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "环保",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "环保员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "环保员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "环保员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.2,
+              "risk": 0.2,
+              "resource_density": 0.1,
+              "cost": 0.1,
+              "carbon": 0.3,
+              "night_restriction": 0.1
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -3335,7 +3923,27 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "重难点",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {},
+                "BJ": {}
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -3583,9 +4191,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:23",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -3676,14 +4284,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "887e31f87bb02c59af5abfb01e73cfedb1c044ad",
+          "incremental_fingerprint": "e19d6769b0f1fe9490fd13edb3acab2f75ba62a3",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "887e31f87bb02c59af5abfb01e73cfedb1c044ad",
+            "fingerprint": "e19d6769b0f1fe9490fd13edb3acab2f75ba62a3",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -3741,6 +4349,174 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "重难点",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "critical_interface_count",
+                "default_value": 8,
+                "unit": "处",
+                "checker": "技术负责人"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "risk_trigger_percent",
+                "default_value": 5,
+                "unit": "%",
+                "checker": "技术负责人"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "expert_team_size",
+                "default_value": 9,
+                "unit": "人",
+                "checker": "技术负责人"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "重难点",
+            "unit_output_per_day": 440.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 12,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "重难点",
+            "items": [
+              {
+                "trigger_id": "重难点-RISK-1",
+                "risk": "接口冲突",
+                "trigger_parameter": "critical_interface_count",
+                "threshold": 8,
+                "unit": "处",
+                "checker": "技术负责人",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              },
+              {
+                "trigger_id": "重难点-RISK-2",
+                "risk": "专项工序失控",
+                "trigger_parameter": "risk_trigger_percent",
+                "threshold": 5,
+                "unit": "%",
+                "checker": "技术负责人",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "14.0",
+                "page_hint": 11,
+                "paragraph_hint": 29,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-D59884114A",
+                "clause_path": "GB 50300-2013/第1条/S14.0/P29",
+                "source_excerpt": "第1条 第一步（定义）：执行重难点响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：",
+                "anchor_hash": "39293b334ac5c97f"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "重难点",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.08,
+              "carbon": 0.04,
+              "night_restriction": 0.08
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -4285,7 +5061,27 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "扣分点",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {},
+                "BJ": {}
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -4493,9 +5289,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:23",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -4580,14 +5376,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "c22a595c8ef3d90ad3be649b1ed573cd755dece6",
+          "incremental_fingerprint": "47a43b30d90a24d206aa36bf03f97930b813eb04",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "c22a595c8ef3d90ad3be649b1ed573cd755dece6",
+            "fingerprint": "47a43b30d90a24d206aa36bf03f97930b813eb04",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -4635,6 +5431,174 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "扣分点",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "required_response_items",
+                "default_value": 30,
+                "unit": "项",
+                "checker": "项目总工"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "missing_clause_count",
+                "default_value": 1,
+                "unit": "项",
+                "checker": "项目总工"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "response_deadline_hours",
+                "default_value": 4,
+                "unit": "h",
+                "checker": "项目总工"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "扣分点",
+            "unit_output_per_day": 480.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "扣分点",
+            "items": [
+              {
+                "trigger_id": "扣分点-RISK-1",
+                "risk": "响应不完整",
+                "trigger_parameter": "missing_clause_count",
+                "threshold": 1,
+                "unit": "项",
+                "checker": "项目总工",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "扣分点-RISK-2",
+                "risk": "逾期响应",
+                "trigger_parameter": "response_deadline_hours",
+                "threshold": 4,
+                "unit": "h",
+                "checker": "项目总工",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "15.0",
+                "page_hint": 70,
+                "paragraph_hint": 66,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-5C5B866AFE",
+                "clause_path": "GB 50300-2013/第1条/S15.0/P66",
+                "source_excerpt": "第1条 第一步（定义）：执行扣分点响应控制补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：",
+                "anchor_hash": "a94d0beffe19ed8e"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "扣分点",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "项目总工",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.2,
+              "risk": 0.4,
+              "resource_density": 0.1,
+              "cost": 0.1,
+              "carbon": 0.05,
+              "night_restriction": 0.15
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -5319,7 +6283,35 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "质量",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                },
+                "BJ": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -5587,9 +6579,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:23",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -5680,14 +6672,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "65eafbf85c9819f3e09362ee5a7273ed162798b4",
+          "incremental_fingerprint": "73ae7a1ef4748a30167ed05b3af01b016199cb7d",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "65eafbf85c9819f3e09362ee5a7273ed162798b4",
+            "fingerprint": "73ae7a1ef4748a30167ed05b3af01b016199cb7d",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -5735,6 +6727,174 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "deviation_limit_mm",
+                "default_value": 3,
+                "unit": "mm",
+                "checker": "质量员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "defect_trigger_percent",
+                "default_value": 2,
+                "unit": "%",
+                "checker": "质量员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recheck_frequency_per_shift",
+                "default_value": 2,
+                "unit": "次/班",
+                "checker": "质量员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "质量",
+            "unit_output_per_day": 500.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "质量",
+            "items": [
+              {
+                "trigger_id": "质量-RISK-1",
+                "risk": "质量偏差",
+                "trigger_parameter": "deviation_limit_mm",
+                "threshold": 3,
+                "unit": "mm",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "质量-RISK-2",
+                "risk": "抽检不达标",
+                "trigger_parameter": "acceptance_pass_rate_percent",
+                "threshold": 95,
+                "unit": "%",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB/T 50326-2017",
+                "section_hint": "16.0",
+                "page_hint": 26,
+                "paragraph_hint": 15,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-F6D3EBE0C8",
+                "clause_path": "GB/T 50326-2017/第1条/S16.0/P15",
+                "source_excerpt": "第1条 第一步（定义）：执行清单-工序-资源映射补强节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分",
+                "anchor_hash": "2af402783733961f"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.1,
+              "carbon": 0.05,
+              "night_restriction": 0.05
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -6247,7 +7407,35 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "进度",
+              "active_values": {
+                "min_process_interval_days": 1,
+                "milestone_delay_alarm_days": 2,
+                "deviation_response_hours": 4
+              },
+              "national_values": {
+                "min_process_interval_days": 1,
+                "milestone_delay_alarm_days": 2,
+                "deviation_response_hours": 4
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "min_process_interval_days": 1,
+                  "milestone_delay_alarm_days": 1,
+                  "deviation_response_hours": 3
+                },
+                "BJ": {
+                  "min_process_interval_days": 1,
+                  "milestone_delay_alarm_days": 1,
+                  "deviation_response_hours": 3
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -6524,14 +7712,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "69a8befa5091be499bd7c8a749b3b652751b2fae",
+          "incremental_fingerprint": "d8a7ab1ccfde29c5cae10491fdfdb842add97786",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "69a8befa5091be499bd7c8a749b3b652751b2fae",
+            "fingerprint": "d8a7ab1ccfde29c5cae10491fdfdb842add97786",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -6559,6 +7747,174 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "进度",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "planned_duration_days",
+                "default_value": 30,
+                "unit": "天",
+                "checker": "施工员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "milestone_delay_alarm_days",
+                "default_value": 2,
+                "unit": "天",
+                "checker": "施工员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recovery_window_hours",
+                "default_value": 24,
+                "unit": "h",
+                "checker": "施工员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "进度",
+            "unit_output_per_day": 550.0,
+            "crew_size_baseline": 13,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 15,
+              "machines": 3
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "进度",
+            "items": [
+              {
+                "trigger_id": "进度-RISK-1",
+                "risk": "关键节点延误",
+                "trigger_parameter": "milestone_delay_alarm_days",
+                "threshold": 2,
+                "unit": "天",
+                "checker": "施工员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "进度-RISK-2",
+                "risk": "工序衔接中断",
+                "trigger_parameter": "min_process_interval_days",
+                "threshold": 2,
+                "unit": "天",
+                "checker": "施工员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB/T 50326-2017",
+                "section_hint": "4.0",
+                "page_hint": 115,
+                "paragraph_hint": 74,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-13BB64E7E5",
+                "clause_path": "GB/T 50326-2017/第1条/S4.0/P74",
+                "source_excerpt": "第1条 第一步（定义）：执行进度动态计算节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕质",
+                "anchor_hash": "8e997430874cd110"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "进度",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "施工员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.45,
+              "risk": 0.25,
+              "resource_density": 0.15,
+              "cost": 0.08,
+              "carbon": 0.03,
+              "night_restriction": 0.04
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         },
         {
@@ -7049,7 +8405,27 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "重难点",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {},
+                "BJ": {}
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -7276,14 +8652,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "b7811a658c021ef2456630dc527a3167e7d44cc9",
+          "incremental_fingerprint": "48629a9f410d8be079754cb51189cf640970e957",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "b7811a658c021ef2456630dc527a3167e7d44cc9",
+            "fingerprint": "48629a9f410d8be079754cb51189cf640970e957",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -7311,6 +8687,181 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "重难点",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "critical_interface_count",
+                "default_value": 8,
+                "unit": "处",
+                "checker": "技术负责人"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "risk_trigger_percent",
+                "default_value": 5,
+                "unit": "%",
+                "checker": "技术负责人"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "expert_team_size",
+                "default_value": 9,
+                "unit": "人",
+                "checker": "技术负责人"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "重难点",
+            "unit_output_per_day": 440.0,
+            "crew_size_baseline": 12,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 14,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "重难点",
+            "items": [
+              {
+                "trigger_id": "重难点-RISK-1",
+                "risk": "接口冲突",
+                "trigger_parameter": "critical_interface_count",
+                "threshold": 8,
+                "unit": "处",
+                "checker": "技术负责人",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              },
+              {
+                "trigger_id": "重难点-RISK-2",
+                "risk": "专项工序失控",
+                "trigger_parameter": "risk_trigger_percent",
+                "threshold": 5,
+                "unit": "%",
+                "checker": "技术负责人",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 2
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB/T 50326-2017",
+                "section_hint": "4.0",
+                "page_hint": 60,
+                "paragraph_hint": 55,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-834EF768B2",
+                "clause_path": "GB/T 50326-2017/第1条/S4.0/P55",
+                "source_excerpt": "第1条 第一步（定义）：执行重难点动态计算节点安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析）：围绕",
+                "anchor_hash": "18de7746944f461d"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "重难点",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "技术负责人",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.08,
+              "carbon": 0.04,
+              "night_restriction": 0.08
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 1,
+            "pass_count": 1,
+            "trace_coverage_avg": 1.0,
+            "last_feedback_at": "2026-02-27T12:50:44",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            },
+            "pass_rate": 1.0,
+            "domains": {
+              "earthwork": 1
+            },
+            "recommended_defaults": {
+              "inspection_frequency_per_shift": 2
+            }
           }
         }
       ]
@@ -7841,7 +9392,35 @@
                 "policy_code": "EARTHWORK-PROJECT-OVERRIDE",
                 "status": "ready_override"
               }
-            ]
+            ],
+            "numeric_redlines": {
+              "enabled": true,
+              "active_region": "CN",
+              "dimension": "质量",
+              "active_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "national_values": {
+                "acceptance_pass_rate_percent": 95,
+                "sampling_frequency_per_shift": 2,
+                "deviation_limit_mm": 3
+              },
+              "region_override_candidates": {
+                "SH": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                },
+                "BJ": {
+                  "acceptance_pass_rate_percent": 96,
+                  "sampling_frequency_per_shift": 2,
+                  "deviation_limit_mm": 2
+                }
+              },
+              "source": "kg_strengthen_v3"
+            }
           },
           "unit_dimension_model": {
             "enabled": true,
@@ -8029,9 +9608,9 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-26T17:09:16",
-            "approved_by": "codex-auto",
-            "signature": "codex-auto-auto-sign",
+            "approved_at": "2026-02-27T12:50:23",
+            "approved_by": "system",
+            "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
           },
           "formula_sensitivity": {
@@ -8116,14 +9695,14 @@
               "assertion_triplet_ready": true
             }
           },
-          "incremental_fingerprint": "1eebf47965b25088677d4bd760fd970671178059",
+          "incremental_fingerprint": "7fbcd2adbf9feadd08ac8fb7cee7635a15dac09d",
           "incremental_update": {
             "strategy": "fingerprint_diff",
-            "fingerprint": "1eebf47965b25088677d4bd760fd970671178059",
+            "fingerprint": "7fbcd2adbf9feadd08ac8fb7cee7635a15dac09d",
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-26T17:09:16",
+            "checked_at": "2026-02-27T12:50:23",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -8181,6 +9760,174 @@
                 "replacement": ""
               }
             ]
+          },
+          "process_parameter_pack": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "earthwork",
+            "flow_chain": "工序名称->参数->风险->控制->验证",
+            "steps": [
+              {
+                "seq": 1,
+                "step": "定义",
+                "parameter": "deviation_limit_mm",
+                "default_value": 3,
+                "unit": "mm",
+                "checker": "质量员"
+              },
+              {
+                "seq": 2,
+                "step": "分析",
+                "parameter": "defect_trigger_percent",
+                "default_value": 2,
+                "unit": "%",
+                "checker": "质量员"
+              },
+              {
+                "seq": 3,
+                "step": "解决",
+                "parameter": "recheck_frequency_per_shift",
+                "default_value": 2,
+                "unit": "次/班",
+                "checker": "质量员"
+              }
+            ]
+          },
+          "resource_productivity_model": {
+            "enabled": true,
+            "model_version": "v1",
+            "domain": "earthwork",
+            "dimension": "质量",
+            "unit_output_per_day": 500.0,
+            "crew_size_baseline": 10,
+            "equipment_utilization": 0.85,
+            "material_loss_rate_percent": 1.9,
+            "peak_resource_estimate": {
+              "workers": 10,
+              "machines": 2
+            },
+            "formula_hint": "duration_days = quantity / max(unit_output_per_day * crew_efficiency, 1)"
+          },
+          "risk_trigger_matrix": {
+            "enabled": true,
+            "dimension": "质量",
+            "items": [
+              {
+                "trigger_id": "质量-RISK-1",
+                "risk": "质量偏差",
+                "trigger_parameter": "deviation_limit_mm",
+                "threshold": 3,
+                "unit": "mm",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              },
+              {
+                "trigger_id": "质量-RISK-2",
+                "risk": "抽检不达标",
+                "trigger_parameter": "acceptance_pass_rate_percent",
+                "threshold": 95,
+                "unit": "%",
+                "checker": "质量员",
+                "action": "触发Fail-Fast并启动纠偏闭环",
+                "response_sla_hours": 4
+              }
+            ]
+          },
+          "clause_locator": {
+            "enabled": true,
+            "trace_rule": "clause->section->page->paragraph->anchor",
+            "pointer_mode": "hash+excerpt",
+            "anchors": [
+              {
+                "clause_ref": "第1条",
+                "standard_code": "GB 50300-2013",
+                "section_hint": "19.0",
+                "page_hint": 7,
+                "paragraph_hint": 44,
+                "source_hierarchy": "答疑文件",
+                "evidence_anchor_id": "EA-331A953B37",
+                "clause_path": "GB 50300-2013/第1条/S19.0/P44",
+                "source_excerpt": "第1条 第一步（定义）：执行桩基隐蔽工程区块链验收平台安全工序定义，参数inspection_frequency_per_shift=2、emergency_response_minutes=30、leakage_protector_ma=30，安全员每班次核验1次；第二步（分析",
+                "anchor_hash": "f63f85feefe52e3d"
+              }
+            ]
+          },
+          "cross_discipline_interface_contract": {
+            "enabled": true,
+            "dimension": "质量",
+            "domain": "earthwork",
+            "interfaces": [
+              {
+                "with_domain": "building",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "road",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              },
+              {
+                "with_domain": "management",
+                "required_checks": [
+                  "标高一致",
+                  "坐标一致",
+                  "工期窗口一致",
+                  "资源占用不冲突"
+                ],
+                "checker": "质量员",
+                "severity": "medium"
+              }
+            ],
+            "fail_fast_on_mismatch": true
+          },
+          "optimization_objectives_ext": {
+            "enabled": true,
+            "optimizer": "pareto_v2",
+            "objectives": {
+              "duration": 0.3,
+              "risk": 0.35,
+              "resource_density": 0.15,
+              "cost": 0.1,
+              "carbon": 0.05,
+              "night_restriction": 0.05
+            },
+            "constraints": {
+              "max_cost_overrun_percent": 3.0,
+              "max_carbon_overrun_percent": 5.0,
+              "night_work_window": "22:00-06:00",
+              "night_noise_limit_db": 55
+            }
+          },
+          "online_learning_profile": {
+            "enabled": true,
+            "strategy": "ema_feedback_v1",
+            "alpha": 0.2,
+            "hit_count": 0,
+            "pass_count": 0,
+            "trace_coverage_avg": 0.0,
+            "last_feedback_at": "",
+            "weight_adjustments": {
+              "keyword_exact_weight": 1.0,
+              "query_token_weight": 1.0,
+              "fts_rank_weight": 1.0,
+              "domain_weight": 1.0,
+              "timeline_weight": 1.0,
+              "region_weight": 1.0
+            }
           }
         }
       ]

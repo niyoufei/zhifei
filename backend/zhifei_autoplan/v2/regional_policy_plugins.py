@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
-DEFAULT_PLUGIN_DIR = Path("backend/data/autoplan/v2/regional_policy_plugins")
+DEFAULT_PLUGIN_DIR = Path("backend/zhifei_autoplan/v2/regional_policy_plugins_data")
 
 DEFAULT_BUILTIN_PLUGINS: List[Dict[str, Any]] = [
     {
@@ -47,10 +47,37 @@ def _iter_plugin_dicts(plugin_dir: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def _resolve_plugin_dir(plugin_dir: Path | str) -> Path:
+    raw = Path(plugin_dir).expanduser()
+    candidates: List[Path] = []
+    if raw.is_absolute():
+        candidates.append(raw.resolve())
+    else:
+        candidates.append((Path.cwd() / raw).resolve())
+        backend_root = Path(__file__).resolve().parents[2]
+        candidates.append((backend_root / raw).resolve())
+        parts = list(raw.parts)
+        if parts and parts[0].lower() == "backend":
+            trimmed = Path(*parts[1:]) if len(parts) > 1 else Path(".")
+            candidates.append((backend_root / trimmed).resolve())
+    seen = set()
+    deduped: List[Path] = []
+    for item in candidates:
+        key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    for item in deduped:
+        if item.exists():
+            return item
+    return deduped[0] if deduped else raw.resolve()
+
+
 def load_regional_policy_plugins(
     plugin_dir: Path | str = DEFAULT_PLUGIN_DIR,
 ) -> Dict[str, Dict[str, Any]]:
-    base = Path(plugin_dir).expanduser().resolve()
+    base = _resolve_plugin_dir(plugin_dir)
     rows = _iter_plugin_dicts(base)
     out: Dict[str, Dict[str, Any]] = {}
     for row in rows:

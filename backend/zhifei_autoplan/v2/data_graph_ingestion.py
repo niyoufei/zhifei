@@ -1217,10 +1217,55 @@ def _extract_clause_locator(node: Dict[str, Any]) -> Dict[str, Any]:
         ),
     )
     out = _coerce_dict(raw)
-    if "anchors" not in out or not isinstance(out.get("anchors"), list):
-        out["anchors"] = []
+    anchors = out.get("anchors")
+    normalized_anchors: List[Dict[str, Any]] = []
+    if isinstance(anchors, list):
+        for item in anchors:
+            if not isinstance(item, dict):
+                continue
+            rec = {str(k): v for k, v in item.items() if str(k).strip() and v not in (None, "", [], {})}
+            clause_ref = str(rec.get("clause_ref") or "").strip()
+            standard_code = str(rec.get("standard_code") or "").strip()
+            section_hint = str(rec.get("section_hint") or "").strip()
+            paragraph_hint = str(rec.get("paragraph_hint") or "").strip()
+            if not clause_ref and not standard_code:
+                continue
+            if clause_ref:
+                rec["clause_ref"] = clause_ref
+            if standard_code:
+                rec["standard_code"] = standard_code
+            if section_hint:
+                rec["section_hint"] = section_hint
+            if paragraph_hint:
+                rec["paragraph_hint"] = paragraph_hint
+            if not str(rec.get("clause_path") or "").strip():
+                segs = [x for x in [standard_code, clause_ref] if x]
+                if section_hint:
+                    segs.append(f"S{section_hint}")
+                if paragraph_hint:
+                    segs.append(f"P{paragraph_hint}")
+                rec["clause_path"] = "/".join(segs)[:160]
+            if not str(rec.get("source_excerpt") or "").strip():
+                source_excerpt = " ".join(x for x in [clause_ref, standard_code] if x).strip() or "条文定位锚点"
+                rec["source_excerpt"] = source_excerpt[:140]
+            if not str(rec.get("anchor_hash") or "").strip():
+                hash_seed = "|".join(
+                    [
+                        clause_ref,
+                        standard_code,
+                        section_hint,
+                        str(rec.get("page_hint") or ""),
+                        paragraph_hint,
+                        str(rec.get("evidence_anchor_id") or ""),
+                    ]
+                )
+                rec["anchor_hash"] = hashlib.sha1(hash_seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+            normalized_anchors.append(rec)
+    out["anchors"] = normalized_anchors
     if "enabled" not in out:
         out["enabled"] = False
+    if normalized_anchors and not str(out.get("pointer_mode") or "").strip():
+        out["pointer_mode"] = "hash+excerpt"
     return out
 
 

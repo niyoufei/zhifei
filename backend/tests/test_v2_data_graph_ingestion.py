@@ -408,7 +408,10 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
                                 },
                                 "resource_productivity_model": {"enabled": True, "unit_output_per_day": 320.0},
                                 "risk_trigger_matrix": {"enabled": True, "items": [{"trigger_id": "R-1"}]},
-                                "clause_locator": {"enabled": True, "anchors": [{"clause_ref": "第1条"}]},
+                                "clause_locator": {
+                                    "enabled": True,
+                                    "anchors": [{"clause_ref": "第1条", "standard_code": "GB 50300-2013"}],
+                                },
                                 "cross_discipline_interface_contract": {
                                     "enabled": True,
                                     "interfaces": [{"with_domain": "mep"}],
@@ -466,6 +469,10 @@ def test_search_supports_enhanced_capability_fields_and_filters(tmp_path: Path) 
     assert bool((node.get("resource_productivity_model") or {}).get("enabled"))
     assert bool((node.get("risk_trigger_matrix") or {}).get("enabled"))
     assert bool((node.get("clause_locator") or {}).get("enabled"))
+    first_anchor = ((node.get("clause_locator") or {}).get("anchors") or [{}])[0]
+    assert str(first_anchor.get("anchor_hash") or "").strip()
+    assert str(first_anchor.get("clause_path") or "").strip()
+    assert str(first_anchor.get("source_excerpt") or "").strip()
     assert bool((node.get("cross_discipline_interface_contract") or {}).get("enabled"))
     assert bool((node.get("optimization_objectives_ext") or {}).get("enabled"))
     assert bool((node.get("online_learning_profile") or {}).get("enabled"))

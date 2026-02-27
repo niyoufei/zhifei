@@ -2120,6 +2120,20 @@ def _ensure_clause_locator(node: Dict[str, Any], *, source_hierarchy: str) -> in
         clause_refs = ["第1条"]
     clause_refs = _unique_keep_order(clause_refs)[:8]
 
+    content = node.get("content")
+    excerpt_seed = ""
+    if isinstance(content, dict):
+        premium = content.get("operation_desc_premium")
+        if isinstance(premium, dict):
+            excerpt_seed = str(premium.get("desc") or "")
+        elif isinstance(premium, str):
+            excerpt_seed = premium
+        if not excerpt_seed:
+            excerpt_seed = str(content.get("operation_desc_mediocre") or "")
+    if not excerpt_seed:
+        excerpt_seed = str(node.get("name") or node.get("node_id") or "标准条文约束")
+    excerpt_seed = re.sub(r"\s+", " ", excerpt_seed).strip()
+
     rows: List[Dict[str, Any]] = []
     for idx, clause in enumerate(clause_refs, start=1):
         ref = refs[idx - 1] if idx - 1 < len(refs) else (refs[0] if refs else "")
@@ -2128,6 +2142,9 @@ def _ensure_clause_locator(node: Dict[str, Any], *, source_hierarchy: str) -> in
         page_hint = _stable_index(f"{node_seed}|{clause}|page", 150) + 1
         section_hint = _stable_index(f"{node_seed}|{clause}|sec", 20) + 1
         paragraph_hint = _stable_index(f"{node_seed}|{clause}|para", 80) + 1
+        anchor_hash = hashlib.sha1(f"{node_seed}|{code}|{clause}".encode("utf-8", errors="ignore")).hexdigest()[:16]
+        clause_path = f"{code}/{clause}/S{section_hint}.0/P{paragraph_hint}"
+        source_excerpt = f"{clause} {excerpt_seed}".strip()[:140]
         rows.append(
             {
                 "clause_ref": clause,
@@ -2137,11 +2154,15 @@ def _ensure_clause_locator(node: Dict[str, Any], *, source_hierarchy: str) -> in
                 "paragraph_hint": paragraph_hint,
                 "source_hierarchy": source_hierarchy,
                 "evidence_anchor_id": (evidence_anchor_ids[idx - 1] if idx - 1 < len(evidence_anchor_ids) else ""),
+                "clause_path": clause_path,
+                "source_excerpt": source_excerpt,
+                "anchor_hash": anchor_hash,
             }
         )
     payload = {
         "enabled": True,
         "trace_rule": "clause->section->page->paragraph->anchor",
+        "pointer_mode": "hash+excerpt",
         "anchors": rows,
     }
     if node.get("clause_locator") != payload:

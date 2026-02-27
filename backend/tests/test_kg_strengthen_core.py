@@ -112,6 +112,11 @@ def test_strengthen_file_repairs_core_fields(tmp_path: Path) -> None:
         assert isinstance((node.get("risk_trigger_matrix") or {}).get("items"), list)
         assert isinstance(node.get("clause_locator"), dict)
         assert isinstance((node.get("clause_locator") or {}).get("anchors"), list)
+        clause_anchors = (node.get("clause_locator") or {}).get("anchors") or []
+        assert clause_anchors and isinstance(clause_anchors[0], dict)
+        assert str(clause_anchors[0].get("anchor_hash") or "").strip()
+        assert str(clause_anchors[0].get("source_excerpt") or "").strip()
+        assert str(clause_anchors[0].get("clause_path") or "").strip()
         assert isinstance(node.get("cross_discipline_constraints"), dict)
         assert isinstance(node.get("cross_discipline_interface_contract"), dict)
         assert isinstance(node.get("approval_workflow"), dict)

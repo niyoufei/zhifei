@@ -556,6 +556,11 @@ class MultiAgentDocPipeline:
                         "retry_missing_keywords": rewrite_keywords,
                         "source_trace": {
                             "node_id": selected_graph.get("node_id") if isinstance(selected_graph, dict) else None,
+                            "kg_node_ref": (
+                                (selected_graph.get("payload") or {}).get("node_id")
+                                if isinstance((selected_graph or {}).get("payload"), dict)
+                                else None
+                            ),
                             "title": selected_graph.get("title") if isinstance(selected_graph, dict) else None,
                             "source_file": selected_graph.get("source_file") if isinstance(selected_graph, dict) else None,
                             "source_path": selected_graph.get("source_path") if isinstance(selected_graph, dict) else None,
@@ -850,6 +855,12 @@ class MultiAgentDocPipeline:
                         },
                         "evidence": {
                             "node_id": source_trace.get("node_id") or graph_hit.get("node_id"),
+                            "kg_node_ref": source_trace.get("kg_node_ref")
+                            or (
+                                (graph_hit.get("payload") or {}).get("node_id")
+                                if isinstance(graph_hit.get("payload"), dict)
+                                else None
+                            ),
                             "node_title": source_trace.get("title") or graph_hit.get("title"),
                             "source_file": source_trace.get("source_file") or graph_hit.get("source_file"),
                             "source_path": source_trace.get("source_path") or graph_hit.get("source_path"),
@@ -864,6 +875,21 @@ class MultiAgentDocPipeline:
                                 clause_anchors[0]
                                 if clause_anchors and isinstance(clause_anchors[0], dict)
                                 else {}
+                            ),
+                            "clause_anchor_hash": (
+                                str(clause_anchors[0].get("anchor_hash") or "")
+                                if clause_anchors and isinstance(clause_anchors[0], dict)
+                                else ""
+                            ),
+                            "clause_anchor_path": (
+                                str(clause_anchors[0].get("clause_path") or "")
+                                if clause_anchors and isinstance(clause_anchors[0], dict)
+                                else ""
+                            ),
+                            "clause_anchor_excerpt": (
+                                str(clause_anchors[0].get("source_excerpt") or "")
+                                if clause_anchors and isinstance(clause_anchors[0], dict)
+                                else ""
                             ),
                             "retrieval_query": sec.get("graph_query"),
                             "index_source_path": (
@@ -1305,6 +1331,7 @@ class MultiAgentDocPipeline:
         enable_retrieval_weight_training: bool = True,
         retrieval_weight_profile_path: Path | str = DEFAULT_WEIGHT_PROFILE_PATH,
         enable_feedback_learning: bool = True,
+        enable_feedback_writeback: bool = True,
         feedback_output_path: Path | str = "build/kg_project_feedback_memory.json",
         region_context: str | None = None,
         bid_date: str | None = None,
@@ -1564,7 +1591,10 @@ class MultiAgentDocPipeline:
                     "status": "done" if retrieval_weight_profile.get("triggered") else "skipped",
                     "result": retrieval_weight_profile,
                 },
-                "feedback_agent": {"status": "done" if enable_feedback_learning else "skipped"},
+                "feedback_agent": {
+                    "status": "done" if enable_feedback_learning else "skipped",
+                    "writeback": "done" if (enable_feedback_learning and enable_feedback_writeback) else "skipped",
+                },
                 "visual_agent": {
                     "status": "done" if visual_meta.get("generated") else "skipped",
                     "meta": visual_meta,
@@ -1611,6 +1641,8 @@ class MultiAgentDocPipeline:
                     **update_feedback_memory(
                         result_payload=output,
                         output_path=feedback_output_path,
+                        writeback_graph=bool(enable_feedback_writeback),
+                        graph_root=graph_root,
                     ),
                 }
             except Exception as exc:

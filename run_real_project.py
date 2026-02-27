@@ -285,6 +285,12 @@ def _arg_parser() -> argparse.ArgumentParser:
         help="是否启用真实项目回灌学习。",
     )
     p.add_argument(
+        "--feedback-writeback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否将反馈学习结果回写到知识图谱节点在线学习画像。",
+    )
+    p.add_argument(
         "--retrieval-weight-training",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -370,6 +376,7 @@ async def _run(args: argparse.Namespace) -> int:
         enable_retrieval_weight_training=bool(args.retrieval_weight_training),
         retrieval_weight_profile_path=Path(args.retrieval_weight_profile).expanduser().resolve(),
         enable_feedback_learning=bool(args.feedback_learning),
+        enable_feedback_writeback=bool(args.feedback_writeback),
         region_context=args.region_context,
         bid_date=args.bid_date,
         allow_superseded=bool(args.allow_superseded),
@@ -443,10 +450,13 @@ async def _run(args: argparse.Namespace) -> int:
         )
     feedback = result.get("feedback_learning") if isinstance(result.get("feedback_learning"), dict) else {}
     if feedback.get("triggered"):
+        writeback = feedback.get("writeback") if isinstance(feedback.get("writeback"), dict) else {}
         print(
             "Feedback Learning: "
             f"projects_total={int(feedback.get('projects_total') or 0)}, "
-            f"node_updates={int(feedback.get('node_updates') or 0)}"
+            f"node_updates={int(feedback.get('node_updates') or 0)}, "
+            f"writeback_ok={bool(writeback.get('ok'))}, "
+            f"writeback_nodes={int(writeback.get('nodes_updated') or 0)}"
         )
     chapter_plan = result.get("chapter_response_plan") if isinstance(result.get("chapter_response_plan"), dict) else {}
     if chapter_plan:

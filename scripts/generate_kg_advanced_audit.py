@@ -82,6 +82,7 @@ def _check_file(path: Path) -> Dict[str, Any]:
         "missing_resource_productivity_model": 0,
         "missing_risk_trigger_matrix": 0,
         "missing_clause_locator": 0,
+        "missing_clause_locator_pointer": 0,
         "missing_interface_contract": 0,
         "missing_optimization_objectives_ext": 0,
         "missing_online_learning_profile": 0,
@@ -252,6 +253,23 @@ def _check_file(path: Path) -> Dict[str, Any]:
             issues["missing_clause_locator"] += 1
             if len(samples["missing_clause_locator"]) < 8:
                 samples["missing_clause_locator"].append({"node_id": node_id})
+        else:
+            anchors = clause_locator.get("anchors")
+            pointer_ok = False
+            if isinstance(anchors, list):
+                for anchor in anchors:
+                    if not isinstance(anchor, dict):
+                        continue
+                    has_hash = bool(str(anchor.get("anchor_hash") or "").strip())
+                    has_excerpt = bool(str(anchor.get("source_excerpt") or "").strip())
+                    has_path = bool(str(anchor.get("clause_path") or "").strip())
+                    if has_hash and (has_excerpt or has_path):
+                        pointer_ok = True
+                        break
+            if not pointer_ok:
+                issues["missing_clause_locator_pointer"] += 1
+                if len(samples["missing_clause_locator_pointer"]) < 8:
+                    samples["missing_clause_locator_pointer"].append({"node_id": node_id})
 
         interface_contract = node.get("cross_discipline_interface_contract")
         if not isinstance(interface_contract, dict) or not bool(interface_contract.get("enabled")) or not isinstance(interface_contract.get("interfaces"), list):
