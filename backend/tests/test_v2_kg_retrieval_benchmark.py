@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from backend.zhifei_autoplan.v2.data_graph_ingestion import ingest_knowledge_graph
-from backend.zhifei_autoplan.v2.kg_retrieval_benchmark import ensure_benchmark_dataset, run_retrieval_benchmark
+from backend.zhifei_autoplan.v2.kg_retrieval_benchmark import (
+    _normalize_domain_hint,
+    ensure_benchmark_dataset,
+    run_retrieval_benchmark,
+)
 
 
 def test_run_retrieval_benchmark_reports_pass_metrics(tmp_path: Path) -> None:
@@ -161,3 +165,10 @@ def test_run_retrieval_benchmark_emits_domain_summary(tmp_path: Path) -> None:
     first = summary[0]
     assert first.get("domain")
     assert int(first.get("total_cases") or 0) >= 1
+
+
+def test_normalize_domain_hint_maps_zf_kg_filename_to_canonical_domain() -> None:
+    assert _normalize_domain_hint("ZF-KG-09-Landscape-Master.json") == "road"
+    assert _normalize_domain_hint("ZF-KG-35-Fire-Protection.json") == "mep"
+    assert _normalize_domain_hint("ZF-KG-51-SmartSite-General.json") == "digital"
+    assert _normalize_domain_hint("ZF-KG-23-Petrochemical.json") == "mep"

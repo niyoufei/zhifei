@@ -84,6 +84,91 @@ BOQ_ROUTE_SCORE_ADJUST = {
     "unknown": -0.07,
 }
 BOQ_UNIT_PATTERN = r"(?:m3|m2|m|t|kg|台|套|个|项|处|座|樘|米|吨|㎡|㎥)"
+RETRIEVAL_DOMAIN_CORE = {
+    "bridge",
+    "tunnel",
+    "railway",
+    "hydraulic",
+    "mep",
+    "earthwork",
+    "road",
+    "building",
+    "management",
+    "digital",
+}
+RETRIEVAL_DOMAIN_TOKEN_MAP = (
+    ("bridge", "bridge"),
+    ("tunnel", "tunnel"),
+    ("railway", "railway"),
+    ("rail", "railway"),
+    ("offshorewind", "hydraulic"),
+    ("marine", "hydraulic"),
+    ("harbor", "hydraulic"),
+    ("port", "hydraulic"),
+    ("hydraulic", "hydraulic"),
+    ("water", "hydraulic"),
+    ("river", "hydraulic"),
+    ("sponge", "hydraulic"),
+    ("drainage", "hydraulic"),
+    ("wtp", "hydraulic"),
+    ("water-treatment", "hydraulic"),
+    ("mep", "mep"),
+    ("electrical", "mep"),
+    ("hvac", "mep"),
+    ("fire", "mep"),
+    ("gas", "mep"),
+    ("pipeline", "mep"),
+    ("petrochemical", "mep"),
+    ("power-energy", "mep"),
+    ("power", "mep"),
+    ("energy", "mep"),
+    ("weak-current", "mep"),
+    ("district-heating", "mep"),
+    ("heating", "mep"),
+    ("waste-to-energy", "mep"),
+    ("communication", "mep"),
+    ("smartsite", "digital"),
+    ("smartom", "digital"),
+    ("digital", "digital"),
+    ("bim", "digital"),
+    ("data-center", "digital"),
+    ("network", "digital"),
+    ("调度", "digital"),
+    ("碳", "digital"),
+    ("networkgraph", "digital"),
+    ("quantum", "digital"),
+    ("carbon", "digital"),
+    ("fm", "digital"),
+    ("earthwork", "earthwork"),
+    ("foundation", "earthwork"),
+    ("deep-excavation", "earthwork"),
+    ("road", "road"),
+    ("municipal-road", "road"),
+    ("landscape", "road"),
+    ("airport", "road"),
+    ("highway", "road"),
+    ("building", "building"),
+    ("housing", "building"),
+    ("hospital", "building"),
+    ("deco", "building"),
+    ("decoration", "building"),
+    ("curtain", "building"),
+    ("steel-structure", "building"),
+    ("prefabricated", "building"),
+    ("demolition", "building"),
+    ("exterior-ancillary", "building"),
+    ("ancillary", "building"),
+    ("urban-renewal", "building"),
+    ("crane", "building"),
+    ("lifting", "building"),
+    ("scaffolding", "building"),
+    ("formwork", "building"),
+    ("management", "management"),
+    ("safetycivilization", "management"),
+    ("greenconstruction", "management"),
+    ("temporaryworks", "management"),
+    ("fournew", "management"),
+)
 
 
 def _confidence_level(score: float) -> str:
@@ -93,6 +178,38 @@ def _confidence_level(score: float) -> str:
     if val >= 0.65:
         return "medium"
     return "low"
+
+
+def _normalize_retrieval_domain_label(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "unknown"
+    alias_map = {
+        "general": "management",
+        "quality": "management",
+        "safety": "management",
+        "environment": "management",
+        "municipal": "road",
+        "traffic": "road",
+        "hospital": "building",
+        "housing": "building",
+        "decoration": "building",
+        "fire": "mep",
+        "electrical": "mep",
+        "automation": "digital",
+    }
+    if text in RETRIEVAL_DOMAIN_CORE:
+        return text
+    if text in alias_map:
+        return alias_map[text]
+    if text.startswith("zf-kg-"):
+        text = re.sub(r"^zf-kg-\d+-", "", text)
+        text = re.sub(r"\.json$", "", text)
+    compact = text.replace("_", "-").replace(" ", "-")
+    for token, domain in RETRIEVAL_DOMAIN_TOKEN_MAP:
+        if token in compact:
+            return domain
+    return "unknown"
 
 
 def _to_float(value: Any) -> float | None:
@@ -1026,6 +1143,163 @@ def _write_boq_manual_review_report(governance: Dict[str, Any], *, output_path: 
     return str(out)
 
 
+def _build_retrieval_remediation_plan(
+    *,
+    benchmark: Dict[str, Any],
+    domain_warnings: List[Dict[str, Any]],
+    quality_warnings: List[Dict[str, Any]],
+    min_domain_pass_rate: float,
+) -> Dict[str, Any]:
+    rows = benchmark.get("rows") if isinstance(benchmark.get("rows"), list) else []
+    floor = max(0.0, min(float(min_domain_pass_rate), 1.0))
+    weak_domains: Dict[str, Dict[str, Any]] = {}
+    for row in domain_warnings:
+        if not isinstance(row, dict):
+            continue
+        domain = str(row.get("domain") or "").strip()
+        if not domain:
+            continue
+        weak_domains[domain] = {
+            "domain": domain,
+            "raw_domain": str(row.get("raw_domain") or domain),
+            "total_cases": int(row.get("total_cases") or 0),
+            "pass_rate": float(row.get("pass_rate") or 0.0),
+            "min_pass_rate": float(row.get("min_pass_rate") or floor),
+            "failed_queries": [],
+            "candidate_keywords": [],
+        }
+
+    token_freq: Dict[str, Dict[str, int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ok = bool(row.get("ok"))
+        raw_domain = str(row.get("domain") or "").strip()
+        norm_domain = _normalize_retrieval_domain_label(raw_domain)
+        if norm_domain not in weak_domains:
+            continue
+        query = str(row.get("query") or "").strip()
+        if (not ok) and query:
+            weak_domains[norm_domain]["failed_queries"].append(query)
+        kws = row.get("expected_keywords") if isinstance(row.get("expected_keywords"), list) else []
+        bag = token_freq.setdefault(norm_domain, {})
+        for kw in kws:
+            term = str(kw or "").strip()
+            if len(term) < 2:
+                continue
+            bag[term] = int(bag.get(term) or 0) + 1
+        if query:
+            for tok in re.split(r"[^\w\u4e00-\u9fff]+", query):
+                term = str(tok or "").strip()
+                if len(term) < 2:
+                    continue
+                bag[term] = int(bag.get(term) or 0) + 1
+
+    actionable: List[Dict[str, Any]] = []
+    for domain, row in weak_domains.items():
+        bag = token_freq.get(domain) or {}
+        ranked = sorted(bag.items(), key=lambda x: (-x[1], x[0]))
+        candidate_keywords = [x[0] for x in ranked[:8]]
+        failed_queries = [str(x) for x in row.get("failed_queries", []) if str(x).strip()][:8]
+        row["candidate_keywords"] = candidate_keywords
+        row["failed_queries"] = failed_queries
+        row["suggested_actions"] = [
+            f"补充 {domain} 领域参数节点（动作+参数+检查人）",
+            "补充至少2条可计算 FormulaNode（含变量定义与单位）",
+            "为新增节点补齐 reference_standard 与 evidence_sources",
+            f"复跑检索评测，确保 pass_rate >= {row.get('min_pass_rate'):.2f}",
+        ]
+        actionable.append(row)
+
+    quality_rows: List[Dict[str, Any]] = []
+    for row in quality_warnings:
+        if not isinstance(row, dict):
+            continue
+        quality_rows.append(
+            {
+                "raw_domain": str(row.get("raw_domain") or "unknown"),
+                "total_cases": int(row.get("total_cases") or 0),
+                "pass_rate": float(row.get("pass_rate") or 0.0),
+                "suggested_actions": [
+                    "清洗评测集 domain_hint，改为 canonical domain（building/road/mep/...)",
+                    "避免将文件名直接作为 domain，改用工程专业域标签",
+                ],
+            }
+        )
+
+    return {
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "benchmark_ok": bool(benchmark.get("ok")),
+        "total_cases": int(benchmark.get("total_cases") or 0),
+        "pass_rate": float(benchmark.get("pass_rate") or 0.0),
+        "avg_mrr": float(benchmark.get("avg_mrr") or 0.0),
+        "domain_warnings_total": len(actionable),
+        "domain_quality_warnings_total": len(quality_rows),
+        "domain_actions": actionable,
+        "domain_quality_actions": quality_rows,
+    }
+
+
+def _write_retrieval_remediation_report(plan: Dict[str, Any], *, output_path: Path | str) -> str:
+    out = Path(output_path).expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    lines: List[str] = []
+    lines.append("# KG Retrieval Remediation Report")
+    lines.append("")
+    lines.append(f"- Generated At: {plan.get('generated_at')}")
+    lines.append(f"- Benchmark OK: {bool(plan.get('benchmark_ok'))}")
+    lines.append(f"- Total Cases: {int(plan.get('total_cases') or 0)}")
+    lines.append(f"- Pass Rate: {float(plan.get('pass_rate') or 0.0):.4f}")
+    lines.append(f"- Avg MRR: {float(plan.get('avg_mrr') or 0.0):.4f}")
+    lines.append(f"- Domain Warnings: {int(plan.get('domain_warnings_total') or 0)}")
+    lines.append(f"- Domain Label Quality Warnings: {int(plan.get('domain_quality_warnings_total') or 0)}")
+    lines.append("")
+    lines.append("## Domain Remediation")
+    lines.append("")
+    actions = plan.get("domain_actions") if isinstance(plan.get("domain_actions"), list) else []
+    if not actions:
+        lines.append("None")
+    else:
+        for idx, row in enumerate(actions, start=1):
+            if not isinstance(row, dict):
+                continue
+            lines.append(f"### {idx}. {row.get('domain')}")
+            lines.append("")
+            lines.append(f"- Raw Domain: {row.get('raw_domain')}")
+            lines.append(f"- Cases: {int(row.get('total_cases') or 0)}")
+            lines.append(f"- Pass Rate: {float(row.get('pass_rate') or 0.0):.4f}")
+            lines.append(f"- Target Pass Rate: {float(row.get('min_pass_rate') or 0.0):.4f}")
+            kws = [str(x) for x in (row.get("candidate_keywords") or []) if str(x).strip()]
+            lines.append(f"- Candidate Keywords: {', '.join(kws) if kws else '-'}")
+            fq = [str(x) for x in (row.get("failed_queries") or []) if str(x).strip()]
+            if fq:
+                lines.append("- Failed Query Samples:")
+                for q in fq[:6]:
+                    lines.append(f"  - {q}")
+            for act in (row.get("suggested_actions") or [])[:6]:
+                lines.append(f"- Action: {act}")
+            lines.append("")
+    lines.append("## Domain Label Data Quality")
+    lines.append("")
+    quality_rows = plan.get("domain_quality_actions") if isinstance(plan.get("domain_quality_actions"), list) else []
+    if not quality_rows:
+        lines.append("None")
+    else:
+        lines.append("| Raw Domain | Cases | Pass Rate | Suggested Action |")
+        lines.append("|---|---:|---:|---|")
+        for row in quality_rows:
+            if not isinstance(row, dict):
+                continue
+            actions_text = "；".join([str(x) for x in (row.get("suggested_actions") or [])[:2]])
+            lines.append(
+                f"| {row.get('raw_domain')} | {int(row.get('total_cases') or 0)} | "
+                f"{float(row.get('pass_rate') or 0.0):.4f} | {actions_text} |"
+            )
+    lines.append("")
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return str(out)
+
+
 def _arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run V2 engine on a real project (production mode).")
     p.add_argument("--tender", nargs="+", required=True, help="招标文件路径（PDF/Word/TXT等）。")
@@ -1107,10 +1381,33 @@ def _arg_parser() -> argparse.ArgumentParser:
         help="检索门禁最小平均MRR阈值。",
     )
     p.add_argument(
+        "--benchmark-min-domain-pass-rate",
+        type=float,
+        default=0.70,
+        help="检索门禁各专业域最小通过率阈值。",
+    )
+    p.add_argument(
+        "--benchmark-domain-min-cases",
+        type=int,
+        default=3,
+        help="触发域级门禁判定的最小案例数。",
+    )
+    p.add_argument(
+        "--retrieval-remediation-report",
+        default="build/KG_Retrieval_Remediation_Report.md",
+        help="检索域补强计划报告输出路径。",
+    )
+    p.add_argument(
         "--enforce-retrieval-gate",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="检索门禁失败时是否拦截发布。",
+    )
+    p.add_argument(
+        "--enforce-benchmark-domain-gate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否启用检索评测域级门禁（按专业域逐项放行）。",
     )
     p.add_argument(
         "--feedback-learning",
@@ -1229,6 +1526,18 @@ def _arg_parser() -> argparse.ArgumentParser:
         default=360,
         help="评测集自动扩容后的最大案例数。",
     )
+    p.add_argument(
+        "--enforce-auto-generated-lifecycle-gate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否启用自动补丁生命周期门禁（过期/未复核拦截）。",
+    )
+    p.add_argument(
+        "--auto-generated-max-age-days",
+        type=int,
+        default=120,
+        help="自动补丁节点最大允许年龄（天）。",
+    )
     return p
 
 
@@ -1241,6 +1550,7 @@ async def _run(args: argparse.Namespace) -> int:
     report_path = Path(args.missing_report).expanduser().resolve()
     docx_out_path = Path(args.docx_out).expanduser().resolve()
     boq_review_queue_path = Path(args.boq_review_queue).expanduser().resolve()
+    retrieval_remediation_path = Path(args.retrieval_remediation_report).expanduser().resolve()
 
     for tender in tender_paths:
         if not Path(tender).exists():
@@ -1296,7 +1606,10 @@ async def _run(args: argparse.Namespace) -> int:
         benchmark_dataset_path=Path(str(benchmark_dataset.get("dataset_path") or args.benchmark_dataset)).expanduser().resolve(),
         benchmark_min_pass_rate=float(args.benchmark_min_pass_rate),
         benchmark_min_avg_mrr=float(args.benchmark_min_avg_mrr),
+        benchmark_min_domain_pass_rate=float(args.benchmark_min_domain_pass_rate),
+        benchmark_domain_min_cases=max(1, int(args.benchmark_domain_min_cases)),
         enforce_retrieval_gate=bool(args.enforce_retrieval_gate),
+        enforce_benchmark_domain_gate=bool(args.enforce_benchmark_domain_gate),
         enable_retrieval_weight_training=bool(args.retrieval_weight_training),
         retrieval_weight_profile_path=Path(args.retrieval_weight_profile).expanduser().resolve(),
         enable_feedback_learning=bool(args.feedback_learning),
@@ -1305,6 +1618,8 @@ async def _run(args: argparse.Namespace) -> int:
         bid_date=args.bid_date,
         allow_superseded=bool(args.allow_superseded),
         enforce_standard_reference_gate=True,
+        enforce_auto_generated_lifecycle_gate=bool(args.enforce_auto_generated_lifecycle_gate),
+        auto_generated_max_age_days=max(7, int(args.auto_generated_max_age_days)),
         regional_plugin_dir=(
             Path(args.regional_plugin_dir).expanduser().resolve() if args.regional_plugin_dir else None
         ),
@@ -1316,6 +1631,27 @@ async def _run(args: argparse.Namespace) -> int:
         hit_rate_dashboard_md_path=Path(args.hit_rate_dashboard_md).expanduser().resolve(),
         enrichment_draft_path=Path(args.enrichment_draft).expanduser().resolve(),
         boq_governance=governance,
+    )
+    benchmark = result.get("retrieval_benchmark") if isinstance(result.get("retrieval_benchmark"), dict) else {}
+    domain_warnings = (
+        result.get("retrieval_benchmark_domain_warnings")
+        if isinstance(result.get("retrieval_benchmark_domain_warnings"), list)
+        else []
+    )
+    domain_quality_warnings = (
+        result.get("retrieval_benchmark_domain_quality_warnings")
+        if isinstance(result.get("retrieval_benchmark_domain_quality_warnings"), list)
+        else []
+    )
+    retrieval_remediation_plan = _build_retrieval_remediation_plan(
+        benchmark=benchmark,
+        domain_warnings=domain_warnings,
+        quality_warnings=domain_quality_warnings,
+        min_domain_pass_rate=float(args.benchmark_min_domain_pass_rate),
+    )
+    retrieval_remediation_saved = _write_retrieval_remediation_report(
+        retrieval_remediation_plan,
+        output_path=retrieval_remediation_path,
     )
     if output_path.exists():
         try:
@@ -1331,6 +1667,8 @@ async def _run(args: argparse.Namespace) -> int:
                 "governance": governance,
                 "manual_review_queue_report": boq_review_queue_saved,
                 "benchmark_dataset": benchmark_dataset,
+                "retrieval_remediation_report": retrieval_remediation_saved,
+                "retrieval_remediation_plan": retrieval_remediation_plan,
             }
             output_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1372,7 +1710,6 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"Score Coverage OK: {bool(score_audit.get('ok'))}")
     print(f"Graph Support OK: {bool(graph_audit.get('ok'))}")
     print(f"Knowledge Gaps: {len(gaps)}")
-    benchmark = result.get("retrieval_benchmark") if isinstance(result.get("retrieval_benchmark"), dict) else {}
     if benchmark.get("triggered"):
         print(
             "Retrieval Benchmark: "
@@ -1380,6 +1717,11 @@ async def _run(args: argparse.Namespace) -> int:
             f"pass_rate={float(benchmark.get('pass_rate') or 0.0):.4f}, "
             f"avg_mrr={float(benchmark.get('avg_mrr') or 0.0):.4f}"
         )
+        if isinstance(domain_warnings, list) and domain_warnings:
+            print(f"Retrieval Domain Warnings: {len(domain_warnings)}")
+        if isinstance(domain_quality_warnings, list) and domain_quality_warnings:
+            print(f"Retrieval Domain Label Warnings: {len(domain_quality_warnings)}")
+        print(f"Retrieval Remediation Report: {retrieval_remediation_saved}")
         print(
             "Retrieval Benchmark Dataset: "
             f"cases={int(benchmark_dataset.get('cases_total') or 0)}, "

@@ -189,3 +189,56 @@ def test_normalize_boq_item_soft_price_penalty_for_quantity_only_pdf(tmp_path: P
     assert normalized
     assert "missing_price_pair_soft" in (normalized.get("anomalies") or [])
     assert float(normalized.get("parsing_confidence") or 0.0) > 0.6
+
+
+def test_normalize_retrieval_domain_label_maps_file_stem() -> None:
+    mod = _load_module()
+    assert mod._normalize_retrieval_domain_label("ZF-KG-09-Landscape-Master.json") == "road"
+    assert mod._normalize_retrieval_domain_label("ZF-KG-35-Fire-Protection.json") == "mep"
+    assert mod._normalize_retrieval_domain_label("ZF-KG-51-SmartSite-General.json") == "digital"
+    assert mod._normalize_retrieval_domain_label("ZF-KG-23-Petrochemical.json") == "mep"
+
+
+def test_build_retrieval_remediation_plan_and_write_report(tmp_path: Path) -> None:
+    mod = _load_module()
+    benchmark = {
+        "ok": False,
+        "total_cases": 10,
+        "pass_rate": 0.6,
+        "avg_mrr": 0.55,
+        "rows": [
+            {
+                "case_id": "c1",
+                "query": "景观 模块化 施工",
+                "expected_keywords": ["景观", "施工"],
+                "ok": False,
+                "domain": "ZF-KG-09-Landscape-Master",
+            },
+            {
+                "case_id": "c2",
+                "query": "消防 管网 压力",
+                "expected_keywords": ["消防", "压力"],
+                "ok": True,
+                "domain": "mep",
+            },
+        ],
+    }
+    plan = mod._build_retrieval_remediation_plan(
+        benchmark=benchmark,
+        domain_warnings=[
+            {"domain": "road", "raw_domain": "ZF-KG-09-Landscape-Master", "total_cases": 4, "pass_rate": 0.42}
+        ],
+        quality_warnings=[{"raw_domain": "???", "total_cases": 3, "pass_rate": 0.1}],
+        min_domain_pass_rate=0.70,
+    )
+    assert int(plan.get("domain_warnings_total") or 0) == 1
+    assert int(plan.get("domain_quality_warnings_total") or 0) == 1
+    first = (plan.get("domain_actions") or [])[0]
+    assert str(first.get("domain") or "") == "road"
+    assert any("景观" in str(x) for x in (first.get("candidate_keywords") or []))
+
+    out = mod._write_retrieval_remediation_report(plan, output_path=tmp_path / "retrieval_plan.md")
+    assert Path(out).exists()
+    text = Path(out).read_text(encoding="utf-8")
+    assert "KG Retrieval Remediation Report" in text
+    assert "Domain Remediation" in text

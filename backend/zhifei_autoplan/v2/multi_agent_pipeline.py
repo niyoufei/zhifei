@@ -78,6 +78,91 @@ PROFESSIONAL_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
     "road": ["道路", "路基", "路面", "沥青", "交通导改", "市政道路"],
     "building": ["房建", "主体结构", "砌体", "装修", "幕墙", "钢结构", "装配式"],
 }
+BENCHMARK_DOMAIN_CORE = {
+    "bridge",
+    "tunnel",
+    "railway",
+    "hydraulic",
+    "mep",
+    "earthwork",
+    "road",
+    "building",
+    "management",
+    "digital",
+}
+BENCHMARK_FILE_DOMAIN_TOKEN_MAP = (
+    ("bridge", "bridge"),
+    ("tunnel", "tunnel"),
+    ("railway", "railway"),
+    ("rail", "railway"),
+    ("offshorewind", "hydraulic"),
+    ("marine", "hydraulic"),
+    ("harbor", "hydraulic"),
+    ("port", "hydraulic"),
+    ("hydraulic", "hydraulic"),
+    ("water", "hydraulic"),
+    ("river", "hydraulic"),
+    ("sponge", "hydraulic"),
+    ("drainage", "hydraulic"),
+    ("wtp", "hydraulic"),
+    ("water-treatment", "hydraulic"),
+    ("mep", "mep"),
+    ("electrical", "mep"),
+    ("hvac", "mep"),
+    ("fire", "mep"),
+    ("gas", "mep"),
+    ("pipeline", "mep"),
+    ("petrochemical", "mep"),
+    ("power-energy", "mep"),
+    ("power", "mep"),
+    ("energy", "mep"),
+    ("weak-current", "mep"),
+    ("district-heating", "mep"),
+    ("heating", "mep"),
+    ("waste-to-energy", "mep"),
+    ("communication", "mep"),
+    ("smartsite", "digital"),
+    ("smartom", "digital"),
+    ("digital", "digital"),
+    ("bim", "digital"),
+    ("data-center", "digital"),
+    ("network", "digital"),
+    ("调度", "digital"),
+    ("碳", "digital"),
+    ("networkgraph", "digital"),
+    ("quantum", "digital"),
+    ("carbon", "digital"),
+    ("fm", "digital"),
+    ("earthwork", "earthwork"),
+    ("foundation", "earthwork"),
+    ("deep-excavation", "earthwork"),
+    ("road", "road"),
+    ("municipal-road", "road"),
+    ("landscape", "road"),
+    ("airport", "road"),
+    ("highway", "road"),
+    ("building", "building"),
+    ("housing", "building"),
+    ("hospital", "building"),
+    ("deco", "building"),
+    ("decoration", "building"),
+    ("curtain", "building"),
+    ("steel-structure", "building"),
+    ("prefabricated", "building"),
+    ("demolition", "building"),
+    ("exterior-ancillary", "building"),
+    ("ancillary", "building"),
+    ("urban-renewal", "building"),
+    ("crane", "building"),
+    ("lifting", "building"),
+    ("scaffolding", "building"),
+    ("formwork", "building"),
+    ("management", "management"),
+    ("safetycivilization", "management"),
+    ("greenconstruction", "management"),
+    ("temporaryworks", "management"),
+    ("fournew", "management"),
+)
 
 CONSISTENCY_KEYWORDS = ("标高", "高程", "坐标", "坐标X", "坐标Y", "工期", "里程碑", "关键线路")
 SENTENCE_SPLIT_RE = re.compile(r"[。；;!?！？]\s*")
@@ -1313,6 +1398,221 @@ class MultiAgentDocPipeline:
                         )
         return warnings
 
+    def _collect_retrieval_domain_warnings(
+        self,
+        *,
+        retrieval_benchmark: Dict[str, Any],
+        min_domain_pass_rate: float,
+        min_cases: int,
+        strict_mode: bool = False,
+    ) -> List[Dict[str, Any]]:
+        warnings: List[Dict[str, Any]] = []
+        rows = retrieval_benchmark.get("domain_summary") if isinstance(retrieval_benchmark.get("domain_summary"), list) else []
+        floor = max(0.0, min(float(min_domain_pass_rate), 1.0))
+        cases_floor = max(1, int(min_cases))
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_domain = str(row.get("domain") or "").strip()
+            domain = self._normalize_benchmark_domain_label(raw_domain)
+            total = int(row.get("total_cases") or row.get("total") or 0)
+            pass_rate = float(row.get("pass_rate") or 0.0)
+            if total < cases_floor:
+                continue
+            if domain == "unknown":
+                continue
+            if pass_rate >= floor:
+                continue
+            warnings.append(
+                {
+                    "type": "retrieval_domain_underperforming",
+                    "severity": "major" if strict_mode else "minor",
+                    "dimension": "检索门禁",
+                    "domain": domain,
+                    "raw_domain": raw_domain or domain,
+                    "total_cases": total,
+                    "pass_rate": round(pass_rate, 6),
+                    "min_pass_rate": round(floor, 6),
+                    "status": "domain_pass_rate_below_threshold",
+                }
+            )
+        return warnings
+
+    def _collect_retrieval_domain_quality_warnings(
+        self,
+        *,
+        retrieval_benchmark: Dict[str, Any],
+        min_cases: int,
+    ) -> List[Dict[str, Any]]:
+        warnings: List[Dict[str, Any]] = []
+        rows = retrieval_benchmark.get("domain_summary") if isinstance(retrieval_benchmark.get("domain_summary"), list) else []
+        cases_floor = max(1, int(min_cases))
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_domain = str(row.get("domain") or "").strip()
+            total = int(row.get("total_cases") or row.get("total") or 0)
+            if total < cases_floor:
+                continue
+            normalized = self._normalize_benchmark_domain_label(raw_domain)
+            if normalized != "unknown":
+                continue
+            warnings.append(
+                {
+                    "type": "retrieval_domain_unclassified",
+                    "severity": "minor",
+                    "dimension": "检索门禁",
+                    "raw_domain": raw_domain or "unknown",
+                    "total_cases": total,
+                    "pass_rate": round(float(row.get("pass_rate") or 0.0), 6),
+                    "status": "domain_label_needs_normalization",
+                }
+            )
+        return warnings
+
+    def _normalize_benchmark_domain_label(self, value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return "unknown"
+        alias_map = {
+            "general": "management",
+            "quality": "management",
+            "safety": "management",
+            "environment": "management",
+            "环保": "management",
+            "municipal": "road",
+            "traffic": "road",
+            "hospital": "building",
+            "housing": "building",
+            "decoration": "building",
+            "fire": "mep",
+            "electrical": "mep",
+            "automation": "digital",
+        }
+        if text in BENCHMARK_DOMAIN_CORE:
+            return text
+        if text in alias_map:
+            return alias_map[text]
+        if text.startswith("zf-kg-"):
+            text = re.sub(r"^zf-kg-\d+-", "", text)
+            text = re.sub(r"\.json$", "", text)
+        compact = text.replace("_", "-").replace(" ", "-")
+        for token, domain in BENCHMARK_FILE_DOMAIN_TOKEN_MAP:
+            if token in compact:
+                return domain
+        return "unknown"
+
+    def _collect_auto_generated_lifecycle_warnings(
+        self,
+        *,
+        sections: List[Dict[str, Any]],
+        bid_date: str | None,
+        max_age_days: int,
+        strict_mode: bool = False,
+    ) -> List[Dict[str, Any]]:
+        warnings: List[Dict[str, Any]] = []
+        bid_dt: datetime | None = None
+        if bid_date:
+            try:
+                bid_dt = datetime.strptime(str(bid_date).strip(), "%Y-%m-%d")
+            except Exception:
+                bid_dt = None
+        anchor = bid_dt or datetime.now()
+        max_age = max(7, int(max_age_days))
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            title = str(sec.get("title") or "").strip() or "章节"
+            hit = sec.get("graph_hit") if isinstance(sec.get("graph_hit"), dict) else {}
+            payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
+            node_id = str(hit.get("node_id") or "").strip()
+
+            is_auto = bool(hit.get("is_auto_generated"))
+            if not is_auto:
+                is_auto = bool(payload.get("is_auto_generated")) if isinstance(payload, dict) else False
+            if not is_auto:
+                continue
+
+            review_status = str(
+                hit.get("auto_generated_review_status")
+                or payload.get("review_status")
+                or "pending"
+            ).strip().lower()
+            if review_status not in {"pending", "approved", "rejected"}:
+                review_status = "pending"
+
+            generated_text = str(
+                hit.get("auto_generated_at")
+                or payload.get("auto_generated_at")
+                or ""
+            ).strip()
+            expires_text = str(
+                hit.get("auto_generated_expires_at")
+                or payload.get("auto_generated_expires_at")
+                or ""
+            ).strip()
+            expired = bool(hit.get("auto_generated_expired"))
+            if not expired and expires_text:
+                try:
+                    expires_dt = datetime.strptime(expires_text, "%Y-%m-%d")
+                    expired = anchor > expires_dt
+                except Exception:
+                    expired = False
+
+            if review_status == "rejected":
+                warnings.append(
+                    {
+                        "type": "auto_generated_node_rejected",
+                        "severity": "major",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "status": review_status,
+                    }
+                )
+            elif strict_mode and review_status == "pending":
+                warnings.append(
+                    {
+                        "type": "auto_generated_node_pending_review",
+                        "severity": "major",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "status": review_status,
+                    }
+                )
+
+            if expired:
+                warnings.append(
+                    {
+                        "type": "auto_generated_node_expired",
+                        "severity": "major",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "status": review_status,
+                        "expires_at": expires_text,
+                    }
+                )
+
+            if generated_text:
+                try:
+                    generated_dt = datetime.strptime(generated_text, "%Y-%m-%d")
+                except Exception:
+                    generated_dt = None
+                if generated_dt is not None:
+                    age_days = max(0, int((anchor - generated_dt).days))
+                    if age_days > max_age and review_status != "approved":
+                        warnings.append(
+                            {
+                                "type": "auto_generated_node_overage",
+                                "severity": "major" if strict_mode else "minor",
+                                "dimension": title,
+                                "node_id": node_id,
+                                "status": review_status,
+                                "age_days": age_days,
+                                "max_age_days": max_age,
+                            }
+                        )
+        return warnings
+
     def _build_sentence_evidence_chain(
         self,
         *,
@@ -2042,7 +2342,10 @@ class MultiAgentDocPipeline:
         benchmark_dataset_path: Path | str = DEFAULT_BENCHMARK_DATASET_PATH,
         benchmark_min_pass_rate: float = 0.85,
         benchmark_min_avg_mrr: float = 0.65,
+        benchmark_min_domain_pass_rate: float = 0.70,
+        benchmark_domain_min_cases: int = 3,
         enforce_retrieval_gate: bool = False,
+        enforce_benchmark_domain_gate: bool = False,
         enable_retrieval_weight_training: bool = True,
         retrieval_weight_profile_path: Path | str = DEFAULT_WEIGHT_PROFILE_PATH,
         enable_feedback_learning: bool = True,
@@ -2062,6 +2365,8 @@ class MultiAgentDocPipeline:
         numeric_density_min: float = 0.95,
         auto_enrich_numeric_density: bool = True,
         enforce_standard_reference_gate: bool = False,
+        enforce_auto_generated_lifecycle_gate: bool = False,
+        auto_generated_max_age_days: int = 120,
         hit_rate_dashboard_json_path: Path | str = DEFAULT_HIT_RATE_DASHBOARD_JSON,
         hit_rate_dashboard_md_path: Path | str = DEFAULT_HIT_RATE_DASHBOARD_MD,
         enrichment_draft_path: Path | str = DEFAULT_ENRICHMENT_DRAFT_JSON,
@@ -2236,6 +2541,8 @@ class MultiAgentDocPipeline:
                     self_healing_result["rollback_reason"] = "validation_failed"
 
         benchmark_warning: Dict[str, Any] = {}
+        benchmark_domain_warnings: List[Dict[str, Any]] = []
+        benchmark_domain_quality_warnings: List[Dict[str, Any]] = []
         if bool(retrieval_benchmark.get("triggered")) and not bool(retrieval_benchmark.get("ok")):
             benchmark_warning = {
                 "type": "retrieval_benchmark_gate_failed",
@@ -2253,6 +2560,35 @@ class MultiAgentDocPipeline:
                 if gap not in final_pass.get("gaps", []):
                     final_pass.setdefault("gaps", []).append(gap)
                 final_pass["intercepted"] = True
+        if bool(retrieval_benchmark.get("triggered")):
+            benchmark_domain_warnings = self._collect_retrieval_domain_warnings(
+                retrieval_benchmark=retrieval_benchmark,
+                min_domain_pass_rate=float(benchmark_min_domain_pass_rate),
+                min_cases=int(benchmark_domain_min_cases),
+                strict_mode=bool(enforce_benchmark_domain_gate),
+            )
+            benchmark_domain_quality_warnings = self._collect_retrieval_domain_quality_warnings(
+                retrieval_benchmark=retrieval_benchmark,
+                min_cases=int(benchmark_domain_min_cases),
+            )
+            if benchmark_domain_warnings:
+                benchmark_warning["domain_warnings"] = benchmark_domain_warnings
+                if enforce_benchmark_domain_gate:
+                    final_pass.setdefault("gaps", []).append(
+                        {
+                            "type": "retrieval_benchmark_domain_gate_failed",
+                            "dimension": "检索门禁",
+                            "required_keywords": [str(x.get("domain") or "") for x in benchmark_domain_warnings[:8]],
+                            "query": "kg_retrieval_benchmark.domain_summary",
+                            "suggested_parameters": [
+                                f"domain_pass_rate >= {float(benchmark_min_domain_pass_rate):.2f}",
+                                f"domain_cases >= {int(benchmark_domain_min_cases)}",
+                            ],
+                        }
+                    )
+                    final_pass["intercepted"] = True
+            if benchmark_domain_quality_warnings:
+                benchmark_warning["domain_quality_warnings"] = benchmark_domain_quality_warnings
 
         if auto_enrich_numeric_density:
             final_pass["sections"] = self._enforce_numeric_density_sections(
@@ -2300,6 +2636,30 @@ class MultiAgentDocPipeline:
                     "required_keywords": [str(warning.get("status") or "")],
                     "query": str(warning.get("node_id") or "standard_validity_timeline"),
                     "suggested_parameters": ["更新标准时效记录或切换至有效标准节点"],
+                }
+            )
+            final_pass["intercepted"] = True
+        auto_generated_lifecycle_warnings = self._collect_auto_generated_lifecycle_warnings(
+            sections=final_pass.get("sections") or [],
+            bid_date=self.bid_date,
+            max_age_days=int(auto_generated_max_age_days),
+            strict_mode=bool(enforce_auto_generated_lifecycle_gate),
+        )
+        for warning in auto_generated_lifecycle_warnings:
+            if not isinstance(warning, dict):
+                continue
+            if str(warning.get("severity") or "").strip().lower() != "major":
+                continue
+            if not enforce_auto_generated_lifecycle_gate:
+                continue
+            final_pass.setdefault("gaps", []).append(
+                {
+                    "type": str(warning.get("type") or "auto_generated_lifecycle_warning"),
+                    "severity": "major",
+                    "dimension": str(warning.get("dimension") or "图谱自愈生命周期"),
+                    "required_keywords": [str(warning.get("status") or "")],
+                    "query": str(warning.get("node_id") or "auto_generated_lifecycle"),
+                    "suggested_parameters": ["补丁节点需人工复核通过且在有效期内"],
                 }
             )
             final_pass["intercepted"] = True
@@ -2516,6 +2876,7 @@ class MultiAgentDocPipeline:
             "auto_enrichment_draft": enrichment_draft,
             "numeric_density_gate": numeric_density_gate,
             "standard_validity_warnings": standard_validity_warnings,
+            "auto_generated_lifecycle_warnings": auto_generated_lifecycle_warnings,
             "gemini_context_packets": self._build_gemini_context_packets(
                 index_matrix=ctx.index_matrix,
                 sections=final_pass.get("sections") or [],
@@ -2526,6 +2887,8 @@ class MultiAgentDocPipeline:
             "standard_auto_update": standard_update_report,
             "approval_report": approval_report,
             "retrieval_benchmark": retrieval_benchmark,
+            "retrieval_benchmark_domain_warnings": benchmark_domain_warnings,
+            "retrieval_benchmark_domain_quality_warnings": benchmark_domain_quality_warnings,
             "retrieval_weight_profile": retrieval_weight_profile,
             "retrieval_benchmark_warning": benchmark_warning,
             "docx_output": docx_saved,

@@ -16,6 +16,79 @@ DOMAIN_ALIASES = {
     "road": {"road", "municipal", "traffic"},
     "mep": {"mep", "electrical", "hvac", "fire"},
 }
+FILE_DOMAIN_TOKEN_MAP = (
+    ("bridge", "bridge"),
+    ("tunnel", "tunnel"),
+    ("railway", "railway"),
+    ("rail", "railway"),
+    ("offshorewind", "hydraulic"),
+    ("marine", "hydraulic"),
+    ("harbor", "hydraulic"),
+    ("port", "hydraulic"),
+    ("hydraulic", "hydraulic"),
+    ("water", "hydraulic"),
+    ("river", "hydraulic"),
+    ("sponge", "hydraulic"),
+    ("drainage", "hydraulic"),
+    ("wtp", "hydraulic"),
+    ("water-treatment", "hydraulic"),
+    ("mep", "mep"),
+    ("electrical", "mep"),
+    ("hvac", "mep"),
+    ("fire", "mep"),
+    ("gas", "mep"),
+    ("pipeline", "mep"),
+    ("petrochemical", "mep"),
+    ("power-energy", "mep"),
+    ("power", "mep"),
+    ("energy", "mep"),
+    ("weak-current", "mep"),
+    ("district-heating", "mep"),
+    ("heating", "mep"),
+    ("waste-to-energy", "mep"),
+    ("communication", "mep"),
+    ("smartsite", "digital"),
+    ("smartom", "digital"),
+    ("digital", "digital"),
+    ("bim", "digital"),
+    ("data-center", "digital"),
+    ("network", "digital"),
+    ("调度", "digital"),
+    ("碳", "digital"),
+    ("networkgraph", "digital"),
+    ("quantum", "digital"),
+    ("carbon", "digital"),
+    ("fm", "digital"),
+    ("earthwork", "earthwork"),
+    ("foundation", "earthwork"),
+    ("deep-excavation", "earthwork"),
+    ("road", "road"),
+    ("municipal-road", "road"),
+    ("landscape", "road"),
+    ("airport", "road"),
+    ("highway", "road"),
+    ("building", "building"),
+    ("housing", "building"),
+    ("hospital", "building"),
+    ("deco", "building"),
+    ("decoration", "building"),
+    ("curtain", "building"),
+    ("steel-structure", "building"),
+    ("prefabricated", "building"),
+    ("demolition", "building"),
+    ("exterior-ancillary", "building"),
+    ("ancillary", "building"),
+    ("urban-renewal", "building"),
+    ("crane", "building"),
+    ("lifting", "building"),
+    ("scaffolding", "building"),
+    ("formwork", "building"),
+    ("management", "management"),
+    ("safetycivilization", "management"),
+    ("greenconstruction", "management"),
+    ("temporaryworks", "management"),
+    ("fournew", "management"),
+)
 
 
 def _iter_kg_nodes(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -39,6 +112,13 @@ def _normalize_domain_hint(value: Any) -> str:
     text = str(value or "").strip().lower()
     if not text:
         return "general"
+    if text.startswith("zf-kg-"):
+        text = re.sub(r"^zf-kg-\d+-", "", text)
+        text = re.sub(r"\.json$", "", text)
+    compact = text.replace("_", "-").replace(" ", "-")
+    for token, domain in FILE_DOMAIN_TOKEN_MAP:
+        if token in compact:
+            return domain
     if any(tok in text for tok in ("bridge", "桥梁")):
         return "bridge"
     if any(tok in text for tok in ("tunnel", "隧道")):

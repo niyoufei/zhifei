@@ -798,7 +798,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T17:02:21",
+            "approved_at": "2026-03-01T00:08:55",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -892,7 +892,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -2324,7 +2324,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T17:02:21",
+            "approved_at": "2026-03-01T00:08:55",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -2418,7 +2418,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -2726,10 +2726,10 @@
             "enabled": true,
             "strategy": "ema_feedback_v1",
             "alpha": 0.2,
-            "hit_count": 0,
+            "hit_count": 4,
             "pass_count": 0,
-            "trace_coverage_avg": 0.0,
-            "last_feedback_at": "",
+            "trace_coverage_avg": 1.0,
+            "last_feedback_at": "2026-03-01T00:09:18",
             "weight_adjustments": {
               "keyword_exact_weight": 1.0,
               "query_token_weight": 1.0,
@@ -2753,28 +2753,24 @@
                 "segment_key": "earthwork",
                 "min_hit_count": 3,
                 "weight_adjustments": {
-                  "domain_weight": 1.06,
-                  "keyword_exact_weight": 1.03
-                }
-              },
-              {
-                "segment_type": "dimension",
-                "segment_key": "进度",
-                "min_hit_count": 2,
-                "weight_adjustments": {
-                  "query_token_weight": 1.05
-                }
-              },
-              {
-                "segment_type": "region",
-                "segment_key": "CN",
-                "min_hit_count": 8,
-                "weight_adjustments": {
-                  "region_weight": 1.02,
-                  "timeline_weight": 1.01
+                  "domain_weight": 0.95
                 }
               }
-            ]
+            ],
+            "pass_rate": 0.0,
+            "domains": {
+              "earthwork": 4
+            },
+            "recommended_defaults": {
+              "inspection_frequency_per_shift": 2
+            },
+            "segment_performance": {
+              "domain:earthwork": {
+                "hit_count": 4,
+                "pass_count": 0,
+                "pass_rate": 0.0
+              }
+            }
           },
           "entity_alignment": {
             "enabled": true,
@@ -3866,7 +3862,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T17:02:21",
+            "approved_at": "2026-03-01T00:08:55",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -3960,7 +3956,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -4278,10 +4274,10 @@
             "enabled": true,
             "strategy": "ema_feedback_v1",
             "alpha": 0.2,
-            "hit_count": 0,
+            "hit_count": 4,
             "pass_count": 0,
-            "trace_coverage_avg": 0.0,
-            "last_feedback_at": "",
+            "trace_coverage_avg": 1.0,
+            "last_feedback_at": "2026-03-01T00:09:18",
             "weight_adjustments": {
               "keyword_exact_weight": 1.0,
               "query_token_weight": 1.0,
@@ -4305,28 +4301,24 @@
                 "segment_key": "earthwork",
                 "min_hit_count": 3,
                 "weight_adjustments": {
-                  "domain_weight": 1.06,
-                  "keyword_exact_weight": 1.03
-                }
-              },
-              {
-                "segment_type": "dimension",
-                "segment_key": "环保",
-                "min_hit_count": 2,
-                "weight_adjustments": {
-                  "query_token_weight": 1.05
-                }
-              },
-              {
-                "segment_type": "region",
-                "segment_key": "CN",
-                "min_hit_count": 8,
-                "weight_adjustments": {
-                  "region_weight": 1.02,
-                  "timeline_weight": 1.01
+                  "domain_weight": 0.95
                 }
               }
-            ]
+            ],
+            "pass_rate": 0.0,
+            "domains": {
+              "earthwork": 4
+            },
+            "recommended_defaults": {
+              "inspection_frequency_per_shift": 2
+            },
+            "segment_performance": {
+              "domain:earthwork": {
+                "hit_count": 4,
+                "pass_count": 0,
+                "pass_rate": 0.0
+              }
+            }
           },
           "entity_alignment": {
             "enabled": true,
@@ -5424,7 +5416,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T17:02:21",
+            "approved_at": "2026-03-01T00:08:55",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -5524,7 +5516,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -5842,10 +5834,10 @@
             "enabled": true,
             "strategy": "ema_feedback_v1",
             "alpha": 0.2,
-            "hit_count": 0,
+            "hit_count": 4,
             "pass_count": 0,
-            "trace_coverage_avg": 0.0,
-            "last_feedback_at": "",
+            "trace_coverage_avg": 1.0,
+            "last_feedback_at": "2026-03-01T00:09:18",
             "weight_adjustments": {
               "keyword_exact_weight": 1.0,
               "query_token_weight": 1.0,
@@ -5869,28 +5861,24 @@
                 "segment_key": "earthwork",
                 "min_hit_count": 3,
                 "weight_adjustments": {
-                  "domain_weight": 1.06,
-                  "keyword_exact_weight": 1.03
-                }
-              },
-              {
-                "segment_type": "dimension",
-                "segment_key": "重难点",
-                "min_hit_count": 2,
-                "weight_adjustments": {
-                  "query_token_weight": 1.05
-                }
-              },
-              {
-                "segment_type": "region",
-                "segment_key": "CN",
-                "min_hit_count": 8,
-                "weight_adjustments": {
-                  "region_weight": 1.02,
-                  "timeline_weight": 1.01
+                  "domain_weight": 0.95
                 }
               }
-            ]
+            ],
+            "pass_rate": 0.0,
+            "domains": {
+              "earthwork": 4
+            },
+            "recommended_defaults": {
+              "inspection_frequency_per_shift": 2
+            },
+            "segment_performance": {
+              "domain:earthwork": {
+                "hit_count": 4,
+                "pass_count": 0,
+                "pass_rate": 0.0
+              }
+            }
           },
           "entity_alignment": {
             "enabled": true,
@@ -6910,7 +6898,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T17:02:21",
+            "approved_at": "2026-03-01T00:08:55",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -7004,7 +6992,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -7312,10 +7300,10 @@
             "enabled": true,
             "strategy": "ema_feedback_v1",
             "alpha": 0.2,
-            "hit_count": 0,
+            "hit_count": 4,
             "pass_count": 0,
-            "trace_coverage_avg": 0.0,
-            "last_feedback_at": "",
+            "trace_coverage_avg": 1.0,
+            "last_feedback_at": "2026-03-01T00:09:18",
             "weight_adjustments": {
               "keyword_exact_weight": 1.0,
               "query_token_weight": 1.0,
@@ -7339,28 +7327,24 @@
                 "segment_key": "earthwork",
                 "min_hit_count": 3,
                 "weight_adjustments": {
-                  "domain_weight": 1.06,
-                  "keyword_exact_weight": 1.03
-                }
-              },
-              {
-                "segment_type": "dimension",
-                "segment_key": "扣分点",
-                "min_hit_count": 2,
-                "weight_adjustments": {
-                  "query_token_weight": 1.05
-                }
-              },
-              {
-                "segment_type": "region",
-                "segment_key": "CN",
-                "min_hit_count": 8,
-                "weight_adjustments": {
-                  "region_weight": 1.02,
-                  "timeline_weight": 1.01
+                  "domain_weight": 0.95
                 }
               }
-            ]
+            ],
+            "pass_rate": 0.0,
+            "domains": {
+              "earthwork": 4
+            },
+            "recommended_defaults": {
+              "inspection_frequency_per_shift": 2
+            },
+            "segment_performance": {
+              "domain:earthwork": {
+                "hit_count": 4,
+                "pass_count": 0,
+                "pass_rate": 0.0
+              }
+            }
           },
           "entity_alignment": {
             "enabled": true,
@@ -8599,7 +8583,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T17:02:21",
+            "approved_at": "2026-03-01T00:08:55",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -8699,7 +8683,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -10107,7 +10091,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -10395,10 +10379,10 @@
             "enabled": true,
             "strategy": "ema_feedback_v1",
             "alpha": 0.2,
-            "hit_count": 12,
-            "pass_count": 4,
+            "hit_count": 16,
+            "pass_count": 6,
             "trace_coverage_avg": 1.0,
-            "last_feedback_at": "2026-02-28T17:02:54",
+            "last_feedback_at": "2026-02-28T23:49:52",
             "weight_adjustments": {
               "keyword_exact_weight": 1.0,
               "query_token_weight": 1.0,
@@ -10426,18 +10410,18 @@
                 }
               }
             ],
-            "pass_rate": 0.333333,
+            "pass_rate": 0.375,
             "domains": {
-              "earthwork": 12
+              "earthwork": 16
             },
             "recommended_defaults": {
               "inspection_frequency_per_shift": 2
             },
             "segment_performance": {
               "domain:earthwork": {
-                "hit_count": 12,
-                "pass_count": 4,
-                "pass_rate": 0.333333
+                "hit_count": 16,
+                "pass_count": 6,
+                "pass_rate": 0.375
               }
             }
           },
@@ -11379,7 +11363,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -12675,7 +12659,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T17:02:21",
+            "approved_at": "2026-03-01T00:08:55",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -12769,7 +12753,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T17:02:21",
+            "checked_at": "2026-03-01T00:08:55",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,

@@ -305,3 +305,85 @@ async def test_multi_agent_pipeline_builds_dynamic_specialist_and_compliance_age
     assert len(result["sections"]) == len(result["index_matrix"]["index_matrix"])
     assert all("specialist_domain" in sec for sec in result["sections"])
     assert all("specialist_agent" in sec for sec in result["sections"])
+
+
+def test_collect_retrieval_domain_warnings() -> None:
+    pipeline = MultiAgentDocPipeline(kg_db_path=Path("backend/data/autoplan/v2/test_domain.sqlite3"))
+    warnings = pipeline._collect_retrieval_domain_warnings(
+        retrieval_benchmark={
+            "triggered": True,
+            "domain_summary": [
+                {"domain": "mep", "total_cases": 6, "pass_rate": 0.42},
+                {"domain": "road", "total_cases": 2, "pass_rate": 0.20},
+                {"domain": "building", "total_cases": 8, "pass_rate": 0.91},
+            ],
+        },
+        min_domain_pass_rate=0.70,
+        min_cases=3,
+        strict_mode=True,
+    )
+    assert isinstance(warnings, list)
+    assert len(warnings) == 1
+    assert str(warnings[0].get("domain") or "") == "mep"
+    assert str(warnings[0].get("severity") or "") == "major"
+    assert str(warnings[0].get("raw_domain") or "") == "mep"
+
+
+def test_collect_retrieval_domain_warnings_can_normalize_file_domain_and_emit_quality_warning() -> None:
+    pipeline = MultiAgentDocPipeline(kg_db_path=Path("backend/data/autoplan/v2/test_domain_norm.sqlite3"))
+    warnings = pipeline._collect_retrieval_domain_warnings(
+        retrieval_benchmark={
+            "triggered": True,
+            "domain_summary": [
+                {"domain": "ZF-KG-09-Landscape-Master", "total_cases": 4, "pass_rate": 0.42},
+                {"domain": "mep", "total_cases": 4, "pass_rate": 0.32},
+                {"domain": "???", "total_cases": 5, "pass_rate": 0.10},
+            ],
+        },
+        min_domain_pass_rate=0.70,
+        min_cases=3,
+        strict_mode=False,
+    )
+    by_domain = {str(x.get("domain") or ""): x for x in warnings}
+    assert "road" in by_domain
+    assert "mep" in by_domain
+    assert "unknown" not in by_domain
+    quality = pipeline._collect_retrieval_domain_quality_warnings(
+        retrieval_benchmark={
+            "triggered": True,
+            "domain_summary": [
+                {"domain": "???", "total_cases": 5, "pass_rate": 0.10},
+                {"domain": "building", "total_cases": 6, "pass_rate": 0.91},
+            ],
+        },
+        min_cases=3,
+    )
+    assert len(quality) == 1
+    assert str(quality[0].get("raw_domain") or "") == "???"
+    assert pipeline._normalize_benchmark_domain_label("ZF-KG-51-SmartSite-General") == "digital"
+
+
+def test_collect_auto_generated_lifecycle_warnings() -> None:
+    pipeline = MultiAgentDocPipeline(kg_db_path=Path("backend/data/autoplan/v2/test_lifecycle.sqlite3"))
+    warnings = pipeline._collect_auto_generated_lifecycle_warnings(
+        sections=[
+            {
+                "title": "质量",
+                "graph_hit": {
+                    "node_id": "AUTO-001",
+                    "is_auto_generated": True,
+                    "auto_generated_review_status": "pending",
+                    "auto_generated_at": "2025-01-01",
+                    "auto_generated_expires_at": "2025-03-01",
+                    "auto_generated_expired": True,
+                },
+            }
+        ],
+        bid_date="2026-02-28",
+        max_age_days=90,
+        strict_mode=True,
+    )
+    types = {str(w.get("type") or "") for w in warnings if isinstance(w, dict)}
+    assert "auto_generated_node_pending_review" in types
+    assert "auto_generated_node_expired" in types
+    assert "auto_generated_node_overage" in types
