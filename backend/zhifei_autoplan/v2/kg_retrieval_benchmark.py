@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from collections import defaultdict
 from typing import Any, Dict, List
 
 from backend.zhifei_autoplan.v2.data_graph_ingestion import search_graph_index
@@ -96,7 +97,7 @@ def _generate_cases_from_kg(
     seed_offset: int = 0,
 ) -> List[Dict[str, Any]]:
     files = sorted(kg_root.glob("ZF-KG-*.json"))
-    rows: List[Dict[str, Any]] = []
+    by_domain: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     seq = int(seed_offset)
     for path in files:
         try:
@@ -124,19 +125,63 @@ def _generate_cases_from_kg(
                     continue
                 dedup_local.add(q_key)
                 seq += 1
-                rows.append(
-                    {
-                        "case_id": f"auto-{seq:04d}",
-                        "query": q,
-                        "expected_keywords": keywords[:2],
-                        "expected_domain": "",
-                        "source_file": path.name,
-                        "auto_generated": True,
-                    }
-                )
-                if len(rows) >= max_cases:
-                    return rows
-    return rows
+                case = {
+                    "case_id": f"auto-{seq:04d}",
+                    "query": q,
+                    "expected_keywords": keywords[:2],
+                    "expected_domain": "",
+                    "domain_hint": domain_hint,
+                    "source_file": path.name,
+                    "auto_generated": True,
+                }
+                by_domain[domain_hint].append(case)
+
+    domains = sorted(by_domain.keys())
+    if not domains:
+        return []
+    out: List[Dict[str, Any]] = []
+    cursor = {d: 0 for d in domains}
+    while len(out) < max_cases:
+        progressed = False
+        for domain in domains:
+            pool = by_domain.get(domain) or []
+            idx = int(cursor.get(domain) or 0)
+            if idx >= len(pool):
+                continue
+            out.append(pool[idx])
+            cursor[domain] = idx + 1
+            progressed = True
+            if len(out) >= max_cases:
+                break
+        if not progressed:
+            break
+    return out
+
+
+def _case_domain(case: Dict[str, Any]) -> str:
+    hint = str(case.get("domain_hint") or case.get("expected_domain") or "").strip().lower()
+    if hint:
+        return hint
+    source = str(case.get("source_file") or "").strip().lower()
+    if not source:
+        return "general"
+    return _normalize_domain_hint(source)
+
+
+def _summarize_case_coverage(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
+    domain_counts: Dict[str, int] = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        domain = _case_domain(case)
+        domain_counts[domain] = int(domain_counts.get(domain) or 0) + 1
+    ranked = sorted(domain_counts.items(), key=lambda x: (-x[1], x[0]))
+    return {
+        "domains_total": len(domain_counts),
+        "domain_counts": {k: v for k, v in ranked},
+        "largest_domain": ranked[0][0] if ranked else "general",
+        "largest_domain_cases": ranked[0][1] if ranked else 0,
+    }
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -219,12 +264,15 @@ def ensure_benchmark_dataset(
         }
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(json.dumps(out_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    effective_cases = merged_cases if expanded else [x for x in existing if isinstance(x, dict)]
+    coverage = _summarize_case_coverage(effective_cases)
     return {
         "ok": True,
         "expanded": expanded,
         "dataset_path": str(dst if expanded else src),
         "cases_seed": len(existing),
-        "cases_total": len(merged_cases if expanded else existing),
+        "cases_total": len(effective_cases),
+        "coverage": coverage,
         "kg_root": str(root),
     }
 
@@ -267,6 +315,7 @@ def run_retrieval_benchmark(
     rows: List[Dict[str, Any]] = []
     passed = 0
     mrr_sum = 0.0
+    domain_stats: Dict[str, Dict[str, Any]] = {}
 
     for idx, case in enumerate(cases, start=1):
         if not isinstance(case, dict):
@@ -298,6 +347,15 @@ def run_retrieval_benchmark(
         if ok:
             passed += 1
             mrr_sum += 1.0 / rank
+        domain = _case_domain(case)
+        row = domain_stats.setdefault(
+            domain,
+            {"domain": domain, "total": 0, "passed": 0, "mrr_sum": 0.0},
+        )
+        row["total"] = int(row["total"]) + 1
+        if ok:
+            row["passed"] = int(row["passed"]) + 1
+            row["mrr_sum"] = float(row["mrr_sum"]) + (1.0 / rank)
         rows.append(
             {
                 "case_id": str(case.get("case_id") or f"case-{idx:03d}"),
@@ -310,6 +368,7 @@ def run_retrieval_benchmark(
                 "match_score": round(score, 4),
                 "best_score": round(best_score, 4),
                 "top_total": len(hits),
+                "domain": domain,
                 "top_node_id": (hits[rank - 1].get("node_id") if rank > 0 and rank - 1 < len(hits) else None),
             }
         )
@@ -318,6 +377,20 @@ def run_retrieval_benchmark(
     pass_rate = round((passed / total), 6) if total > 0 else 0.0
     avg_mrr = round((mrr_sum / total), 6) if total > 0 else 0.0
     ok = bool(total > 0 and pass_rate >= float(min_pass_rate) and avg_mrr >= float(min_avg_mrr))
+    domain_summary: List[Dict[str, Any]] = []
+    for domain, row in sorted(domain_stats.items(), key=lambda x: (-int(x[1].get("total") or 0), x[0])):
+        d_total = int(row.get("total") or 0)
+        d_pass = int(row.get("passed") or 0)
+        d_mrr = float(row.get("mrr_sum") or 0.0)
+        domain_summary.append(
+            {
+                "domain": domain,
+                "total_cases": d_total,
+                "passed_cases": d_pass,
+                "pass_rate": round(d_pass / max(d_total, 1), 6),
+                "avg_mrr": round(d_mrr / max(d_total, 1), 6),
+            }
+        )
     return {
         "ok": ok,
         "dataset_path": str(Path(dataset_path).expanduser().resolve()),
@@ -328,5 +401,6 @@ def run_retrieval_benchmark(
         "pass_rate": pass_rate,
         "avg_mrr": avg_mrr,
         "thresholds": {"min_pass_rate": _safe_float(min_pass_rate), "min_avg_mrr": _safe_float(min_avg_mrr)},
+        "domain_summary": domain_summary,
         "rows": rows,
     }

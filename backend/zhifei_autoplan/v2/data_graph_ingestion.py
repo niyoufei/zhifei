@@ -279,6 +279,44 @@ def _safe_date_key(value: Any) -> int:
     return year * 10000 + month * 100 + day
 
 
+def _auto_generated_lifecycle(
+    payload: Dict[str, Any] | None,
+    *,
+    bid_date_key: int = 0,
+) -> Dict[str, Any]:
+    data = payload if isinstance(payload, dict) else {}
+    is_auto_generated = bool(data.get("is_auto_generated"))
+    if not is_auto_generated:
+        return {
+            "is_auto_generated": False,
+            "review_status": "n/a",
+            "ttl_days": 0,
+            "generated_at": "",
+            "expires_at": "",
+            "expired": False,
+        }
+    generated_at = str(data.get("auto_generated_at") or "").strip()
+    expires_at = str(data.get("auto_generated_expires_at") or "").strip()
+    ttl_days = int(data.get("auto_generated_ttl_days") or 0)
+    if ttl_days < 0:
+        ttl_days = 0
+    review_status = str(data.get("review_status") or "pending").strip().lower()
+    if review_status not in {"pending", "approved", "rejected"}:
+        review_status = "pending"
+
+    as_of_key = int(bid_date_key or _safe_date_key(time.strftime("%Y-%m-%d", time.localtime())))
+    exp_key = _safe_date_key(expires_at)
+    expired = bool(exp_key > 0 and as_of_key > exp_key)
+    return {
+        "is_auto_generated": True,
+        "review_status": review_status,
+        "ttl_days": ttl_days,
+        "generated_at": generated_at,
+        "expires_at": expires_at,
+        "expired": expired,
+    }
+
+
 def _timeline_match_for_bid(
     timeline: Dict[str, Any],
     *,
@@ -2769,6 +2807,16 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         "uncertainty_profile": uncertainty_profile,
                         "knowledge_tier": knowledge_tier,
                         "is_auto_generated": bool(_is_auto_generated_node_payload(node)),
+                        "auto_generated_at": str(
+                            _dict_get_case_insensitive(node, ("auto_generated_at", "generated_at")) or ""
+                        ).strip(),
+                        "auto_generated_ttl_days": int(
+                            _safe_float(_dict_get_case_insensitive(node, ("auto_generated_ttl_days", "ttl_days")), 0.0)
+                        ),
+                        "auto_generated_expires_at": str(
+                            _dict_get_case_insensitive(node, ("auto_generated_expires_at", "expires_at")) or ""
+                        ).strip(),
+                        "review_status": str(_dict_get_case_insensitive(node, ("review_status",)) or "").strip().lower(),
                         "reference_standard": reference_materials.get("reference_standard") or [],
                         "reference_standard_codes": reference_materials.get("reference_standard_codes") or [],
                         "reference_source_documents": reference_materials.get("reference_source_documents") or [],
@@ -4271,6 +4319,7 @@ class KnowledgeGraphIndex:
                 continue
             knowledge_tier = str(payload.get("knowledge_tier") or "").strip().lower() if isinstance(payload, dict) else ""
             is_auto_generated = bool(payload.get("is_auto_generated")) if isinstance(payload, dict) else False
+            auto_lifecycle = _auto_generated_lifecycle(payload if isinstance(payload, dict) else {}, bid_date_key=bid_date_key)
             wf_status = str(approval_workflow.get("status") or "").strip().lower() if isinstance(approval_workflow, dict) else ""
             if knowledge_tier not in {"gold", "silver", "bronze"}:
                 if not is_auto_generated:
@@ -4457,6 +4506,13 @@ class KnowledgeGraphIndex:
             if is_auto_generated:
                 auto_penalty = -1.1
                 score += auto_penalty
+                review_status = str(auto_lifecycle.get("review_status") or "pending")
+                if review_status == "pending":
+                    score -= 0.25
+                elif review_status == "rejected":
+                    score -= 1.0
+                if bool(auto_lifecycle.get("expired")):
+                    score -= 1.8
             else:
                 score += 0.5
 
@@ -4581,6 +4637,8 @@ class KnowledgeGraphIndex:
                 "timeline_match_state": timeline_match.get("state"),
                 "knowledge_tier": knowledge_tier,
                 "is_auto_generated": bool(is_auto_generated),
+                "auto_generated_review_status": str(auto_lifecycle.get("review_status") or ""),
+                "auto_generated_expired": bool(auto_lifecycle.get("expired")),
                 "regional_plugin_reasons": region_plugin_match.get("reasons") if isinstance(region_plugin_match, dict) else [],
                 "score_breakdown": score_breakdown,
             }
@@ -4599,6 +4657,11 @@ class KnowledgeGraphIndex:
                 "entity_master_key": entity_master_key,
                 "knowledge_tier": knowledge_tier,
                 "is_auto_generated": bool(is_auto_generated),
+                "auto_generated_review_status": str(auto_lifecycle.get("review_status") or ""),
+                "auto_generated_expired": bool(auto_lifecycle.get("expired")),
+                "auto_generated_ttl_days": int(auto_lifecycle.get("ttl_days") or 0),
+                "auto_generated_at": str(auto_lifecycle.get("generated_at") or ""),
+                "auto_generated_expires_at": str(auto_lifecycle.get("expires_at") or ""),
                 "reference_standard_codes": reference_standard_codes,
                 "reference_source_documents": reference_source_documents,
                 "applicable_conditions": _safe_json_load(row["applicable_conditions_json"], {}),

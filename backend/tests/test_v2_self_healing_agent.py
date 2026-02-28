@@ -37,6 +37,10 @@ async def test_self_healing_agent_fallback_build_and_persist(tmp_path: Path) -> 
     formula_node = built["nodes"][1]
 
     assert parameter_node["is_auto_generated"] is True
+    assert str(parameter_node.get("auto_generated_at") or "").strip()
+    assert str(parameter_node.get("auto_generated_expires_at") or "").strip()
+    assert int(parameter_node.get("auto_generated_ttl_days") or 0) >= 7
+    assert str(parameter_node.get("review_status") or "") in {"pending", "approved", "rejected"}
     assert isinstance(parameter_node.get("reference_standard"), list)
     assert parameter_node["reference_standard"]
     assert isinstance(parameter_node.get("applicable_conditions"), dict)
@@ -45,6 +49,8 @@ async def test_self_healing_agent_fallback_build_and_persist(tmp_path: Path) -> 
 
     assert formula_node["node_type"] == "FormulaNode"
     assert formula_node["is_auto_generated"] is True
+    assert str(formula_node.get("auto_generated_at") or "").strip()
+    assert str(formula_node.get("auto_generated_expires_at") or "").strip()
     assert str(formula_node.get("formula_expression") or "").strip()
     assert isinstance(formula_node.get("formula_variables"), list)
     assert formula_node["reference_standard"]

@@ -873,7 +873,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T08:31:31",
+            "approved_at": "2026-02-28T17:02:21",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -969,7 +969,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T08:31:31",
+            "checked_at": "2026-02-28T17:02:21",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -2353,7 +2353,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T08:31:31",
+            "approved_at": "2026-02-28T17:02:21",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -2449,7 +2449,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T08:31:31",
+            "checked_at": "2026-02-28T17:02:21",
             "catalog_version": "v1",
             "checked_codes": 4,
             "superseded_count": 0,
@@ -3835,7 +3835,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T08:31:31",
+            "approved_at": "2026-02-28T17:02:21",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -3931,7 +3931,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T08:31:31",
+            "checked_at": "2026-02-28T17:02:21",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -5335,7 +5335,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T08:31:31",
+            "approved_at": "2026-02-28T17:02:21",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -5431,7 +5431,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T08:31:31",
+            "checked_at": "2026-02-28T17:02:21",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -6863,7 +6863,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T08:31:31",
+            "approved_at": "2026-02-28T17:02:21",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -6965,7 +6965,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T08:31:31",
+            "checked_at": "2026-02-28T17:02:21",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -8508,7 +8508,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T08:31:31",
+            "approved_at": "2026-02-28T17:02:21",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -8604,7 +8604,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T08:31:31",
+            "checked_at": "2026-02-28T17:02:21",
             "catalog_version": "v1",
             "checked_codes": 5,
             "superseded_count": 0,
@@ -9958,7 +9958,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T08:31:31",
+            "checked_at": "2026-02-28T17:02:21",
             "catalog_version": "v1",
             "checked_codes": 2,
             "superseded_count": 0,
@@ -11354,7 +11354,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T08:31:31",
+            "checked_at": "2026-02-28T17:02:21",
             "catalog_version": "v1",
             "checked_codes": 3,
             "superseded_count": 0,
@@ -11597,10 +11597,10 @@
             "enabled": true,
             "strategy": "ema_feedback_v1",
             "alpha": 0.2,
-            "hit_count": 5,
-            "pass_count": 1,
+            "hit_count": 6,
+            "pass_count": 2,
             "trace_coverage_avg": 1.0,
-            "last_feedback_at": "2026-02-28T08:32:02",
+            "last_feedback_at": "2026-02-28T17:02:54",
             "weight_adjustments": {
               "keyword_exact_weight": 1.0,
               "query_token_weight": 1.0,
@@ -11628,18 +11628,18 @@
                 }
               }
             ],
-            "pass_rate": 0.2,
+            "pass_rate": 0.333333,
             "domains": {
-              "mep": 5
+              "mep": 6
             },
             "recommended_defaults": {
               "inspection_frequency_per_shift": 2
             },
             "segment_performance": {
               "domain:mep": {
-                "hit_count": 5,
-                "pass_count": 1,
-                "pass_rate": 0.2
+                "hit_count": 6,
+                "pass_count": 2,
+                "pass_rate": 0.333333
               }
             }
           },

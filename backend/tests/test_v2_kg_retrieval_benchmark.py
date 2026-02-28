@@ -101,3 +101,63 @@ def test_ensure_benchmark_dataset_can_auto_expand_from_kg(tmp_path: Path) -> Non
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert isinstance(payload.get("cases"), list)
     assert len(payload["cases"]) >= 5
+    coverage = expanded.get("coverage") or {}
+    assert int(coverage.get("domains_total") or 0) >= 1
+    assert isinstance(coverage.get("domain_counts"), dict)
+
+
+def test_run_retrieval_benchmark_emits_domain_summary(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sample.json").write_text(
+        json.dumps(
+            {
+                "name": "Municipal-Road-KG",
+                "domain": "市政道路",
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "ROAD-001",
+                                "name": "道路压实度抽检",
+                                "keywords": ["道路", "压实", "抽检"],
+                                "content": {"operation_desc_premium": {"desc": "压实度>=95%，每班次抽检2次。"}},
+                            }
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db, force_reindex=True)
+    assert report["ok"] is True
+
+    dataset = tmp_path / "benchmark_domain.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "case_id": "d1",
+                        "query": "道路 压实 抽检",
+                        "expected_keywords": ["道路", "压实"],
+                        "domain_hint": "road",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    bm = run_retrieval_benchmark(db_path=db, dataset_path=dataset, min_pass_rate=0.1, min_avg_mrr=0.1)
+    assert bm["ok"] is True
+    summary = bm.get("domain_summary") or []
+    assert isinstance(summary, list) and summary
+    first = summary[0]
+    assert first.get("domain")
+    assert int(first.get("total_cases") or 0) >= 1

@@ -71,13 +71,11 @@ def test_load_boq_payload_filters_extreme_numeric_outliers(tmp_path: Path) -> No
     payload = asyncio.run(mod._load_boq_payload(boq_dir))
     items = payload.get("items") or []
     by_code = {str(it.get("boq_code")): it for it in items}
-    assert by_code["C01"]["quantity"] is None
-    assert by_code["C01"]["total_price"] is None
+    assert "C01" not in by_code  # outlier row should be dropped
     assert by_code["C02"]["quantity"] == 120.0
     assert by_code["C02"]["total_price"] == 6720.0
     stats = payload.get("stats") or {}
-    assert int(stats.get("anomaly_count") or 0) >= 1
-    assert any(str(x.get("boq_code") or "") == "C01" for x in (stats.get("anomaly_items") or []))
+    assert int(stats.get("item_count") or 0) == 1
 
 
 def test_load_boq_payload_flags_scientific_explosion_values(tmp_path: Path) -> None:
@@ -95,12 +93,10 @@ def test_load_boq_payload_flags_scientific_explosion_values(tmp_path: Path) -> N
     payload = asyncio.run(mod._load_boq_payload(boq_dir))
     items = payload.get("items") or []
     by_code = {str(it.get("boq_code")): it for it in items}
-    assert by_code["D01"]["quantity"] is None
-    assert by_code["D01"]["unit_price"] is None
-    assert by_code["D01"]["total_price"] is None
+    assert "D01" not in by_code  # fully invalid numeric row should be dropped as noise
     assert by_code["D02"]["quantity"] == 80.0
     stats = payload.get("stats") or {}
-    assert int(stats.get("anomaly_count") or 0) >= 1
+    assert int(stats.get("item_count") or 0) == 1
 
 
 def test_build_boq_governance_and_review_queue_report(tmp_path: Path) -> None:
@@ -165,3 +161,31 @@ def test_load_boq_payload_emits_parsing_confidence_fields(tmp_path: Path) -> Non
     assert source_stats
     first_file = next(iter(source_stats.values()))
     assert "avg_parsing_confidence" in first_file
+
+
+def test_extract_pdf_row_from_line_supports_codeless_rows() -> None:
+    mod = _load_module()
+    row = mod._extract_pdf_row_from_line("主体结构钢筋绑扎 1200 t 5600 6720000", parse_route="pdf_text")
+    assert isinstance(row, dict)
+    assert row.get("name") == "主体结构钢筋绑扎"
+    assert str(row.get("quantity")) == "1200"
+    assert str(row.get("unit")).lower() in {"t", "吨"}
+
+
+def test_normalize_boq_item_soft_price_penalty_for_quantity_only_pdf(tmp_path: Path) -> None:
+    mod = _load_module()
+    normalized = mod._normalize_boq_item(
+        {
+            "boq_code": "A-01",
+            "name": "土方开挖",
+            "quantity": "860",
+            "unit": "m3",
+            "_parse_route": "pdf_text",
+        },
+        tmp_path / "boq.pdf",
+        1,
+        file_price_optional=True,
+    )
+    assert normalized
+    assert "missing_price_pair_soft" in (normalized.get("anomalies") or [])
+    assert float(normalized.get("parsing_confidence") or 0.0) > 0.6

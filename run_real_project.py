@@ -28,15 +28,18 @@ NUMERIC_LIMITS = {
 }
 BOQ_REVIEW_QUEUE_MAX = 400
 CONFIDENCE_WEIGHTS = {
-    "quantity_scientific_explosion": 0.28,
-    "unit_price_scientific_explosion": 0.20,
-    "total_price_scientific_explosion": 0.26,
-    "quantity_unit_outlier": 0.20,
-    "quantity_dynamic_outlier": 0.16,
-    "price_consistency_outlier": 0.18,
-    "missing_unit_for_quantity": 0.12,
-    "missing_price_pair": 0.10,
-    "missing_quantity": 0.12,
+    "quantity_scientific_explosion": 0.24,
+    "unit_price_scientific_explosion": 0.16,
+    "total_price_scientific_explosion": 0.20,
+    "quantity_unit_outlier": 0.14,
+    "quantity_dynamic_outlier": 0.12,
+    "price_consistency_outlier": 0.12,
+    "missing_unit_for_quantity": 0.08,
+    "missing_price_pair": 0.08,
+    "missing_price_pair_soft": 0.03,
+    "missing_quantity": 0.10,
+    "unrecognized_name_noise": 0.08,
+    "missing_code_soft": 0.02,
 }
 UNIT_QUANTITY_LIMITS = {
     "m3": 1.0e7,
@@ -51,6 +54,36 @@ UNIT_QUANTITY_LIMITS = {
     "处": 1.0e6,
     "座": 1.0e6,
 }
+BOQ_HEADER_NOISE_TERMS = {
+    "序号",
+    "清单编码",
+    "清单项目编码",
+    "编码",
+    "项目名称",
+    "名称",
+    "工程量",
+    "数量",
+    "单位",
+    "综合单价",
+    "单价",
+    "合价",
+    "总价",
+    "金额",
+    "备注",
+    "页码",
+    "小计",
+    "合计",
+}
+BOQ_ROUTE_SCORE_ADJUST = {
+    "boq_parser": 0.03,
+    "csv": 0.02,
+    "excel": 0.02,
+    "pdf_table": -0.02,
+    "pdf_text": -0.04,
+    "pdf_ocr": -0.06,
+    "unknown": -0.07,
+}
+BOQ_UNIT_PATTERN = r"(?:m3|m2|m|t|kg|台|套|个|项|处|座|樘|米|吨|㎡|㎥)"
 
 
 def _confidence_level(score: float) -> str:
@@ -127,6 +160,66 @@ def _looks_like_scientific_explosion(raw: Any) -> bool:
     return len(digits) >= 16
 
 
+def _is_noise_boq_name(name: str) -> bool:
+    text = str(name or "").strip()
+    if not text:
+        return True
+    normalized = re.sub(r"\s+", "", text).lower()
+    if normalized in {x.lower() for x in BOQ_HEADER_NOISE_TERMS}:
+        return True
+    if all(token in normalized for token in ("分部分项", "工程量清单")):
+        return True
+    if re.fullmatch(r"[A-Za-z]{1,5}\d{0,3}", normalized):
+        return True
+    if len(re.sub(r"[^A-Za-z0-9\u4e00-\u9fa5]", "", text)) < 2:
+        return True
+    return False
+
+
+def _extract_pdf_row_from_line(clean: str, *, parse_route: str) -> Dict[str, Any] | None:
+    text = re.sub(r"\s+", " ", str(clean or "").strip())
+    if not text:
+        return None
+    qty_unit_re = re.compile(rf"(?P<qty>-?\d+(?:\.\d+)?)\s*(?P<unit>{BOQ_UNIT_PATTERN})\b", flags=re.IGNORECASE)
+    m = qty_unit_re.search(text)
+    if not m:
+        return None
+    prefix = text[: m.start()].strip(" -:：|")
+    suffix = text[m.end() :].strip()
+    if not prefix:
+        return None
+
+    prefix_tokens = prefix.split()
+    if len(prefix_tokens) >= 2 and re.fullmatch(r"\d{1,3}", prefix_tokens[0]):
+        prefix_tokens = prefix_tokens[1:]
+    if not prefix_tokens:
+        return None
+
+    code = ""
+    first = prefix_tokens[0]
+    if re.fullmatch(r"[A-Za-z]?[A-Za-z0-9./_-]{2,24}", first):
+        if re.search(r"\d", first) and len(prefix_tokens) >= 2:
+            code = first
+            prefix_tokens = prefix_tokens[1:]
+
+    name = " ".join(prefix_tokens).strip()
+    if _is_noise_boq_name(name):
+        return None
+
+    numeric_tail = re.findall(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", suffix or "")
+    unit_price = numeric_tail[0] if len(numeric_tail) >= 1 else None
+    total_price = numeric_tail[1] if len(numeric_tail) >= 2 else None
+    return {
+        "boq_code": code,
+        "name": name,
+        "quantity": m.group("qty"),
+        "unit": m.group("unit"),
+        "unit_price": unit_price,
+        "total_price": total_price,
+        "_parse_route": parse_route,
+    }
+
+
 def _fallback_parse_pdf_text_rows(path: Path) -> List[Dict[str, Any]]:
     try:
         import pdfplumber  # type: ignore
@@ -138,7 +231,7 @@ def _fallback_parse_pdf_text_rows(path: Path) -> List[Dict[str, Any]]:
         r"(?P<code>[A-Za-z0-9][A-Za-z0-9./_-]{2,})\s+"
         r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()\-_/·、]{2,50})\s+"
         r"(?P<qty>\d+(?:\.\d+)?)\s*"
-        r"(?P<unit>m3|m2|m|t|kg|台|套|个|项|处|座|樘|米|吨|㎡|㎥)\b",
+        rf"(?P<unit>{BOQ_UNIT_PATTERN})\b",
         flags=re.IGNORECASE,
     )
     try:
@@ -150,8 +243,14 @@ def _fallback_parse_pdf_text_rows(path: Path) -> List[Dict[str, Any]]:
                     clean = re.sub(r"\s+", " ", str(line or "").strip())
                     if not clean:
                         continue
+                    parsed = _extract_pdf_row_from_line(clean, parse_route="pdf_text")
+                    if parsed:
+                        rows.append(parsed)
+                        continue
                     m = line_re.search(clean)
                     if not m:
+                        continue
+                    if _is_noise_boq_name(str(m.group("name") or "")):
                         continue
                     rows.append(
                         {
@@ -181,7 +280,7 @@ def _fallback_parse_pdf_ocr_rows(path: Path) -> List[Dict[str, Any]]:
         r"(?P<code>[A-Za-z0-9][A-Za-z0-9./_-]{2,})\s+"
         r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()\-_/·、]{2,50})\s+"
         r"(?P<qty>\d+(?:\.\d+)?)\s*"
-        r"(?P<unit>m3|m2|m|t|kg|台|套|个|项|处|座|樘|米|吨|㎡|㎥)\b",
+        rf"(?P<unit>{BOQ_UNIT_PATTERN})\b",
         flags=re.IGNORECASE,
     )
     try:
@@ -199,8 +298,16 @@ def _fallback_parse_pdf_ocr_rows(path: Path) -> List[Dict[str, Any]]:
             clean = re.sub(r"\s+", " ", str(line or "").strip())
             if not clean:
                 continue
+            parsed = _extract_pdf_row_from_line(clean, parse_route="pdf_ocr")
+            if parsed:
+                rows.append(parsed)
+                if len(rows) >= 1800:
+                    return rows
+                continue
             m = line_re.search(clean)
             if not m:
+                continue
+            if _is_noise_boq_name(str(m.group("name") or "")):
                 continue
             rows.append(
                 {
@@ -407,12 +514,20 @@ def _boq_candidates(path: Path) -> List[Path]:
     return sorted(files, key=lambda p: str(p))
 
 
-def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dict[str, Any]:
+def _normalize_boq_item(
+    raw: Dict[str, Any],
+    source_file: Path,
+    seq: int,
+    *,
+    file_price_optional: bool = False,
+) -> Dict[str, Any]:
     name = str(raw.get("name") or "").strip()
-    if not name:
+    if not name or _is_noise_boq_name(name):
         return {}
     anomalies: List[str] = []
-    unit = str(raw.get("unit") or "").strip() or None
+    raw_unit = str(raw.get("unit") or "").strip()
+    norm_unit = _normalize_unit(raw_unit)
+    unit = norm_unit or raw_unit or None
     quantity_raw = raw.get("quantity")
     quantity = _sanitize_numeric(_to_float(quantity_raw), "quantity")
     if _looks_like_scientific_explosion(quantity_raw):
@@ -423,6 +538,8 @@ def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dic
         if abs(float(quantity)) > q_limit:
             quantity = None
             anomalies.append("quantity_unit_outlier")
+    if quantity is None:
+        return {}
 
     unit_price_raw = raw.get("unit_price")
     total_price_raw = raw.get("total_price")
@@ -446,27 +563,51 @@ def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dic
         ratio = abs(float(total_price) - expect) / max(expect, 1.0)
         if ratio > 8.0:
             anomalies.append("price_consistency_outlier")
+    # Rows without any numeric signal are very likely OCR/header noise and should not enter governance.
+    if quantity is None and unit_price is None and total_price is None:
+        return {}
     if quantity is not None and (unit is None or not str(unit).strip()):
         anomalies.append("missing_unit_for_quantity")
-    if quantity is None:
-        anomalies.append("missing_quantity")
     if unit_price is None and total_price is None:
-        anomalies.append("missing_price_pair")
+        parse_route_for_price = str(raw.get("_parse_route") or "unknown").strip().lower()
+        if file_price_optional or parse_route_for_price in {"pdf_text", "pdf_ocr"}:
+            anomalies.append("missing_price_pair_soft")
+        else:
+            anomalies.append("missing_price_pair")
 
     confidence = 1.0
     for tag in anomalies:
         confidence -= float(CONFIDENCE_WEIGHTS.get(str(tag), 0.06))
-    if str(raw.get("boq_code") or "").strip().startswith(("AUTO-", "CSV-", "XLS-")):
-        confidence -= 0.04
     parse_route = str(raw.get("_parse_route") or "unknown").strip().lower()
-    if parse_route in {"pdf_text", "pdf_ocr"}:
-        confidence -= 0.08
-    elif parse_route in {"pdf_table"}:
-        confidence -= 0.04
+    confidence += float(BOQ_ROUTE_SCORE_ADJUST.get(parse_route, BOQ_ROUTE_SCORE_ADJUST["unknown"]))
+
+    code_text = str(raw.get("boq_code") or raw.get("code") or "").strip()
+    if code_text:
+        if re.search(r"[A-Za-z]", code_text) and re.search(r"\d", code_text):
+            confidence += 0.02
+    else:
+        anomalies.append("missing_code_soft")
+        confidence -= float(CONFIDENCE_WEIGHTS.get("missing_code_soft", 0.02))
+    if code_text.startswith(("AUTO-", "CSV-", "XLS-")):
+        confidence -= 0.03
+
+    if quantity is not None and unit is not None:
+        confidence += 0.06
+    if unit_price is not None or total_price is not None:
+        confidence += 0.03
+    resources = raw.get("resources")
+    process_name = str(raw.get("process") or "").strip()
+    if process_name:
+        confidence += 0.02
+    if isinstance(resources, list) and resources:
+        confidence += 0.02
+    if isinstance(raw.get("source_file"), str) and str(raw.get("source_file") or "").strip():
+        confidence += 0.01
+
     confidence = max(0.0, min(1.0, confidence))
 
     return {
-        "boq_code": str(raw.get("boq_code") or raw.get("code") or f"AUTO-{seq}"),
+        "boq_code": str(code_text or f"AUTO-{seq}"),
         "name": name,
         "quantity": quantity,
         "unit": unit,
@@ -482,6 +623,11 @@ def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dic
 
 async def _load_single_boq(path: Path) -> Dict[str, Any]:
     suffix = path.suffix.lower()
+    filename = str(path.name or "")
+    price_optional = bool(
+        suffix == ".pdf"
+        and any(token in filename for token in ("汇总", "透视", "工程量清单", "清单汇总", "清单透视", "清单总表"))
+    )
     fallback_used = False
     fallback_sources: List[str] = []
     if suffix == ".csv":
@@ -530,15 +676,18 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
     for idx, item in enumerate(payload.get("items") or [], start=1):
         if not isinstance(item, dict):
             continue
-        normalized = _normalize_boq_item(item, path, idx)
+        normalized = _normalize_boq_item(item, path, idx, file_price_optional=price_optional)
         if normalized:
             normalized_items.append(normalized)
-            if normalized.get("anomalies"):
+            significant_anomalies = [
+                str(tag) for tag in (normalized.get("anomalies") or []) if str(tag) not in {"missing_price_pair_soft", "missing_code_soft"}
+            ]
+            if significant_anomalies:
                 anomaly_items.append(
                     {
                         "boq_code": normalized.get("boq_code"),
                         "name": normalized.get("name"),
-                        "anomalies": normalized.get("anomalies"),
+                        "anomalies": significant_anomalies,
                     }
                 )
 
@@ -581,6 +730,7 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
         for it in normalized_items
         if isinstance(it.get("unit_price"), (int, float)) or isinstance(it.get("total_price"), (int, float))
     )
+    payload["stats"]["valid_unit_count"] = sum(1 for it in normalized_items if str(it.get("unit") or "").strip())
     payload["stats"]["avg_parsing_confidence"] = round(
         sum(float(it.get("parsing_confidence") or 0.0) for it in normalized_items) / max(len(normalized_items), 1),
         6,
@@ -588,6 +738,18 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
     payload["stats"]["low_confidence_count"] = sum(
         1 for it in normalized_items if float(it.get("parsing_confidence") or 0.0) < 0.55
     )
+    payload["stats"]["medium_confidence_count"] = sum(
+        1 for it in normalized_items if 0.55 <= float(it.get("parsing_confidence") or 0.0) < 0.85
+    )
+    payload["stats"]["high_confidence_count"] = sum(
+        1 for it in normalized_items if float(it.get("parsing_confidence") or 0.0) >= 0.85
+    )
+    route_dist: Dict[str, int] = {}
+    for it in normalized_items:
+        route = str(it.get("parse_route") or "unknown")
+        route_dist[route] = int(route_dist.get(route) or 0) + 1
+    payload["stats"]["parse_route_distribution"] = route_dist
+    payload["stats"]["file_price_optional"] = bool(price_optional)
     payload["stats"]["low_confidence_items"] = [
         {
             "boq_code": str(it.get("boq_code") or ""),
@@ -694,24 +856,35 @@ def _build_boq_governance(
         item_count = int(info.get("item_count") or file_item_count.get(file_path) or 0)
         anomaly_count = int(info.get("anomaly_count") or 0)
         valid_qty = int(info.get("valid_quantity_count") or 0)
+        valid_unit = int(info.get("valid_unit_count") or 0)
         valid_price = int(info.get("valid_price_count") or 0)
         fallback_used = bool(info.get("fallback_used"))
         avg_conf = max(0.0, min(1.0, float(info.get("avg_parsing_confidence") or 0.0)))
         anomaly_ratio = float(anomaly_count) / max(item_count, 1)
         qty_ratio = float(valid_qty) / max(item_count, 1)
+        unit_ratio = float(valid_unit) / max(item_count, 1)
         price_ratio = float(valid_price) / max(item_count, 1)
-        fallback_penalty = 0.10 if fallback_used else 0.0
+        low_conf_ratio = float(info.get("low_confidence_count") or 0) / max(item_count, 1)
+        route_dist = info.get("parse_route_distribution") if isinstance(info.get("parse_route_distribution"), dict) else {}
+        ocr_ratio = float(route_dist.get("pdf_ocr") or 0) / max(item_count, 1)
+        text_ratio = float(route_dist.get("pdf_text") or 0) / max(item_count, 1)
+        fallback_penalty = 0.0
+        if fallback_used:
+            fallback_penalty = min(0.06, ocr_ratio * 0.04 + text_ratio * 0.03 + 0.02)
+        low_conf_penalty = min(0.10, low_conf_ratio * 0.10)
         score = max(
             0.0,
             min(
                 1.0,
-                avg_conf * 0.45
-                + max(0.0, 1.0 - anomaly_ratio) * 0.20
-                + qty_ratio * 0.20
-                + price_ratio * 0.15
+                avg_conf * 0.60
+                + max(0.0, 1.0 - anomaly_ratio) * 0.12
+                + qty_ratio * 0.14
+                + unit_ratio * 0.09
+                + price_ratio * 0.05
                 - fallback_penalty,
             ),
         )
+        score = max(0.0, min(1.0, score - low_conf_penalty))
         trust_level = "high" if score >= 0.85 else "medium" if score >= trust_threshold else "low"
         file_scores.append(
             {
@@ -720,8 +893,10 @@ def _build_boq_governance(
                 "anomaly_count": anomaly_count,
                 "anomaly_ratio": round(anomaly_ratio, 6),
                 "valid_quantity_ratio": round(qty_ratio, 6),
+                "valid_unit_ratio": round(unit_ratio, 6),
                 "valid_price_ratio": round(price_ratio, 6),
                 "avg_parsing_confidence": round(avg_conf, 6),
+                "low_confidence_ratio": round(low_conf_ratio, 6),
                 "fallback_used": fallback_used,
                 "trust_score": round(score, 6),
                 "trust_level": trust_level,
@@ -730,7 +905,7 @@ def _build_boq_governance(
         weighted_sum += score * max(item_count, 1)
         weighted_count += max(item_count, 1)
 
-        if trust_level == "low" or anomaly_count > max(10, int(math.ceil(item_count * 0.08))):
+        if trust_level == "low" or anomaly_count > max(12, int(math.ceil(item_count * 0.12))):
             for row_item in (info.get("anomaly_items") or [])[:80]:
                 if isinstance(row_item, dict):
                     manual_review_queue.append(
@@ -769,18 +944,27 @@ def _build_boq_governance(
 
     overall = round(weighted_sum / max(weighted_count, 1.0), 6)
     low_trust_files = [x for x in file_scores if str(x.get("trust_level")) == "low"]
-    parse_error_rate = round(len(parse_errors) / max(int(stats.get("source_file_count") or 1), 1), 6)
-    trusted = bool(overall >= trust_threshold and parse_error_rate <= 0.35 and len(low_trust_files) == 0)
+    source_file_total = max(int(stats.get("source_file_count") or len(file_scores) or 1), 1)
+    parse_error_rate = round(len(parse_errors) / source_file_total, 6)
+    low_trust_ratio = round(len(low_trust_files) / source_file_total, 6)
+    trusted = bool(
+        overall >= trust_threshold
+        and parse_error_rate <= 0.35
+        and low_trust_ratio <= 0.34
+    )
     governance = {
         "enabled": True,
         "trust_threshold": round(float(trust_threshold), 6),
         "overall_trust_score": overall,
         "trusted": trusted,
         "parse_error_rate": parse_error_rate,
+        "low_trust_ratio": low_trust_ratio,
+        "source_file_total": source_file_total,
         "file_scores": sorted(file_scores, key=lambda x: (x.get("trust_score", 0.0), x.get("file", ""))),
         "low_trust_files": low_trust_files,
         "manual_review_queue": manual_review_queue[:BOQ_REVIEW_QUEUE_MAX],
         "manual_review_total": len(manual_review_queue),
+        "trusted_with_watchlist": bool(trusted and len(low_trust_files) > 0),
         "hard_gate_recommended": bool((not trusted) or parse_error_rate > 0.35),
     }
     return governance
@@ -796,6 +980,7 @@ def _write_boq_manual_review_report(governance: Dict[str, Any], *, output_path: 
     lines.append(f"- Trusted: {bool(governance.get('trusted'))}")
     lines.append(f"- Overall Trust Score: {float(governance.get('overall_trust_score') or 0.0):.4f}")
     lines.append(f"- Parse Error Rate: {float(governance.get('parse_error_rate') or 0.0):.4f}")
+    lines.append(f"- Low Trust File Ratio: {float(governance.get('low_trust_ratio') or 0.0):.4f}")
     lines.append(f"- Hard Gate Recommended: {bool(governance.get('hard_gate_recommended'))}")
     lines.append("")
     lines.append("## Low Trust Files")
@@ -804,14 +989,16 @@ def _write_boq_manual_review_report(governance: Dict[str, Any], *, output_path: 
     if not low_files:
         lines.append("None")
     else:
-        lines.append("| File | Trust Score | Item Count | Anomaly Count |")
-        lines.append("|---|---:|---:|---:|")
+        lines.append("| File | Trust Score | Item Count | Anomaly Count | Avg Confidence | Low Confidence Ratio |")
+        lines.append("|---|---:|---:|---:|---:|---:|")
         for row in low_files:
             if not isinstance(row, dict):
                 continue
             lines.append(
                 f"| {row.get('file')} | {float(row.get('trust_score') or 0.0):.4f} | "
-                f"{int(row.get('item_count') or 0)} | {int(row.get('anomaly_count') or 0)} |"
+                f"{int(row.get('item_count') or 0)} | {int(row.get('anomaly_count') or 0)} | "
+                f"{float(row.get('avg_parsing_confidence') or 0.0):.4f} | "
+                f"{float(row.get('low_confidence_ratio') or 0.0):.4f} |"
             )
     lines.append("")
     lines.append("## Manual Review Items")

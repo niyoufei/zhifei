@@ -71,6 +71,36 @@ def _evidence_strength_avg(sections: List[Dict[str, Any]]) -> float:
     return round(sum(vals) / len(vals), 6)
 
 
+def _gap_breakdown(gaps: List[Dict[str, Any]]) -> Dict[str, int]:
+    counter: Dict[str, int] = {}
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            continue
+        key = str(gap.get("type") or "unknown").strip() or "unknown"
+        counter[key] = int(counter.get(key) or 0) + 1
+    return dict(sorted(counter.items(), key=lambda x: (-x[1], x[0])))
+
+
+def _recommended_actions_from_gaps(gaps: List[Dict[str, Any]], *, limit: int = 8) -> List[str]:
+    actions: List[str] = []
+    seen = set()
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            continue
+        for item in gap.get("suggested_parameters") or []:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            actions.append(text)
+            if len(actions) >= limit:
+                return actions
+    return actions
+
+
 def build_hit_rate_dashboard(
     *,
     index_matrix: Dict[str, Any],
@@ -82,6 +112,7 @@ def build_hit_rate_dashboard(
     gaps: List[Dict[str, Any]],
     pre_healing_gap_count: int,
     self_healing: Dict[str, Any],
+    boq_governance: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     matrix_rows = index_matrix.get("index_matrix") if isinstance(index_matrix.get("index_matrix"), list) else []
     dimension_total = int(len(matrix_rows))
@@ -113,6 +144,19 @@ def build_hit_rate_dashboard(
     major_count = _safe_int(severity_map.get("major"), 0)
     minor_count = _safe_int(severity_map.get("minor"), 0)
 
+    boq = boq_governance if isinstance(boq_governance, dict) else {}
+    boq_enabled = bool(boq.get("enabled"))
+    boq_trusted = bool(boq.get("trusted")) if boq_enabled else True
+    boq_score = round(_safe_float(boq.get("overall_trust_score"), 0.0), 6) if boq_enabled else 0.0
+    boq_threshold = round(_safe_float(boq.get("trust_threshold"), 0.0), 6) if boq_enabled else 0.0
+    boq_parse_error_rate = round(_safe_float(boq.get("parse_error_rate"), 0.0), 6) if boq_enabled else 0.0
+
+    gap_breakdown = _gap_breakdown(gaps)
+    recommended_actions = _recommended_actions_from_gaps(gaps)
+    if boq_enabled and not boq_trusted:
+        recommended_actions.insert(0, "修复BOQ低置信度与异常条目，完成人工复核队列闭环")
+    recommended_actions = recommended_actions[:8]
+
     thresholds = {
         "score_hit_rate_min": 0.92,
         "graph_hit_rate_min": 0.92,
@@ -120,6 +164,7 @@ def build_hit_rate_dashboard(
         "sentence_trace_ratio_min": 0.90,
         "graph_binding_rate_min": 0.90,
         "numeric_density_min": 0.95,
+        "boq_trust_score_min": boq_threshold if boq_enabled else 0.0,
     }
     checks = {
         "score_hit_rate_ok": score_hit_rate >= float(thresholds["score_hit_rate_min"]),
@@ -129,6 +174,7 @@ def build_hit_rate_dashboard(
         "graph_binding_rate_ok": graph_binding_rate >= float(thresholds["graph_binding_rate_min"]),
         "numeric_density_ok": numeric_density >= float(thresholds["numeric_density_min"]),
         "consistency_blocker_ok": blocker_count == 0,
+        "boq_trust_ok": bool(boq_trusted),
     }
     overall_ok = all(bool(v) for v in checks.values())
 
@@ -153,9 +199,15 @@ def build_hit_rate_dashboard(
             "consistency_blocker_count": blocker_count,
             "consistency_major_count": major_count,
             "consistency_minor_count": minor_count,
+            "boq_trust_enabled": boq_enabled,
+            "boq_trust_score": boq_score,
+            "boq_trust_threshold": boq_threshold,
+            "boq_parse_error_rate": boq_parse_error_rate,
         },
         "thresholds": thresholds,
         "checks": checks,
+        "gate_breakdown": gap_breakdown,
+        "recommended_actions": recommended_actions,
     }
 
 
@@ -360,12 +412,28 @@ def write_hit_rate_dashboard(
         f"- Numeric Sentence Density: {float(metrics.get('numeric_sentence_density') or 0.0):.4f}",
         f"- Evidence Strength Avg: {float(metrics.get('evidence_strength_avg') or 0.0):.4f}",
         f"- Consistency Blockers: {int(metrics.get('consistency_blocker_count') or 0)}",
+        f"- BOQ Trust Enabled: {bool(metrics.get('boq_trust_enabled'))}",
+        f"- BOQ Trust Score: {float(metrics.get('boq_trust_score') or 0.0):.4f}",
+        f"- BOQ Parse Error Rate: {float(metrics.get('boq_parse_error_rate') or 0.0):.4f}",
         "",
         "## Checks",
         "",
     ]
     for k in sorted(checks.keys()):
         lines.append(f"- {k}: {bool(checks.get(k))}")
+    gate_breakdown = dashboard.get("gate_breakdown") if isinstance(dashboard.get("gate_breakdown"), dict) else {}
+    lines.extend(["", "## Gate Breakdown", ""])
+    if gate_breakdown:
+        for k, v in gate_breakdown.items():
+            lines.append(f"- {k}: {int(v)}")
+    else:
+        lines.append("- none")
+    actions = dashboard.get("recommended_actions") if isinstance(dashboard.get("recommended_actions"), list) else []
+    lines.extend(["", "## Recommended Actions", ""])
+    if actions:
+        for item in actions:
+            lines.append(f"- {str(item)}")
+    else:
+        lines.append("- none")
     m.write_text("\n".join(lines), encoding="utf-8")
     return {"ok": True, "json_path": str(j), "md_path": str(m)}
-

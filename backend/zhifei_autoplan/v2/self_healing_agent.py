@@ -5,6 +5,7 @@ import ast
 import json
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,6 +44,7 @@ FALLBACK_BACKEND_CHAIN = (
     ("qwen", "qwen-plus"),
     ("deepseek", "deepseek-chat"),
 )
+DEFAULT_AUTO_GENERATED_TTL_DAYS = 45
 
 
 DIMENSION_DEFAULTS: Dict[str, Dict[str, Any]] = {
@@ -174,6 +176,11 @@ def _extract_query_tokens(query: str, *, limit: int = 24) -> List[str]:
     tokens = re.split(r"[^\w\u4e00-\u9fff%]+", str(query or ""))
     cleaned = [tok.strip() for tok in tokens if tok and tok.strip()]
     return _dedupe_texts(cleaned)[:limit]
+
+
+def _utc_date_str(offset_days: int = 0) -> str:
+    dt = datetime.now(timezone.utc) + timedelta(days=int(offset_days))
+    return dt.strftime("%Y-%m-%d")
 
 
 def _infer_source_hierarchy_from_query(query: str) -> str:
@@ -547,6 +554,9 @@ class SelfHealingAgent:
 
     def _fallback_nodes(self, gaps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         nodes: List[Dict[str, Any]] = []
+        generated_at = _utc_date_str(0)
+        ttl_days = int(DEFAULT_AUTO_GENERATED_TTL_DAYS)
+        expires_at = _utc_date_str(ttl_days)
         for idx, gap in enumerate(gaps, start=1):
             dimension = str(gap.get("dimension") or "未知维度")
             gap_type = str(gap.get("type") or "")
@@ -607,6 +617,11 @@ class SelfHealingAgent:
                     "safety_level": conf.get("safety_level") or "medium",
                     "reference_standard": conf.get("reference_standard") or ["GB 50300-2013"],
                     "is_auto_generated": True,
+                    "auto_generated_at": generated_at,
+                    "auto_generated_ttl_days": ttl_days,
+                    "auto_generated_expires_at": expires_at,
+                    "review_required": True,
+                    "review_status": "pending",
                     "formula_expression": conf.get("formula_expression") if is_formula else "",
                     "formula_variables": conf.get("formula_variables") if is_formula else [],
                     "professional_domain": evidence_fields.get("professional_domain"),
@@ -629,6 +644,8 @@ class SelfHealingAgent:
             fallback_map[dim] = DIMENSION_DEFAULTS.get(dim, DIMENSION_DEFAULTS["质量"])
 
         out: List[Dict[str, Any]] = []
+        generated_at = _utc_date_str(0)
+        default_ttl_days = int(DEFAULT_AUTO_GENERATED_TTL_DAYS)
         for idx, node in enumerate(raw_nodes, start=1):
             if not isinstance(node, dict):
                 continue
@@ -711,6 +728,18 @@ class SelfHealingAgent:
             if not is_formula:
                 formula_expression = ""
                 formula_variables = []
+            ttl_days = int(node.get("auto_generated_ttl_days") or default_ttl_days)
+            if ttl_days < 7:
+                ttl_days = 7
+            if ttl_days > 365:
+                ttl_days = 365
+            auto_generated_at = str(node.get("auto_generated_at") or generated_at).strip() or generated_at
+            auto_generated_expires_at = (
+                str(node.get("auto_generated_expires_at") or "").strip() or _utc_date_str(ttl_days)
+            )
+            review_status = str(node.get("review_status") or "pending").strip().lower()
+            if review_status not in {"pending", "approved", "rejected"}:
+                review_status = "pending"
             evidence_fields = _build_default_evidence_fields(
                 node_id=node_id,
                 dimension=dim,
@@ -752,6 +781,11 @@ class SelfHealingAgent:
                     "safety_level": safety,
                     "reference_standard": standards,
                     "is_auto_generated": True,
+                    "auto_generated_at": auto_generated_at,
+                    "auto_generated_ttl_days": ttl_days,
+                    "auto_generated_expires_at": auto_generated_expires_at,
+                    "review_required": True,
+                    "review_status": review_status,
                     "formula_expression": formula_expression,
                     "formula_variables": formula_variables,
                     "professional_domain": professional_domain,
@@ -783,6 +817,38 @@ class SelfHealingAgent:
                 standard_ok += 1
             else:
                 issues.append({"node_id": node_id, "type": "invalid_reference_standard", "details": refs_list})
+
+            review_status = str(node.get("review_status") or "").strip().lower()
+            if review_status not in {"pending", "approved", "rejected"}:
+                issues.append({"node_id": node_id, "type": "invalid_review_status", "details": review_status})
+
+            ttl_days = int(node.get("auto_generated_ttl_days") or 0)
+            if ttl_days < 7 or ttl_days > 365:
+                issues.append({"node_id": node_id, "type": "invalid_auto_generated_ttl_days", "details": ttl_days})
+            generated_at = str(node.get("auto_generated_at") or "").strip()
+            expires_at = str(node.get("auto_generated_expires_at") or "").strip()
+            if not generated_at or not expires_at:
+                issues.append({"node_id": node_id, "type": "missing_auto_generated_dates"})
+            else:
+                try:
+                    gen_dt = datetime.fromisoformat(generated_at)
+                    exp_dt = datetime.fromisoformat(expires_at)
+                    if exp_dt <= gen_dt:
+                        issues.append(
+                            {
+                                "node_id": node_id,
+                                "type": "invalid_auto_generated_expiry_order",
+                                "details": {"generated_at": generated_at, "expires_at": expires_at},
+                            }
+                        )
+                except Exception:
+                    issues.append(
+                        {
+                            "node_id": node_id,
+                            "type": "invalid_auto_generated_date_format",
+                            "details": {"generated_at": generated_at, "expires_at": expires_at},
+                        }
+                    )
 
             if str(node.get("node_type") or "") == "FormulaNode":
                 expr = str(node.get("formula_expression") or "").strip()

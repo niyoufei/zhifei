@@ -979,3 +979,63 @@ def test_search_handles_fts_query_with_slash_tokens(tmp_path: Path) -> None:
     )
     assert result["ok"] is True
     assert int(result.get("total") or 0) >= 1
+
+
+def test_search_marks_expired_auto_generated_nodes_and_prefers_human(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "auto_lifecycle.json").write_text(
+        json.dumps(
+            {
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "HUM-001",
+                                "name": "混凝土浇筑控制节点",
+                                "keywords": ["混凝土", "浇筑", "控制"],
+                                "source_hierarchy": "国标",
+                                "content": {"operation_desc_premium": {"desc": "厚度30cm，班次复核2次。"}},
+                            },
+                            {
+                                "node_id": "AUTO-001",
+                                "name": "混凝土浇筑控制节点-自动补全",
+                                "keywords": ["混凝土", "浇筑", "控制"],
+                                "source_hierarchy": "国标",
+                                "is_auto_generated": True,
+                                "review_status": "pending",
+                                "auto_generated_at": "2025-01-01",
+                                "auto_generated_ttl_days": 30,
+                                "auto_generated_expires_at": "2025-01-31",
+                                "content": {"operation_desc_premium": {"desc": "自动补全版本。"}},
+                            },
+                        ]
+                    }
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(
+        query="混凝土 浇筑 控制",
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=5,
+        bid_date="2026-02-28",
+        prefer_human_verified=True,
+    )
+    assert result["ok"] is True
+    assert int(result.get("total") or 0) >= 2
+    first = result["results"][0]
+    assert str(first.get("title") or "").startswith("混凝土浇筑控制节点")
+    assert bool(first.get("is_auto_generated")) is False
+    auto_rows = [x for x in (result.get("results") or []) if "自动补全" in str(x.get("title") or "")]
+    assert auto_rows
+    assert bool(auto_rows[0].get("auto_generated_expired")) is True
+    assert str(auto_rows[0].get("auto_generated_review_status") or "") == "pending"

@@ -2350,6 +2350,7 @@ class MultiAgentDocPipeline:
             gaps=final_pass.get("gaps") or [],
             pre_healing_gap_count=len(first_pass.get("gaps") or []),
             self_healing=self_healing_result,
+            boq_governance=boq_governance or {},
         )
         dashboard_saved = write_hit_rate_dashboard(
             dashboard=hit_rate_dashboard,
