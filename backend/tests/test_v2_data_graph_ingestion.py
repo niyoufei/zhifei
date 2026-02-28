@@ -940,3 +940,42 @@ def test_search_outputs_uncertainty_interval_bundle(tmp_path: Path) -> None:
     assert float(interval.get("confidence_level") or 0.0) == pytest.approx(0.72, rel=1e-6)
     assert float(interval.get("lower") or 0.0) == pytest.approx(8.0, rel=1e-6)
     assert float(interval.get("upper") or 0.0) == pytest.approx(12.0, rel=1e-6)
+
+
+def test_search_handles_fts_query_with_slash_tokens(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "slash_token.json").write_text(
+        json.dumps(
+            {
+                "knowledge_database": {
+                    "core": {
+                        "nodes": [
+                            {
+                                "node_id": "FTS-001",
+                                "name": "公路桥涵施工技术规范节点",
+                                "keywords": ["JTG/T 3650-2020", "桥涵", "施工"],
+                                "reference_standard": ["JTG/T 3650-2020 公路桥涵施工技术规范"],
+                                "content": {"operation_desc_premium": {"desc": "按JTG/T 3650-2020执行"}},
+                            }
+                        ]
+                    }
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(
+        query="JTG/T 3650-2020",
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=5,
+    )
+    assert result["ok"] is True
+    assert int(result.get("total") or 0) >= 1

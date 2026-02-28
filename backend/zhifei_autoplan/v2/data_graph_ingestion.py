@@ -54,6 +54,10 @@ DEFAULT_RETRIEVAL_SCORE_WEIGHTS: Dict[str, float] = {
 }
 
 DEFAULT_FORMULA_EXPRESSION = "quantity / max(productivity_per_day, 1)"
+STANDARD_CODE_RE = re.compile(
+    r"(GB(?:/T)?|JGJ|SL|TB|DL|CJ|JTG(?:/T)?|DB(?:/T)?\d{2}|T/[A-Z0-9]+)\s*[-/]?\s*\d{2,6}(?:[./-]\d+)?",
+    flags=re.IGNORECASE,
+)
 
 PROFESSIONAL_DOMAIN_SEEDS: Dict[str, Tuple[str, ...]] = {
     "bridge": ("bridge", "桥梁", "箱梁", "桥面", "挂篮", "盖梁", "桥墩"),
@@ -822,6 +826,147 @@ def _coerce_targets(raw: Any) -> List[str]:
         seen.add(norm)
         uniq.append(item)
     return uniq
+
+
+def _extract_standard_codes(values: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        matched = False
+        for m in STANDARD_CODE_RE.finditer(text):
+            code = re.sub(r"\s+", " ", m.group(0)).strip()
+            key = code.lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(code)
+            matched = True
+        if not matched and STANDARD_CODE_RE.search(text):
+            norm = re.sub(r"\s+", " ", text).strip()
+            key = norm.lower()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(norm)
+    return out[:24]
+
+
+def _extract_reference_materials(node: Dict[str, Any]) -> Dict[str, Any]:
+    refs_raw = _dict_get_case_insensitive(
+        node,
+        (
+            "reference_standard",
+            "reference_standard_codes",
+            "reference_standards",
+            "reference",
+            "references",
+        ),
+    )
+    docs_raw = _dict_get_case_insensitive(
+        node,
+        (
+            "reference_source_documents",
+            "source_documents",
+            "authority_documents",
+            "source_refs",
+            "source_reference",
+        ),
+    )
+    def _as_reference_list(raw: Any) -> List[str]:
+        out: List[str] = []
+        if raw is None:
+            return out
+        if isinstance(raw, str):
+            out.extend([x.strip() for x in re.split(r"[;,，；、|\n\r]+", raw) if x.strip()])
+        elif isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str):
+                    out.extend([x.strip() for x in re.split(r"[;,，；、|\n\r]+", item) if x.strip()])
+                elif item not in (None, "", [], {}):
+                    out.append(str(item).strip())
+        elif isinstance(raw, dict):
+            for val in raw.values():
+                out.extend(_as_reference_list(val))
+        else:
+            out.append(str(raw).strip())
+        dedup: List[str] = []
+        seen = set()
+        for item in out:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            low = text.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            dedup.append(text)
+        return dedup[:32]
+
+    refs_list = _as_reference_list(refs_raw)
+    docs_list = _as_reference_list(docs_raw)
+    code_refs = _extract_standard_codes(refs_list)
+    code_keys = {x.lower() for x in code_refs}
+
+    source_docs: List[str] = []
+    for item in refs_list + docs_list:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if text.lower() in code_keys:
+            continue
+        if STANDARD_CODE_RE.search(text):
+            continue
+        if text not in source_docs:
+            source_docs.append(text)
+
+    merged_refs: List[str] = []
+    seen = set()
+    for item in code_refs + source_docs:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        low = text.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        merged_refs.append(text)
+    return {
+        "reference_standard": merged_refs[:24],
+        "reference_standard_codes": code_refs[:24],
+        "reference_source_documents": source_docs[:24],
+        "reference_standard_primary": merged_refs[0] if merged_refs else "",
+        "reference_standard_count": len(merged_refs),
+    }
+
+
+def _is_auto_generated_node_payload(node: Dict[str, Any]) -> bool:
+    if bool(node.get("is_auto_generated")):
+        return True
+    text = json.dumps(node, ensure_ascii=False)
+    return "is_auto_generated" in text and ("true" in text.lower() or "1" in text)
+
+
+def _infer_knowledge_tier(
+    *,
+    node: Dict[str, Any],
+    approval_workflow: Dict[str, Any],
+    source_hierarchy: str,
+) -> str:
+    explicit = str(_dict_get_case_insensitive(node, ("knowledge_tier", "quality_tier", "tier")) or "").strip().lower()
+    if explicit in {"gold", "silver", "bronze"}:
+        return explicit
+    wf_status = str(approval_workflow.get("status") or "").strip().lower()
+    if not _is_auto_generated_node_payload(node):
+        return "gold"
+    if wf_status == "approved":
+        if source_hierarchy in {"答疑文件", "设计图纸", "国标"}:
+            return "gold"
+        return "silver"
+    if wf_status in {"pending", "review", "in_review"}:
+        return "silver"
+    return "bronze"
 
 
 def _extract_relation_targets(node: Dict[str, Any], edge_type: str) -> List[str]:
@@ -2511,6 +2656,7 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     approval_workflow = _extract_approval_workflow(node)
                     formula_sensitivity = _extract_formula_sensitivity(node)
                     bim_ifc_context = _extract_bim_ifc_context(node)
+                    reference_materials = _extract_reference_materials(node)
                     process_parameter_pack = _extract_process_parameter_pack(node)
                     resource_productivity_model = _extract_resource_productivity_model(node)
                     risk_trigger_matrix = _extract_risk_trigger_matrix(node)
@@ -2560,6 +2706,11 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                             "confidence_level": round(confidence, 4),
                             "relative_interval": round(relative_interval, 4),
                         }
+                    knowledge_tier = _infer_knowledge_tier(
+                        node=node,
+                        approval_workflow=approval_workflow if isinstance(approval_workflow, dict) else {},
+                        source_hierarchy=source_hierarchy,
+                    )
                     refs = _build_reference_keys(
                         node,
                         uid="",
@@ -2616,6 +2767,13 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         "formula_safety_profile": formula_safety_profile,
                         "evidence_completeness": evidence_completeness,
                         "uncertainty_profile": uncertainty_profile,
+                        "knowledge_tier": knowledge_tier,
+                        "is_auto_generated": bool(_is_auto_generated_node_payload(node)),
+                        "reference_standard": reference_materials.get("reference_standard") or [],
+                        "reference_standard_codes": reference_materials.get("reference_standard_codes") or [],
+                        "reference_source_documents": reference_materials.get("reference_source_documents") or [],
+                        "reference_standard_primary": str(reference_materials.get("reference_standard_primary") or ""),
+                        "reference_standard_count": int(reference_materials.get("reference_standard_count") or 0),
                     }
 
                     tactical = _extract_tactical_fields(node, activation_context=activation_ctx)
@@ -2648,6 +2806,8 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     keywords.extend(_extract_terms(formula_safety_profile))
                     keywords.extend(_extract_terms(evidence_completeness))
                     keywords.extend(_extract_terms(uncertainty_profile))
+                    keywords.extend(_extract_terms(reference_materials.get("reference_standard_codes") or []))
+                    keywords.extend(_extract_terms(reference_materials.get("reference_source_documents") or []))
                     activation_signal = ""
                     dna_verified = True
                     tactical_mode = ""
@@ -3560,10 +3720,10 @@ class KnowledgeGraphIndex:
             # Schema version tracking for reindex safety.
             vrow = conn.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
             version = str(vrow[0]) if vrow else "0"
-            if version != "6":
+            if version != "7":
                 self._schema_needs_reindex = True
                 conn.execute(
-                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '6')"
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', '7')"
                 )
             conn.commit()
 
@@ -3881,7 +4041,20 @@ class KnowledgeGraphIndex:
         tokens = _tokenize(query)
         if not tokens:
             return {}
-        fts_query = " OR ".join(tokens[:16])
+        safe_tokens: List[str] = []
+        for token in tokens:
+            cleaned = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", str(token or "")).strip()
+            if not cleaned:
+                continue
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if len(cleaned) < 2:
+                continue
+            safe_tokens.append(f"\"{cleaned}\"")
+            if len(safe_tokens) >= 16:
+                break
+        if not safe_tokens:
+            return {}
+        fts_query = " OR ".join(safe_tokens)
         rows = conn.execute(
             """
             SELECT rowid, bm25(nodes_fts) AS rank
@@ -3947,6 +4120,8 @@ class KnowledgeGraphIndex:
         regional_plugin_dir: Path | str | None = None,
         retrieval_weight_profile_path: Path | str | None = None,
         require_approved_auto: bool = False,
+        prefer_human_verified: bool = True,
+        min_source_weight: int = 0,
         resolve_authority: bool = True,
     ) -> Dict[str, Any]:
         top_k = max(1, min(int(top_k or 12), 200))
@@ -3961,6 +4136,7 @@ class KnowledgeGraphIndex:
         min_gemini_score = max(0.0, min(100.0, _safe_float(min_gemini_usefulness_score, 0.0)))
         min_retrieval_quality = max(0.0, min(100.0, _safe_float(min_retrieval_quality_score, 0.0)))
         norm_region = str(region_context or "").strip().upper()
+        min_source_weight_int = max(0, min(5, int(min_source_weight or 0)))
         bid_date_text = str(bid_date or "").strip()
         bid_date_key = _safe_date_key(bid_date_text)
         score_weights = _load_retrieval_score_weights(retrieval_weight_profile_path)
@@ -4072,6 +4248,37 @@ class KnowledgeGraphIndex:
             approval_workflow = _safe_json_load(row["approval_workflow_json"], {})
             formula_sensitivity = _safe_json_load(row["formula_sensitivity_json"], {})
             bim_ifc_context = _safe_json_load(row["bim_ifc_context_json"], {})
+            reference_standard_codes = payload.get("reference_standard_codes") if isinstance(payload, dict) else []
+            if not isinstance(reference_standard_codes, list):
+                reference_standard_codes = []
+            reference_standard = payload.get("reference_standard") if isinstance(payload, dict) else []
+            if not isinstance(reference_standard, list):
+                reference_standard = []
+            if not reference_standard_codes and reference_standard:
+                reference_standard_codes = _extract_standard_codes([str(x).strip() for x in reference_standard if str(x).strip()])
+            reference_source_documents = payload.get("reference_source_documents") if isinstance(payload, dict) else []
+            if not isinstance(reference_source_documents, list):
+                reference_source_documents = []
+            if not reference_source_documents and reference_standard:
+                code_set = {str(x).strip().lower() for x in reference_standard_codes if str(x).strip()}
+                reference_source_documents = [
+                    str(x).strip()
+                    for x in reference_standard
+                    if str(x).strip() and str(x).strip().lower() not in code_set and not STANDARD_CODE_RE.search(str(x))
+                ][:12]
+            source_weight = int(SOURCE_HIERARCHY_WEIGHTS.get(str(row["source_hierarchy"] or "未知"), 0))
+            if source_weight < min_source_weight_int:
+                continue
+            knowledge_tier = str(payload.get("knowledge_tier") or "").strip().lower() if isinstance(payload, dict) else ""
+            is_auto_generated = bool(payload.get("is_auto_generated")) if isinstance(payload, dict) else False
+            wf_status = str(approval_workflow.get("status") or "").strip().lower() if isinstance(approval_workflow, dict) else ""
+            if knowledge_tier not in {"gold", "silver", "bronze"}:
+                if not is_auto_generated:
+                    knowledge_tier = "gold"
+                elif wf_status == "approved":
+                    knowledge_tier = "silver"
+                else:
+                    knowledge_tier = "bronze"
             process_parameter_pack = _coerce_dict(payload.get("process_parameter_pack"))
             resource_productivity_model = _coerce_dict(payload.get("resource_productivity_model"))
             risk_trigger_matrix = _coerce_dict(payload.get("risk_trigger_matrix"))
@@ -4222,6 +4429,37 @@ class KnowledgeGraphIndex:
             else:
                 approval_contrib = 0.0
 
+            source_docs_contrib = 0.0
+            reference_contrib = 0.0
+            tier_contrib = 0.0
+            auto_penalty = 0.0
+            if str(row["source_hierarchy"] or "") in {"国标", "行标", "企标"}:
+                if reference_standard_codes:
+                    reference_contrib = 0.9
+                    score += reference_contrib
+                else:
+                    score -= 1.3
+            if str(row["source_hierarchy"] or "") in {"答疑文件", "设计图纸"}:
+                if reference_source_documents:
+                    source_docs_contrib = 0.8
+                    score += source_docs_contrib
+                else:
+                    score -= 0.8
+            if knowledge_tier == "gold":
+                tier_contrib = 1.2
+                score += tier_contrib
+            elif knowledge_tier == "silver":
+                tier_contrib = 0.4
+                score += tier_contrib
+            else:
+                tier_contrib = -0.4
+                score += tier_contrib
+            if is_auto_generated:
+                auto_penalty = -1.1
+                score += auto_penalty
+            else:
+                score += 0.5
+
             if isinstance(standard_validity_timeline, dict):
                 status = str(standard_validity_timeline.get("timeline_status") or "").strip().lower()
                 if status == "active":
@@ -4323,6 +4561,10 @@ class KnowledgeGraphIndex:
                 "retrieval_quality_contrib": round(retrieval_quality_contrib, 6),
                 "approval_contrib": round(approval_contrib, 6),
                 "region_plugin_contrib": round(region_plugin_contrib, 6),
+                "reference_contrib": round(reference_contrib, 6),
+                "source_docs_contrib": round(source_docs_contrib, 6),
+                "tier_contrib": round(tier_contrib, 6),
+                "auto_penalty": round(auto_penalty, 6),
             }
             retrieval_explainability = {
                 "enabled": True,
@@ -4337,6 +4579,8 @@ class KnowledgeGraphIndex:
                 "long_tail_match": long_tail_match,
                 "query_dimensions": query_dimensions,
                 "timeline_match_state": timeline_match.get("state"),
+                "knowledge_tier": knowledge_tier,
+                "is_auto_generated": bool(is_auto_generated),
                 "regional_plugin_reasons": region_plugin_match.get("reasons") if isinstance(region_plugin_match, dict) else [],
                 "score_breakdown": score_breakdown,
             }
@@ -4349,9 +4593,14 @@ class KnowledgeGraphIndex:
                 "source_file": row["file_name"],
                 "source_path": row["source_path"],
                 "source_hierarchy": row["source_hierarchy"],
+                "source_hierarchy_weight": source_weight,
                 "node_type": row["node_type"],
                 "object_key": row["object_key"],
                 "entity_master_key": entity_master_key,
+                "knowledge_tier": knowledge_tier,
+                "is_auto_generated": bool(is_auto_generated),
+                "reference_standard_codes": reference_standard_codes,
+                "reference_source_documents": reference_source_documents,
                 "applicable_conditions": _safe_json_load(row["applicable_conditions_json"], {}),
                 "resource_requirements": resource_requirements,
                 "safety_level": row["safety_level"],
@@ -4413,6 +4662,11 @@ class KnowledgeGraphIndex:
                     "timeline_status": standard_validity_timeline.get("timeline_status")
                     if isinstance(standard_validity_timeline, dict)
                     else "",
+                    "source_hierarchy_weight": source_weight,
+                    "knowledge_tier": knowledge_tier,
+                    "is_auto_generated": bool(is_auto_generated),
+                    "reference_standard_codes": reference_standard_codes[:10],
+                    "reference_source_documents": reference_source_documents[:10],
                     "timeline_match_state": timeline_match.get("state"),
                     "entity_master_key": entity_master_key,
                     "evidence_completeness_ratio": _safe_float(evidence_completeness.get("completeness_ratio"), 0.0),
@@ -4425,6 +4679,11 @@ class KnowledgeGraphIndex:
             results.append(result_item)
 
         results.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        if prefer_human_verified and results:
+            verified = [x for x in results if not bool(x.get("is_auto_generated"))]
+            if len(verified) >= max(2, top_k // 2):
+                fallback = [x for x in results if bool(x.get("is_auto_generated"))]
+                results = verified + fallback
         before = len(results)
         if resolve_authority:
             results = self._apply_authority_resolution(results)
@@ -4444,6 +4703,8 @@ class KnowledgeGraphIndex:
             "bid_date": bid_date_text,
             "allow_superseded": bool(allow_superseded),
             "require_approved_auto": bool(require_approved_auto),
+            "prefer_human_verified": bool(prefer_human_verified),
+            "min_source_weight": min_source_weight_int,
             "total": len(results),
             "results": results[:top_k],
             "db_path": str(self.db_path),
@@ -4675,6 +4936,8 @@ def search_graph_index(
     regional_plugin_dir: Path | str | None = None,
     retrieval_weight_profile_path: Path | str | None = None,
     require_approved_auto: bool = False,
+    prefer_human_verified: bool = True,
+    min_source_weight: int = 0,
     resolve_authority: bool = True,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> Dict[str, Any]:
@@ -4694,6 +4957,8 @@ def search_graph_index(
         regional_plugin_dir=regional_plugin_dir,
         retrieval_weight_profile_path=retrieval_weight_profile_path,
         require_approved_auto=require_approved_auto,
+        prefer_human_verified=prefer_human_verified,
+        min_source_weight=min_source_weight,
         resolve_authority=resolve_authority,
     )
 

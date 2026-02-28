@@ -559,8 +559,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "JGJ 59-2011",
@@ -869,7 +868,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -965,22 +964,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 4,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "JGJ 59-2011",
@@ -1976,8 +1975,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "JGJ 59-2011",
@@ -2266,7 +2264,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -2362,22 +2360,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 4,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "JGJ 59-2011",
@@ -3410,8 +3408,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "JGJ 59-2011",
@@ -3748,7 +3745,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -3844,22 +3841,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 5,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "JGJ 59-2011",
@@ -4927,8 +4924,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "JGJ 59-2011",
@@ -5285,7 +5281,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -5381,22 +5377,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 5,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "JGJ 59-2011",
@@ -6450,8 +6446,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "JGJ 59-2011",
@@ -6796,7 +6791,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -6892,22 +6887,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 6,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "JGJ 59-2011",
@@ -8006,8 +8001,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "JGJ 59-2011",
@@ -8368,7 +8362,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -8470,22 +8464,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 4,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "JGJ 59-2011",
@@ -9551,8 +9545,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "JGJ 59-2011",
@@ -9921,7 +9914,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -10029,22 +10022,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 5,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "JGJ 59-2011",
@@ -11229,8 +11222,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "GB 50210-2018",
@@ -11503,7 +11495,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -11599,12 +11591,12 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 5,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
                 "code": "GB/T 50326-2017",
@@ -11637,14 +11629,14 @@
                 "replacement": ""
               },
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "GB 50210-2018",
@@ -13032,7 +13024,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 3,
             "superseded_count": 0,
@@ -14341,7 +14333,7 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 3,
             "superseded_count": 0,
@@ -15314,8 +15306,7 @@
                 "effective_date": "2013-01-01",
                 "expiry_date": "2023-12-31",
                 "review_cycle_years": 10,
-                "status": "superseded",
-                "superseded_by": "GB 50300-2024"
+                "status": "review_required"
               },
               {
                 "standard_code": "JGJ 59-2011",
@@ -15592,7 +15583,7 @@
             "release_gate": "manual_or_system_approval_for_auto_generated",
             "reference_required": true,
             "approval_source": "manual_signoff",
-            "approved_at": "2026-02-28T06:16:16",
+            "approved_at": "2026-02-28T08:31:31",
             "approved_by": "system",
             "signature": "system-auto-sign",
             "note": "auto_approval_from_pipeline"
@@ -15688,22 +15679,22 @@
             "rebuild_on_change": true
           },
           "standard_update_state": {
-            "checked_at": "2026-02-28T06:16:15",
+            "checked_at": "2026-02-28T08:31:31",
             "catalog_version": "v1",
             "checked_codes": 5,
-            "superseded_count": 1,
-            "updated_count": 1,
-            "status": "updated",
+            "superseded_count": 0,
+            "updated_count": 0,
+            "status": "up_to_date",
             "details": [
               {
-                "code": "GB 50300-2013",
+                "code": "GB 50300-2024",
                 "key": "GB50300",
-                "current_year": 2013,
+                "current_year": 2024,
                 "latest_code": "GB 50300-2024",
                 "latest_year": 2024,
                 "tier": "国标",
-                "status": "superseded",
-                "replacement": "GB 50300-2024"
+                "status": "active",
+                "replacement": ""
               },
               {
                 "code": "JGJ 59-2011",

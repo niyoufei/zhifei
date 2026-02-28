@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -13,6 +15,128 @@ DOMAIN_ALIASES = {
     "road": {"road", "municipal", "traffic"},
     "mep": {"mep", "electrical", "hvac", "fire"},
 }
+
+
+def _iter_kg_nodes(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    kb = payload.get("knowledge_database")
+    if not isinstance(kb, dict):
+        return out
+    for section in kb.values():
+        if not isinstance(section, dict):
+            continue
+        nodes = section.get("nodes")
+        if not isinstance(nodes, list):
+            continue
+        for node in nodes:
+            if isinstance(node, dict):
+                out.append(node)
+    return out
+
+
+def _normalize_domain_hint(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "general"
+    if any(tok in text for tok in ("bridge", "桥梁")):
+        return "bridge"
+    if any(tok in text for tok in ("tunnel", "隧道")):
+        return "tunnel"
+    if any(tok in text for tok in ("railway", "rail", "铁路")):
+        return "railway"
+    if any(tok in text for tok in ("hydraulic", "water", "水利", "泵站")):
+        return "hydraulic"
+    if any(tok in text for tok in ("mep", "机电", "电气", "hvac", "消防")):
+        return "mep"
+    if any(tok in text for tok in ("earthwork", "土方", "基坑", "边坡")):
+        return "earthwork"
+    if any(tok in text for tok in ("road", "道路", "市政")):
+        return "road"
+    if any(tok in text for tok in ("building", "房建", "主体", "装饰", "幕墙")):
+        return "building"
+    if any(tok in text for tok in ("management", "quality", "safety", "环保", "进度")):
+        return "management"
+    return text
+
+
+def _extract_case_keywords(node: Dict[str, Any], *, max_count: int = 4) -> List[str]:
+    values: List[str] = []
+    for key in ("keywords", "qt_tag"):
+        raw = node.get(key)
+        if isinstance(raw, list):
+            values.extend([str(x).strip() for x in raw if str(x).strip()])
+    title = str(node.get("name") or node.get("title") or "").strip()
+    values.extend([x for x in re.split(r"[^\w\u4e00-\u9fff]+", title) if x.strip()])
+    out: List[str] = []
+    seen = set()
+    for item in values:
+        term = str(item).strip()
+        if not term or len(term) < 2:
+            continue
+        if re.fullmatch(r"\d+(?:\.\d+)?", term):
+            continue
+        if "_" in term and not re.search(r"pm\d+|db|mpa", term.lower()):
+            continue
+        if not re.search(r"[\u4e00-\u9fffA-Za-z]", term):
+            continue
+        low = term.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(term)
+        if len(out) >= max_count:
+            break
+    return out
+
+
+def _generate_cases_from_kg(
+    *,
+    kg_root: Path,
+    max_cases: int,
+    seed_offset: int = 0,
+) -> List[Dict[str, Any]]:
+    files = sorted(kg_root.glob("ZF-KG-*.json"))
+    rows: List[Dict[str, Any]] = []
+    seq = int(seed_offset)
+    for path in files:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        domain_hint = _normalize_domain_hint(payload.get("domain") or path.stem)
+        for node in _iter_kg_nodes(payload):
+            keywords = _extract_case_keywords(node)
+            if not keywords:
+                continue
+            title = str(node.get("name") or node.get("title") or "").strip()
+            query_candidates = [
+                " ".join(keywords[:3]).strip(),
+                " ".join(([title] if title else []) + keywords[:2]).strip(),
+                " ".join((keywords[:1] + keywords[2:4])).strip(),
+            ]
+            dedup_local = set()
+            for query in query_candidates:
+                q = str(query or "").strip()
+                if len(q) < 3:
+                    continue
+                q_key = q.lower()
+                if q_key in dedup_local:
+                    continue
+                dedup_local.add(q_key)
+                seq += 1
+                rows.append(
+                    {
+                        "case_id": f"auto-{seq:04d}",
+                        "query": q,
+                        "expected_keywords": keywords[:2],
+                        "expected_domain": "",
+                        "source_file": path.name,
+                        "auto_generated": True,
+                    }
+                )
+                if len(rows) >= max_cases:
+                    return rows
+    return rows
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -34,6 +158,75 @@ def _load_dataset(path: Path | str) -> Dict[str, Any]:
         cases = []
     payload["cases"] = cases
     return payload
+
+
+def ensure_benchmark_dataset(
+    *,
+    dataset_path: Path | str = DEFAULT_DATASET_PATH,
+    kg_root: Path | str,
+    min_cases: int = 120,
+    max_cases: int = 360,
+    output_path: Path | str | None = None,
+) -> Dict[str, Any]:
+    src = Path(dataset_path).expanduser().resolve()
+    root = Path(kg_root).expanduser().resolve()
+    payload = _load_dataset(src)
+    existing = payload.get("cases") if isinstance(payload.get("cases"), list) else []
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for case in existing:
+        if not isinstance(case, dict):
+            continue
+        query = str(case.get("query") or "").strip()
+        if not query:
+            continue
+        dedup[query.lower()] = case
+
+    min_n = max(0, int(min_cases))
+    max_n = max(min_n, int(max_cases))
+    expanded = False
+    if len(dedup) < min_n:
+        generated = _generate_cases_from_kg(
+            kg_root=root,
+            max_cases=max_n,
+            seed_offset=len(dedup),
+        )
+        for case in generated:
+            query = str(case.get("query") or "").strip()
+            if not query:
+                continue
+            key = query.lower()
+            if key in dedup:
+                continue
+            dedup[key] = case
+            if len(dedup) >= max_n:
+                break
+        expanded = True
+
+    merged_cases = list(dedup.values())[:max_n]
+    dst = Path(output_path).expanduser().resolve() if output_path not in (None, "") else src
+    if expanded:
+        out_payload = {
+            "version": str(payload.get("version") or "v2"),
+            "meta": {
+                "auto_expanded": True,
+                "source_dataset": str(src),
+                "generated_at": int(time.time()),
+                "cases_seed": len(existing),
+                "cases_total": len(merged_cases),
+                "kg_root": str(root),
+            },
+            "cases": merged_cases,
+        }
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(json.dumps(out_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "ok": True,
+        "expanded": expanded,
+        "dataset_path": str(dst if expanded else src),
+        "cases_seed": len(existing),
+        "cases_total": len(merged_cases if expanded else existing),
+        "kg_root": str(root),
+    }
 
 
 def _hit_match_score(hit: Dict[str, Any], case: Dict[str, Any]) -> float:

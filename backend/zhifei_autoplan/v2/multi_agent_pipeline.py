@@ -81,6 +81,10 @@ PROFESSIONAL_DOMAIN_KEYWORDS: Dict[str, List[str]] = {
 
 CONSISTENCY_KEYWORDS = ("标高", "高程", "坐标", "坐标X", "坐标Y", "工期", "里程碑", "关键线路")
 SENTENCE_SPLIT_RE = re.compile(r"[。；;!?！？]\s*")
+STANDARD_CODE_RE = re.compile(
+    r"(GB(?:/T)?|JGJ|SL|TB|DL|CJ|JTG(?:/T)?|DB(?:/T)?\d{2}|T/[A-Z0-9]+)\s*[-/]?\s*\d{2,6}(?:[./-]\d+)?",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass
@@ -101,6 +105,8 @@ class MultiAgentDocPipeline:
         self_healing_model: Optional[str] = None,
         self_healing_api_key: Optional[str] = None,
         min_gemini_usefulness_score: float = 30.0,
+        prefer_human_verified_hits: bool = True,
+        min_source_weight: int = 0,
     ):
         self.kg_db_path = Path(kg_db_path)
         self.quant_engine = QuantitativeBoQEngine()
@@ -115,6 +121,8 @@ class MultiAgentDocPipeline:
         self.allow_superseded: bool = False
         self.regional_plugin_dir: str | None = None
         self._strict_variant_mode: bool = False
+        self.prefer_human_verified_hits = bool(prefer_human_verified_hits)
+        self.min_source_weight = max(0, min(5, int(min_source_weight)))
 
     def _read_tender_text(self, path: str) -> str:
         p = Path(path)
@@ -445,6 +453,8 @@ class MultiAgentDocPipeline:
             allow_superseded=self.allow_superseded,
             regional_plugin_dir=self.regional_plugin_dir,
             retrieval_weight_profile_path=self.retrieval_weight_profile_path,
+            prefer_human_verified=self.prefer_human_verified_hits,
+            min_source_weight=self.min_source_weight,
             db_path=self.kg_db_path,
         )
         candidates = graph_search.get("results") or []
@@ -491,6 +501,8 @@ class MultiAgentDocPipeline:
             allow_superseded=self.allow_superseded,
             regional_plugin_dir=self.regional_plugin_dir,
             retrieval_weight_profile_path=self.retrieval_weight_profile_path,
+            prefer_human_verified=self.prefer_human_verified_hits,
+            min_source_weight=self.min_source_weight,
             db_path=self.kg_db_path,
         )
         candidates = search.get("results") or []
@@ -669,6 +681,8 @@ class MultiAgentDocPipeline:
                     allow_superseded=self.allow_superseded,
                     regional_plugin_dir=self.regional_plugin_dir,
                     retrieval_weight_profile_path=self.retrieval_weight_profile_path,
+                    prefer_human_verified=self.prefer_human_verified_hits,
+                    min_source_weight=self.min_source_weight,
                     db_path=self.kg_db_path,
                 )
                 text = self._make_section_text(
@@ -715,6 +729,24 @@ class MultiAgentDocPipeline:
                                 (selected_graph.get("payload") or {}).get("reference_standard")
                                 if isinstance((selected_graph or {}).get("payload"), dict)
                                 else []
+                            ),
+                            "reference_standard_codes": (
+                                (selected_graph.get("payload") or {}).get("reference_standard_codes")
+                                if isinstance((selected_graph or {}).get("payload"), dict)
+                                else []
+                            ),
+                            "reference_source_documents": (
+                                (selected_graph.get("payload") or {}).get("reference_source_documents")
+                                if isinstance((selected_graph or {}).get("payload"), dict)
+                                else []
+                            ),
+                            "knowledge_tier": (
+                                selected_graph.get("knowledge_tier")
+                                or (
+                                    (selected_graph.get("payload") or {}).get("knowledge_tier")
+                                    if isinstance((selected_graph or {}).get("payload"), dict)
+                                    else ""
+                                )
                             ),
                             "formula_expression": selected_graph.get("formula_expression")
                             if isinstance(selected_graph, dict)
@@ -904,6 +936,8 @@ class MultiAgentDocPipeline:
                         node_types=["FormulaNode"],
                         top_k=1,
                         min_gemini_usefulness_score=self.min_gemini_usefulness_score,
+                        prefer_human_verified=self.prefer_human_verified_hits,
+                        min_source_weight=self.min_source_weight,
                         db_path=self.kg_db_path,
                     ).get("total")
                     or 0
@@ -1101,6 +1135,7 @@ class MultiAgentDocPipeline:
         *,
         sections: List[Dict[str, Any]],
         bid_date: str | None,
+        strict_mode: bool = False,
     ) -> List[Dict[str, Any]]:
         warnings: List[Dict[str, Any]] = []
         bid_dt: datetime | None = None
@@ -1114,13 +1149,84 @@ class MultiAgentDocPipeline:
                 continue
             title = str(sec.get("title") or "").strip() or "章节"
             hit = sec.get("graph_hit") if isinstance(sec.get("graph_hit"), dict) else {}
+            payload = hit.get("payload") if isinstance(hit.get("payload"), dict) else {}
             timeline = hit.get("standard_validity_timeline") if isinstance(hit.get("standard_validity_timeline"), dict) else {}
+            source_hierarchy = str(hit.get("source_hierarchy") or "").strip()
+            node_id = str(hit.get("node_id") or "").strip()
+
+            reference_codes = hit.get("reference_standard_codes")
+            if not isinstance(reference_codes, list):
+                reference_codes = payload.get("reference_standard_codes") if isinstance(payload.get("reference_standard_codes"), list) else []
+            reference_codes = [str(x).strip() for x in reference_codes if str(x).strip()]
+            if not reference_codes and isinstance(timeline.get("records"), list):
+                for rec in timeline.get("records") or []:
+                    if not isinstance(rec, dict):
+                        continue
+                    code = str(rec.get("standard_code") or "").strip()
+                    if code and STANDARD_CODE_RE.search(code) and code not in reference_codes:
+                        reference_codes.append(code)
+
+            reference_sources = hit.get("reference_source_documents")
+            if not isinstance(reference_sources, list):
+                reference_sources = payload.get("reference_source_documents") if isinstance(payload.get("reference_source_documents"), list) else []
+            reference_sources = [str(x).strip() for x in reference_sources if str(x).strip()]
+            if not reference_sources:
+                fallback_source = str(hit.get("source_path") or hit.get("source_file") or "").strip()
+                if fallback_source:
+                    reference_sources = [fallback_source]
+
+            if strict_mode and source_hierarchy in {"国标", "行标", "企标"} and not reference_codes:
+                warnings.append(
+                    {
+                        "type": "standard_code_missing",
+                        "severity": "major",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "source_hierarchy": source_hierarchy,
+                        "status": "missing_reference_standard_codes",
+                    }
+                )
+
+            invalid_codes = [code for code in reference_codes if not STANDARD_CODE_RE.search(code)]
+            if strict_mode and source_hierarchy in {"国标", "行标", "企标"} and invalid_codes:
+                warnings.append(
+                    {
+                        "type": "standard_code_format_invalid",
+                        "severity": "major",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "source_hierarchy": source_hierarchy,
+                        "status": "invalid_code_format",
+                        "invalid_codes": invalid_codes[:8],
+                    }
+                )
+
+            if strict_mode and source_hierarchy in {"答疑文件", "设计图纸"} and not reference_sources:
+                warnings.append(
+                    {
+                        "type": "source_document_missing",
+                        "severity": "major",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "source_hierarchy": source_hierarchy,
+                        "status": "missing_reference_source_documents",
+                    }
+                )
             if not timeline:
+                if strict_mode and source_hierarchy in {"国标", "行标", "企标"}:
+                    warnings.append(
+                        {
+                            "type": "standard_timeline_missing",
+                            "severity": "major",
+                            "dimension": title,
+                            "node_id": node_id,
+                            "source_hierarchy": source_hierarchy,
+                            "status": "missing_timeline",
+                        }
+                    )
                 continue
             status = str(timeline.get("timeline_status") or "").strip().lower()
             effective_date = str(timeline.get("effective_date") or "").strip()
-            node_id = str(hit.get("node_id") or "").strip()
-            source_hierarchy = str(hit.get("source_hierarchy") or "").strip()
             if status in {"superseded", "expired", "deprecated"}:
                 warnings.append(
                     {
@@ -1134,6 +1240,56 @@ class MultiAgentDocPipeline:
                     }
                 )
                 continue
+
+            records = timeline.get("records") if isinstance(timeline.get("records"), list) else []
+            anchor = bid_dt or datetime.now()
+            active_records = 0
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                rec_status = str(rec.get("status") or "").strip().lower()
+                if rec_status in {"superseded", "expired", "deprecated"}:
+                    continue
+                eff_text = str(rec.get("effective_date") or "").strip()
+                exp_text = str(rec.get("expiry_date") or "").strip()
+                try:
+                    eff_dt = datetime.strptime(eff_text, "%Y-%m-%d") if eff_text else None
+                except Exception:
+                    eff_dt = None
+                try:
+                    exp_dt = datetime.strptime(exp_text, "%Y-%m-%d") if exp_text else None
+                except Exception:
+                    exp_dt = None
+                if eff_dt and anchor < eff_dt:
+                    continue
+                if exp_dt and anchor > exp_dt:
+                    continue
+                active_records += 1
+            if strict_mode and records and active_records == 0 and source_hierarchy in {"国标", "行标", "企标"}:
+                warnings.append(
+                    {
+                        "type": "standard_timeline_no_active_record",
+                        "severity": "major",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "source_hierarchy": source_hierarchy,
+                        "status": status or "review_required",
+                        "effective_date": effective_date,
+                    }
+                )
+                continue
+            if strict_mode and status in {"review_required", "unknown"} and source_hierarchy in {"国标", "行标", "企标"}:
+                warnings.append(
+                    {
+                        "type": "standard_timeline_review_required",
+                        "severity": "minor",
+                        "dimension": title,
+                        "node_id": node_id,
+                        "source_hierarchy": source_hierarchy,
+                        "status": status,
+                        "effective_date": effective_date,
+                    }
+                )
             if effective_date:
                 try:
                     eff = datetime.strptime(effective_date, "%Y-%m-%d")
@@ -1188,6 +1344,30 @@ class MultiAgentDocPipeline:
                     refs = payload.get("reference_standard")
                     if isinstance(refs, list):
                         reference_standard = refs
+            reference_standard_codes = (
+                source_trace.get("reference_standard_codes")
+                if isinstance(source_trace.get("reference_standard_codes"), list)
+                else []
+            )
+            reference_source_documents = (
+                source_trace.get("reference_source_documents")
+                if isinstance(source_trace.get("reference_source_documents"), list)
+                else []
+            )
+            if isinstance(graph_hit.get("payload"), dict):
+                payload = graph_hit.get("payload") or {}
+                if not reference_standard_codes and isinstance(payload.get("reference_standard_codes"), list):
+                    reference_standard_codes = [str(x).strip() for x in (payload.get("reference_standard_codes") or []) if str(x).strip()]
+                if not reference_source_documents and isinstance(payload.get("reference_source_documents"), list):
+                    reference_source_documents = [str(x).strip() for x in (payload.get("reference_source_documents") or []) if str(x).strip()]
+            knowledge_tier = str(
+                source_trace.get("knowledge_tier")
+                or graph_hit.get("knowledge_tier")
+                or ((graph_hit.get("payload") or {}).get("knowledge_tier") if isinstance(graph_hit.get("payload"), dict) else "")
+                or ""
+            ).strip().lower()
+            if knowledge_tier not in {"gold", "silver", "bronze"}:
+                knowledge_tier = "silver" if bool(source_trace.get("is_auto_generated") or self._is_auto_generated_hit(graph_hit)) else "gold"
             formula_variables = source_trace.get("formula_variables")
             if not isinstance(formula_variables, list):
                 formula_variables = graph_hit.get("formula_variables") if isinstance(graph_hit.get("formula_variables"), list) else []
@@ -1259,6 +1439,9 @@ class MultiAgentDocPipeline:
                             "source_hierarchy": source_trace.get("source_hierarchy")
                             or graph_hit.get("source_hierarchy"),
                             "reference_standard": reference_standard[:6],
+                            "reference_standard_codes": reference_standard_codes[:8],
+                            "reference_source_documents": reference_source_documents[:8],
+                            "knowledge_tier": knowledge_tier,
                             "formula_expression": source_trace.get("formula_expression")
                             or graph_hit.get("formula_expression"),
                             "formula_variables": formula_variables[:8],
@@ -1878,6 +2061,7 @@ class MultiAgentDocPipeline:
         enforce_numeric_density_gate: bool = True,
         numeric_density_min: float = 0.95,
         auto_enrich_numeric_density: bool = True,
+        enforce_standard_reference_gate: bool = False,
         hit_rate_dashboard_json_path: Path | str = DEFAULT_HIT_RATE_DASHBOARD_JSON,
         hit_rate_dashboard_md_path: Path | str = DEFAULT_HIT_RATE_DASHBOARD_MD,
         enrichment_draft_path: Path | str = DEFAULT_ENRICHMENT_DRAFT_JSON,
@@ -2101,6 +2285,7 @@ class MultiAgentDocPipeline:
         standard_validity_warnings = self._collect_standard_validity_warnings(
             sections=final_pass.get("sections") or [],
             bid_date=self.bid_date,
+            strict_mode=bool(enforce_standard_reference_gate),
         )
         for warning in standard_validity_warnings:
             if not isinstance(warning, dict):

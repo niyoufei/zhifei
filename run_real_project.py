@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
-from backend.zhifei_autoplan.v2.kg_retrieval_benchmark import DEFAULT_DATASET_PATH as DEFAULT_BENCHMARK_DATASET_PATH
+from backend.zhifei_autoplan.v2.kg_retrieval_benchmark import (
+    DEFAULT_DATASET_PATH as DEFAULT_BENCHMARK_DATASET_PATH,
+    ensure_benchmark_dataset,
+)
 from backend.zhifei_autoplan.v2.kg_paths import resolve_default_kg_root
 from backend.zhifei_autoplan.v2.multi_agent_pipeline import MultiAgentDocPipeline
 
@@ -24,6 +27,17 @@ NUMERIC_LIMITS = {
     "total_price": 1.0e12,
 }
 BOQ_REVIEW_QUEUE_MAX = 400
+CONFIDENCE_WEIGHTS = {
+    "quantity_scientific_explosion": 0.28,
+    "unit_price_scientific_explosion": 0.20,
+    "total_price_scientific_explosion": 0.26,
+    "quantity_unit_outlier": 0.20,
+    "quantity_dynamic_outlier": 0.16,
+    "price_consistency_outlier": 0.18,
+    "missing_unit_for_quantity": 0.12,
+    "missing_price_pair": 0.10,
+    "missing_quantity": 0.12,
+}
 UNIT_QUANTITY_LIMITS = {
     "m3": 1.0e7,
     "m2": 1.0e8,
@@ -37,6 +51,15 @@ UNIT_QUANTITY_LIMITS = {
     "处": 1.0e6,
     "座": 1.0e6,
 }
+
+
+def _confidence_level(score: float) -> str:
+    val = max(0.0, min(1.0, float(score)))
+    if val >= 0.85:
+        return "high"
+    if val >= 0.65:
+        return "medium"
+    return "low"
 
 
 def _to_float(value: Any) -> float | None:
@@ -138,11 +161,61 @@ def _fallback_parse_pdf_text_rows(path: Path) -> List[Dict[str, Any]]:
                             "unit": m.group("unit"),
                             "unit_price": None,
                             "total_price": None,
+                            "_parse_route": "pdf_text",
                         }
                     )
     except Exception:
         return []
     return rows[:2000]
+
+
+def _fallback_parse_pdf_ocr_rows(path: Path) -> List[Dict[str, Any]]:
+    try:
+        from pdf2image import convert_from_path  # type: ignore
+        import pytesseract  # type: ignore
+    except Exception:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    line_re = re.compile(
+        r"(?P<code>[A-Za-z0-9][A-Za-z0-9./_-]{2,})\s+"
+        r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()\-_/·、]{2,50})\s+"
+        r"(?P<qty>\d+(?:\.\d+)?)\s*"
+        r"(?P<unit>m3|m2|m|t|kg|台|套|个|项|处|座|樘|米|吨|㎡|㎥)\b",
+        flags=re.IGNORECASE,
+    )
+    try:
+        images = convert_from_path(str(path), dpi=170, first_page=1, last_page=8)
+    except Exception:
+        return []
+    for image in images[:8]:
+        try:
+            text = pytesseract.image_to_string(image, lang="chi_sim+eng")
+        except Exception:
+            text = ""
+        if not text:
+            continue
+        for line in text.splitlines():
+            clean = re.sub(r"\s+", " ", str(line or "").strip())
+            if not clean:
+                continue
+            m = line_re.search(clean)
+            if not m:
+                continue
+            rows.append(
+                {
+                    "boq_code": m.group("code"),
+                    "name": m.group("name"),
+                    "quantity": m.group("qty"),
+                    "unit": m.group("unit"),
+                    "unit_price": None,
+                    "total_price": None,
+                    "_parse_route": "pdf_ocr",
+                }
+            )
+            if len(rows) >= 1800:
+                return rows
+    return rows
 
 
 def _pick_value(row: Dict[str, Any], aliases: List[str]) -> Any:
@@ -317,6 +390,7 @@ def _fallback_parse_pdf_table_rows(path: Path) -> List[Dict[str, Any]]:
                                 "unit": r[idx_unit] if idx_unit is not None and idx_unit < len(r) else None,
                                 "unit_price": r[idx_up] if idx_up is not None and idx_up < len(r) else None,
                                 "total_price": r[idx_tp] if idx_tp is not None and idx_tp < len(r) else None,
+                                "_parse_route": "pdf_table",
                             }
                         )
     except Exception:
@@ -374,6 +448,22 @@ def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dic
             anomalies.append("price_consistency_outlier")
     if quantity is not None and (unit is None or not str(unit).strip()):
         anomalies.append("missing_unit_for_quantity")
+    if quantity is None:
+        anomalies.append("missing_quantity")
+    if unit_price is None and total_price is None:
+        anomalies.append("missing_price_pair")
+
+    confidence = 1.0
+    for tag in anomalies:
+        confidence -= float(CONFIDENCE_WEIGHTS.get(str(tag), 0.06))
+    if str(raw.get("boq_code") or "").strip().startswith(("AUTO-", "CSV-", "XLS-")):
+        confidence -= 0.04
+    parse_route = str(raw.get("_parse_route") or "unknown").strip().lower()
+    if parse_route in {"pdf_text", "pdf_ocr"}:
+        confidence -= 0.08
+    elif parse_route in {"pdf_table"}:
+        confidence -= 0.04
+    confidence = max(0.0, min(1.0, confidence))
 
     return {
         "boq_code": str(raw.get("boq_code") or raw.get("code") or f"AUTO-{seq}"),
@@ -383,6 +473,9 @@ def _normalize_boq_item(raw: Dict[str, Any], source_file: Path, seq: int) -> Dic
         "unit_price": unit_price,
         "total_price": total_price,
         "source_file": str(source_file),
+        "parse_route": parse_route,
+        "parsing_confidence": round(confidence, 6),
+        "confidence_level": _confidence_level(confidence),
         "anomalies": anomalies,
     }
 
@@ -398,14 +491,20 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
     else:
         parser = BoQParser()
         items, stats = await parser.parse(str(path))
+        parser_rows: List[Dict[str, Any]] = []
+        for item in items:
+            row = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+            row["_parse_route"] = "boq_parser"
+            parser_rows.append(row)
         payload = {
-            "items": [it.model_dump() for it in items],
+            "items": parser_rows,
             "stats": stats,
         }
         if suffix == ".pdf":
             parser_rows = list(payload.get("items") or [])
             table_rows = _fallback_parse_pdf_table_rows(path)
             text_rows = _fallback_parse_pdf_text_rows(path)
+            ocr_rows = _fallback_parse_pdf_ocr_rows(path)
             merged_rows: List[Dict[str, Any]] = []
             if parser_rows:
                 merged_rows.extend(parser_rows)
@@ -415,11 +514,15 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
             if text_rows:
                 merged_rows.extend(text_rows)
                 fallback_sources.append("pdf_text")
+            if ocr_rows:
+                merged_rows.extend(ocr_rows)
+                fallback_sources.append("pdf_ocr")
             if merged_rows:
                 payload["items"] = merged_rows
                 payload["stats"] = dict(payload.get("stats") or {})
                 payload["stats"]["fallback_table_rows"] = len(table_rows)
                 payload["stats"]["fallback_text_rows"] = len(text_rows)
+                payload["stats"]["fallback_ocr_rows"] = len(ocr_rows)
                 payload["stats"]["fusion_sources"] = ["boq_parser"] + fallback_sources
                 fallback_used = bool(fallback_sources)
     normalized_items: List[Dict[str, Any]] = []
@@ -478,6 +581,24 @@ async def _load_single_boq(path: Path) -> Dict[str, Any]:
         for it in normalized_items
         if isinstance(it.get("unit_price"), (int, float)) or isinstance(it.get("total_price"), (int, float))
     )
+    payload["stats"]["avg_parsing_confidence"] = round(
+        sum(float(it.get("parsing_confidence") or 0.0) for it in normalized_items) / max(len(normalized_items), 1),
+        6,
+    )
+    payload["stats"]["low_confidence_count"] = sum(
+        1 for it in normalized_items if float(it.get("parsing_confidence") or 0.0) < 0.55
+    )
+    payload["stats"]["low_confidence_items"] = [
+        {
+            "boq_code": str(it.get("boq_code") or ""),
+            "name": str(it.get("name") or ""),
+            "parsing_confidence": round(float(it.get("parsing_confidence") or 0.0), 6),
+            "parse_route": str(it.get("parse_route") or ""),
+            "anomalies": [str(x) for x in (it.get("anomalies") or [])[:4]],
+        }
+        for it in normalized_items
+        if float(it.get("parsing_confidence") or 0.0) < 0.55
+    ][:120]
     if not payload.get("items"):
         raise ValueError(f"BOQ parsing returned empty items: {path}")
     return payload
@@ -575,18 +696,19 @@ def _build_boq_governance(
         valid_qty = int(info.get("valid_quantity_count") or 0)
         valid_price = int(info.get("valid_price_count") or 0)
         fallback_used = bool(info.get("fallback_used"))
+        avg_conf = max(0.0, min(1.0, float(info.get("avg_parsing_confidence") or 0.0)))
         anomaly_ratio = float(anomaly_count) / max(item_count, 1)
         qty_ratio = float(valid_qty) / max(item_count, 1)
         price_ratio = float(valid_price) / max(item_count, 1)
-        fallback_penalty = 0.08 if fallback_used else 0.0
+        fallback_penalty = 0.10 if fallback_used else 0.0
         score = max(
             0.0,
             min(
                 1.0,
-                1.0
-                - anomaly_ratio * 0.55
-                - max(0.0, 1.0 - qty_ratio) * 0.20
-                - max(0.0, 1.0 - price_ratio) * 0.10
+                avg_conf * 0.45
+                + max(0.0, 1.0 - anomaly_ratio) * 0.20
+                + qty_ratio * 0.20
+                + price_ratio * 0.15
                 - fallback_penalty,
             ),
         )
@@ -599,6 +721,7 @@ def _build_boq_governance(
                 "anomaly_ratio": round(anomaly_ratio, 6),
                 "valid_quantity_ratio": round(qty_ratio, 6),
                 "valid_price_ratio": round(price_ratio, 6),
+                "avg_parsing_confidence": round(avg_conf, 6),
                 "fallback_used": fallback_used,
                 "trust_score": round(score, 6),
                 "trust_level": trust_level,
@@ -616,6 +739,19 @@ def _build_boq_governance(
                             "type": "anomaly_item",
                             "boq_code": str(row_item.get("boq_code") or ""),
                             "name": str(row_item.get("name") or ""),
+                            "anomalies": [str(x) for x in (row_item.get("anomalies") or [])[:6]],
+                        }
+                    )
+            for row_item in (info.get("low_confidence_items") or [])[:80]:
+                if isinstance(row_item, dict):
+                    manual_review_queue.append(
+                        {
+                            "file": str(file_path),
+                            "type": "low_confidence_item",
+                            "boq_code": str(row_item.get("boq_code") or ""),
+                            "name": str(row_item.get("name") or ""),
+                            "parsing_confidence": float(row_item.get("parsing_confidence") or 0.0),
+                            "parse_route": str(row_item.get("parse_route") or ""),
                             "anomalies": [str(x) for x in (row_item.get("anomalies") or [])[:6]],
                         }
                     )
@@ -690,6 +826,9 @@ def _write_boq_manual_review_report(governance: Dict[str, Any], *, output_path: 
             if not isinstance(row, dict):
                 continue
             details = str(row.get("error") or "、".join([str(x) for x in (row.get("anomalies") or [])]))
+            conf = row.get("parsing_confidence")
+            if conf is not None:
+                details = f"{details}; conf={float(conf):.4f}; route={row.get('parse_route')}"
             details = details.replace("|", "\\|")
             lines.append(
                 f"| {idx} | {row.get('file')} | {row.get('type')} | {row.get('boq_code') or ''} | "
@@ -783,7 +922,7 @@ def _arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--enforce-retrieval-gate",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="检索门禁失败时是否拦截发布。",
     )
     p.add_argument(
@@ -816,7 +955,7 @@ def _arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--bid-date",
-        default=None,
+        default=time.strftime("%Y-%m-%d", time.localtime()),
         help="投标日期（YYYY-MM-DD），用于标准时间窗生效过滤。",
     )
     p.add_argument(
@@ -831,9 +970,21 @@ def _arg_parser() -> argparse.ArgumentParser:
         help="地域法规插件目录（JSON）。",
     )
     p.add_argument(
+        "--prefer-human-verified-hits",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="检索时优先人工/已校核节点。",
+    )
+    p.add_argument(
+        "--min-source-weight",
+        type=int,
+        default=1,
+        help="检索节点最小效力层级权重（答疑5>图纸4>国标3>行标2>企标1>未知0）。",
+    )
+    p.add_argument(
         "--release-freeze",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="通过后是否创建知识图谱冻结快照。",
     )
     p.add_argument(
@@ -876,8 +1027,20 @@ def _arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--boq-hard-gate",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="是否在BOQ可信度不足时直接拦截运行。",
+    )
+    p.add_argument(
+        "--benchmark-auto-expand-min",
+        type=int,
+        default=120,
+        help="评测集最小案例数；不足时自动从图谱扩容。",
+    )
+    p.add_argument(
+        "--benchmark-auto-expand-max",
+        type=int,
+        default=360,
+        help="评测集自动扩容后的最大案例数。",
     )
     return p
 
@@ -920,6 +1083,16 @@ async def _run(args: argparse.Namespace) -> int:
         kg_db_path=kg_db,
         self_healing_provider=args.self_heal_provider,
         self_healing_model=args.self_heal_model,
+        prefer_human_verified_hits=bool(args.prefer_human_verified_hits),
+        min_source_weight=int(args.min_source_weight),
+    )
+
+    benchmark_dataset = ensure_benchmark_dataset(
+        dataset_path=Path(args.benchmark_dataset).expanduser().resolve(),
+        kg_root=kg_root,
+        min_cases=max(0, int(args.benchmark_auto_expand_min)),
+        max_cases=max(12, int(args.benchmark_auto_expand_max)),
+        output_path=Path("build/kg_retrieval_benchmark.auto.json").expanduser().resolve(),
     )
 
     result = await pipeline.run(
@@ -933,7 +1106,7 @@ async def _run(args: argparse.Namespace) -> int:
         docx_output_path=docx_out_path,
         enable_standard_auto_update=bool(args.standard_auto_update),
         run_retrieval_benchmark_gate=bool(args.retrieval_benchmark_gate),
-        benchmark_dataset_path=Path(args.benchmark_dataset).expanduser().resolve(),
+        benchmark_dataset_path=Path(str(benchmark_dataset.get("dataset_path") or args.benchmark_dataset)).expanduser().resolve(),
         benchmark_min_pass_rate=float(args.benchmark_min_pass_rate),
         benchmark_min_avg_mrr=float(args.benchmark_min_avg_mrr),
         enforce_retrieval_gate=bool(args.enforce_retrieval_gate),
@@ -944,6 +1117,7 @@ async def _run(args: argparse.Namespace) -> int:
         region_context=args.region_context,
         bid_date=args.bid_date,
         allow_superseded=bool(args.allow_superseded),
+        enforce_standard_reference_gate=True,
         regional_plugin_dir=(
             Path(args.regional_plugin_dir).expanduser().resolve() if args.regional_plugin_dir else None
         ),
@@ -969,6 +1143,7 @@ async def _run(args: argparse.Namespace) -> int:
                 "stats": boq_payload.get("stats") or {},
                 "governance": governance,
                 "manual_review_queue_report": boq_review_queue_saved,
+                "benchmark_dataset": benchmark_dataset,
             }
             output_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1017,6 +1192,12 @@ async def _run(args: argparse.Namespace) -> int:
             f"ok={bool(benchmark.get('ok'))}, "
             f"pass_rate={float(benchmark.get('pass_rate') or 0.0):.4f}, "
             f"avg_mrr={float(benchmark.get('avg_mrr') or 0.0):.4f}"
+        )
+        print(
+            "Retrieval Benchmark Dataset: "
+            f"cases={int(benchmark_dataset.get('cases_total') or 0)}, "
+            f"expanded={bool(benchmark_dataset.get('expanded'))}, "
+            f"path={benchmark_dataset.get('dataset_path')}"
         )
     retrieval_weight = (
         result.get("retrieval_weight_profile") if isinstance(result.get("retrieval_weight_profile"), dict) else {}

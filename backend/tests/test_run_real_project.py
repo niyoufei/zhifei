@@ -139,3 +139,29 @@ def test_build_boq_governance_and_review_queue_report(tmp_path: Path) -> None:
     assert Path(report).exists()
     text = Path(report).read_text(encoding="utf-8")
     assert "BOQ Manual Review Queue" in text
+
+
+def test_load_boq_payload_emits_parsing_confidence_fields(tmp_path: Path) -> None:
+    mod = _load_module()
+    boq_dir = tmp_path / "boq"
+    boq_dir.mkdir(parents=True, exist_ok=True)
+
+    (boq_dir / "confidence.csv").write_text(
+        "boq_code,name,quantity,unit,unit_price,total_price\n"
+        "E01,正常项,100,m3,66,6600\n"
+        "E02,异常项,1.23E+42,m3,5.0E+11,6.15E+53\n",
+        encoding="utf-8",
+    )
+
+    payload = asyncio.run(mod._load_boq_payload(boq_dir))
+    items = payload.get("items") or []
+    assert items
+    for row in items:
+        conf = float(row.get("parsing_confidence") or 0.0)
+        assert 0.0 <= conf <= 1.0
+        assert str(row.get("confidence_level") or "") in {"high", "medium", "low"}
+    stats = payload.get("stats") or {}
+    source_stats = stats.get("source_stats") or {}
+    assert source_stats
+    first_file = next(iter(source_stats.values()))
+    assert "avg_parsing_confidence" in first_file
