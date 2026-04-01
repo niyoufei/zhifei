@@ -9,6 +9,22 @@
 2. 在知识图谱/规则约束下生成结构化中间产物（JSON）
 3. 自动导出可交付的施工组织设计文档（DOCX）
 
+## 当前在线主链
+
+当前 V2 Web 页面真实主链见：
+
+- [docs/online_chain_map.md](/Users/youfeini/Desktop/文档生成系统/docs/online_chain_map.md)
+
+一句话说明：
+
+- 当前页面主链是 `app.py -> /actions/* -> actions_bridge.py -> backend/zhifei_autoplan/*`
+- `/autoplan/*` 仍在线，但属于兼容层，不再作为 V2 页面主链表述
+
+补充说明：
+
+- `devserver.py` 为历史兼容启动壳，不再作为当前页面主入口
+- README 下方保留的 `/compose`、`/export`、`/audit` 示例属于兼容接口/离线核验说明，不应与 8501 页面主流程混淆
+
 ## 环境准备
 
 ### 系统要求
@@ -20,6 +36,29 @@
 ```bash
 pip3 install -r requirements.txt
 ```
+
+### 环境变量
+
+复制 [.env.example](/Users/youfeini/Desktop/文档生成系统/.env.example) 到本地环境后，至少配置以下变量：
+
+```bash
+OPENAI_API_KEY_TEXT_MAIN=...
+OPENAI_API_KEY_TEXT_BACKUP=...
+OPENAI_API_KEY_AUTOMATION=...
+GEMINI_API_KEY_A=...
+GEMINI_API_KEY_B=...
+ZF_ACTIONS_KEY=zf-webui-key
+```
+
+当前第一阶段 Provider 角色固定为：
+
+- `OPENAI_API_KEY_TEXT_MAIN`：正文主生成
+- `OPENAI_API_KEY_TEXT_BACKUP`：正文故障切换
+- `OPENAI_API_KEY_AUTOMATION`：自动修订 / 自检 / 排障
+- `GEMINI_API_KEY_A`：视觉主通道
+- `GEMINI_API_KEY_B`：视觉备用通道
+
+兼容旧变量名，但服务端优先读取上述新命名。前端不再接收或展示明文 API Key。
 
 ### OCR（可选但强烈推荐）
 
@@ -74,13 +113,13 @@ chmod +x scripts/run_e2e.sh
 ```bash
 cd /path/to/文档生成系统
 export PYTHONPATH="$PWD:$PYTHONPATH"
-python3 -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+python3 -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8010
 ```
 
 #### 2. 验证服务
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8010/health
 ```
 
 预期返回：
@@ -90,10 +129,10 @@ curl http://127.0.0.1:8000/health
 
 ## 生成命令
 
-### 生成文档（/compose）
+### 生成文档（/compose，兼容接口示例）
 
 ```bash
-curl -X POST http://127.0.0.1:8000/compose \
+curl -X POST http://127.0.0.1:8010/compose \
   -H "Content-Type: application/json" \
   -d '{
     "topic": "建筑装饰装修工程施工组织设计",
@@ -108,16 +147,16 @@ curl -X POST http://127.0.0.1:8000/compose \
   }'
 ```
 
-### 导出 DOCX（/export）
+### 导出 DOCX（/export，兼容接口示例）
 
 ```bash
-curl -X POST http://127.0.0.1:8000/export -o output.docx
+curl -X POST http://127.0.0.1:8010/export -o output.docx
 ```
 
-### 查看审计链（/audit）
+### 查看审计链（/audit，兼容接口示例）
 
 ```bash
-curl http://127.0.0.1:8000/audit
+curl http://127.0.0.1:8010/audit
 ```
 
 ## 产物路径
@@ -143,6 +182,22 @@ curl http://127.0.0.1:8000/audit
 # 方式二：直接运行测试（需先启动服务器）
 python3 backend/scripts/smoke_e2e.py
 ```
+
+### 运行本地 Smoke 基线
+
+```bash
+# 默认：只跑核心 smoke
+./scripts/run_smoke.sh
+
+# 可选：在核心 smoke 后继续附加本地浏览器运维基线
+DOCGEN_RUN_LOCAL_UI_ADMIN_SMOKE=1 ./scripts/run_smoke.sh
+```
+
+补充说明：
+- 默认行为不变，不会自动附加本地 admin/browser 运维链
+- 打开 `DOCGEN_RUN_LOCAL_UI_ADMIN_SMOKE=1` 后，会额外串行执行：
+  - `scripts/verify_local_ui_admin_chain.sh`
+- 这条附加链只属于本地运维基线，不属于服务器 release/worktree 工具
 
 测试会验证：
 - `/compose` 返回 200 且 status="ok"
@@ -397,6 +452,8 @@ cat build/clawdbot/audit.log
 │   └── zhifei_autoplan/     # 自动规划模块
 ├── scripts/
 │   ├── run_e2e.sh           # 一键端到端脚本
+│   ├── run_smoke.sh         # 本地 smoke 入口（支持附加本地运维基线）
+│   ├── verify_local_ui_admin_chain.sh # 本地浏览器运维基线入口
 │   ├── smoke_api.py         # 快速接口冒烟（/health、/capabilities、/config）
 │   └── clean_audit_exports.py # 审计导出目录本地清理（--days / --keep）
 ├── build/                   # 构建产物
