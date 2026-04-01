@@ -91,9 +91,6 @@ require_number "$TENANT_LIMIT" "DOCGEN_ADMIN_SMOKE_TENANT_LIMIT"
 require_number "$WINDOW_LIMIT" "DOCGEN_ADMIN_SMOKE_WINDOW_LIMIT"
 
 BACKEND_URL="http://${HOST}:${PORT}"
-OWNER_PID="$(port_owner_pid "$PORT")"
-[[ -z "$OWNER_PID" ]] || fail "port ${PORT} already in use by pid=${OWNER_PID}"
-
 START_CMD=(
   "$PYTHON_BIN" -m uvicorn backend.app.main:app
   --host "$HOST"
@@ -120,6 +117,9 @@ if [[ "$DOCGEN_PREVIEW" = "1" ]]; then
   printf 'snapshot_export_summary_endpoint=%s\n' "${BACKEND_URL}/auth/tenant_usage_reports_exports_summary_snapshot_exports_summary"
   exit 0
 fi
+
+OWNER_PID="$(port_owner_pid "$PORT")"
+[[ -z "$OWNER_PID" ]] || fail "port ${PORT} already in use by pid=${OWNER_PID}"
 
 mkdir -p "$RUNTIME_DIR"
 TMP_DIR="$(mktemp -d)"
