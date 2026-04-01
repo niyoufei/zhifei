@@ -14,6 +14,8 @@ WAIT_TIMEOUT_MS="${DOCGEN_UI_WAIT_TIMEOUT_MS:-60000}"
 BROWSER_WIDTH="${DOCGEN_UI_BROWSER_WIDTH:-1440}"
 BROWSER_HEIGHT="${DOCGEN_UI_BROWSER_HEIGHT:-1200}"
 KEEP_BROWSER="${DOCGEN_UI_KEEP_BROWSER:-0}"
+RUN_ATTEMPTS="${DOCGEN_UI_RUN_ATTEMPTS:-2}"
+RETRY_SLEEP_SECONDS="${DOCGEN_UI_RETRY_SLEEP_SECONDS:-1}"
 
 TENDER_FILE="$FIXTURE_DIR/tender.docx"
 BOQ_FILE="$FIXTURE_DIR/boq.xlsx"
@@ -46,6 +48,26 @@ require_cmd() {
     echo "[ERROR] missing required command: $name" >&2
     exit 1
   fi
+}
+
+normalize_positive_int() {
+  local raw="$1"
+  local fallback="$2"
+  if [[ "$raw" =~ ^[0-9]+$ ]] && (( raw > 0 )); then
+    printf '%s\n' "$raw"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+cleanup_playwright_runtime() {
+  pkill -f 'playwright_chromiumdev_profile' >/dev/null 2>&1 || true
+  pkill -f 'Google Chrome.app/Contents/MacOS/Google Chrome.*remote-debugging-pipe' >/dev/null 2>&1 || true
+}
+
+should_retry_browser_output() {
+  local output="$1"
+  grep -Eq 'BrowserType\.launch: Target page, context or browser has been closed|TargetClosedError|signal=SIGKILL|exception while trying to kill process: Error: kill EPERM' <<<"$output"
 }
 
 python_has_playwright() {
@@ -131,6 +153,7 @@ ensure_fixtures
 tmp_dir="$(mktemp -d)"
 runner_js="$tmp_dir/ui_upload_outline_smoke.cjs"
 runner_py="$tmp_dir/ui_upload_outline_smoke.py"
+RUN_ATTEMPTS="$(normalize_positive_int "$RUN_ATTEMPTS" 2)"
 
 if [[ "$RESOLVED_RUNNER_IMPL" = "node" ]]; then
   PLAYWRIGHT_NODE_PATH="$(detect_playwright_node_path)"
@@ -415,8 +438,20 @@ else
   print_status "fixture boq.xlsx" "0" "$BOQ_FILE missing"
 fi
 
-if [[ "$RESOLVED_RUNNER_IMPL" = "node" ]]; then
-  node_output="$(
+node_output=""
+page_ready=""
+selected_files=""
+outline_loaded=""
+streamlit_upload=""
+upload_matches=""
+ui_error=""
+attempt=1
+
+while true; do
+  runner_output_file="$tmp_dir/browser-runner-output.txt"
+  runner_status=0
+  if [[ "$RESOLVED_RUNNER_IMPL" = "node" ]]; then
+    set +e
     NODE_PATH="$PLAYWRIGHT_NODE_PATH" \
     DOCGEN_UI_PLAYWRIGHT_MODULE="$PLAYWRIGHT_MODULE" \
     DOCGEN_UI_BROWSER_EXECUTABLE="$BROWSER_EXECUTABLE" \
@@ -427,10 +462,11 @@ if [[ "$RESOLVED_RUNNER_IMPL" = "node" ]]; then
     DOCGEN_UI_KEEP_BROWSER="$KEEP_BROWSER" \
     DOCGEN_UI_TENDER_FILE="$TENDER_FILE" \
     DOCGEN_UI_BOQ_FILE="$BOQ_FILE" \
-    "$NODE_BIN" "$runner_js" 2>&1
-  )"
-else
-  node_output="$(
+    "$NODE_BIN" "$runner_js" >"$runner_output_file" 2>&1
+    runner_status=$?
+    set -e
+  else
+    set +e
     DOCGEN_UI_BROWSER_EXECUTABLE="$BROWSER_EXECUTABLE" \
     DOCGEN_UI_BASE_URL="$BASE_URL" \
     DOCGEN_UI_WAIT_TIMEOUT_MS="$WAIT_TIMEOUT_MS" \
@@ -439,16 +475,34 @@ else
     DOCGEN_UI_KEEP_BROWSER="$KEEP_BROWSER" \
     DOCGEN_UI_TENDER_FILE="$TENDER_FILE" \
     DOCGEN_UI_BOQ_FILE="$BOQ_FILE" \
-    "$PYTHON_BIN" "$runner_py" 2>&1
-  )"
-fi
+    "$PYTHON_BIN" "$runner_py" >"$runner_output_file" 2>&1
+    runner_status=$?
+    set -e
+  fi
 
-page_ready="$(extract_result "UI_PAGE_READY" "$node_output")"
-selected_files="$(extract_result "UI_SELECTED_FILES" "$node_output")"
-outline_loaded="$(extract_result "UI_OUTLINE_LOADED" "$node_output")"
-streamlit_upload="$(extract_result "UI_STREAMLIT_UPLOAD" "$node_output")"
-upload_matches="$(extract_result "UI_UPLOAD_204_MATCHES" "$node_output")"
-ui_error="$(extract_result "UI_ERROR" "$node_output")"
+  node_output="$(cat "$runner_output_file")"
+  page_ready="$(extract_result "UI_PAGE_READY" "$node_output")"
+  selected_files="$(extract_result "UI_SELECTED_FILES" "$node_output")"
+  outline_loaded="$(extract_result "UI_OUTLINE_LOADED" "$node_output")"
+  streamlit_upload="$(extract_result "UI_STREAMLIT_UPLOAD" "$node_output")"
+  upload_matches="$(extract_result "UI_UPLOAD_204_MATCHES" "$node_output")"
+  ui_error="$(extract_result "UI_ERROR" "$node_output")"
+
+  if [[ "${page_ready:-0}" = "1" && "${selected_files:-0}" = "1" && "${outline_loaded:-0}" = "1" && "${streamlit_upload:-0}" = "1" ]]; then
+    break
+  fi
+
+  if (( attempt >= RUN_ATTEMPTS )) || ! should_retry_browser_output "${ui_error:-$node_output}"; then
+    break
+  fi
+
+  echo "[WARN] browser smoke attempt ${attempt} failed with transient browser shutdown, retrying after cleanup..."
+  cleanup_playwright_runtime
+  sleep "$RETRY_SLEEP_SECONDS"
+  attempt=$((attempt + 1))
+done
+
+echo "[INFO] browser_attempts=$attempt/$RUN_ATTEMPTS"
 
 if [[ "${page_ready:-0}" = "1" ]]; then
   print_status "page ready" "1" "$BASE_URL"
