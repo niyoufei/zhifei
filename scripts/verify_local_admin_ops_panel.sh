@@ -158,8 +158,6 @@ require_number "$WEB_PORT" "DOCGEN_ADMIN_UI_SMOKE_WEB_PORT"
 require_number "$WAIT_TIMEOUT_SEC" "DOCGEN_ADMIN_UI_SMOKE_WAIT_TIMEOUT_SEC"
 require_number "$BROWSER_WIDTH" "DOCGEN_ADMIN_UI_BROWSER_WIDTH"
 require_number "$BROWSER_HEIGHT" "DOCGEN_ADMIN_UI_BROWSER_HEIGHT"
-[[ -z "$(port_owner_pid "$BACKEND_PORT")" ]] || fail "backend port ${BACKEND_PORT} already in use"
-[[ -z "$(port_owner_pid "$WEB_PORT")" ]] || fail "web port ${WEB_PORT} already in use"
 
 if [[ ! -x "$BROWSER_EXECUTABLE" ]]; then
   fail "browser executable not found: ${BROWSER_EXECUTABLE}"
@@ -215,6 +213,9 @@ if [[ "$DOCGEN_PREVIEW" = "1" ]]; then
   printf 'expected_assertions=%s\n' 'dev_panel,admin_panel,tenant_tab,exports_tab,snapshot_export_tab'
   exit 0
 fi
+
+[[ -z "$(port_owner_pid "$BACKEND_PORT")" ]] || fail "backend port ${BACKEND_PORT} already in use"
+[[ -z "$(port_owner_pid "$WEB_PORT")" ]] || fail "web port ${WEB_PORT} already in use"
 
 mkdir -p "$RUNTIME_DIR"
 tmp_dir="$(mktemp -d)"

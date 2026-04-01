@@ -11,6 +11,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+pick_free_port() {
+  python3 - <<'PY'
+import socket
+
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+}
+
 assert_contains() {
   local needle="$1"
   local file="$2"
@@ -34,6 +44,8 @@ assert_not_contains() {
 }
 
 mkdir -p "$FIXTURE_NODE_PATH/playwright-core"
+BACKEND_PORT="$(pick_free_port)"
+WEB_PORT="$(pick_free_port)"
 
 cat > "$TMP_DIR/mock-node" <<'EOF'
 #!/usr/bin/env bash
@@ -72,21 +84,23 @@ chmod +x "$TMP_DIR/mock-node"
 PREVIEW_OUTPUT="$TMP_DIR/preview.log"
 DOCGEN_PREVIEW=1 \
 DOCGEN_ADMIN_UI_SMOKE_BROWSER_IMPL=node \
-DOCGEN_ADMIN_UI_SMOKE_BACKEND_PORT=18112 \
-DOCGEN_ADMIN_UI_SMOKE_WEB_PORT=18612 \
+DOCGEN_ADMIN_UI_SMOKE_BACKEND_PORT="$BACKEND_PORT" \
+DOCGEN_ADMIN_UI_SMOKE_WEB_PORT="$WEB_PORT" \
+DOCGEN_ADMIN_UI_NODE_BIN="$TMP_DIR/mock-node" \
+DOCGEN_ADMIN_UI_PLAYWRIGHT_NODE_PATH="$FIXTURE_NODE_PATH" \
 bash "$SCRIPT" >"$PREVIEW_OUTPUT" 2>&1
 
-assert_contains "backend_port=18112" "$PREVIEW_OUTPUT"
-assert_contains "web_port=18612" "$PREVIEW_OUTPUT"
-assert_contains "ui_url=http://127.0.0.1:18612/?dev=1" "$PREVIEW_OUTPUT"
+assert_contains "backend_port=$BACKEND_PORT" "$PREVIEW_OUTPUT"
+assert_contains "web_port=$WEB_PORT" "$PREVIEW_OUTPUT"
+assert_contains "ui_url=http://127.0.0.1:${WEB_PORT}/?dev=1" "$PREVIEW_OUTPUT"
 assert_contains "admin_key_source=temp_runtime_only" "$PREVIEW_OUTPUT"
 assert_contains "expected_assertions=dev_panel,admin_panel,tenant_tab,exports_tab,snapshot_export_tab" "$PREVIEW_OUTPUT"
 assert_not_contains "Bearer " "$PREVIEW_OUTPUT"
 
 LIVE_OUTPUT="$TMP_DIR/live.log"
 DOCGEN_ADMIN_UI_SMOKE_BROWSER_IMPL=node \
-DOCGEN_ADMIN_UI_SMOKE_BACKEND_PORT=18112 \
-DOCGEN_ADMIN_UI_SMOKE_WEB_PORT=18612 \
+DOCGEN_ADMIN_UI_SMOKE_BACKEND_PORT="$BACKEND_PORT" \
+DOCGEN_ADMIN_UI_SMOKE_WEB_PORT="$WEB_PORT" \
 DOCGEN_ADMIN_UI_SMOKE_BACKEND_LOG_FILE="$TMP_DIR/backend.log" \
 DOCGEN_ADMIN_UI_SMOKE_WEB_LOG_FILE="$TMP_DIR/web.log" \
 DOCGEN_ADMIN_UI_NODE_BIN="$TMP_DIR/mock-node" \
@@ -94,7 +108,7 @@ DOCGEN_ADMIN_UI_PLAYWRIGHT_NODE_PATH="$FIXTURE_NODE_PATH" \
 DOCGEN_ADMIN_UI_BROWSER_EXECUTABLE="/bin/sh" \
 bash "$SCRIPT" >"$LIVE_OUTPUT" 2>&1
 
-assert_contains "[OK] page ready: http://127.0.0.1:18612/?dev=1" "$LIVE_OUTPUT"
+assert_contains "[OK] page ready: http://127.0.0.1:${WEB_PORT}/?dev=1" "$LIVE_OUTPUT"
 assert_contains "[OK] dev panel visible: 维护 / 诊断（开发）" "$LIVE_OUTPUT"
 assert_contains "[OK] admin panel visible: 运营管理台（只读）" "$LIVE_OUTPUT"
 assert_contains "[OK] admin refresh success: Admin Key accepted and dashboard loaded" "$LIVE_OUTPUT"
