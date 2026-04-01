@@ -1,18 +1,10 @@
 #!/bin/bash
 set -e
-
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT_DIR"
-
-PYTHON_BIN="${DOCGEN_SMOKE_PYTHON:-python3}"
-SMOKE_E2E_SCRIPT="${DOCGEN_SMOKE_E2E_SCRIPT:-scripts/smoke_e2e_v2.py}"
-RUN_LOCAL_UI_ADMIN_SMOKE="${DOCGEN_RUN_LOCAL_UI_ADMIN_SMOKE:-0}"
-LOCAL_UI_ADMIN_SCRIPT="${DOCGEN_LOCAL_UI_ADMIN_SCRIPT:-$ROOT_DIR/scripts/verify_local_ui_admin_chain.sh}"
-
-"$PYTHON_BIN" "$SMOKE_E2E_SCRIPT"
+cd "$(dirname "$0")/.."
+python3 scripts/smoke_e2e_v2.py
 
 # MECE/Observability: print consistency summary from build/audit_report.json (top-level)
-"$PYTHON_BIN" - <<'PY'
+python3 - <<'PY'
 import json, os
 from pathlib import Path
 mode = (os.getenv('QUALITY_CONSISTENCY_MODE') or 'warn').strip().lower()
@@ -36,7 +28,7 @@ else:
 PY
 
 # MECE/Control: consistency gate (warn-only by default; set QUALITY_CONSISTENCY_MODE=fail to block)
-"$PYTHON_BIN" - <<'PY'
+python3 - <<'PY'
 import json, os, sys
 from pathlib import Path
 mode = (os.getenv('QUALITY_CONSISTENCY_MODE') or 'warn').strip().lower()
@@ -64,12 +56,3 @@ if bad:
 print(f'[OK] consistency_gate: OK (mode={mode})')
 sys.exit(0)
 PY
-
-if [ "$RUN_LOCAL_UI_ADMIN_SMOKE" = "1" ]; then
-    if [ ! -f "$LOCAL_UI_ADMIN_SCRIPT" ]; then
-        echo "[FAIL] local_ui_admin_smoke: missing script $LOCAL_UI_ADMIN_SCRIPT"
-        exit 1
-    fi
-    echo "[INFO] local_ui_admin_smoke: enabled ($LOCAL_UI_ADMIN_SCRIPT)"
-    bash "$LOCAL_UI_ADMIN_SCRIPT"
-fi

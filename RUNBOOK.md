@@ -9,16 +9,6 @@
     cd "$HOME/Desktop/文档生成系统"
     ./backend/scripts/run_smoke.sh
 
-### Terminal 2（可选）：在全量 Smoke 后继续附加本地浏览器运维基线
-    cd "$HOME/Desktop/文档生成系统"
-    DOCGEN_RUN_LOCAL_UI_ADMIN_SMOKE=1 ./scripts/run_smoke.sh
-
-说明：
-- 该开关默认关闭，不影响现有 `run_smoke.sh` 默认行为
-- 打开后会在核心 smoke 结束后，额外串行执行：
-  - `scripts/verify_local_ui_admin_chain.sh`
-- 这一步只属于本地运维基线，不属于服务器 release/worktree 工具
-
 ## 2) 8000 端口被占用时才需要做（可选）
     lsof -nP -iTCP:8000 -sTCP:LISTEN
     # 找到 PID 后执行（把 PID 换成数字）：
