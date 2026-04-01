@@ -67,7 +67,7 @@ cleanup_playwright_runtime() {
 
 should_retry_browser_output() {
   local output="$1"
-  grep -Eq 'BrowserType\.launch: Target page, context or browser has been closed|TargetClosedError|signal=SIGKILL|exception while trying to kill process: Error: kill EPERM' <<<"$output"
+  grep -Eq 'BrowserType\.launch: Target page, context or browser has been closed|TargetClosedError|signal=SIGKILL|exception while trying to kill process: Error: kill EPERM|Page\.wait_for_function: Timeout [0-9]+ms exceeded' <<<"$output"
 }
 
 python_has_playwright() {
