@@ -54,17 +54,30 @@ done
 
 BACKEND_PORT="${BACKEND_PORT:-8010}"
 WEB_PORT="${WEB_PORT:-8501}"
+BACKEND_HOST="${BACKEND_HOST:-${ZF_BACKEND_HOST:-${ZF_HOST:-127.0.0.1}}}"
+WEB_HOST="${WEB_HOST:-${ZF_WEB_HOST:-${ZF_HOST:-127.0.0.1}}}"
+BACKEND_CONNECT_HOST="${BACKEND_CONNECT_HOST:-${ZF_BACKEND_CONNECT_HOST:-127.0.0.1}}"
+WEB_CONNECT_HOST="${WEB_CONNECT_HOST:-${ZF_WEB_CONNECT_HOST:-127.0.0.1}}"
+WEB_READY_TIMEOUT_SEC="${ZF_WEB_READY_TIMEOUT_SECONDS:-120}"
+WEB_POST_READY_STABLE_SEC="${ZF_WEB_POST_READY_STABLE_SECONDS:-15}"
+PUBLIC_WEB_URL="${ZF_PUBLIC_WEB_URL:-}"
 SYSTEM_ID="${ZF_SYSTEM_ID:-docgen-system}"
 RUNTIME_DIR="${ZF_RUNTIME_DIR:-$ROOT/.runtime/docgen}"
 PID_BACKEND="$RUNTIME_DIR/webui_backend.pid"
 PID_STREAMLIT="$RUNTIME_DIR/streamlit.pid"
 PID_WATCHDOG="$RUNTIME_DIR/webui_watchdog.pid"
+CONTROL_LOG="logs/webui_control.log"
+
+control_log() {
+  printf '[%s] %s\n' "$(date '+%F %T')" "$1" >> "$CONTROL_LOG"
+}
 
 mkdir -p logs "$RUNTIME_DIR"
+control_log "start requested background=$BACKGROUND backend_port=$BACKEND_PORT web_port=$WEB_PORT"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export ZF_SYSTEM_ID="$SYSTEM_ID"
 export ZF_ACTIONS_KEY="${ZF_ACTIONS_KEY:-zf-webui-key}"
-export ZF_BACKEND_BASE_URL="${ZF_BACKEND_BASE_URL:-http://127.0.0.1:${BACKEND_PORT}}"
+export ZF_BACKEND_BASE_URL="${ZF_BACKEND_BASE_URL:-http://${BACKEND_CONNECT_HOST}:${BACKEND_PORT}}"
 
 PYTHON="python3"
 if [ -x "${ROOT}/venv/bin/python3" ]; then
@@ -93,9 +106,35 @@ pid_cmdline() {
   ps -p "$pid" -o command= 2>/dev/null || true
 }
 
+spawn_detached() {
+  local stdout_path="$1"
+  local stderr_path="$2"
+  shift 2
+  ZF_SPAWN_STDOUT="$stdout_path" \
+  ZF_SPAWN_STDERR="$stderr_path" \
+  "${PYTHON_CMD[@]}" - "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+cmd = sys.argv[1:]
+with open(os.environ["ZF_SPAWN_STDOUT"], "ab", buffering=0) as out, \
+     open(os.environ["ZF_SPAWN_STDERR"], "ab", buffering=0) as err:
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=out,
+        stderr=err,
+        start_new_session=True,
+        close_fds=True,
+    )
+print(proc.pid)
+PY
+}
+
 backend_identity_state() {
   local raw
-  raw="$(curl -fsS --max-time 2 "http://127.0.0.1:${BACKEND_PORT}/health" 2>/dev/null || true)"
+  raw="$(curl -fsS --max-time 2 "http://${BACKEND_CONNECT_HOST}:${BACKEND_PORT}/health" 2>/dev/null || true)"
   [ -n "$raw" ] || return 1
   set +e
   ZF_HEALTH_RAW="$raw" "${PYTHON_CMD[@]}" - "$SYSTEM_ID" <<'PY'
@@ -127,6 +166,68 @@ PY
   return 1
 }
 
+streamlit_health_ok() {
+  local raw
+  raw="$(curl -fsS --max-time 2 "http://${WEB_CONNECT_HOST}:${WEB_PORT}/_stcore/health" 2>/dev/null || true)"
+  [ -n "$raw" ]
+}
+
+backend_provider_alignment() {
+  local raw
+  raw="$(curl -fsS --max-time 2 "http://${BACKEND_CONNECT_HOST}:${BACKEND_PORT}/capabilities" 2>/dev/null || true)"
+  [ -n "$raw" ] || return 1
+  set +e
+  ZF_CAPS_RAW="$raw" \
+  EXPECT_TEXT_MAIN="$([ -n "${OPENAI_API_KEY_TEXT_MAIN:-${OPENAI_API_KEY:-}}" ] && echo 1 || echo 0)" \
+  EXPECT_TEXT_BACKUP="$([ -n "${OPENAI_API_KEY_TEXT_BACKUP:-${ZF_LLM_FALLBACK1_API_KEY:-}}" ] && echo 1 || echo 0)" \
+  EXPECT_AUTOMATION="$([ -n "${OPENAI_API_KEY_AUTOMATION:-}" ] && echo 1 || echo 0)" \
+  EXPECT_GEMINI_A="$([ -n "${GEMINI_API_KEY_A:-${ZF_GOOGLE_API_KEY:-${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}}}" ] && echo 1 || echo 0)" \
+  EXPECT_GEMINI_B="$([ -n "${GEMINI_API_KEY_B:-}" ] && echo 1 || echo 0)" \
+  "${PYTHON_CMD[@]}" - <<'PY'
+import json
+import os
+import sys
+
+def _expect(name: str) -> bool:
+    return os.environ.get(name, "0").strip() == "1"
+
+try:
+    payload = json.loads(os.environ.get("ZF_CAPS_RAW", ""))
+except Exception:
+    sys.exit(1)
+ps = payload.get("provider_status") if isinstance(payload, dict) else None
+if not isinstance(ps, dict):
+    sys.exit(1)
+
+checks = [
+    ("EXPECT_TEXT_MAIN", "text_main"),
+    ("EXPECT_TEXT_BACKUP", "text_backup"),
+    ("EXPECT_AUTOMATION", "automation"),
+    ("EXPECT_GEMINI_A", "gemini_a"),
+    ("EXPECT_GEMINI_B", "gemini_b"),
+]
+for env_name, field in checks:
+    if not _expect(env_name):
+        continue
+    item = ps.get(field)
+    if not isinstance(item, dict) or not bool(item.get("configured")):
+        sys.exit(2)
+sys.exit(0)
+PY
+  local code=$?
+  set -e
+  return "$code"
+}
+
+expect_local_provider_bootstrap() {
+  [ -n "${OPENAI_API_KEY_TEXT_MAIN:-${OPENAI_API_KEY:-}}" ] && return 0
+  [ -n "${OPENAI_API_KEY_TEXT_BACKUP:-${ZF_LLM_FALLBACK1_API_KEY:-}}" ] && return 0
+  [ -n "${OPENAI_API_KEY_AUTOMATION:-}" ] && return 0
+  [ -n "${GEMINI_API_KEY_A:-${ZF_GOOGLE_API_KEY:-${GOOGLE_API_KEY:-${GEMINI_API_KEY:-}}}}" ] && return 0
+  [ -n "${GEMINI_API_KEY_B:-}" ] && return 0
+  return 1
+}
+
 is_our_streamlit_cmd() {
   local cmd="$1"
   [[ "$cmd" == *"streamlit"* ]] || return 1
@@ -135,9 +236,26 @@ is_our_streamlit_cmd() {
   return 0
 }
 
+open_browser_if_allowed() {
+  local open_url=""
+  if [ "${ZF_SKIP_OPEN:-0}" = "1" ]; then
+    return 0
+  fi
+  open_url="${PUBLIC_WEB_URL:-http://${WEB_CONNECT_HOST}:${WEB_PORT}}"
+  if command -v open >/dev/null 2>&1; then
+    # Browser auto-open is a best-effort convenience and must not flip the whole
+    # launcher into a failed state once backend/web listeners are already up.
+    open "$open_url" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 if lsof -nP -iTCP:"$BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  if ! backend_identity_state; then
-    code=$?
+  set +e
+  backend_identity_state
+  code=$?
+  set -e
+  if [ "$code" -ne 0 ]; then
     owner_pid="$(port_owner_pid "$BACKEND_PORT")"
     owner_cmd="$(pid_cmdline "${owner_pid:-}")"
     if [ "$code" -eq 2 ]; then
@@ -147,19 +265,67 @@ if lsof -nP -iTCP:"$BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     fi
     echo "        占用进程: pid=${owner_pid:-unknown}"
     echo "        命令: ${owner_cmd:-unknown}"
+    control_log "start failed backend_port_conflict code=$code owner_pid=${owner_pid:-unknown}"
     exit 1
   fi
   owner_pid="$(port_owner_pid "$BACKEND_PORT")"
-  if [ -n "${owner_pid:-}" ]; then
-    echo "$owner_pid" > "$PID_BACKEND"
+  if backend_provider_alignment; then
+    if [ -n "${owner_pid:-}" ]; then
+      echo "$owner_pid" > "$PID_BACKEND"
+    fi
+    control_log "backend ready pid=${owner_pid:-unknown} reused=true"
+  else
+    code=$?
+    if expect_local_provider_bootstrap && { [ "$code" -eq 2 ] || [ "$code" -eq 1 ]; }; then
+      echo "[WARN] 已发现旧 backend 进程，但 provider 未就绪；正在切换到读取本地 key 文件的新实例。"
+      control_log "backend provider_mismatch code=$code owner_pid=${owner_pid:-unknown}; restarting"
+      if [ -n "${owner_pid:-}" ]; then
+        kill "$owner_pid" >/dev/null 2>&1 || true
+      fi
+      for _ in $(seq 1 10); do
+        if ! lsof -nP -iTCP:"$BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+          break
+        fi
+        sleep 1
+      done
+      if lsof -nP -iTCP:"$BACKEND_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "[ERROR] 无法释放旧 backend 端口 ${BACKEND_PORT}，请检查占用进程。"
+        control_log "start failed backend_port_release_timeout port=$BACKEND_PORT owner_pid=${owner_pid:-unknown}"
+        exit 1
+      fi
+      spawn_detached "logs/webui_backend.out.log" "logs/webui_backend.err.log" \
+        "${PYTHON_CMD[@]}" -m uvicorn backend.app.main:app \
+        --app-dir "$ROOT" \
+        --host "$BACKEND_HOST" \
+        --port "$BACKEND_PORT" \
+        > "$PID_BACKEND"
+
+      ready=false
+      for _ in $(seq 1 25); do
+        if backend_identity_state && backend_provider_alignment; then
+          ready=true
+          break
+        fi
+        sleep 1
+      done
+      if [ "$ready" != true ]; then
+        echo "[ERROR] 后端重启后 provider 仍未就绪，请检查 logs/webui_backend.err.log 和本地 key 文件。"
+        control_log "start failed backend_provider_unready_after_restart"
+        exit 1
+      fi
+      control_log "backend ready pid=$(cat "$PID_BACKEND" 2>/dev/null || echo unknown) reused=false restarted_for_provider=true"
+    elif [ -n "${owner_pid:-}" ]; then
+      echo "$owner_pid" > "$PID_BACKEND"
+      control_log "backend ready pid=${owner_pid:-unknown} reused=true provider_check_skipped code=$code"
+    fi
   fi
 else
-  nohup "${PYTHON_CMD[@]}" -m uvicorn backend.app.main:app \
+  spawn_detached "logs/webui_backend.out.log" "logs/webui_backend.err.log" \
+    "${PYTHON_CMD[@]}" -m uvicorn backend.app.main:app \
     --app-dir "$ROOT" \
-    --host 127.0.0.1 \
+    --host "$BACKEND_HOST" \
     --port "$BACKEND_PORT" \
-    > logs/webui_backend.out.log 2> logs/webui_backend.err.log < /dev/null &
-  echo $! > "$PID_BACKEND"
+    > "$PID_BACKEND"
 
   ready=false
   for _ in $(seq 1 25); do
@@ -171,11 +337,14 @@ else
   done
   if [ "$ready" != true ]; then
     echo "[ERROR] 后端启动失败，请检查 logs/webui_backend.err.log"
+    control_log "start failed backend_boot_timeout"
     exit 1
   fi
+  control_log "backend ready pid=$(cat "$PID_BACKEND" 2>/dev/null || echo unknown) reused=false"
 fi
 
 if [ "$BACKGROUND" = true ]; then
+  web_reused=false
   if lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     owner_pid="$(port_owner_pid "$WEB_PORT")"
     owner_cmd="$(pid_cmdline "${owner_pid:-}")"
@@ -183,33 +352,59 @@ if [ "$BACKGROUND" = true ]; then
       echo "[ERROR] 端口 ${WEB_PORT} 已被其他应用占用，为防止互相影响已停止启动。"
       echo "        占用进程: pid=${owner_pid:-unknown}"
       echo "        命令: ${owner_cmd:-unknown}"
+      control_log "start failed web_port_conflict owner_pid=${owner_pid:-unknown}"
       exit 1
     fi
     if [ -n "${owner_pid:-}" ]; then
       echo "$owner_pid" > "$PID_STREAMLIT"
     fi
+    web_reused=true
   else
-    nohup "${PYTHON_CMD[@]}" -m streamlit run "$ROOT/app.py" \
-      --server.address 127.0.0.1 \
+    spawn_detached "logs/streamlit.out.log" "logs/streamlit.err.log" \
+      "${PYTHON_CMD[@]}" -m streamlit run "$ROOT/app.py" \
+      --server.address "$WEB_HOST" \
       --server.port "$WEB_PORT" \
       --server.headless true \
       --server.fileWatcherType none \
       --server.runOnSave false \
-      >> logs/streamlit.out.log 2>> logs/streamlit.err.log < /dev/null &
-    echo $! > "$PID_STREAMLIT"
+      > "$PID_STREAMLIT"
   fi
 
-  for _ in $(seq 1 30); do
-    if lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  web_ready=false
+  for _ in $(seq 1 "$WEB_READY_TIMEOUT_SEC"); do
+    if lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1 && streamlit_health_ok; then
+      web_ready=true
       break
     fi
     sleep 1
   done
-  if ! lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  if [ "$web_ready" != true ]; then
     echo "[ERROR] Web UI 启动失败，请检查 logs/streamlit.err.log"
+    control_log "start failed web_boot_timeout timeout_sec=$WEB_READY_TIMEOUT_SEC"
     exit 1
   fi
-  # Optional self-heal watchdog (disabled by default to avoid macOS Desktop permission issues).
+  if [ "$WEB_POST_READY_STABLE_SEC" -gt 0 ]; then
+    stable_left="$WEB_POST_READY_STABLE_SEC"
+    while [ "$stable_left" -gt 0 ]; do
+      if ! lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1 || ! streamlit_health_ok; then
+        echo "[ERROR] Web UI 启动后未能稳定就绪，请检查 logs/streamlit.err.log"
+        control_log "start failed web_post_ready_unstable stable_sec=$WEB_POST_READY_STABLE_SEC"
+        exit 1
+      fi
+      stable_left=$((stable_left - 1))
+      if [ "$stable_left" -gt 0 ]; then
+        sleep 1
+      fi
+    done
+  fi
+  owner_pid="$(port_owner_pid "$WEB_PORT")"
+  if [ -n "${owner_pid:-}" ]; then
+    echo "$owner_pid" > "$PID_STREAMLIT"
+  fi
+  if [ -f "$PID_STREAMLIT" ]; then
+    control_log "web ready pid=$(cat "$PID_STREAMLIT" 2>/dev/null || echo unknown) reused=$web_reused stable_sec=$WEB_POST_READY_STABLE_SEC"
+  fi
+  # Optional self-heal watchdog (legacy mode; keep disabled by default, chief agent now runs in backend).
   # Disabled when already running inside watchdog context to avoid recursion.
   if [ "${ZF_ENABLE_SELF_HEAL:-0}" = "1" ] && [ "${ZF_WATCHDOG_MODE:-0}" != "1" ]; then
     wd_need_start=true
@@ -221,33 +416,36 @@ if [ "$BACKGROUND" = true ]; then
     fi
     if [ "$wd_need_start" = true ]; then
       nohup env \
+        BACKEND_HOST="$BACKEND_CONNECT_HOST" \
         BACKEND_PORT="$BACKEND_PORT" \
+        WEB_HOST="$WEB_CONNECT_HOST" \
         WEB_PORT="$WEB_PORT" \
         ZF_WATCHDOG_MODE=1 \
         ZF_ENABLE_SELF_HEAL=0 \
         "$ROOT/scripts/web_ui_watchdog.sh" \
         >> logs/webui_watchdog.out.log 2>> logs/webui_watchdog.err.log < /dev/null &
       echo $! > "$PID_WATCHDOG"
+      control_log "watchdog ready pid=$(cat "$PID_WATCHDOG" 2>/dev/null || echo unknown)"
     fi
   fi
-  if command -v open >/dev/null 2>&1; then
-    open "http://127.0.0.1:${WEB_PORT}"
-  fi
-  echo "施组专家系统已进化完成，请访问 http://127.0.0.1:${WEB_PORT}"
+  open_browser_if_allowed
+  control_log "start finished backend_pid=$(cat "$PID_BACKEND" 2>/dev/null || echo unknown) web_pid=$(cat "$PID_STREAMLIT" 2>/dev/null || echo unknown)"
+  echo "文档生成系统已就绪，请访问 ${PUBLIC_WEB_URL:-http://${WEB_CONNECT_HOST}:${WEB_PORT}}"
   exit 0
 fi
 
 if lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  if command -v open >/dev/null 2>&1; then
-    open "http://127.0.0.1:${WEB_PORT}"
-  fi
-  echo "施组专家系统已进化完成，请访问 http://127.0.0.1:${WEB_PORT}"
+  owner_pid="$(port_owner_pid "$WEB_PORT")"
+  control_log "start finished backend_pid=$(cat "$PID_BACKEND" 2>/dev/null || echo unknown) web_pid=${owner_pid:-unknown} foreground_reused_web=true"
+  open_browser_if_allowed
+  echo "文档生成系统已就绪，请访问 ${PUBLIC_WEB_URL:-http://${WEB_CONNECT_HOST}:${WEB_PORT}}"
   exit 0
 fi
 
-echo "施组专家系统已进化完成，请访问 http://127.0.0.1:${WEB_PORT}"
+echo "文档生成系统已就绪，请访问 ${PUBLIC_WEB_URL:-http://${WEB_CONNECT_HOST}:${WEB_PORT}}"
+control_log "start finished backend_pid=$(cat "$PID_BACKEND" 2>/dev/null || echo unknown) web_pid=foreground foreground_reused_web=false"
 "${PYTHON_CMD[@]}" -m streamlit run "$ROOT/app.py" \
-  --server.address 127.0.0.1 \
+  --server.address "$WEB_HOST" \
   --server.port "$WEB_PORT" \
   --server.headless true \
   --server.fileWatcherType none \

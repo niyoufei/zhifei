@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from backend.zhifei_autoplan.agents.section_writer import SectionWriter
+from backend.zhifei_autoplan.agents.section_writer import SectionWriter, compact_text_to_length_bounds
 
 
 class TestSectionWriterInit:
@@ -19,6 +19,14 @@ class TestSectionWriterInit:
         mock_llm = MagicMock()
         writer = SectionWriter(llm=mock_llm)
         assert writer.llm is mock_llm
+
+    def test_compact_text_to_length_bounds_reduces_long_text(self):
+        """Public helper should reduce long text into configured range."""
+        source = ("工序：钢筋绑扎。设备：GW40弯曲机1台。参数：间距200mm，合格率≥98%。" * 20).strip()
+        compacted = compact_text_to_length_bounds(source, min_length=120, max_length=300)
+        assert compacted is not None
+        assert 120 <= len(compacted) <= 300
+        assert "GW40弯曲机1台" in compacted
 
 
 class TestBuildPrompt:
@@ -121,13 +129,14 @@ class TestFallback:
         """Test fallback has template structure."""
         writer = SectionWriter()
         result = writer._fallback("施工方案", {})
-        assert "【量化指标】" in result
-        assert "频次" in result
-        assert "阈值" in result
-        assert "间距" in result
-        assert "【风险→控制→验证】" in result
+        assert "本章量化控制要求如下" in result
+        assert "巡检频次控制为" in result
+        assert "关键偏差控制在" in result
+        assert "风险→控制→验证" in result
         assert "风险：" in result and "控制：" in result and "验证：" in result
         assert "【证据:" in result
+        assert "【范围】" not in result
+        assert "【证据摘要】" not in result
 
     def test_fallback_can_use_doc_evidence_as_source(self):
         """Fallback may use doc_evidence as a traceable evidence source."""
@@ -150,8 +159,8 @@ class TestWrite:
         result = await writer.write("工程概况", {})
         assert result["title"] == "工程概况"
         assert "prompt" in result
-        assert "【量化指标】" in result["content"]
-        assert "【风险→控制→验证】" in result["content"]
+        assert "本章量化控制要求如下" in result["content"]
+        assert "风险→控制→验证" in result["content"]
         assert "【证据:" in result["content"]
 
     @pytest.mark.asyncio
@@ -171,6 +180,13 @@ class TestWrite:
             "text": "生成的章节内容...",
             "provider": "openai",
             "model": "gpt-4",
+            "request_id": "req-1",
+            "client_request_id": "client-1",
+            "used_key_alias": "OPENAI_API_KEY_TEXT_MAIN",
+            "latency_ms": 432,
+            "token_usage": {"input_tokens": 120, "output_tokens": 66, "total_tokens": 186},
+            "cache_hit": True,
+            "cached_tokens": 32,
         }
         writer = SectionWriter(llm=mock_llm)
         result = await writer.write("工程概况", {})
@@ -178,6 +194,16 @@ class TestWrite:
         assert result["content"] == "生成的章节内容..."
         assert result["provider"] == "openai"
         assert result["model"] == "gpt-4"
+        assert result["request_id"] == "req-1"
+        assert result["client_request_id"] == "client-1"
+        assert result["used_key_alias"] == "OPENAI_API_KEY_TEXT_MAIN"
+        assert result["latency_ms"] == 432
+        assert result["token_usage"]["total_tokens"] == 186
+        assert result["cache_hit"] is True
+        assert result["cached_tokens"] == 32
+        assert len(result["resource_usage_attempts"]) == 1
+        assert result["resource_usage_attempts"][0]["attempt"] == 1
+        assert result["resource_usage_attempts"][0]["token_usage"]["input_tokens"] == 120
         mock_llm.complete.assert_called_once()
 
     @pytest.mark.asyncio
@@ -192,10 +218,9 @@ class TestWrite:
         writer = SectionWriter(llm=mock_llm)
         context = {"kg_evidence": ["证据A", "证据B"], "doc_evidence": ["文档C"]}
         result = await writer.write("施工方案", context)
-        # Should use fallback + evidence
-        assert "【量化指标】" in result["content"]
-        assert "【证据摘要】" in result["content"]
-        assert "证据A" in result["content"]
+        assert "本章量化控制要求如下" in result["content"]
+        assert "【证据摘要】" not in result["content"]
+        assert "证据A" not in result["content"]
         assert "文档C" in result["content"]
 
     @pytest.mark.asyncio
@@ -205,8 +230,8 @@ class TestWrite:
         mock_llm.complete.return_value = {"text": "   \n\t  "}
         writer = SectionWriter(llm=mock_llm)
         result = await writer.write("质量管理", {})
-        assert "【量化指标】" in result["content"]
-        assert "【证据摘要】" in result["content"]
+        assert "本章量化控制要求如下" in result["content"]
+        assert "【证据摘要】" not in result["content"]
 
     @pytest.mark.asyncio
     async def test_write_with_llm_error_uses_fallback(self):
@@ -218,13 +243,13 @@ class TestWrite:
         }
         writer = SectionWriter(llm=mock_llm)
         result = await writer.write("安全管理", {})
-        assert "【量化指标】" in result["content"]
-        assert "【证据摘要】" in result["content"]
+        assert "本章量化控制要求如下" in result["content"]
+        assert "【证据摘要】" not in result["content"]
         assert result["error"] == "API rate limit exceeded"
 
     @pytest.mark.asyncio
     async def test_write_evidence_limit_in_fallback(self):
-        """Test fallback limits evidence to 3 items each."""
+        """Fallback should use a traceable source without leaking evidence summary lists."""
         mock_llm = AsyncMock()
         mock_llm.complete.return_value = {"text": ""}
         writer = SectionWriter(llm=mock_llm)
@@ -234,14 +259,9 @@ class TestWrite:
         }
         result = await writer.write("进度计划", context)
         content = result["content"]
-        # Should have first 3 from each
-        assert "kg1" in content
-        assert "kg2" in content
-        assert "kg3" in content
-        assert "kg4" not in content
+        assert "kg1" not in content
         assert "doc1" in content
-        assert "doc2" in content
-        assert "doc3" in content
+        assert "doc2" not in content
         assert "doc4" not in content
 
     @pytest.mark.asyncio
@@ -263,6 +283,54 @@ class TestWrite:
         assert "model" in result
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_write_overlong_response_is_compacted_not_failed(self):
+        """Overlong but usable content should be compacted into the requested range."""
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = {
+            "text": (
+                "工序：钢筋绑扎。设备：GW40弯曲机1台，钢筋切断机1台。"
+                "参数：间距200mm，保护层厚度25mm，抽检频次每100m2一次，合格率≥98%。"
+                "责任：施工员复核，质检员每班检查，形成《钢筋检验批验收记录》。"
+            )
+            * 12,
+            "provider": "openai",
+            "model": "gpt-5.4",
+        }
+        writer = SectionWriter(llm=mock_llm)
+        result = await writer.write("钢筋工程", {}, min_length=120, max_length=420)
+        logs = result.get("constraint_log") or []
+        content = str(result.get("content") or "")
+
+        assert result.get("error") in ("", None)
+        assert len(content) <= 420
+        assert len(content) >= 120
+        assert any(item.get("status") == "compacted" for item in logs)
+        assert "GW40弯曲机1台" in content
+        assert "间距200mm" in content
+        assert "合格率≥98%" in content
+
+    @pytest.mark.asyncio
+    async def test_write_underlength_still_falls_back_after_retry(self):
+        """Too-short output remains a hard failure and should still fall back."""
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = {
+            "text": "间距200mm，责任到人。",
+            "provider": "openai",
+            "model": "gpt-5.4",
+        }
+        writer = SectionWriter(llm=mock_llm, max_retry=2)
+        result = await writer.write("钢筋工程", {}, min_length=80, max_length=180)
+        logs = result.get("constraint_log") or []
+
+        assert mock_llm.complete.call_count == 2
+        assert "本章量化控制要求如下" in str(result.get("content") or "")
+        assert any("length_out_of_range" in str(item.get("reason") or "") for item in logs)
+        assert any(item.get("status") == "fallback" for item in logs)
+        assert len(result["resource_usage_attempts"]) == 2
+        assert result["resource_usage_attempts"][0]["attempt"] == 1
+        assert result["resource_usage_attempts"][1]["attempt"] == 2
+
 
 class TestEdgeCases:
     """Test edge cases and special scenarios."""
@@ -275,7 +343,8 @@ class TestEdgeCases:
         writer = SectionWriter(llm=mock_llm)
         result = await writer.write("章节", {})
         # None should be treated as empty, triggering fallback
-        assert "【证据摘要】" in result["content"]
+        assert "【证据摘要】" not in result["content"]
+        assert "本章量化控制要求如下" in result["content"]
 
     @pytest.mark.asyncio
     async def test_write_with_unicode_title(self):
