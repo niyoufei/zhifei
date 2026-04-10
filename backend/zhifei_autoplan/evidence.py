@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -95,6 +96,128 @@ def format_hit_locator(hit: Dict[str, Any]) -> str:
     return f"{fname}#{loc}" if loc else fname
 
 
+@lru_cache(maxsize=128)
+def _file_sha256(path_str: str, mtime_ns: int) -> str:
+    p = Path(path_str)
+    if not p.exists() or not p.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with p.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def search_tender_source_spans(
+    tender: Dict[str, Any] | None,
+    query: str,
+    limit: int = 6,
+    *,
+    prefer_filename_keywords: Iterable[str] | None = None,
+) -> List[Dict[str, Any]]:
+    items = tender.get("items") if isinstance(tender, dict) else None
+    if not isinstance(items, list) or not items:
+        return []
+    tokens = _tokenize_query(query)
+    prefer = [str(x).strip() for x in (prefer_filename_keywords or []) if str(x).strip()]
+    hits: List[Dict[str, Any]] = []
+    seen = set()
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        dim = str(item.get("dimension") or "").strip()
+        keywords = [str(x).strip() for x in (item.get("keywords") or []) if str(x).strip()]
+        try:
+            weight = float(item.get("weight") or 0.0)
+        except Exception:
+            weight = 0.0
+        spans = item.get("source_spans") if isinstance(item.get("source_spans"), list) else []
+        for span in spans[:8]:
+            if not isinstance(span, dict):
+                continue
+            file_name = str(span.get("file_name") or span.get("filename") or "").strip()
+            snippet = str(span.get("snippet") or "").strip()
+            if not file_name or not snippet:
+                continue
+            path = Path(file_name)
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                offset = int(span.get("start") if span.get("start") is not None else span.get("offset") or 0)
+            except Exception:
+                offset = 0
+            page = None
+            try:
+                raw_page = span.get("page")
+                if raw_page is not None:
+                    page = int(raw_page)
+                    if page >= 0:
+                        page += 1
+            except Exception:
+                page = None
+            try:
+                mtime_ns = int(os.stat(path).st_mtime_ns)
+            except Exception:
+                mtime_ns = 0
+            sha256 = _file_sha256(str(path), mtime_ns)
+            hit = {
+                "filename": path.name,
+                "file_path": str(path),
+                "sha256": sha256,
+                "offset": offset,
+                "page": page,
+                "snippet": snippet,
+                "dimension": dim,
+                "keywords": keywords,
+                "weight": weight,
+            }
+            locator = format_hit_locator(hit)
+            if not locator or locator in seen:
+                continue
+            hay = " ".join([dim, " ".join(keywords), snippet, path.name]).lower()
+            score = weight
+            for t in tokens:
+                tl = t.lower()
+                if tl and tl in hay:
+                    score += 2.0
+                elif t and t in path.name:
+                    score += 0.8
+            for k in prefer:
+                if k and k in path.name:
+                    score += 2.5
+            if page is not None:
+                score += 0.4
+            if offset is not None and sha256:
+                score += 1.2
+            hit["locator"] = locator
+            hit["_score"] = score
+            hits.append(hit)
+            seen.add(locator)
+
+    hits.sort(key=lambda row: float(row.get("_score") or 0.0), reverse=True)
+    return hits[: max(1, int(limit or 1))]
+
+
+def best_tender_source_span_hit(
+    tender: Dict[str, Any] | None,
+    query: str,
+    limit: int = 8,
+    *,
+    prefer_filename_keywords: Iterable[str] | None = None,
+) -> Dict[str, Any] | None:
+    hits = search_tender_source_spans(
+        tender,
+        query,
+        limit=limit,
+        prefer_filename_keywords=prefer_filename_keywords,
+    )
+    return hits[0] if hits else None
+
+
 def _tags_match(
     rec_tags: Any,
     *,
@@ -121,22 +244,41 @@ def search_ingested_docs(
     project_id: str | None = None,
     require_tags: Iterable[str] | None = None,
     exclude_tags: Iterable[str] | None = None,
+    record_project_type: str | None = None,
+    record_filters: Dict[str, Any] | None = None,
+    audit_path: str | Path | None = None,
 ) -> List[Dict[str, Any]]:
-    audit_path = Path("backend/data/audit/ingest.jsonl")
-    if not audit_path.exists():
+    audit_file = Path(audit_path or "backend/data/audit/ingest.jsonl")
+    if not audit_file.exists():
         return []
     uniq = _tokenize_query(query)
     if not uniq:
         return []
     hits: List[Dict[str, Any]] = []
     try:
-        mtime_ns = int(os.stat(audit_path).st_mtime_ns)
+        mtime_ns = int(os.stat(audit_file).st_mtime_ns)
     except Exception:
         mtime_ns = 0
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
-    for rec in _load_audit_records(str(audit_path), mtime_ns):
+    filter_project_type = str(record_project_type or "").strip()
+    normalized_filters = {
+        str(k).strip(): str(v).strip()
+        for k, v in (record_filters or {}).items()
+        if str(k).strip() and str(v).strip()
+    }
+    for rec in _load_audit_records(str(audit_file), mtime_ns):
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
+        if filter_project_type and str(rec.get("project_type") or "").strip() != filter_project_type:
+            continue
+        if normalized_filters:
+            mismatch = False
+            for key, expected in normalized_filters.items():
+                if str(rec.get(key) or "").strip() != expected:
+                    mismatch = True
+                    break
+            if mismatch:
+                continue
         if not _tags_match(rec.get("tags"), require_tags=require_tags, exclude_tags=exclude_tags):
             continue
         p = Path(rec.get("extract_saved_as") or "")
@@ -197,6 +339,7 @@ def best_ingested_hit(
     project_id: str | None = None,
     require_tags: Iterable[str] | None = None,
     exclude_tags: Iterable[str] | None = None,
+    audit_path: str | Path | None = None,
 ) -> Dict[str, Any] | None:
     """
     Pick the best hit for a query. Used for auto-citing BoQ items and for evidence traceability remediation.
@@ -207,6 +350,7 @@ def best_ingested_hit(
         project_id=project_id,
         require_tags=require_tags,
         exclude_tags=exclude_tags,
+        audit_path=audit_path,
     )
     if not hits:
         return None
@@ -245,6 +389,7 @@ def list_ingested_filenames_by_tag(
     project_id: str | None = None,
     limit: int = 80,
     exclude_tags: Iterable[str] | None = None,
+    audit_path: str | Path | None = None,
 ) -> List[str]:
     """
     List unique ingested filenames for a given tag from ingest audit.
@@ -252,21 +397,21 @@ def list_ingested_filenames_by_tag(
     - checking whether drawings/standards exist for a project
     - cross-index evidence typing (drawing vs standard)
     """
-    audit_path = Path("backend/data/audit/ingest.jsonl")
-    if not audit_path.exists():
+    audit_file = Path(audit_path or "backend/data/audit/ingest.jsonl")
+    if not audit_file.exists():
         return []
     t = str(tag or "").strip()
     if not t:
         return []
     try:
-        mtime_ns = int(os.stat(audit_path).st_mtime_ns)
+        mtime_ns = int(os.stat(audit_file).st_mtime_ns)
     except Exception:
         mtime_ns = 0
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     ex = {str(x).strip() for x in (exclude_tags or []) if str(x).strip()}
     out: List[str] = []
     seen = set()
-    for rec in _load_audit_records(str(audit_path), mtime_ns):
+    for rec in _load_audit_records(str(audit_file), mtime_ns):
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
         tags = rec.get("tags") if isinstance(rec.get("tags"), list) else []

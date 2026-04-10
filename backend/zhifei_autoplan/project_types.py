@@ -6,6 +6,7 @@ from typing import Any
 # Keep strict order as requested by the product requirement.
 PROJECT_TYPES: list[str] = [
     "房建",
+    "维修改造",
     "装修",
     "市政道路",
     "市政排水",
@@ -28,7 +29,8 @@ PROJECT_TYPES: list[str] = [
 
 
 _TYPE_KEYWORDS: dict[str, list[str]] = {
-    "房建": ["房建", "土建", "主体结构", "住宅楼", "公共建筑"],
+    "房建": ["房建", "建房", "房屋建筑", "土建", "主体结构", "住宅楼", "公共建筑"],
+    "维修改造": ["维修改造", "维修", "改造", "翻新", "加固改造", "既有建筑改造", "修缮"],
     "装修": ["装修", "装饰", "精装修", "幕墙", "内装"],
     "市政道路": ["道路", "路基", "路面", "交安", "导改", "沥青"],
     "市政排水": ["排水", "雨污", "污水", "雨水", "管网", "检查井"],
@@ -59,6 +61,10 @@ _COMMON_CLOSED_LOOP_REQUIREMENT = (
 _TYPE_REQUIREMENTS: dict[str, list[str]] = {
     "房建": [
         "重点覆盖基础、主体、二次结构、屋面与防渗，写清关键工序控制点与验收指标。",
+        _COMMON_CLOSED_LOOP_REQUIREMENT,
+    ],
+    "维修改造": [
+        "重点覆盖拆除保护、既有结构复核、加固修缮、成品保护与不停用/少扰民施工组织。",
         _COMMON_CLOSED_LOOP_REQUIREMENT,
     ],
     "装修": [
@@ -144,6 +150,17 @@ def normalize_project_type(value: str | None) -> str | None:
     s = str(value or "").strip()
     if not s:
         return None
+    aliases = {
+        "建房": "房建",
+        "房屋建筑": "房建",
+        "房屋建筑工程": "房建",
+        "维修": "维修改造",
+        "改造": "维修改造",
+        "维修工程": "维修改造",
+        "改造工程": "维修改造",
+        "修缮": "维修改造",
+    }
+    s = aliases.get(s, s)
     if s in PROJECT_TYPES:
         return s
     for tp in PROJECT_TYPES:
@@ -197,4 +214,3 @@ def project_type_requirements(project_type: str | None) -> list[str]:
     if not tp:
         return []
     return list(_TYPE_REQUIREMENTS.get(tp) or [_COMMON_CLOSED_LOOP_REQUIREMENT])
-
