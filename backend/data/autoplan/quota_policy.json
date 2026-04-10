@@ -1,0 +1,39 @@
+{
+  "config_version": "2026-04-02-saas-quota-v2",
+  "defaults": {
+    "session": {
+      "running_limit": 1,
+      "queued_limit": 2,
+      "active_limit": 3,
+      "warning_ratio": 0.8,
+      "tokens_last_hour_warning": 120000,
+      "scan_limit": 500,
+      "lease_seconds": 900,
+      "text_chain_profile": "default",
+      "degrade_text_chain_profile": "cost_guard"
+    },
+    "user": {
+      "running_limit": 2,
+      "queued_limit": 4,
+      "active_limit": 6,
+      "warning_ratio": 0.8,
+      "tokens_last_hour_warning": 240000,
+      "scan_limit": 500,
+      "lease_seconds": 900,
+      "text_chain_profile": "default",
+      "degrade_text_chain_profile": "cost_guard"
+    }
+  },
+  "text_chain_profiles": {
+    "default": {
+      "slot_order": ["text_main", "text_backup", "text_compat_google"]
+    },
+    "cost_guard": {
+      "slot_order": ["text_backup", "text_compat_google", "text_main"]
+    }
+  },
+  "overrides": {
+    "sessions": {},
+    "users": {}
+  }
+}

@@ -23,6 +23,9 @@ __pycache__/
 # ===== Backup folders =====
 # Local backup snapshots, never commit
 /_untracked_backup*/
+*.bak.codex-*
+*.bak.codex-*/
+app_legacy_*.py
 
 # ===== ZhiFei_V20.1 generated data =====
 # Ignore generated data folders prefixed with ZhiFei_V20.1
@@ -42,15 +45,24 @@ __pycache__/
 .bin/
 .cursor/
 .coverage
+.playwright-cli/
 .runtime/**
 .streamlit/**
+/_autodoctor/
+/_smartcheck/
+/_autodoctor/**
+/_smartcheck/**
 
 # ===== Local sample/test packs (single-user local assets) =====
 /01_真实项目测试/**
 /02_规范测试入库/**
 /03_系统核心规则与字典/**
+/04_实战演习输入/**
 /knowledge_graph/**
 /文档生成系统.app/**
+/施组专家系统.app/**
+/output/**
+/scripts/* 2.sh
 
 # ===== Generated outputs (non-source artifacts) =====
 /build/**
@@ -108,11 +120,20 @@ __pycache__/
 /backend/data/autoplan/media/**
 /backend/data/autoplan/projects/**
 /backend/data/autoplan/archive/**
+/backend/data/autoplan/cache/
+/backend/data/autoplan/cache/**
+/backend/data/autoplan/evolution/
+/backend/data/autoplan/evolution/**
 /backend/data/autoplan/tender_matrix.json
 /backend/data/autoplan/boq_data.json
 /backend/data/autoplan/param_receipt_latest.json
 /backend/data/autoplan/params.json
+/backend/data/autoplan/plan.json
 /backend/data/autoplan/variant_cycle_global.json
+/backend/data/kg/
+/backend/data/kg/**
+/backend/data/workspaces/
+/backend/data/workspaces/**
 
 # Backend local assets / generated packs
 /backend/Project_Files/**
