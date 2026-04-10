@@ -140,6 +140,34 @@ def list_users(limit: int = 100) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_users_page(limit: int = 20, before_id: int | None = None) -> dict:
+    init_db()
+    effective_limit = max(1, min(int(limit or 20), 100))
+    conn = _get_conn()
+    cur = conn.cursor()
+    if before_id is not None and int(before_id) > 0:
+        cur.execute(
+            "SELECT id, email, balance, daily_limit FROM users WHERE id < ? ORDER BY id DESC LIMIT ?",
+            (int(before_id), effective_limit + 1),
+        )
+    else:
+        cur.execute(
+            "SELECT id, email, balance, daily_limit FROM users ORDER BY id DESC LIMIT ?",
+            (effective_limit + 1,),
+        )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    has_more = len(rows) > effective_limit
+    items = rows[:effective_limit]
+    next_before_user_id = int(items[-1]["id"]) if has_more and items else None
+    return {
+        "items": items,
+        "limit": effective_limit,
+        "has_more": has_more,
+        "next_before_user_id": next_before_user_id,
+    }
+
+
 def list_charges(limit: int = 100) -> list[dict]:
     init_db()
     conn = _get_conn()
