@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${DOCGEN_SMOKE_PYTHON:-python3}"
-SMOKE_E2E_SCRIPT="${DOCGEN_SMOKE_E2E_SCRIPT:-scripts/smoke_e2e_v2.py}"
+SMOKE_E2E_SCRIPT="${DOCGEN_SMOKE_E2E_SCRIPT:-backend/scripts/smoke_e2e.py}"
 RUN_LOCAL_UI_ADMIN_SMOKE="${DOCGEN_RUN_LOCAL_UI_ADMIN_SMOKE:-0}"
 LOCAL_UI_ADMIN_SCRIPT="${DOCGEN_LOCAL_UI_ADMIN_SCRIPT:-$ROOT_DIR/scripts/verify_local_ui_admin_chain.sh}"
 

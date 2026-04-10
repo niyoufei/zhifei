@@ -7,6 +7,10 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+# Legacy compatibility smoke for `/compose`.
+# The current V2 page release baseline is `backend/scripts/smoke_e2e.py`
+# and `scripts/run_smoke.sh`, which exercise the `/actions/*` main chain.
+
 BASE = "http://127.0.0.1:8010"
 
 def http_request(method: str, path: str, payload=None, timeout=60):
@@ -170,7 +174,7 @@ def main():
         print("[WARN] /export did not return docx; body head 800 chars:")
         print(body3.decode("utf-8", errors="replace")[:800])
 
-    print("\n[SUCCESS] E2E smoke test passed: /compose -> artifacts -> /audit (replayable) -> /export")
+    print("\n[SUCCESS] legacy compose-compat smoke passed: /compose -> artifacts -> /audit (replayable) -> /export")
 
 if __name__ == "__main__":
     main()

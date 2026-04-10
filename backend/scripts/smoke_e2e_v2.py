@@ -8,6 +8,10 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
+# Legacy compatibility smoke for `/compose`.
+# The current V2 page release baseline is `backend/scripts/smoke_e2e.py`
+# and `scripts/run_smoke.sh`, which exercise the `/actions/*` main chain.
+
 BASE = "http://127.0.0.1:8000"
 
 def http_get_json(path: str, timeout: int = 10):
@@ -244,7 +248,7 @@ except Exception as _e:
     print("[WARN] quality soft gate error:", repr(_e))
 
 
-    print("\n[SUCCESS] smoke_e2e_v2 passed: openapi(/retrieve) + /compose + artifacts + /audit + /export")
+    print("\n[SUCCESS] legacy smoke_e2e_v2 passed: openapi(/retrieve) + /compose + artifacts + /audit + /export")
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
+import uuid
 from typing import List
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Header, BackgroundTasks
@@ -11,7 +13,7 @@ from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
 from backend.zhifei_autoplan.kg_store import save_kg_bytes, list_kg, set_active_kg, get_active_kg
 from backend.zhifei_autoplan.kg_runtime import search_kg
-from backend.zhifei_autoplan.tender_store import save_tender_matrix, load_tender_matrix
+from backend.zhifei_autoplan.tender_store import save_tender_matrix, load_tender_matrix, save_bidding_format_config
 from backend.zhifei_autoplan.boq_store import save_boq_data
 from backend.auth_store import get_user_by_id, update_balance, log_charge, count_user_actions_since
 import jwt
@@ -24,12 +26,98 @@ from fastapi.responses import FileResponse
 from backend.zhifei_autoplan.job_store import create_job, update_job, get_job, list_jobs, cleanup_jobs
 from backend.zhifei_autoplan.plan_store import save_plan, load_plan
 from backend.zhifei_autoplan.optimizer import optimize_sections
+from backend.zhifei_autoplan.resource_audit import append_resource_event, summarize_variants
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
+from backend.zhifei_autoplan.docx_formatter import build_bidding_format_config_from_style
+from backend.zhifei_autoplan.provider_runtime import apply_server_provider_routing
+from backend.zhifei_autoplan.job_admission import admission_http_detail, apply_admission_degrade, evaluate_job_admission
+from backend.zhifei_autoplan.workspace import maybe_cleanup_expired_workspaces, resolve_workspace_dir, workspace_paths
 
 router = APIRouter(prefix="/autoplan", tags=["Zhifei AutoPlan"])
 JWT_SECRET = os.environ.get("ZF_JWT_SECRET", "change-me")
 JWT_ALG = "HS256"
 COST_PER_JOB = int(os.environ.get("ZF_JOB_COST", "1"))
+logger = logging.getLogger("zhifei.autoplan")
+
+
+def _new_log_anchor(stage: str) -> str:
+    return f"autoplan.{str(stage or 'unknown').strip() or 'unknown'}.{uuid.uuid4().hex[:8]}"
+
+
+def _raise_autoplan_http_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    stage: str,
+    next_action: str | None = None,
+    extra: dict | None = None,
+    exc: Exception | None = None,
+) -> None:
+    anchor = _new_log_anchor(stage)
+    detail = {
+        "ok": False,
+        "code": str(code or "").strip() or "autoplan_error",
+        "message": str(message or "").strip() or "autoplan error",
+        "stage": str(stage or "").strip() or "unknown",
+        "log_anchor": anchor,
+    }
+    if next_action:
+        detail["next_action"] = str(next_action)
+    if isinstance(extra, dict) and extra:
+        detail["extra"] = extra
+    if exc is None:
+        logger.warning("%s code=%s status=%s detail=%s", anchor, code, status_code, detail)
+    else:
+        logger.exception("%s code=%s status=%s detail=%s", anchor, code, status_code, detail)
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+def _prepare_runtime_payload(
+    payload: dict,
+    *,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+) -> dict:
+    prepared = apply_server_provider_routing(payload if isinstance(payload, dict) else {})
+    trace_id = str(prepared.get("trace_id") or prepared.get("request_id") or "").strip() or uuid.uuid4().hex
+    prepared["request_id"] = trace_id
+    prepared["trace_id"] = trace_id
+    if session_id:
+        prepared["session_id"] = str(session_id)
+    if workspace_dir:
+        prepared["workspace_dir"] = str(workspace_dir)
+    return prepared
+
+
+def _resolve_workspace_context(
+    *,
+    user: dict | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+) -> dict:
+    sid = str(session_id or "").strip()
+    if not sid and isinstance(user, dict) and user.get("id") is not None:
+        sid = f"user-{user['id']}"
+    if not sid:
+        sid = uuid.uuid4().hex
+    resolved = str(resolve_workspace_dir(session_id=sid, workspace_dir=workspace_dir))
+    maybe_cleanup_expired_workspaces(exclude_workspace=resolved)
+    return {"session_id": sid, "workspace_dir": resolved}
+
+
+def _build_dir(workspace_dir: str | None) -> Path:
+    return workspace_paths(workspace_dir)["build"] if workspace_dir else Path("build")
+
+
+def _audit_file(workspace_dir: str | None) -> Path:
+    if workspace_dir:
+        return workspace_paths(workspace_dir)["audit_dir"] / "autoplan.jsonl"
+    return Path("backend/data/audit/autoplan.jsonl")
+
+
+def _audit_export_dir(workspace_dir: str | None, user_id: int | str) -> Path:
+    return _build_dir(workspace_dir) / "_audit_exports" / str(user_id)
 
 
 def _load_field_alias() -> dict:
@@ -135,16 +223,17 @@ def _charge(user: dict, cost: int, action: str):
     log_charge(user["id"], action, cost)
 
 
-def _audit(action: str, user_id: int | None = None, detail: dict | None = None):
+def _audit(action: str, user_id: int | None = None, detail: dict | None = None, *, workspace_dir: str | None = None):
     try:
         from datetime import datetime
-        path = Path("backend/data/audit/autoplan.jsonl")
+        path = _audit_file(workspace_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         rec = {
             "ts": datetime.utcnow().isoformat(),
             "action": action,
             "user_id": user_id,
             "detail": detail or {},
+            "workspace_dir": workspace_dir,
         }
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -158,8 +247,10 @@ def _read_audit(
     user_id: int | None = None,
     ts_after: str | None = None,
     ts_before: str | None = None,
+    *,
+    workspace_dir: str | None = None,
 ):
-    path = Path("backend/data/audit/autoplan.jsonl")
+    path = _audit_file(workspace_dir)
     if not path.exists():
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -185,8 +276,8 @@ def _read_audit(
     return items
 
 
-def _audit_summary(limit: int = 10000, user_id: int | None = None, by_user: bool = False):
-    path = Path("backend/data/audit/autoplan.jsonl")
+def _audit_summary(limit: int = 10000, user_id: int | None = None, by_user: bool = False, *, workspace_dir: str | None = None):
+    path = _audit_file(workspace_dir)
     if not path.exists():
         return {"by_action": {}, "by_user": {}}
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -213,8 +304,8 @@ def _audit_summary(limit: int = 10000, user_id: int | None = None, by_user: bool
     return {"by_action": by_action, "by_user": by_user_count, "total": n}
 
 
-def _audit_stats_by_day(limit_days: int = 30, user_id: int | None = None):
-    path = Path("backend/data/audit/autoplan.jsonl")
+def _audit_stats_by_day(limit_days: int = 30, user_id: int | None = None, *, workspace_dir: str | None = None):
+    path = _audit_file(workspace_dir)
     if not path.exists():
         return {"by_day": {}, "total": 0}
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -242,11 +333,18 @@ def _audit_stats_by_day(limit_days: int = 30, user_id: int | None = None):
     return {"by_day": dict(sorted(by_day.items())), "total": total}
 
 
-async def _save_upload(uf: UploadFile) -> str:
-    # 临时落地到磁盘，供 pdfplumber/pandas 读取
+async def _save_upload(uf: UploadFile, *, workspace_dir: str | None = None) -> str:
+    # 临时落地到当前会话工作区，避免跨用户文件污染。
     data = await uf.read()
     if not data:
         raise HTTPException(status_code=400, detail=f"空文件：{uf.filename}")
+    if workspace_dir:
+        tmp_dir = workspace_paths(workspace_dir)["uploads"] / "_compat_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = Path(str(uf.filename or "upload.bin")).name
+        path = tmp_dir / f"{uuid.uuid4().hex}_{safe_name}"
+        path.write_bytes(data)
+        return str(path)
     suffix = f"_{uf.filename}"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
         f.write(data)
@@ -257,6 +355,8 @@ async def _save_upload(uf: UploadFile) -> str:
 async def parse_tender(
     files: List[UploadFile] = File(...),
     project_id: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     """
@@ -265,19 +365,39 @@ async def parse_tender(
     """
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "tender_parse")
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     if not files:
         raise HTTPException(status_code=400, detail="未上传文件")
-    paths = await asyncio.gather(*[_save_upload(f) for f in files])
+    paths = await asyncio.gather(*[_save_upload(f, workspace_dir=workspace["workspace_dir"]) for f in files])
     parser = TenderParser()
     matrix = await parser.parse(paths)
-    saved_at = save_tender_matrix(matrix.model_dump(), project_id=project_id)
-    return {"matrix": matrix.model_dump(), "saved_at": saved_at}
+    matrix_dict = matrix.model_dump()
+    bidding_format_config = build_bidding_format_config_from_style(matrix_dict.get("style"))
+    matrix_dict["bidding_format_config"] = bidding_format_config
+    extraction_meta = matrix_dict.get("extraction_meta") if isinstance(matrix_dict.get("extraction_meta"), dict) else {}
+    extraction_meta["format_extraction_rule"] = "优先提取招标排版要求；未提及字段在 bidding_format_config.json 显式置 null。"
+    matrix_dict["extraction_meta"] = extraction_meta
+    saved_at = save_tender_matrix(matrix_dict, project_id=project_id, workspace_dir=workspace["workspace_dir"])
+    format_saved_at = save_bidding_format_config(
+        bidding_format_config,
+        project_id=project_id,
+        workspace_dir=workspace["workspace_dir"],
+    )
+    return {
+        "matrix": matrix_dict,
+        "saved_at": saved_at,
+        "bidding_format_config_saved_at": format_saved_at,
+        "session_id": workspace["session_id"],
+        "workspace_dir": workspace["workspace_dir"],
+    }
 
 
 @router.post("/boq/parse")
 async def parse_boq(
     file: UploadFile = File(...),
     project_id: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     """
@@ -286,32 +406,51 @@ async def parse_boq(
     """
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "boq_parse")
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     if not file:
         raise HTTPException(status_code=400, detail="未上传文件")
-    path = await _save_upload(file)
+    path = await _save_upload(file, workspace_dir=workspace["workspace_dir"])
     parser = BoQParser()
     items, stats = await parser.parse(path)
     payload = {
         "items": [it.model_dump() for it in items],
         "stats": stats,
     }
-    saved_at = save_boq_data(payload, project_id=project_id)
-    return {**payload, "saved_at": saved_at}
+    saved_at = save_boq_data(payload, project_id=project_id, workspace_dir=workspace["workspace_dir"])
+    return {**payload, "saved_at": saved_at, "session_id": workspace["session_id"], "workspace_dir": workspace["workspace_dir"]}
 
 
 @router.post("/plan/save")
-async def save_plan_api(req: PlanRequest, project_id: str | None = None, authorization: str | None = Header(default=None)):
+async def save_plan_api(
+    req: PlanRequest,
+    project_id: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
-    path = save_plan(req.model_dump(), project_id=project_id)
-    _audit("plan_save", user_id=user["id"], detail={"path": path, "project_id": project_id})
-    return {"ok": True, "saved_at": path}
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    path = save_plan(req.model_dump(), project_id=project_id, workspace_dir=workspace["workspace_dir"])
+    _audit("plan_save", user_id=user["id"], detail={"path": path, "project_id": project_id}, workspace_dir=workspace["workspace_dir"])
+    return {"ok": True, "saved_at": path, "session_id": workspace["session_id"], "workspace_dir": workspace["workspace_dir"]}
 
 
 @router.get("/plan/get")
-async def get_plan_api(project_id: str | None = None, authorization: str | None = Header(default=None)):
+async def get_plan_api(
+    project_id: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
-    _audit("plan_get", user_id=user["id"], detail={"project_id": project_id})
-    return {"ok": True, "plan": load_plan(project_id=project_id) or {}}
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    _audit("plan_get", user_id=user["id"], detail={"project_id": project_id}, workspace_dir=workspace["workspace_dir"])
+    return {
+        "ok": True,
+        "plan": load_plan(project_id=project_id, workspace_dir=workspace["workspace_dir"]) or {},
+        "session_id": workspace["session_id"],
+        "workspace_dir": workspace["workspace_dir"],
+    }
 
 
 class ActivateKGRequest(BaseModel):
@@ -332,6 +471,7 @@ class GenerateRequest(BaseModel):
     style: dict | None = None
     variants: int = 1
     chapter_pages: dict | None = None
+    front_matter_outline: dict | None = None
     quality_strict: bool | None = None
     auto_remediate: bool = True
     remediate_mode: str = "template"  # template | llm
@@ -352,6 +492,7 @@ class PlanRequest(BaseModel):
     variants: int = 1
     chapter_requirements: dict = {}
     chapter_pages: dict = {}
+    front_matter_outline: dict | None = None
     quality_strict: bool = True
     auto_remediate: bool = True
     remediate_mode: str = "template"
@@ -419,7 +560,7 @@ class AuditExportCleanupRequest(BaseModel):
 
 
 @router.post("/kg/upload")
-async def upload_kg(file: UploadFile = File(...)):
+async def upload_kg(file: UploadFile = File(...), session_id: str | None = None, workspace_dir: str | None = None):
     """
     上传你已有的知识图谱（JSON），系统只做存档与追溯，不重新构建。
     """
@@ -434,42 +575,109 @@ async def upload_kg(file: UploadFile = File(...)):
         _json.loads(data.decode("utf-8", errors="replace"))
     except Exception:
         raise HTTPException(status_code=400, detail="仅支持 JSON 知识图谱文件")
-    meta = save_kg_bytes(data, file.filename)
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    meta = save_kg_bytes(data, file.filename, workspace_dir=workspace["workspace_dir"])
     return {"ok": True, "kg": meta}
 
 
 @router.get("/kg/list")
-async def list_kg_files():
-    return {"ok": True, "items": list_kg()}
+async def list_kg_files(session_id: str | None = None, workspace_dir: str | None = None):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    return {"ok": True, "items": list_kg(workspace_dir=workspace["workspace_dir"])}
 
 
 @router.get("/kg/active")
-async def get_active_kg_file():
-    return {"ok": True, "active": get_active_kg()}
+async def get_active_kg_file(session_id: str | None = None, workspace_dir: str | None = None):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    return {"ok": True, "active": get_active_kg(workspace_dir=workspace["workspace_dir"])}
 
 
 @router.post("/kg/activate")
-async def activate_kg(req: ActivateKGRequest):
+async def activate_kg(req: ActivateKGRequest, session_id: str | None = None, workspace_dir: str | None = None):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
     try:
-        rec = set_active_kg(req.kg_id)
+        rec = set_active_kg(req.kg_id, workspace_dir=workspace["workspace_dir"])
         return {"ok": True, "active": rec}
     except ValueError:
-        raise HTTPException(status_code=404, detail="kg_id not found")
+        _raise_autoplan_http_error(
+            404,
+            "kg_id_not_found",
+            "kg_id not found",
+            stage="kg_activate",
+            next_action="call /autoplan/kg/list and choose a valid kg_id",
+            extra={"kg_id": str(req.kg_id or "").strip()},
+        )
 
 
 @router.get("/kg/search")
-async def search_kg_api(q: str, top_k: int = 6):
-    return search_kg(q, top_k=top_k)
+async def search_kg_api(q: str, top_k: int = 6, session_id: str | None = None, workspace_dir: str | None = None):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    result = search_kg(q, top_k=top_k, workspace_dir=workspace["workspace_dir"])
+    error = str(result.get("error") or "").strip()
+    if not error:
+        return result
+    if error == "no_active_kg":
+        _raise_autoplan_http_error(
+            409,
+            "kg_not_active",
+            "no active kg",
+            stage="kg_search",
+            next_action="upload and activate a KG before searching",
+            extra={"query": str(q or ""), "top_k": int(top_k or 0)},
+        )
+    if error == "kg_file_missing":
+        _raise_autoplan_http_error(
+            404,
+            "kg_file_missing",
+            "active kg file missing",
+            stage="kg_search",
+            next_action="re-upload or re-activate the KG pack",
+            extra={"query": str(q or ""), "top_k": int(top_k or 0)},
+        )
+    if error == "empty_query":
+        _raise_autoplan_http_error(
+            400,
+            "kg_empty_query",
+            "empty query",
+            stage="kg_search",
+            next_action="provide a non-empty search query",
+        )
+    if error.startswith("kg_parse_error"):
+        _raise_autoplan_http_error(
+            500,
+            "kg_parse_error",
+            "active kg parse failed",
+            stage="kg_search",
+            next_action="check active KG file integrity and re-upload if needed",
+            extra={"reason": error},
+        )
+    _raise_autoplan_http_error(
+        500,
+        "kg_search_failed",
+        "kg search failed",
+        stage="kg_search",
+        next_action="check server logs for kg search failure",
+        extra={"reason": error},
+    )
 
 
 @router.post("/generate")
-async def generate_plan(req: GenerateRequest, authorization: str | None = Header(default=None)):
+async def generate_plan(
+    req: GenerateRequest,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_generate")
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
     payload = req.model_dump()
     pid = str(payload.get("project_id") or "").strip() or None
-    plan = load_plan(project_id=pid) or {}
-    tender = load_tender_matrix(project_id=pid) or {}
+    plan = load_plan(project_id=pid, workspace_dir=workspace["workspace_dir"])
+    if not isinstance(plan, dict):
+        plan = {}
+    tender = load_tender_matrix(project_id=pid, workspace_dir=workspace["workspace_dir"]) or {}
     if not payload.get("outline"):
         payload["outline"] = plan.get("outline") or []
     if not payload.get("outline"):
@@ -486,6 +694,8 @@ async def generate_plan(req: GenerateRequest, authorization: str | None = Header
         payload["chapter_pages"] = plan.get("chapter_pages") or {}
     if not payload.get("chapter_pages"):
         payload["chapter_pages"] = tender.get("chapter_pages") or {}
+    if payload.get("front_matter_outline") is None:
+        payload["front_matter_outline"] = plan.get("front_matter_outline") or {}
     if payload.get("quality_strict") is None:
         payload["quality_strict"] = plan.get("quality_strict", True)
     if payload.get("auto_remediate") is None:
@@ -500,6 +710,8 @@ async def generate_plan(req: GenerateRequest, authorization: str | None = Header
         payload["compare_titles"] = plan.get("compare_titles")
     if not payload.get("variants"):
         payload["variants"] = plan.get("variants") or 1
+    payload = _prepare_runtime_payload(payload, session_id=workspace["session_id"], workspace_dir=workspace["workspace_dir"])
+    payload["user_id"] = user["id"]
 
     variants = int(payload.get("variants") or 1)
     variant_ids = reserve_variant_ids(
@@ -512,27 +724,48 @@ async def generate_plan(req: GenerateRequest, authorization: str | None = Header
     for vid in variant_ids:
         payload["variant_id"] = int(vid)
         results.append(await run_autoplan(payload))
-    out_path = Path("build") / "autoplan_generated.json"
+    out_path = build_dir / "autoplan_generated.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
     # 自动导出 DOCX（每个版本一个文件）
     docx_files = []
     for i, variant in enumerate(results):
-        out_docx = Path("build") / f"autoplan_generated_v{i + 1}.docx"
+        out_docx = build_dir / f"autoplan_generated_v{i + 1}.docx"
         export_autoplan_docx(variant, str(out_docx))
         docx_files.append(str(out_docx))
-    _audit("generate", user_id=user["id"], detail={"variants": len(results), "docx": docx_files, "project_id": pid})
-    return {"ok": True, "saved_at": str(out_path), "docx": docx_files, "result": results}
+    _audit(
+        "generate",
+        user_id=user["id"],
+        detail={"variants": len(results), "docx": docx_files, "project_id": pid},
+        workspace_dir=workspace["workspace_dir"],
+    )
+    return {
+        "ok": True,
+        "saved_at": str(out_path),
+        "docx": docx_files,
+        "result": results,
+        "session_id": workspace["session_id"],
+        "workspace_dir": workspace["workspace_dir"],
+    }
 
 
 @router.post("/generate_async")
-async def generate_plan_async(req: GenerateRequest, background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
+async def generate_plan_async(
+    req: GenerateRequest,
+    background_tasks: BackgroundTasks,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
-    _charge(user, COST_PER_JOB, "autoplan_generate_async")
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
     payload = req.model_dump()
     pid = str(payload.get("project_id") or "").strip() or None
-    plan = load_plan(project_id=pid) or {}
-    tender = load_tender_matrix(project_id=pid) or {}
+    plan = load_plan(project_id=pid, workspace_dir=workspace["workspace_dir"])
+    if not isinstance(plan, dict):
+        plan = {}
+    tender = load_tender_matrix(project_id=pid, workspace_dir=workspace["workspace_dir"]) or {}
     if not payload.get("outline"):
         payload["outline"] = plan.get("outline") or []
     if not payload.get("outline"):
@@ -549,6 +782,8 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
         payload["chapter_pages"] = plan.get("chapter_pages") or {}
     if not payload.get("chapter_pages"):
         payload["chapter_pages"] = tender.get("chapter_pages") or {}
+    if payload.get("front_matter_outline") is None:
+        payload["front_matter_outline"] = plan.get("front_matter_outline") or {}
     if payload.get("quality_strict") is None:
         payload["quality_strict"] = plan.get("quality_strict", True)
     if payload.get("auto_remediate") is None:
@@ -563,6 +798,49 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
         payload["compare_titles"] = plan.get("compare_titles")
     if not payload.get("variants"):
         payload["variants"] = plan.get("variants") or 1
+    admission = evaluate_job_admission(
+        scope="user",
+        tenant_id=f"user-{user['id']}",
+        workspace_dir=workspace["workspace_dir"],
+        user_id=int(user["id"]),
+        requested_jobs=1,
+    )
+    if not admission.get("allowed", False):
+        _audit(
+            "generate_async_rejected",
+            user_id=user["id"],
+            detail={
+                "project_id": pid,
+                "scope": admission.get("scope"),
+                "code": admission.get("code"),
+                "usage": admission.get("usage"),
+                "limits": admission.get("limits"),
+            },
+            workspace_dir=workspace["workspace_dir"],
+        )
+        append_resource_event(
+            "job_rejected",
+            workspace_dir=workspace["workspace_dir"],
+            session_id=workspace["session_id"],
+            user_id=user["id"],
+            request_id=payload.get("request_id"),
+            trace_id=payload.get("trace_id"),
+            project_id=pid,
+            topic=payload.get("topic"),
+            variants=int(payload.get("variants") or 1),
+            rejection_code=admission.get("code"),
+            rejection_scope=admission.get("scope"),
+            next_action=admission.get("next_action"),
+            usage=admission.get("usage"),
+            limits=admission.get("limits"),
+        )
+        raise HTTPException(status_code=429, detail=admission_http_detail(admission))
+    degrade_plan = apply_admission_degrade(payload, admission)
+    if degrade_plan:
+        admission["degrade_plan"] = degrade_plan
+    _charge(user, COST_PER_JOB, "autoplan_generate_async")
+    payload = _prepare_runtime_payload(payload, session_id=workspace["session_id"], workspace_dir=workspace["workspace_dir"])
+    payload["user_id"] = user["id"]
     variants = int(payload.get("variants") or 1)
     payload["_variant_ids"] = reserve_variant_ids(
         project_id=pid,
@@ -570,12 +848,43 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
         explicit_variant_id=payload.get("variant_id"),
         explicit_template_id=payload.get("logic_template_id") or payload.get("logic_template"),
     )
-    job_id = create_job(payload, user_id=user["id"])
-    _audit("generate_async", user_id=user["id"], detail={"job_id": job_id, "project_id": pid})
+    job_id = create_job(payload, user_id=user["id"], workspace_dir=workspace["workspace_dir"])
+    _audit(
+        "generate_async",
+        user_id=user["id"],
+        detail={"job_id": job_id, "project_id": pid, "degrade_plan": degrade_plan or None},
+        workspace_dir=workspace["workspace_dir"],
+    )
+    append_resource_event(
+        "job_queued",
+        workspace_dir=workspace["workspace_dir"],
+        session_id=workspace["session_id"],
+        user_id=user["id"],
+        job_id=job_id,
+        request_id=payload.get("request_id"),
+        trace_id=payload.get("trace_id"),
+        project_id=pid,
+        topic=payload.get("topic"),
+        variants=int(payload.get("variants") or 1),
+        warning_level=admission.get("warning_level"),
+        warning_codes=[item.get("code") for item in admission.get("warnings") or [] if isinstance(item, dict) and item.get("code")],
+        degrade_plan=degrade_plan or None,
+    )
 
     def _run_job():
         try:
-            update_job(job_id, status="running")
+            update_job(job_id, status="running", workspace_dir=workspace["workspace_dir"])
+            append_resource_event(
+                "job_started",
+                workspace_dir=workspace["workspace_dir"],
+                session_id=workspace["session_id"],
+                user_id=user["id"],
+                job_id=job_id,
+                request_id=payload.get("request_id"),
+                trace_id=payload.get("trace_id"),
+                project_id=pid,
+                topic=payload.get("topic"),
+            )
             variants = int(payload.get("variants") or 1)
             variant_ids = payload.get("_variant_ids")
             if not isinstance(variant_ids, list) or not variant_ids:
@@ -589,39 +898,122 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
             for vid in variant_ids:
                 payload["variant_id"] = int(vid)
                 results.append(asyncio.run(run_autoplan(payload)))
-            out_json = Path("build") / f"autoplan_{job_id}.json"
+            out_json = build_dir / f"autoplan_{job_id}.json"
             out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
             docx_files = []
             compare_files = []
             for i, variant in enumerate(results):
-                out_docx = Path("build") / f"autoplan_{job_id}_v{i + 1}.docx"
+                out_docx = build_dir / f"autoplan_{job_id}_v{i + 1}.docx"
                 export_autoplan_docx(variant, str(out_docx))
                 docx_files.append(str(out_docx))
-                out_compare = Path("build") / f"autoplan_{job_id}_compare_v{i + 1}.docx"
+                out_compare = build_dir / f"autoplan_{job_id}_compare_v{i + 1}.docx"
                 export_autoplan_compare_docx(variant, str(out_compare))
                 compare_files.append(str(out_compare))
+            resource_usage_summary = summarize_variants(results)
             update_job(
                 job_id,
                 status="done",
-                result={"json": str(out_json), "docx": docx_files, "compare_docx": compare_files},
+                result={
+                    "json": str(out_json),
+                    "docx": docx_files,
+                    "compare_docx": compare_files,
+                    "resource_usage_summary": resource_usage_summary,
+                },
+                workspace_dir=workspace["workspace_dir"],
+            )
+            append_resource_event(
+                "job_completed",
+                workspace_dir=workspace["workspace_dir"],
+                session_id=workspace["session_id"],
+                user_id=user["id"],
+                job_id=job_id,
+                request_id=payload.get("request_id"),
+                trace_id=payload.get("trace_id"),
+                project_id=pid,
+                topic=payload.get("topic"),
+                resource_usage_summary=resource_usage_summary,
+                file_count=len(docx_files) + len(compare_files) + 1,
             )
         except Exception as e:
-            update_job(job_id, status="failed", error=repr(e))
+            update_job(job_id, status="failed", error=repr(e), workspace_dir=workspace["workspace_dir"])
+            append_resource_event(
+                "job_failed",
+                workspace_dir=workspace["workspace_dir"],
+                session_id=workspace["session_id"],
+                user_id=user["id"],
+                job_id=job_id,
+                request_id=payload.get("request_id"),
+                trace_id=payload.get("trace_id"),
+                project_id=pid,
+                topic=payload.get("topic"),
+                error=repr(e),
+            )
 
     background_tasks.add_task(_run_job)
-    return {"ok": True, "job_id": job_id}
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "session_id": workspace["session_id"],
+        "workspace_dir": workspace["workspace_dir"],
+        "admission": admission_http_detail(admission),
+    }
 
 
 @router.post("/generate_async_batch")
-async def generate_async_batch(requests: list[GenerateRequest], background_tasks: BackgroundTasks, authorization: str | None = Header(default=None)):
+async def generate_async_batch(
+    requests: list[GenerateRequest],
+    background_tasks: BackgroundTasks,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
+    batch_requests = requests[:10]
+    admission = evaluate_job_admission(
+        scope="user",
+        tenant_id=f"user-{user['id']}",
+        workspace_dir=workspace["workspace_dir"],
+        user_id=int(user["id"]),
+        requested_jobs=len(batch_requests),
+    )
+    if not admission.get("allowed", False):
+        _audit(
+            "generate_async_batch_rejected",
+            user_id=user["id"],
+            detail={
+                "batch_size": len(batch_requests),
+                "scope": admission.get("scope"),
+                "code": admission.get("code"),
+                "usage": admission.get("usage"),
+                "limits": admission.get("limits"),
+            },
+            workspace_dir=workspace["workspace_dir"],
+        )
+        append_resource_event(
+            "job_rejected",
+            workspace_dir=workspace["workspace_dir"],
+            session_id=workspace["session_id"],
+            user_id=user["id"],
+            variants=len(batch_requests),
+            rejection_code=admission.get("code"),
+            rejection_scope=admission.get("scope"),
+            next_action=admission.get("next_action"),
+            usage=admission.get("usage"),
+            limits=admission.get("limits"),
+        )
+        raise HTTPException(status_code=429, detail=admission_http_detail(admission))
     jobs = []
-    for req in requests[:10]:
+    batch_degrade_applied = 0
+    for req in batch_requests:
         _charge(user, COST_PER_JOB, "autoplan_generate_async_batch")
         payload = req.model_dump()
         pid = str(payload.get("project_id") or "").strip() or None
-        plan = load_plan(project_id=pid) or {}
-        tender = load_tender_matrix(project_id=pid) or {}
+        plan = load_plan(project_id=pid, workspace_dir=workspace["workspace_dir"])
+        if not isinstance(plan, dict):
+            plan = {}
+        tender = load_tender_matrix(project_id=pid, workspace_dir=workspace["workspace_dir"]) or {}
         if not payload.get("outline"):
             payload["outline"] = plan.get("outline") or []
         if not payload.get("outline"):
@@ -638,6 +1030,8 @@ async def generate_async_batch(requests: list[GenerateRequest], background_tasks
             payload["chapter_pages"] = plan.get("chapter_pages") or {}
         if not payload.get("chapter_pages"):
             payload["chapter_pages"] = tender.get("chapter_pages") or {}
+        if payload.get("front_matter_outline") is None:
+            payload["front_matter_outline"] = plan.get("front_matter_outline") or {}
         if payload.get("quality_strict") is None:
             payload["quality_strict"] = plan.get("quality_strict", True)
         if payload.get("auto_remediate") is None:
@@ -652,6 +1046,11 @@ async def generate_async_batch(requests: list[GenerateRequest], background_tasks
             payload["compare_titles"] = plan.get("compare_titles")
         if not payload.get("variants"):
             payload["variants"] = plan.get("variants") or 1
+        degrade_plan = apply_admission_degrade(payload, admission)
+        if degrade_plan:
+            batch_degrade_applied += 1
+        payload = _prepare_runtime_payload(payload, session_id=workspace["session_id"], workspace_dir=workspace["workspace_dir"])
+        payload["user_id"] = user["id"]
         variants = int(payload.get("variants") or 1)
         payload["_variant_ids"] = reserve_variant_ids(
             project_id=pid,
@@ -659,12 +1058,12 @@ async def generate_async_batch(requests: list[GenerateRequest], background_tasks
             explicit_variant_id=payload.get("variant_id"),
             explicit_template_id=payload.get("logic_template_id") or payload.get("logic_template"),
         )
-        job_id = create_job(payload, user_id=user["id"])
+        job_id = create_job(payload, user_id=user["id"], workspace_dir=workspace["workspace_dir"])
 
         def _run_job(_job_id: str, _payload: dict):
             try:
                 local_payload = json.loads(json.dumps(_payload))
-                update_job(_job_id, status="running")
+                update_job(_job_id, status="running", workspace_dir=workspace["workspace_dir"])
                 variants = int(local_payload.get("variants") or 1)
                 variant_ids = local_payload.get("_variant_ids")
                 if not isinstance(variant_ids, list) or not variant_ids:
@@ -678,35 +1077,105 @@ async def generate_async_batch(requests: list[GenerateRequest], background_tasks
                 for vid in variant_ids:
                     local_payload["variant_id"] = int(vid)
                     results.append(asyncio.run(run_autoplan(local_payload)))
-                out_json = Path("build") / f"autoplan_{_job_id}.json"
+                out_json = build_dir / f"autoplan_{_job_id}.json"
                 out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
                 docx_files = []
                 compare_files = []
                 for i, variant in enumerate(results):
-                    out_docx = Path("build") / f"autoplan_{_job_id}_v{i + 1}.docx"
+                    out_docx = build_dir / f"autoplan_{_job_id}_v{i + 1}.docx"
                     export_autoplan_docx(variant, str(out_docx))
                     docx_files.append(str(out_docx))
-                    out_compare = Path("build") / f"autoplan_{_job_id}_compare_v{i + 1}.docx"
+                    out_compare = build_dir / f"autoplan_{_job_id}_compare_v{i + 1}.docx"
                     export_autoplan_compare_docx(variant, str(out_compare))
                     compare_files.append(str(out_compare))
                 update_job(
                     _job_id,
                     status="done",
                     result={"json": str(out_json), "docx": docx_files, "compare_docx": compare_files},
+                    workspace_dir=workspace["workspace_dir"],
                 )
             except Exception as e:
-                update_job(_job_id, status="failed", error=repr(e))
+                update_job(_job_id, status="failed", error=repr(e), workspace_dir=workspace["workspace_dir"])
 
         background_tasks.add_task(_run_job, job_id, payload)
         jobs.append(job_id)
-    return {"ok": True, "job_ids": jobs}
+    if batch_degrade_applied > 0:
+        admission["degrade_plan"] = {
+            "applied": True,
+            "reason": "soft_capacity_guard",
+            "message": f"当前租户负载偏高，已对本批 {batch_degrade_applied} 个任务启用保守并发配置。",
+            "jobs": batch_degrade_applied,
+            "warning_level": admission.get("warning_level"),
+        }
+    return {
+        "ok": True,
+        "job_ids": jobs,
+        "session_id": workspace["session_id"],
+        "workspace_dir": workspace["workspace_dir"],
+        "admission": admission_http_detail(admission),
+    }
+
+
+@router.get("/usage_status")
+async def usage_status(
+    requested_jobs: int = 1,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    decision = evaluate_job_admission(
+        scope="user",
+        tenant_id=f"user-{user['id']}",
+        workspace_dir=workspace["workspace_dir"],
+        user_id=int(user["id"]),
+        requested_jobs=max(0, int(requested_jobs or 0)),
+    )
+    return {"ok": True, "admission": admission_http_detail(decision)}
+
+
+@router.get("/usage_report")
+async def usage_report(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    decision = evaluate_job_admission(
+        scope="user",
+        tenant_id=f"user-{user['id']}",
+        workspace_dir=workspace["workspace_dir"],
+        user_id=int(user["id"]),
+        requested_jobs=0,
+    )
+    usage = decision.get("usage") if isinstance(decision.get("usage"), dict) else {}
+    return {
+        "ok": True,
+        "scope": "user",
+        "user_id": int(user["id"]),
+        "session_id": workspace["session_id"],
+        "workspace_dir": workspace["workspace_dir"],
+        "usage_profile": usage.get("usage_profile") if isinstance(usage.get("usage_profile"), dict) else {},
+        "limits": dict(decision.get("limits") or {}),
+        "warning_level": str(decision.get("warning_level") or "none"),
+        "warnings": list(decision.get("warnings") or []),
+    }
 
 
 @router.post("/optimize")
-async def optimize_content(req: OptimizeRequest, authorization: str | None = Header(default=None)):
+async def optimize_content(
+    req: OptimizeRequest,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_optimize")
-    json_path = Path("build") / "autoplan_generated.json"
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
+    json_path = build_dir / "autoplan_generated.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail="autoplan_generated.json not found")
     data = json.loads(json_path.read_text(encoding="utf-8"))
@@ -715,21 +1184,27 @@ async def optimize_content(req: OptimizeRequest, authorization: str | None = Hea
     docx_files = []
     if isinstance(result, dict) and isinstance(result.get("variants"), list) and result["variants"]:
         for i, variant in enumerate(result["variants"]):
-            out_docx = Path("build") / f"autoplan_generated_v{i + 1}.docx"
+            out_docx = build_dir / f"autoplan_generated_v{i + 1}.docx"
             export_autoplan_docx(variant, str(out_docx))
             docx_files.append(str(out_docx))
     else:
-        out_docx = Path("build") / "autoplan_generated_v1.docx"
+        out_docx = build_dir / "autoplan_generated_v1.docx"
         export_autoplan_docx_from_file(str(json_path), str(out_docx))
         docx_files.append(str(out_docx))
-    _audit("optimize", user_id=user["id"], detail={"docx": docx_files})
-    return {"ok": True, "docx": docx_files}
+    _audit("optimize", user_id=user["id"], detail={"docx": docx_files}, workspace_dir=workspace["workspace_dir"])
+    return {"ok": True, "docx": docx_files, "session_id": workspace["session_id"], "workspace_dir": workspace["workspace_dir"]}
 
 
 @router.get("/job_status")
-async def job_status(job_id: str, authorization: str | None = Header(default=None)):
+async def job_status(
+    job_id: str,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
-    job = get_job(job_id)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    job = get_job(job_id, workspace_dir=workspace["workspace_dir"])
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     if job.get("user_id") not in (None, user["id"]):
@@ -738,9 +1213,17 @@ async def job_status(job_id: str, authorization: str | None = Header(default=Non
 
 
 @router.get("/job_download")
-async def job_download(job_id: str, kind: str = "docx", v: int = 1, authorization: str | None = Header(default=None)):
+async def job_download(
+    job_id: str,
+    kind: str = "docx",
+    v: int = 1,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
-    job = get_job(job_id)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    job = get_job(job_id, workspace_dir=workspace["workspace_dir"])
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     if job.get("user_id") not in (None, user["id"]):
@@ -752,7 +1235,27 @@ async def job_download(job_id: str, kind: str = "docx", v: int = 1, authorizatio
         path = path[v - 1] if v <= len(path) else None
     if not path:
         raise HTTPException(status_code=404, detail="file not ready")
-    _audit("job_download", user_id=user["id"], detail={"job_id": job_id, "kind": kind, "v": v, "path": path})
+    _audit(
+        "job_download",
+        user_id=user["id"],
+        detail={"job_id": job_id, "kind": kind, "v": v, "path": path},
+        workspace_dir=workspace["workspace_dir"],
+    )
+    append_resource_event(
+        "artifact_download",
+        workspace_dir=workspace["workspace_dir"],
+        session_id=workspace["session_id"],
+        user_id=user["id"],
+        job_id=job_id,
+        kind=kind,
+        variant=max(1, int(v or 1)),
+        file_path=str(path),
+        file_size_bytes=Path(path).stat().st_size,
+        project_id=((job.get("payload") or {}).get("project_id") if isinstance(job.get("payload"), dict) else None),
+        topic=((job.get("payload") or {}).get("topic") if isinstance(job.get("payload"), dict) else None),
+        request_id=((job.get("payload") or {}).get("request_id") if isinstance(job.get("payload"), dict) else None),
+        trace_id=((job.get("payload") or {}).get("trace_id") if isinstance(job.get("payload"), dict) else None),
+    )
     return FileResponse(
         path,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -765,9 +1268,16 @@ async def job_download(job_id: str, kind: str = "docx", v: int = 1, authorizatio
 
 
 @router.get("/job_docx_versions")
-async def job_docx_versions(job_id: str, kind: str = "docx", authorization: str | None = Header(default=None)):
+async def job_docx_versions(
+    job_id: str,
+    kind: str = "docx",
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
-    job = get_job(job_id)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    job = get_job(job_id, workspace_dir=workspace["workspace_dir"])
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     if job.get("user_id") not in (None, user["id"]):
@@ -802,10 +1312,13 @@ async def job_list(
     completed_recent_hours: int | None = None,
     full: bool = False,
     fields: list[str] | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     user = _auth_user(authorization)
-    items = list_jobs(limit=limit, user_id=user["id"])
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    items = list_jobs(limit=limit, user_id=user["id"], workspace_dir=workspace["workspace_dir"])
     if status:
         items = [it for it in items if it.get("status") == status]
     if has_compare is not None:
@@ -841,16 +1354,22 @@ async def job_list(
     if not full:
         _fields = _parse_fields(fields) or set(_job_list_default_fields())
         items = [{k: v for k, v in it.items() if k in _fields} for it in items]
-    _audit("job_list", user_id=user["id"], detail={"count": len(items)})
+    _audit("job_list", user_id=user["id"], detail={"count": len(items)}, workspace_dir=workspace["workspace_dir"])
     return {"ok": True, "items": items}
 
 
 @router.post("/job_status_batch")
-async def job_status_batch(job_ids: list[str], authorization: str | None = Header(default=None)):
+async def job_status_batch(
+    job_ids: list[str],
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     items = []
     for jid in job_ids[:50]:
-        job = get_job(jid)
+        job = get_job(jid, workspace_dir=workspace["workspace_dir"])
         if not job:
             continue
         if job.get("user_id") not in (None, user["id"]):
@@ -860,9 +1379,15 @@ async def job_status_batch(job_ids: list[str], authorization: str | None = Heade
 
 
 @router.post("/job_list_filtered")
-async def job_list_filtered(req: JobListFilterRequest, authorization: str | None = Header(default=None)):
+async def job_list_filtered(
+    req: JobListFilterRequest,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
-    items = list_jobs(limit=req.limit, user_id=user["id"])
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    items = list_jobs(limit=req.limit, user_id=user["id"], workspace_dir=workspace["workspace_dir"])
     if req.job_ids:
         ids = set(req.job_ids)
         items = [it for it in items if it.get("job_id") in ids]
@@ -903,16 +1428,22 @@ async def job_list_filtered(req: JobListFilterRequest, authorization: str | None
         for it in items:
             trimmed.append({k: v for k, v in it.items() if k in fields})
         items = trimmed
-    _audit("job_list_filtered", user_id=user["id"], detail={"count": len(items)})
+    _audit("job_list_filtered", user_id=user["id"], detail={"count": len(items)}, workspace_dir=workspace["workspace_dir"])
     return {"ok": True, "items": items}
 
 
 @router.post("/job_download_batch")
-async def job_download_batch(job_ids: list[str], authorization: str | None = Header(default=None)):
+async def job_download_batch(
+    job_ids: list[str],
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     from pathlib import Path
     import zipfile
-    zip_path = Path("build") / "autoplan_batch.zip"
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    zip_path = _build_dir(workspace["workspace_dir"]) / "autoplan_batch.zip"
     if zip_path.exists():
         try:
             zip_path.unlink()
@@ -920,7 +1451,7 @@ async def job_download_batch(job_ids: list[str], authorization: str | None = Hea
             pass
     with zipfile.ZipFile(zip_path, "w") as z:
         for jid in job_ids[:20]:
-            job = get_job(jid)
+            job = get_job(jid, workspace_dir=workspace["workspace_dir"])
             if not job:
                 continue
             if job.get("user_id") not in (None, user["id"]):
@@ -938,11 +1469,17 @@ async def job_download_batch(job_ids: list[str], authorization: str | None = Hea
 
 
 @router.post("/job_download_compare_batch")
-async def job_download_compare_batch(job_ids: list[str], authorization: str | None = Header(default=None)):
+async def job_download_compare_batch(
+    job_ids: list[str],
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     from pathlib import Path
     import zipfile
-    zip_path = Path("build") / "autoplan_compare_batch.zip"
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    zip_path = _build_dir(workspace["workspace_dir"]) / "autoplan_compare_batch.zip"
     if zip_path.exists():
         try:
             zip_path.unlink()
@@ -950,7 +1487,7 @@ async def job_download_compare_batch(job_ids: list[str], authorization: str | No
             pass
     with zipfile.ZipFile(zip_path, "w") as z:
         for jid in job_ids[:20]:
-            job = get_job(jid)
+            job = get_job(jid, workspace_dir=workspace["workspace_dir"])
             if not job:
                 continue
             if job.get("user_id") not in (None, user["id"]):
@@ -967,10 +1504,15 @@ async def job_download_compare_batch(job_ids: list[str], authorization: str | No
 
 
 @router.get("/job_download_compare_batch_file")
-async def job_download_compare_batch_file(authorization: str | None = Header(default=None)):
-    _ = _auth_user(authorization)
+async def job_download_compare_batch_file(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
     from pathlib import Path
-    zip_path = Path("build") / "autoplan_compare_batch.zip"
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    zip_path = _build_dir(workspace["workspace_dir"]) / "autoplan_compare_batch.zip"
     if not zip_path.exists():
         raise HTTPException(status_code=404, detail="zip not found")
     return FileResponse(
@@ -981,10 +1523,15 @@ async def job_download_compare_batch_file(authorization: str | None = Header(def
 
 
 @router.get("/job_download_batch_file")
-async def job_download_batch_file(authorization: str | None = Header(default=None)):
-    _ = _auth_user(authorization)
+async def job_download_batch_file(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
     from pathlib import Path
-    zip_path = Path("build") / "autoplan_batch.zip"
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    zip_path = _build_dir(workspace["workspace_dir"]) / "autoplan_batch.zip"
     if not zip_path.exists():
         raise HTTPException(status_code=404, detail="zip not found")
     return FileResponse(
@@ -995,82 +1542,113 @@ async def job_download_batch_file(authorization: str | None = Header(default=Non
 
 
 @router.post("/job_cleanup")
-async def job_cleanup(older_than_days: int = 7, authorization: str | None = Header(default=None)):
-    _ = _auth_user(authorization)
-    removed = cleanup_jobs(older_than_seconds=older_than_days * 24 * 3600)
+async def job_cleanup(
+    older_than_days: int = 7,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    removed = cleanup_jobs(older_than_seconds=older_than_days * 24 * 3600, workspace_dir=workspace["workspace_dir"])
     return {"ok": True, "removed": removed}
 
 
 @router.post("/export_docx")
-async def export_docx(authorization: str | None = Header(default=None)):
+async def export_docx(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_export_docx")
-    json_path = Path("build") / "autoplan_generated.json"
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
+    json_path = build_dir / "autoplan_generated.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail="autoplan_generated.json not found")
     data = json.loads(json_path.read_text(encoding="utf-8"))
     docx_files = []
     if isinstance(data, dict) and isinstance(data.get("variants"), list) and data["variants"]:
         for i, variant in enumerate(data["variants"]):
-            out_docx = Path("build") / f"autoplan_generated_v{i + 1}.docx"
+            out_docx = build_dir / f"autoplan_generated_v{i + 1}.docx"
             export_autoplan_docx(variant, str(out_docx))
             docx_files.append(str(out_docx))
     else:
-        out_docx = Path("build") / "autoplan_generated_v1.docx"
+        out_docx = build_dir / "autoplan_generated_v1.docx"
         export_autoplan_docx_from_file(str(json_path), str(out_docx))
         docx_files.append(str(out_docx))
-    _audit("export_docx", user_id=user["id"], detail={"docx": docx_files})
+    _audit("export_docx", user_id=user["id"], detail={"docx": docx_files}, workspace_dir=workspace["workspace_dir"])
     return {"ok": True, "docx": docx_files}
 
 
 @router.post("/export_compare_docx")
-async def export_compare_docx(v: int = 1, authorization: str | None = Header(default=None)):
+async def export_compare_docx(
+    v: int = 1,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_export_compare_docx")
-    json_path = Path("build") / "autoplan_generated.json"
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
+    json_path = build_dir / "autoplan_generated.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail="autoplan_generated.json not found")
     data = json.loads(json_path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and isinstance(data.get("variants"), list) and data["variants"]:
         v = max(1, int(v or 1))
         data = data["variants"][v - 1] if v <= len(data["variants"]) else data["variants"][0]
-    out_docx = Path("build") / f"autoplan_compare_v{v}.docx"
+    out_docx = build_dir / f"autoplan_compare_v{v}.docx"
     export_autoplan_compare_docx(data, str(out_docx))
-    _audit("export_compare_docx", user_id=user["id"], detail={"v": v, "docx": str(out_docx)})
+    _audit("export_compare_docx", user_id=user["id"], detail={"v": v, "docx": str(out_docx)}, workspace_dir=workspace["workspace_dir"])
     return {"ok": True, "docx": str(out_docx)}
 
 
 @router.post("/export_compare_docx_all")
-async def export_compare_docx_all(authorization: str | None = Header(default=None)):
+async def export_compare_docx_all(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_export_compare_docx_all")
-    json_path = Path("build") / "autoplan_generated.json"
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
+    json_path = build_dir / "autoplan_generated.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail="autoplan_generated.json not found")
     data = json.loads(json_path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and isinstance(data.get("variants"), list) and data["variants"]:
         docx_files = []
         for i, variant in enumerate(data["variants"]):
-            out_docx = Path("build") / f"autoplan_compare_v{i + 1}.docx"
+            out_docx = build_dir / f"autoplan_compare_v{i + 1}.docx"
             export_autoplan_compare_docx(variant, str(out_docx))
             docx_files.append(str(out_docx))
-        _audit("export_compare_docx_all", user_id=user["id"], detail={"docx": docx_files})
+        _audit("export_compare_docx_all", user_id=user["id"], detail={"docx": docx_files}, workspace_dir=workspace["workspace_dir"])
         return {"ok": True, "docx": docx_files}
-    out_docx = Path("build") / "autoplan_compare_v1.docx"
+    out_docx = build_dir / "autoplan_compare_v1.docx"
     export_autoplan_compare_docx(data, str(out_docx))
-    _audit("export_compare_docx_all", user_id=user["id"], detail={"docx": [str(out_docx)]})
+    _audit("export_compare_docx_all", user_id=user["id"], detail={"docx": [str(out_docx)]}, workspace_dir=workspace["workspace_dir"])
     return {"ok": True, "docx": [str(out_docx)]}
 
 
 @router.get("/download_docx")
-async def download_docx(v: int = 1, authorization: str | None = Header(default=None)):
+async def download_docx(
+    v: int = 1,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_download_docx")
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     v = max(1, int(v or 1))
-    out_docx = Path("build") / f"autoplan_generated_v{v}.docx"
+    out_docx = _build_dir(workspace["workspace_dir"]) / f"autoplan_generated_v{v}.docx"
     if not out_docx.exists():
         raise HTTPException(status_code=404, detail="docx not found")
-    _audit("download_docx", user_id=user["id"], detail={"v": v, "path": str(out_docx)})
+    _audit("download_docx", user_id=user["id"], detail={"v": v, "path": str(out_docx)}, workspace_dir=workspace["workspace_dir"])
     return FileResponse(
         str(out_docx),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1079,14 +1657,20 @@ async def download_docx(v: int = 1, authorization: str | None = Header(default=N
 
 
 @router.get("/download_compare_docx")
-async def download_compare_docx(v: int = 1, authorization: str | None = Header(default=None)):
+async def download_compare_docx(
+    v: int = 1,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_download_compare_docx")
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     v = max(1, int(v or 1))
-    out_docx = Path("build") / f"autoplan_compare_v{v}.docx"
+    out_docx = _build_dir(workspace["workspace_dir"]) / f"autoplan_compare_v{v}.docx"
     if not out_docx.exists():
         raise HTTPException(status_code=404, detail="docx not found")
-    _audit("download_compare_docx", user_id=user["id"], detail={"v": v, "path": str(out_docx)})
+    _audit("download_compare_docx", user_id=user["id"], detail={"v": v, "path": str(out_docx)}, workspace_dir=workspace["workspace_dir"])
     return FileResponse(
         str(out_docx),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1095,11 +1679,16 @@ async def download_compare_docx(v: int = 1, authorization: str | None = Header(d
 
 
 @router.get("/download_compare_docx_all")
-async def download_compare_docx_all(authorization: str | None = Header(default=None)):
+async def download_compare_docx_all(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_download_compare_docx_all")
     from zipfile import ZipFile
-    build_dir = Path("build")
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
     files = sorted(build_dir.glob("autoplan_compare_v*.docx"))
     if not files:
         raise HTTPException(status_code=404, detail="docx not found")
@@ -1112,7 +1701,7 @@ async def download_compare_docx_all(authorization: str | None = Header(default=N
     with ZipFile(str(zip_path), "w") as z:
         for p in files:
             z.write(p, arcname=p.name)
-    _audit("download_compare_docx_all", user_id=user["id"], detail={"zip": str(zip_path)})
+    _audit("download_compare_docx_all", user_id=user["id"], detail={"zip": str(zip_path)}, workspace_dir=workspace["workspace_dir"])
     return FileResponse(
         str(zip_path),
         media_type="application/zip",
@@ -1121,10 +1710,15 @@ async def download_compare_docx_all(authorization: str | None = Header(default=N
 
 
 @router.get("/compare_docx_versions")
-async def compare_docx_versions(authorization: str | None = Header(default=None)):
-    _ = _auth_user(authorization)
+async def compare_docx_versions(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
     from pathlib import Path
-    files = sorted(Path("build").glob("autoplan_compare_v*.docx"))
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    files = sorted(_build_dir(workspace["workspace_dir"]).glob("autoplan_compare_v*.docx"))
     versions = []
     for p in files:
         name = p.stem  # autoplan_compare_vX
@@ -1157,15 +1751,25 @@ async def audit_log(
     user_id: int | None = None,
     ts_after: str | None = None,
     ts_before: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = user_id
     if user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
     if uid is None and not _is_admin(authorization):
         uid = user["id"]
-    items = _read_audit(limit=limit, action=action, user_id=uid, ts_after=ts_after, ts_before=ts_before)
+    items = _read_audit(
+        limit=limit,
+        action=action,
+        user_id=uid,
+        ts_after=ts_after,
+        ts_before=ts_before,
+        workspace_dir=workspace["workspace_dir"],
+    )
     return {"ok": True, "items": items}
 
 
@@ -1173,28 +1777,45 @@ async def audit_log(
 async def audit_summary(
     limit: int = 10000,
     by_user: bool = False,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = None if _is_admin(authorization) else user["id"]
-    summary = _audit_summary(limit=limit, user_id=uid, by_user=by_user and _is_admin(authorization))
+    summary = _audit_summary(
+        limit=limit,
+        user_id=uid,
+        by_user=by_user and _is_admin(authorization),
+        workspace_dir=workspace["workspace_dir"],
+    )
     return {"ok": True, "summary": summary}
 
 
 @router.get("/audit/stats")
 async def audit_stats(
     days: int = 30,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = None if _is_admin(authorization) else user["id"]
-    stats = _audit_stats_by_day(limit_days=days, user_id=uid)
+    stats = _audit_stats_by_day(limit_days=days, user_id=uid, workspace_dir=workspace["workspace_dir"])
     return {"ok": True, "stats": stats}
 
 
 @router.post("/audit/query")
-async def audit_query(req: AuditQueryRequest, authorization: str | None = Header(default=None)):
+async def audit_query(
+    req: AuditQueryRequest,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = req.user_id
     if req.user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
@@ -1206,6 +1827,7 @@ async def audit_query(req: AuditQueryRequest, authorization: str | None = Header
         user_id=uid,
         ts_after=req.ts_after,
         ts_before=req.ts_before,
+        workspace_dir=workspace["workspace_dir"],
     )
     return {"ok": True, "items": items}
 
@@ -1218,15 +1840,25 @@ async def audit_export(
     user_id: int | None = None,
     ts_after: str | None = None,
     ts_before: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = user_id
     if user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
     if uid is None and not _is_admin(authorization):
         uid = user["id"]
-    items = _read_audit(limit=limit, action=action, user_id=uid, ts_after=ts_after, ts_before=ts_before)
+    items = _read_audit(
+        limit=limit,
+        action=action,
+        user_id=uid,
+        ts_after=ts_after,
+        ts_before=ts_before,
+        workspace_dir=workspace["workspace_dir"],
+    )
     fmt = (fmt or "json").lower()
     if fmt not in ("json", "csv"):
         raise HTTPException(status_code=400, detail="format must be json|csv")
@@ -1256,15 +1888,25 @@ async def audit_export_xlsx(
     user_id: int | None = None,
     ts_after: str | None = None,
     ts_before: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = user_id
     if user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
     if uid is None and not _is_admin(authorization):
         uid = user["id"]
-    items = _read_audit(limit=limit, action=action, user_id=uid, ts_after=ts_after, ts_before=ts_before)
+    items = _read_audit(
+        limit=limit,
+        action=action,
+        user_id=uid,
+        ts_after=ts_after,
+        ts_before=ts_before,
+        workspace_dir=workspace["workspace_dir"],
+    )
     import io
     output = io.BytesIO()
     try:
@@ -1297,15 +1939,18 @@ async def audit_export_xlsx(
 async def audit_export_file_download(
     filename: str = "audit_export",
     user_id: int | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = user_id
     if user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
     if uid is None and not _is_admin(authorization):
         uid = user["id"]
-    base_dir = Path("build") / "audit_exports" / str(uid or user["id"])
+    base_dir = _audit_export_dir(workspace["workspace_dir"], uid or user["id"])
     json_path = base_dir / f"{filename}.json"
     csv_path = base_dir / f"{filename}.csv"
     xlsx_path = base_dir / f"{filename}.xlsx"
@@ -1326,15 +1971,18 @@ async def audit_export_file_download(
 async def audit_export_file_list(
     user_id: int | None = None,
     limit: int = 100,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
     authorization: str | None = Header(default=None),
 ):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = user_id
     if user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
     if uid is None and not _is_admin(authorization):
         uid = user["id"]
-    base_dir = Path("build") / "audit_exports" / str(uid or user["id"])
+    base_dir = _audit_export_dir(workspace["workspace_dir"], uid or user["id"])
     if not base_dir.exists():
         return {"ok": True, "files": []}
     files = sorted(base_dir.glob("*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1352,14 +2000,20 @@ async def audit_export_file_list(
 
 
 @router.post("/audit/export_file_list")
-async def audit_export_file_list_post(req: AuditExportListRequest, authorization: str | None = Header(default=None)):
+async def audit_export_file_list_post(
+    req: AuditExportListRequest,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = req.user_id
     if req.user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
     if uid is None and not _is_admin(authorization):
         uid = user["id"]
-    base_dir = Path("build") / "audit_exports" / str(uid or user["id"])
+    base_dir = _audit_export_dir(workspace["workspace_dir"], uid or user["id"])
     if not base_dir.exists():
         return {"ok": True, "files": []}
     files = sorted(base_dir.glob("*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1377,8 +2031,14 @@ async def audit_export_file_list_post(req: AuditExportListRequest, authorization
 
 
 @router.post("/audit/export_file_cleanup")
-async def audit_export_file_cleanup(req: AuditExportCleanupRequest, authorization: str | None = Header(default=None)):
+async def audit_export_file_cleanup(
+    req: AuditExportCleanupRequest,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = req.user_id
     if req.user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
@@ -1387,7 +2047,7 @@ async def audit_export_file_cleanup(req: AuditExportCleanupRequest, authorizatio
     if req.older_than_days is None and req.keep_latest_n is None:
         raise HTTPException(status_code=400, detail="set older_than_days or keep_latest_n")
     import time
-    base_dir = Path("build") / "audit_exports" / str(uid or user["id"])
+    base_dir = _audit_export_dir(workspace["workspace_dir"], uid or user["id"])
     if not base_dir.exists():
         return {"ok": True, "removed": 0}
     files = sorted(base_dir.glob("*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1414,8 +2074,14 @@ async def audit_export_file_cleanup(req: AuditExportCleanupRequest, authorizatio
 
 
 @router.post("/audit/export_file")
-async def audit_export_file(req: AuditExportRequest, authorization: str | None = Header(default=None)):
+async def audit_export_file(
+    req: AuditExportRequest,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
     uid = req.user_id
     if req.user_id is not None and not _is_admin(authorization):
         raise HTTPException(status_code=403, detail="forbidden")
@@ -1427,11 +2093,12 @@ async def audit_export_file(req: AuditExportRequest, authorization: str | None =
         user_id=uid,
         ts_after=req.ts_after,
         ts_before=req.ts_before,
+        workspace_dir=workspace["workspace_dir"],
     )
     fmt = (req.fmt or "json").lower()
     if fmt not in ("json", "csv", "xlsx"):
         raise HTTPException(status_code=400, detail="format must be json|csv|xlsx")
-    build_dir = Path("build") / "audit_exports" / str(uid or user["id"])
+    build_dir = _audit_export_dir(workspace["workspace_dir"], uid or user["id"])
     build_dir.mkdir(parents=True, exist_ok=True)
     base_name = req.filename or "audit_export"
     if fmt == "json":
@@ -1469,11 +2136,16 @@ async def audit_export_file(req: AuditExportRequest, authorization: str | None =
 
 
 @router.get("/download_docx_all")
-async def download_docx_all(authorization: str | None = Header(default=None)):
+async def download_docx_all(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
     user = _auth_user(authorization)
     _charge(user, COST_PER_JOB, "autoplan_download_docx_all")
     from zipfile import ZipFile
-    build_dir = Path("build")
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
     files = sorted(build_dir.glob("autoplan_generated_v*.docx"))
     if not files:
         raise HTTPException(status_code=404, detail="docx not found")
@@ -1494,10 +2166,15 @@ async def download_docx_all(authorization: str | None = Header(default=None)):
 
 
 @router.get("/docx_versions")
-async def docx_versions(authorization: str | None = Header(default=None)):
-    _ = _auth_user(authorization)
+async def docx_versions(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
     from pathlib import Path
-    files = sorted(Path("build").glob("autoplan_generated_v*.docx"))
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    files = sorted(_build_dir(workspace["workspace_dir"]).glob("autoplan_generated_v*.docx"))
     versions = []
     for p in files:
         name = p.stem  # autoplan_generated_vX
@@ -1514,11 +2191,17 @@ async def docx_versions(authorization: str | None = Header(default=None)):
 
 
 @router.get("/generate_status")
-async def generate_status(authorization: str | None = Header(default=None)):
-    _ = _auth_user(authorization)
-    json_path = Path("build") / "autoplan_generated.json"
-    v1_path = Path("build") / "autoplan_generated_v1.docx"
-    any_docx = sorted(Path("build").glob("autoplan_generated_v*.docx"))
+async def generate_status(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
+    json_path = build_dir / "autoplan_generated.json"
+    v1_path = build_dir / "autoplan_generated_v1.docx"
+    any_docx = sorted(build_dir.glob("autoplan_generated_v*.docx"))
     status = {
         "json_exists": json_path.exists(),
         "docx_exists": bool(any_docx),
@@ -1530,9 +2213,14 @@ async def generate_status(authorization: str | None = Header(default=None)):
 
 
 @router.get("/check")
-async def check_generated(authorization: str | None = Header(default=None)):
-    _ = _auth_user(authorization)
-    json_path = Path("build") / "autoplan_generated.json"
+async def check_generated(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    user = _auth_user(authorization)
+    workspace = _resolve_workspace_context(user=user, session_id=session_id, workspace_dir=workspace_dir)
+    json_path = _build_dir(workspace["workspace_dir"]) / "autoplan_generated.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail="autoplan_generated.json not found")
     data = json.loads(json_path.read_text(encoding="utf-8"))

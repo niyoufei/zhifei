@@ -29,6 +29,27 @@ def _hdr(actions_key: str) -> dict:
     return {"X-Actions-Key": actions_key}
 
 
+def _merge_params(*parts: dict | None) -> dict | None:
+    merged: dict[str, str] = {}
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        for key, value in part.items():
+            text = str(value or "").strip()
+            if text:
+                merged[str(key)] = text
+    return merged or None
+
+
+def _scope_params(session_id: str | None = None, workspace_dir: str | None = None) -> dict | None:
+    return _merge_params(
+        {
+            "session_id": session_id,
+            "workspace_dir": workspace_dir,
+        }
+    )
+
+
 def _post_json(
     base: str,
     path: str,
@@ -113,12 +134,22 @@ def _ingest_files(base: str, file_paths: list[str], *, project_id: str | None = 
                 pass
 
 
-def _download(base: str, actions_key: str, job_id: str, kind: str, variant: int, out_path: Path, timeout: int = 300):
+def _download(
+    base: str,
+    actions_key: str,
+    job_id: str,
+    kind: str,
+    variant: int,
+    out_path: Path,
+    timeout: int = 300,
+    *,
+    params: dict | None = None,
+):
     url = base + "/actions/download"
     r = requests.get(
         url,
         headers=_hdr(actions_key),
-        params={"job_id": job_id, "kind": kind, "variant": variant},
+        params=_merge_params(params, {"job_id": job_id, "kind": kind, "variant": variant}) or {},
         timeout=timeout,
     )
     if r.status_code >= 400:
@@ -212,6 +243,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://127.0.0.1:8010", help="Backend base URL")
     ap.add_argument("--actions-key", default=os.environ.get("ZF_ACTIONS_KEY", ""), help="X-Actions-Key (or set env ZF_ACTIONS_KEY)")
+    ap.add_argument("--session-id", default="", help="Optional actions session_id for isolated workspace scope")
+    ap.add_argument("--workspace-dir", default="", help="Optional actions workspace_dir override")
     ap.add_argument("--topic", required=True, help="Project topic")
     ap.add_argument("--project-id", default="", help="Optional project_id for per-project storage/evidence scoping")
     ap.add_argument("--tender", action="append", default=[], help="Tender file path (repeatable)")
@@ -219,8 +252,11 @@ def main() -> int:
     ap.add_argument("--ingest", action="append", default=[], help="Extra doc path to ingest for evidence (repeatable)")
     ap.add_argument("--plan-json", default="", help="Plan JSON file to POST /actions/plan/save")
     ap.add_argument("--outline", action="append", default=[], help="Override outline for this run (repeatable)")
+    ap.add_argument("--strict-tender-outline", action="store_true", default=False, help="Keep provided outline fixed; do not auto-enrich chapter structure")
     ap.add_argument("--requirements", action="append", default=[], help="Extra requirements (repeatable)")
     ap.add_argument("--variants", type=int, default=1, help="Number of variants")
+    ap.add_argument("--variant-id", type=int, default=0, help="Optional fixed variant_id for deterministic template selection")
+    ap.add_argument("--logic-template-id", default="", help="Optional fixed logic template id (A/B/C/D/E)")
     ap.add_argument("--quality-strict", action="store_true", default=True, help="Enable strict quality checks")
     ap.add_argument("--no-quality-strict", dest="quality_strict", action="store_false", help="Disable strict quality checks")
     ap.add_argument("--auto-remediate", action="store_true", default=True, help="Enable auto remediation")
@@ -242,6 +278,9 @@ def main() -> int:
         print("[FAIL] missing actions key: set env ZF_ACTIONS_KEY or pass --actions-key", file=sys.stderr)
         return 2
     project_id = (args.project_id or "").strip() or None
+    session_id = (args.session_id or "").strip() or None
+    workspace_dir = (args.workspace_dir or "").strip() or None
+    scope_params = _scope_params(session_id=session_id, workspace_dir=workspace_dir)
 
     tender_matrix = None
     if args.tender:
@@ -252,7 +291,7 @@ def main() -> int:
             args.actions_key,
             "files",
             args.tender,
-            params={"project_id": project_id} if project_id else None,
+            params=_merge_params(scope_params, {"project_id": project_id}),
         )
         if isinstance(tr, dict):
             tender_matrix = tr.get("matrix")
@@ -265,7 +304,7 @@ def main() -> int:
             args.actions_key,
             "file",
             [args.boq],
-            params={"project_id": project_id} if project_id else None,
+            params=_merge_params(scope_params, {"project_id": project_id}),
         )
 
     if args.ingest:
@@ -275,7 +314,13 @@ def main() -> int:
     if args.plan_json:
         print("[4/8] save plan defaults")
         payload = json.loads(Path(args.plan_json).read_text(encoding="utf-8"))
-        _post_json(base, "/actions/plan/save", args.actions_key, payload, params={"project_id": project_id} if project_id else None)
+        _post_json(
+            base,
+            "/actions/plan/save",
+            args.actions_key,
+            payload,
+            params=_merge_params(scope_params, {"project_id": project_id}),
+        )
 
     print("[5/8] generate async")
     outline = list(args.outline or [])
@@ -287,6 +332,7 @@ def main() -> int:
         "topic": args.topic,
         "project_id": project_id,
         "outline": outline,
+        "strict_tender_outline": bool(args.strict_tender_outline),
         "requirements": args.requirements,
         "variants": max(1, int(args.variants or 1)),
         "quality_strict": bool(args.quality_strict),
@@ -303,8 +349,12 @@ def main() -> int:
         gen["model"] = args.model
     if args.api_key:
         gen["api_key"] = args.api_key
+    if int(args.variant_id or 0) > 0:
+        gen["variant_id"] = int(args.variant_id)
+    if str(args.logic_template_id or "").strip():
+        gen["logic_template_id"] = str(args.logic_template_id).strip().upper()
 
-    ret = _post_json(base, "/actions/generate_async", args.actions_key, gen)
+    ret = _post_json(base, "/actions/generate_async", args.actions_key, gen, params=scope_params)
     job_id = ret.get("job_id") or ""
     if not job_id:
         print("[FAIL] generate_async missing job_id", file=sys.stderr)
@@ -316,7 +366,7 @@ def main() -> int:
     status = ""
     while time.time() < deadline:
         try:
-            js = _get_json(base, "/actions/job_status", args.actions_key, params={"job_id": job_id})
+            js = _get_json(base, "/actions/job_status", args.actions_key, params=_merge_params(scope_params, {"job_id": job_id}))
         except Exception as e:
             # Backend may briefly restart/reset during long jobs; keep polling until timeout.
             print(f"[WARN] poll transient error: {e}")
@@ -332,7 +382,12 @@ def main() -> int:
         return 3
 
     print("[7/8] read result")
-    rr = _get_json(base, "/actions/result", args.actions_key, params={"job_id": job_id, "variant": 1, "include_sections": False})
+    rr = _get_json(
+        base,
+        "/actions/result",
+        args.actions_key,
+        params=_merge_params(scope_params, {"job_id": job_id, "variant": 1, "include_sections": False}),
+    )
     qc = rr.get("quality_checks") or {}
     _print_quality(qc)
 
@@ -341,14 +396,22 @@ def main() -> int:
         out_dir = Path("build") / "actions_runs" / job_id
         out_dir.mkdir(parents=True, exist_ok=True)
         # json
-        _download(base, args.actions_key, job_id, "json", 1, out_dir / f"autoplan_{job_id}.json")
+        _download(base, args.actions_key, job_id, "json", 1, out_dir / f"autoplan_{job_id}.json", params=scope_params)
         # docx + compare_docx
         variants = int(args.variants or 1)
         for v in range(1, variants + 1):
-            _download(base, args.actions_key, job_id, "docx", v, out_dir / f"autoplan_{job_id}_v{v}.docx")
-            _download(base, args.actions_key, job_id, "compare_docx", v, out_dir / f"autoplan_{job_id}_compare_v{v}.docx")
+            _download(base, args.actions_key, job_id, "docx", v, out_dir / f"autoplan_{job_id}_v{v}.docx", params=scope_params)
+            _download(
+                base,
+                args.actions_key,
+                job_id,
+                "compare_docx",
+                v,
+                out_dir / f"autoplan_{job_id}_compare_v{v}.docx",
+                params=scope_params,
+            )
             try:
-                _download(base, args.actions_key, job_id, "focus_xlsx", v, out_dir / f"autoplan_{job_id}_focus_v{v}.xlsx")
+                _download(base, args.actions_key, job_id, "focus_xlsx", v, out_dir / f"autoplan_{job_id}_focus_v{v}.xlsx", params=scope_params)
             except Exception:
                 pass
             try:
@@ -359,6 +422,7 @@ def main() -> int:
                     "score_overview_xlsx",
                     v,
                     out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx",
+                    params=scope_params,
                 )
             except Exception:
                 pass
@@ -370,6 +434,7 @@ def main() -> int:
                     "expert_review_docx",
                     v,
                     out_dir / f"autoplan_{job_id}_专家复核提要版_v{v}.docx",
+                    params=scope_params,
                 )
             except Exception:
                 pass

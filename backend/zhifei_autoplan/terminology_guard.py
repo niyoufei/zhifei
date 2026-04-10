@@ -4,12 +4,20 @@ import asyncio
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from backend.zhifei_autoplan.model_aliases import latest_runtime_model_for, normalize_provider_model_pair
+from backend.zhifei_autoplan.provider_runtime import resolve_automation_credentials
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
-ENGINEERING_RULES_PATH = Path("03_系统核心规则与字典/ZhiFei_Engineering_Rules_CN.json")
+_MODULE_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _MODULE_DIR.parent.parent
+_RULES_REL_PATH = Path("03_系统核心规则与字典/ZhiFei_Engineering_Rules_CN.json")
+ENGINEERING_RULES_PATH = _PROJECT_ROOT / _RULES_REL_PATH
+_RULES_CACHE_LOCK = threading.Lock()
+_RULES_CACHE: Dict[str, Dict[str, Any]] = {}
 
 _DEFAULT_ALIAS_MAP = {
     "塔吊司机": "建筑起重机械司机",
@@ -37,12 +45,96 @@ def _read_json(path: Path) -> Any:
         return None
 
 
+def _iter_rules_path_candidates(path: str | Path | None = None) -> List[Path]:
+    candidates: List[Path] = []
+    if path is not None:
+        raw = str(path).strip()
+        if raw:
+            p = Path(raw).expanduser()
+            if p.is_absolute():
+                candidates.append(p)
+            else:
+                candidates.append((Path.cwd() / p).resolve())
+                candidates.append((_PROJECT_ROOT / p).resolve())
+    else:
+        env_path = str(os.environ.get("ZF_ENGINEERING_RULES_PATH") or "").strip()
+        if env_path:
+            ep = Path(env_path).expanduser()
+            if ep.is_absolute():
+                candidates.append(ep)
+            else:
+                candidates.append((Path.cwd() / ep).resolve())
+                candidates.append((_PROJECT_ROOT / ep).resolve())
+        candidates.append(ENGINEERING_RULES_PATH.resolve())
+        candidates.append((_PROJECT_ROOT / _RULES_REL_PATH).resolve())
+
+    # unique + stable order
+    uniq: List[Path] = []
+    seen: set[str] = set()
+    for c in candidates:
+        key = str(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(c)
+    return uniq
+
+
+def resolve_engineering_rules_path(path: str | Path | None = None) -> Path:
+    candidates = _iter_rules_path_candidates(path)
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return c
+    # keep deterministic fallback path for diagnostics
+    return candidates[0] if candidates else ENGINEERING_RULES_PATH.resolve()
+
+
+def _read_json_cached(path: Path) -> Any:
+    p = path.resolve()
+    try:
+        st = p.stat()
+    except Exception:
+        return None
+
+    key = str(p)
+    with _RULES_CACHE_LOCK:
+        cached = _RULES_CACHE.get(key)
+        if cached and cached.get("mtime_ns") == st.st_mtime_ns and cached.get("size") == st.st_size:
+            return cached.get("data")
+
+    data = _read_json(p)
+    with _RULES_CACHE_LOCK:
+        _RULES_CACHE[key] = {
+            "mtime_ns": st.st_mtime_ns,
+            "size": st.st_size,
+            "data": data,
+        }
+    return data
+
+
 def load_engineering_rules(path: str | Path | None = None) -> Dict[str, Any]:
-    p = Path(path) if path else ENGINEERING_RULES_PATH
-    obj = _read_json(p)
+    p = resolve_engineering_rules_path(path)
+    obj = _read_json_cached(p)
     if isinstance(obj, dict):
         return obj
     return {}
+
+
+def validate_engineering_rules(path: str | Path | None = None) -> Dict[str, Any]:
+    p = resolve_engineering_rules_path(path)
+    rules = load_engineering_rules(p)
+    missing: List[str] = []
+    if not isinstance(rules.get("建筑法定术语词典"), dict):
+        missing.append("建筑法定术语词典")
+    if not isinstance(rules.get("劳动力排班算法矩阵"), dict):
+        missing.append("劳动力排班算法矩阵")
+    if not isinstance(rules.get("法定工种白名单"), list):
+        missing.append("法定工种白名单")
+    return {
+        "ok": len(missing) == 0,
+        "path": str(p),
+        "missing_keys": missing,
+    }
 
 
 def load_global_terminology(path: str | Path | None = None) -> List[Dict[str, Any]]:
@@ -119,15 +211,18 @@ def _resolve_llm_runtime(
     model: str | None = None,
     api_key: str | None = None,
 ) -> Tuple[str, str, str]:
-    p = str(provider or os.environ.get("ZF_LLM_MAIN_PROVIDER") or "google").strip().lower()
+    auto_provider, auto_model, auto_key = resolve_automation_credentials()
+    if not provider and not model and not api_key and auto_provider and auto_model and auto_key:
+        return auto_provider, auto_model, auto_key
+    p = str(provider or os.environ.get("ZF_LLM_MAIN_PROVIDER") or "openai").strip().lower()
     if not p:
-        p = "google"
-    default_model = {
-        "google": "gemini-3-pro-preview",
-        "openai": "gpt-5.2-pro",
-        "grok": "grok-4-1-fast-reasoning",
-    }.get(p, "gemini-3-pro-preview")
-    m = str(model or os.environ.get("ZF_LLM_MAIN_MODEL") or default_model).strip() or default_model
+        p = "openai"
+    default_model = latest_runtime_model_for(p) or "gpt-5.4"
+    p, m = normalize_provider_model_pair(
+        p,
+        str(model or os.environ.get("ZF_LLM_MAIN_MODEL") or default_model).strip() or default_model,
+        fallback=p,
+    )
     k = str(api_key or os.environ.get("ZF_LLM_MAIN_API_KEY") or _resolve_api_key(p)).strip()
     return p, m, k
 
@@ -533,19 +628,87 @@ def _pick_trade_stage_map(project_matrix: Dict[str, Any], project_key: str) -> D
     return trade_root
 
 
+def _is_trade_ratio_row(data: Any) -> bool:
+    if not isinstance(data, dict) or not data:
+        return False
+    ratio_cells = 0
+    for _, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        if any("占比" in str(kk or "") for kk in v.keys()):
+            ratio_cells += 1
+    return ratio_cells > 0
+
+
+def _is_stage_trade_map(data: Any) -> bool:
+    if not isinstance(data, dict) or not data:
+        return False
+    return any(_is_trade_ratio_row(v) for v in data.values())
+
+
+def _is_domain_trade_map(data: Any) -> bool:
+    if not isinstance(data, dict) or not data:
+        return False
+    return any(_is_stage_trade_map(v) for v in data.values())
+
+
+def _pick_trade_domain_name(domain_map: Dict[str, Any], stage_hint: str, project_type: str) -> str:
+    if not domain_map:
+        return ""
+    st = str(stage_hint or "")
+    pt = str(project_type or "")
+    lex = f"{pt} {st}"
+    preferred = [
+        ("道路", ("道路", "路基", "路面", "路床", "基层")),
+        ("桥梁", ("桥", "梁", "桥面", "桥跨")),
+        ("排水", ("排水", "雨污", "管沟", "管线")),
+        ("燃气", ("燃气", "燃气管", "中压", "低压")),
+        ("综合管廊", ("管廊", "廊体")),
+        ("河道", ("河道", "护岸", "堤防", "疏浚")),
+        ("水利", ("水利", "闸", "坝", "渠", "泵站")),
+    ]
+    for domain_name in domain_map.keys():
+        dn = str(domain_name or "")
+        if not dn:
+            continue
+        if dn in lex or lex in dn:
+            return dn
+    for domain_kw, hit_tokens in preferred:
+        if any(t in lex for t in hit_tokens):
+            for domain_name in domain_map.keys():
+                dn = str(domain_name or "")
+                if domain_kw in dn:
+                    return dn
+    return str(next(iter(domain_map.keys()), "") or "")
+
+
+def _resolve_trade_stage_map(project_matrix: Dict[str, Any], *, project_key: str, stage_hint: str) -> Tuple[str, Dict[str, Any]]:
+    base = _pick_trade_stage_map(project_matrix, project_key)
+    if _is_stage_trade_map(base):
+        return project_key, base
+    if _is_domain_trade_map(base):
+        domain = _pick_trade_domain_name(base, stage_hint=stage_hint, project_type=project_key)
+        stage_map = base.get(domain) if isinstance(base.get(domain), dict) else {}
+        return domain, stage_map if _is_stage_trade_map(stage_map) else {}
+    return "", {}
+
+
 def _pick_trade_ratio(stage_map: Dict[str, Any], stage: str) -> Dict[str, Any]:
+    if _is_trade_ratio_row(stage_map):
+        return stage_map
     if not isinstance(stage_map, dict) or not stage_map:
         return {}
     stage_txt = str(stage or "").strip()
     if stage_txt and isinstance(stage_map.get(stage_txt), dict):
-        return stage_map.get(stage_txt) or {}
+        row = stage_map.get(stage_txt) or {}
+        return row if _is_trade_ratio_row(row) else {}
     # 模糊匹配：优先包含关系。
     for k, v in stage_map.items():
         kk = str(k or "").strip()
         if not kk or not isinstance(v, dict):
             continue
         if stage_txt and (stage_txt in kk or kk in stage_txt):
-            return v
+            return v if _is_trade_ratio_row(v) else {}
     # 回退：章节语义映射到常见阶段名。
     bucket = _normalize_stage_bucket(stage_txt)
     candidate_keys = {
@@ -555,9 +718,12 @@ def _pick_trade_ratio(stage_map: Dict[str, Any], stage: str) -> Dict[str, Any]:
     }.get(bucket, ())
     for ck in candidate_keys:
         if isinstance(stage_map.get(ck), dict):
-            return stage_map.get(ck) or {}
+            row = stage_map.get(ck) or {}
+            if _is_trade_ratio_row(row):
+                return row
     first_key = next(iter(stage_map.keys()), "")
-    return stage_map.get(first_key) if isinstance(stage_map.get(first_key), dict) else {}
+    row = stage_map.get(first_key) if isinstance(stage_map.get(first_key), dict) else {}
+    return row if _is_trade_ratio_row(row) else {}
 
 
 def suggest_labor_ratio_for_chapter(matrix_obj: Dict[str, Any], *, project_type: str, chapter_title: str) -> Dict[str, Any]:
@@ -589,11 +755,12 @@ def suggest_labor_ratio_for_chapter(matrix_obj: Dict[str, Any], *, project_type:
             if isinstance(row, dict):
                 skill_ratio = row
 
-    trade_stage_map = _pick_trade_stage_map(pm, p)
+    selected_trade_domain, trade_stage_map = _resolve_trade_stage_map(pm, project_key=p, stage_hint=stage_hint)
     trade_ratio = _pick_trade_ratio(trade_stage_map, stage_hint)
 
     return {
         "project_type": p,
+        "trade_domain": selected_trade_domain,
         "size": size,
         "stage": stage_bucket,
         "stage_detail": title or stage_bucket,
@@ -633,13 +800,14 @@ def get_labor_ratio_by_condition(
             if not isinstance(skill_row, dict):
                 skill_row = {}
 
-    trade_stage_map = _pick_trade_stage_map(pm, p)
+    selected_trade_domain, trade_stage_map = _resolve_trade_stage_map(pm, project_key=p, stage_hint=stage)
     trade_row = _pick_trade_ratio(trade_stage_map, stage)
     trade_item = trade_row.get(trade_name) if isinstance(trade_row, dict) else None
 
     return {
         "ok": True,
         "project_type": p,
+        "trade_domain": selected_trade_domain,
         "size": size_key,
         "stage": stage,
         "skill_ratio": skill_row if isinstance(skill_row, dict) else {},

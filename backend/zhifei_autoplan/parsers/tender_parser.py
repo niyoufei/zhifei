@@ -15,6 +15,8 @@ from backend.zhifei_autoplan.models import (
     TenderDimension,
     SourceSpan,
 )
+from backend.zhifei_autoplan.agents.outline_guard_agent import OutlineGuardAgent
+from backend.zhifei_autoplan.agents.outline_manager_agent import OutlineManagerAgent
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
 
@@ -34,6 +36,8 @@ class TenderParser:
 
     def __init__(self, llm: Optional[LLMClient] = None):
         self.llm = llm
+        self.outline_guard = OutlineGuardAgent()
+        self.outline_manager = OutlineManagerAgent()
 
     async def parse(self, pdf_paths: List[str]) -> TenderIndexMatrix:
         # 并发读取多份资料（PDF 优先，其它格式走统一解析器）
@@ -269,10 +273,19 @@ class TenderParser:
             ]
             return fallback, {"source": "fallback", "global_requirements": ["招标文本未解析出可用正文，已启用最小覆盖章集合兜底。"]}
         lines = [ln.strip() for ln in merged.splitlines() if ln.strip()]
+        review_anchor_present = self._has_review_outline_anchor(merged, lines)
         # 0) 优先从“技术文件详细评审标准/评审标准”中的“包括但不限于以下内容”抽章目录
         review_outline = self._extract_outline_from_review_standard(merged, lines)
-        if review_outline:
-            return review_outline, {"source": "review_standard", "global_requirements": []}
+        if review_anchor_present or review_outline:
+            managed_outline, managed_source, managed_notes = self.outline_manager.finalize(
+                current_outline=review_outline,
+                current_source="review_standard" if review_outline else "review_anchor",
+                review_outline=review_outline,
+                merged_text=merged,
+                lines=lines,
+            )
+            if len(managed_outline) >= 3:
+                return managed_outline, {"source": managed_source, "global_requirements": managed_notes}
         # 1) 目录块优先
         toc_idx = None
         for i, ln in enumerate(lines[:1200]):
@@ -280,14 +293,28 @@ class TenderParser:
                 toc_idx = i
                 break
         if toc_idx is not None:
-            toc_lines = lines[toc_idx + 1 : toc_idx + 260]
+            toc_lines = self._collect_toc_candidate_lines(lines, toc_idx)
             outline = self._parse_outline_lines(toc_lines)
             if outline:
-                return outline, {"source": "toc", "global_requirements": []}
+                managed_outline, managed_source, managed_notes = self.outline_manager.finalize(
+                    current_outline=outline,
+                    current_source="toc",
+                    review_outline=review_outline,
+                    merged_text=merged,
+                    lines=lines,
+                )
+                return managed_outline, {"source": managed_source, "global_requirements": managed_notes}
         # 2) 全文标题线扫描
         outline = self._parse_outline_lines(lines[:3000])
         if outline:
-            return outline, {"source": "headings", "global_requirements": []}
+            managed_outline, managed_source, managed_notes = self.outline_manager.finalize(
+                current_outline=outline,
+                current_source="headings",
+                review_outline=review_outline,
+                merged_text=merged,
+                lines=lines,
+            )
+            return managed_outline, {"source": managed_source, "global_requirements": managed_notes}
         # 3) 兜底：仅做“覆盖最小集合”，避免空目录导致生成链路中断
         fallback = [
             "编制说明",
@@ -304,6 +331,62 @@ class TenderParser:
             "成品保护与交付",
         ]
         return fallback, {"source": "fallback", "global_requirements": ["目录未从招标文本中明确抽取，已启用最小覆盖章集合兜底。"]}
+
+    def _looks_like_body_paragraph(self, line: str) -> bool:
+        txt = str(line or "").strip()
+        if len(txt) < 18:
+            return False
+        compact = re.sub(r"\s+", "", txt)
+        if any(token in compact for token in ("本工程", "本项目", "项目位于", "编制依据如下", "施工准备", "施工现场", "严格按照", "具体如下")):
+            return True
+        if any(p in txt for p in ("。", "；", "：")) and not re.match(r"^第[一二三四五六七八九十百0-9]+章\s*", txt):
+            return True
+        if re.search(r"(负责|采用|进行|确保|落实|组织|实施)", txt) and len(txt) >= 24:
+            return True
+        return False
+
+    def _collect_toc_candidate_lines(self, lines: list[str], toc_idx: int) -> list[str]:
+        out: list[str] = []
+        body_streak = 0
+        for raw in lines[toc_idx + 1 : min(len(lines), toc_idx + 320)]:
+            txt = str(raw or "").strip()
+            if not txt:
+                continue
+            if self._looks_like_body_paragraph(txt):
+                body_streak += 1
+                if len(out) >= 3 and body_streak >= 2:
+                    break
+                continue
+            body_streak = 0
+            out.append(txt)
+            if len(out) >= 140:
+                break
+        return out
+
+    def _has_review_outline_anchor(self, merged: str, lines: list[str]) -> bool:
+        compact = re.sub(r"\s+", "", merged or "")
+        if not compact:
+            return False
+        if "综合评审表" in compact and "施工组织设计" in compact:
+            return True
+        if "施工组织设计" in compact and any(
+            token in compact for token in ("技术文件评审标准", "技术文件详细评审标准", "详细评审标准")
+        ):
+            return True
+        if "施工组织设计进行评审" in compact and any(token in compact for token in ("以下内容", "包括但不限于以下内容")):
+            return True
+        scan_limit = min(len(lines), 1200)
+        for idx in range(scan_limit):
+            ln_compact = re.sub(r"\s+", "", lines[idx] or "")
+            if "综合评审表" in ln_compact:
+                near = re.sub(r"\s+", "", "".join(lines[idx : idx + 120]))
+                if "施工组织设计" in near:
+                    return True
+            if any(token in ln_compact for token in ("技术文件评审标准", "技术文件详细评审标准", "详细评审标准")):
+                near = re.sub(r"\s+", "", "".join(lines[max(0, idx - 8) : idx + 80]))
+                if "施工组织设计" in near or "以下内容" in near:
+                    return True
+        return False
 
     def _extract_outline_from_review_standard(self, merged: str, lines: list[str]) -> list[str]:
         """
@@ -328,6 +411,14 @@ class TenderParser:
             "编制建议",
             "AI“类人”评审",
             "评标委员会",
+            "本项评委打分",
+            "本项满分",
+            "评标报告",
+            "投标人业绩",
+            "项目经理业绩",
+            "报价文件评审标准",
+            "商务及技术文件评审要求",
+            "评标价等级",
         )
         stop_markers_compact = tuple(re.sub(r"\s+", "", s or "") for s in stop_markers)
         review_positive_tokens = (
@@ -343,6 +434,14 @@ class TenderParser:
             "文明施工",
             "平面布置图",
             "技术组织措施",
+            "工程项目整体理解",
+            "新技术",
+            "新工艺",
+            "重点难点",
+            "危大工程",
+            "保障体系",
+            "人、材、机",
+            "人材机",
         )
         review_negative_tokens = (
             "定标",
@@ -383,6 +482,9 @@ class TenderParser:
             t = re.sub(r"\s+", " ", t)
             return t.strip("：:;；,.，。 ")
 
+        def _compact(s: str) -> str:
+            return re.sub(r"\s+", "", s or "")
+
         def _is_review_context(ctx: str) -> bool:
             compact = re.sub(r"\s+", "", ctx or "")
             if "施工组织设计" not in compact:
@@ -404,7 +506,11 @@ class TenderParser:
                 start = m.end()
                 end = marks[i + 1].start() if i + 1 < len(marks) else len(blob)
                 seg = blob[start:end]
-                seg = re.split(r"(?:一般得|良好得|优秀得|不得分|注\s*[：:]|评标程序|评标委员会)", seg, maxsplit=1)[0]
+                seg = re.split(
+                    r"(?:一般得|良好得|优秀得|不得分|注\s*[：:]|评标程序|评标委员会|本项评委打分|本项满分|评标报告|投标人业绩|项目经理业绩)",
+                    seg,
+                    maxsplit=1,
+                )[0]
                 for sm in stop_markers:
                     p = seg.find(sm)
                     if p >= 0:
@@ -446,6 +552,89 @@ class TenderParser:
                     seen.add(title)
                     out.append(title)
             return out
+
+        def _extract_sentence_items(blob: str) -> list[str]:
+            if not blob.strip():
+                return []
+            compact_blob = _compact(blob)
+            if not compact_blob:
+                return []
+            out: list[str] = []
+            seen = set()
+            for m in re.finditer(r"依据投标人提供的(.{2,140}?)(?:进行评审|的内容进行评审)", compact_blob):
+                title = m.group(1)
+                title = re.sub(r"^针对", "", title).strip()
+                title = re.sub(r"[（(]如有[)）]", "", title).strip()
+                title = re.sub(r"如有", "", title).strip()
+                title = re.sub(r"^关于", "", title).strip()
+                title = re.sub(r"(?:的内容|内容)$", "", title).strip()
+                title = title.strip("：:;；,.，。 ")
+                if len(title) < 2 or len(title) > 56:
+                    continue
+                if title in noise_exact:
+                    continue
+                if any(nk in title for nk in review_negative_tokens):
+                    continue
+                if any(nk in title for nk in ("评标价", "偏差率", "投标人业绩", "项目经理业绩", "报价", "业绩匹配")):
+                    continue
+                if not any(pk in title for pk in review_positive_tokens):
+                    continue
+                title = _normalize_review_item(title)
+                if not title or title in seen:
+                    continue
+                seen.add(title)
+                out.append(title)
+            return out
+
+        def _extract_table_items_from_review_section(raw_lines: list[str]) -> list[str]:
+            """
+            适配“2.2.1（2）技术文件评审标准”的表格型目录：
+            多数项目不是 1）2）编号清单，而是“评审因素行 + 依据投标人提供的…进行评审”。
+            """
+            if not raw_lines:
+                return []
+
+            start_idx: int | None = None
+            scan_limit = min(len(raw_lines), 4000)
+            for i in range(scan_limit):
+                ln_compact = _compact(raw_lines[i])
+                if not re.search(r"2\.?2\.?1[（(]?\s*2[)）]?", ln_compact):
+                    continue
+                near = _compact("".join(raw_lines[i : i + 24]))
+                if "技术文件评审标准" in near or ("技术文件" in near and "评审标准" in near):
+                    start_idx = i
+                    break
+
+            if start_idx is None:
+                for i in range(scan_limit):
+                    ln_compact = _compact(raw_lines[i])
+                    if "技术文件评审标准" in ln_compact or "技术文件详细评审标准" in ln_compact:
+                        start_idx = i
+                        break
+
+            if start_idx is None:
+                return []
+
+            end_idx = min(len(raw_lines), start_idx + 420)
+            for j in range(start_idx + 1, end_idx):
+                ln_compact = _compact(raw_lines[j])
+                if re.search(r"2\.?2\.?1[（(]?\s*3[)）]?", ln_compact):
+                    end_idx = j
+                    break
+                if "报价文件评审标准" in ln_compact or "商务及技术文件评审要求" in ln_compact:
+                    end_idx = j
+                    break
+
+            seg_lines = raw_lines[start_idx:end_idx]
+            seg_text = "\n".join(seg_lines)
+            numbered = _extract_numbered_items(seg_text)
+            sentence_items = _extract_sentence_items(seg_text)
+            if numbered and sentence_items:
+                merged_items = numbered + [x for x in sentence_items if x not in numbered]
+                return merged_items
+            if sentence_items:
+                return sentence_items
+            return numbered
 
         def _pick_best(items_arr: list[list[str]]) -> list[str]:
             if not items_arr:
@@ -502,6 +691,14 @@ class TenderParser:
             t = re.sub(r"[：:;；,，。]+$", "", t).strip()
             if not t:
                 return ""
+            if "工程项目整体理解" in t and ("新技术" in t or "新工艺" in t):
+                return "工程项目整体理解、拟采用的新技术、新工艺"
+            if "重点难点" in t and "危大工程" in t:
+                return "工程重点难点及危大工程的保障体系与措施"
+            if "工期" in t and "质量" in t and ("安全文明" in t or "文明生产" in t):
+                return "确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施"
+            if ("人、材、机" in t or "人材机" in t) and "保障体系" in t:
+                return "确保人、材、机的保障体系与措施"
             for canonical, aliases in canonical_review_items:
                 if any(k and k in t for k in aliases):
                     return canonical
@@ -533,9 +730,23 @@ class TenderParser:
             return _extract_numbered_items(tail)
 
         candidates: list[list[str]] = []
+        sentence_global = _extract_sentence_items(merged)
+        if len(sentence_global) >= 3:
+            guarded = self.outline_guard.sanitize_review_outline(sentence_global)
+            if guarded:
+                candidates.append(guarded)
+
+        table_items = _extract_table_items_from_review_section(lines)
+        if len(table_items) >= 3:
+            guarded = self.outline_guard.sanitize_review_outline(table_items)
+            if guarded:
+                candidates.append(guarded)
+
         precise = _extract_by_precise_anchor(compact_merged)
         if len(precise) >= 3:
-            candidates.append(precise)
+            guarded = self.outline_guard.sanitize_review_outline(precise)
+            if guarded:
+                candidates.append(guarded)
 
         # A) 按行窗口抽取（锚点向后扫描）
         for i, ln in enumerate(lines[:2500]):
@@ -547,7 +758,9 @@ class TenderParser:
                 window = "\n".join(lines[i : i + 180])
                 items = _extract_numbered_items(window)
                 if items:
-                    candidates.append(items)
+                    guarded = self.outline_guard.sanitize_review_outline(items)
+                    if guarded:
+                        candidates.append(guarded)
                 continue
             if "技术文件详细评审标准" in ln_compact:
                 near = "".join(re.sub(r"\s+", "", x or "") for x in lines[i : i + 40])
@@ -558,7 +771,9 @@ class TenderParser:
             window = "\n".join(lines[i : i + 180])
             items = _extract_numbered_items(window)
             if items:
-                candidates.append(items)
+                guarded = self.outline_guard.sanitize_review_outline(items)
+                if guarded:
+                    candidates.append(guarded)
 
         # B) 文本块抽取（“包括但不限于以下内容”后的连续片段）
         for m in re.finditer(r"(包括但不限于以下内容|以下内容)\s*[：:]", merged):
@@ -568,12 +783,15 @@ class TenderParser:
             tail = merged[m.end() : m.end() + 2800]
             items = _extract_numbered_items(tail)
             if items:
-                candidates.append(items)
+                guarded = self.outline_guard.sanitize_review_outline(items)
+                if guarded:
+                    candidates.append(guarded)
 
         if not candidates:
             return []
 
         best = _pick_best(candidates)
+        best = self.outline_guard.sanitize_review_outline(best)
         if len(best) < 3:
             return []
         normalized: list[str] = []
@@ -587,9 +805,9 @@ class TenderParser:
             normalized.append(t)
             if any(t == c for c, _ in canonical_review_items):
                 canonical_hits += 1
-        if canonical_hits >= 6:
-            return normalized
-        return best
+        if canonical_hits >= 6 or (len(best) <= 5 and canonical_hits >= 3):
+            return self.outline_guard.sanitize_review_outline(normalized)
+        return self.outline_guard.sanitize_review_outline(best)
 
     def _parse_outline_lines(self, lines: list[str]) -> list[str]:
         out: list[str] = []
@@ -601,6 +819,7 @@ class TenderParser:
             s = re.sub(r"[·\\.…．]{2,}", " ", s)
             s = re.sub(r"\s+\d{1,4}\s*$", "", s)
             s = re.sub(r"\s*第?\s*\d+\s*页\s*$", "", s)
+            s = re.sub(r"错误!?未定义书签[。.]?", "", s)
             return s.strip()
 
         def _strip_prefix(ln: str) -> str:
@@ -623,6 +842,8 @@ class TenderParser:
             ln = _clean(raw)
             if not ln:
                 continue
+            if self._looks_like_body_paragraph(ln):
+                continue
             if any(x in ln for x in ("附录", "附件", "参考文献", "致谢")):
                 continue
             if not any(rx.match(ln) for rx in lvl1_patterns):
@@ -632,6 +853,10 @@ class TenderParser:
             if len(title) < 2 or len(title) > 48:
                 continue
             if re.fullmatch(r"\d+", title):
+                continue
+            if any(title.startswith(prefix) for prefix in ("本工程", "本项目", "为了", "根据", "按照")):
+                continue
+            if any(token in title for token in ("如下", "详见", "见下表", "内容如下", "具体")):
                 continue
             if title not in seen:
                 seen.add(title)

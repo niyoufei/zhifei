@@ -233,16 +233,29 @@ def _tokenize(text: str) -> List[str]:
     return _dedup_keep_order(toks, limit=200)
 
 
+def _project_workspace_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
 def _iter_project_kg_roots() -> List[Path]:
+    def _is_true(v: Any, default: bool = False) -> bool:
+        if isinstance(v, bool):
+            return v
+        s = str(v or "").strip().lower()
+        if not s:
+            return default
+        return s in {"1", "true", "yes", "on", "y"}
+
     roots: List[Path] = []
     env_root = _norm_text(os.environ.get("ZF_KG_ROOT"))
     if env_root:
         roots.append(Path(env_root).expanduser())
+    workspace_root = _project_workspace_root()
     roots.extend(
         [
-            Path("知识图谱"),
-            Path("backend/知识图谱"),
-            Path("/Users/youfeini/Desktop/文档生成系统/知识图谱"),
+            workspace_root / "知识图谱",
+            workspace_root / "knowledge_graph",
+            workspace_root / "backend" / "知识图谱",
         ]
     )
     out: List[Path] = []
@@ -258,7 +271,31 @@ def _iter_project_kg_roots() -> List[Path]:
         seen.add(key)
         if rp.exists() and rp.is_dir():
             out.append(rp)
+    single_root = _is_true(os.environ.get("ZF_KG_SINGLE_ROOT"), default=True)
+    if single_root and out:
+        return [out[0]]
     return out
+
+
+def prewarm_dispatch_runtime(max_docs: int = 8) -> Dict[str, Any]:
+    """
+    Warm graph-dispatch caches at startup to reduce first-request latency.
+    """
+    dm = _load_domain_map()
+    packs = _load_pack_index()
+    pack_sig = _pack_index_signature()
+    warmed = 0
+    for fn, meta in list(packs.items())[: max(1, int(max_docs or 8))]:
+        gn = _norm_text(meta.get("graph_name")) or Path(fn).stem
+        _docs_for_graph_file(fn, gn, pack_sig)
+        warmed += 1
+    return {
+        "ok": True,
+        "roots": [str(x) for x in _iter_project_kg_roots()],
+        "domain_groups": len((dm.get("knowledge_graph_library") or [])) if isinstance(dm, dict) else 0,
+        "pack_count": len(packs),
+        "warmed_docs": warmed,
+    }
 
 
 def _collect_scalar_snippets(obj: Any, *, max_items: int = 220, max_depth: int = 4) -> List[str]:

@@ -23,6 +23,10 @@ DEFAULT_PROCESS_ORDER = [
     "通用施工工序",
 ]
 
+SCHEDULE_QUANTITY_MAX_ABS = 1e9
+SCHEDULE_QUANTITY_DISPERSION_MAX = 5.0
+SCHEDULE_QUANTITY_INDEX_SATURATED = 0.95
+
 
 def _f(v: Any, default: float = 0.0) -> float:
     try:
@@ -64,7 +68,50 @@ def _extract_resource_count(item: Dict[str, Any]) -> float:
     return float(max(1, len(resources)))
 
 
-def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_quantity_guard(boq_data: Dict[str, Any], items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    boq = boq_data if isinstance(boq_data, dict) else {}
+    stats = boq.get("stats") if isinstance(boq.get("stats"), dict) else {}
+    quantity_dispersion = max(0.0, _f(stats.get("quantity_dispersion"), 0.0))
+    quantity_scale_index = max(0.0, _f(stats.get("quantity_scale_index"), 0.0))
+    construction_density_index = max(0.0, _f(stats.get("construction_density_index"), 0.0))
+    quantities: List[float] = []
+    for item in items:
+        try:
+            qty = float(item.get("quantity"))
+        except Exception:
+            continue
+        if math.isfinite(qty) and qty > 0:
+            quantities.append(qty)
+    quantities.sort()
+    max_quantity = max(quantities) if quantities else 0.0
+    median_quantity = quantities[len(quantities) // 2] if quantities else 0.0
+    mode = "raw_quantity"
+    reason = ""
+    if max_quantity >= SCHEDULE_QUANTITY_MAX_ABS:
+        mode = "item_count_proxy"
+        reason = "quantity_max_abs_guard"
+    elif (
+        quantity_dispersion >= SCHEDULE_QUANTITY_DISPERSION_MAX
+        and quantity_scale_index >= SCHEDULE_QUANTITY_INDEX_SATURATED
+        and construction_density_index >= SCHEDULE_QUANTITY_INDEX_SATURATED
+    ):
+        mode = "item_count_proxy"
+        reason = "quantity_distribution_guard"
+    return {
+        "mode": mode,
+        "reason": reason,
+        "quantity_dispersion": round(quantity_dispersion, 4),
+        "quantity_scale_index": round(quantity_scale_index, 4),
+        "construction_density_index": round(construction_density_index, 4),
+        "max_quantity": max_quantity,
+        "median_quantity": median_quantity,
+        "item_count": len(items),
+    }
+
+
+def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any], *, quantity_guard: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+    guard = quantity_guard if isinstance(quantity_guard, dict) else {}
+    quantity_mode = str(guard.get("mode") or "raw_quantity").strip() or "raw_quantity"
     groups: Dict[str, Dict[str, Any]] = {}
     for it in items:
         pname = _norm_process_name(it)
@@ -74,16 +121,23 @@ def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[
                 "process": pname,
                 "item_count": 0,
                 "quantity": 0.0,
+                "raw_quantity": 0.0,
                 "total_price": 0.0,
                 "resource_units": 0.0,
                 "resource_names": set(),
                 "samples": [],
+                "quantity_proxy_items": 0,
             },
         )
         qty = _f(it.get("quantity"), 0.0)
         total_price = _f(it.get("total_price"), 0.0)
         grp["item_count"] += 1
-        grp["quantity"] += max(0.0, qty)
+        grp["raw_quantity"] += max(0.0, qty)
+        if quantity_mode == "item_count_proxy":
+            grp["quantity"] += 1.0
+            grp["quantity_proxy_items"] += 1
+        else:
+            grp["quantity"] += max(0.0, qty)
         grp["total_price"] += max(0.0, total_price)
         grp["resource_units"] += _extract_resource_count(it)
         for r in (it.get("resources") or []):
@@ -111,10 +165,13 @@ def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[
                 "order": int(order_map.get(pname, 999)),
                 "item_count": int(g.get("item_count") or 0),
                 "quantity": round(qty, 3),
+                "raw_quantity": round(float(g.get("raw_quantity") or 0.0), 3),
                 "total_price": round(float(g.get("total_price") or 0.0), 2),
                 "resource_units": round(float(g.get("resource_units") or 0.0), 3),
                 "resource_names": sorted(list(g.get("resource_names") or [])),
                 "samples": list(g.get("samples") or []),
+                "quantity_proxy_mode": quantity_mode,
+                "quantity_proxy_items": int(g.get("quantity_proxy_items") or 0),
                 "productivity": {
                     "value": round(speed, 4),
                     "unit": str(prod.get("unit") or "项/天"),
@@ -164,6 +221,7 @@ def build_boq_wbs_cpm(
     boq = boq_data if isinstance(boq_data, dict) else {}
     raw_items = boq.get("items") if isinstance(boq.get("items"), list) else []
     items = [it for it in raw_items if isinstance(it, dict)]
+    quantity_guard = _build_quantity_guard(boq, items)
     if not items:
         return {
             "ok": False,
@@ -176,13 +234,15 @@ def build_boq_wbs_cpm(
                 "total_quantity": 0.0,
                 "total_price": 0.0,
                 "estimated_duration_days": 0.0,
+                "schedule_quantity_mode": str(quantity_guard.get("mode") or "raw_quantity"),
             },
         }
 
-    wbs_rows = _group_to_wbs(items, profile)
+    wbs_rows = _group_to_wbs(items, profile, quantity_guard=quantity_guard)
     activities = _build_activity_graph(wbs_rows)
     cpm = run_cpm(activities)
     total_quantity = sum(_f(x.get("quantity"), 0.0) for x in wbs_rows)
+    raw_total_quantity = sum(_f(x.get("raw_quantity"), 0.0) for x in wbs_rows)
     total_price = sum(_f(x.get("total_price"), 0.0) for x in wbs_rows)
     duration_days = _f(cpm.get("project_duration_days"), 0.0)
 
@@ -197,11 +257,15 @@ def build_boq_wbs_cpm(
     summary = {
         "process_count": int(len(wbs_rows)),
         "total_quantity": round(total_quantity, 3),
+        "raw_total_quantity": round(raw_total_quantity, 3),
         "total_price": round(total_price, 2),
         "estimated_duration_days": round(duration_days, 3),
         "resource_peak": _f(cpm.get("resource_peak"), 0.0),
         "critical_interval_days": _f(cpm.get("critical_interval_days"), 0.0),
         "critical_path_names": critical_names,
+        "schedule_quantity_mode": str(quantity_guard.get("mode") or "raw_quantity"),
+        "schedule_quantity_reason": str(quantity_guard.get("reason") or "").strip(),
+        "schedule_quantity_guard": quantity_guard,
     }
 
     # Add a simple deterministic WBS tree path for downstream exports.

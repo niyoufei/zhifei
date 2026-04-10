@@ -1,44 +1,484 @@
 from __future__ import annotations
 
-from typing import Dict, Any
+import re
+import time
+from typing import Dict, Any, List, Tuple
 
+from backend.zhifei_autoplan.docx_formatter import naturalize_machine_text
+from backend.zhifei_autoplan.prompt_registry import build_text_fixed_prefix, text_prompt_cache_settings
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
+from backend.zhifei_autoplan.qingtian_policy import QINGTIAN_BANNED_PHRASES
+
+
+class RewriteException(RuntimeError):
+    """Raised when boilerplate contamination requires a full rewrite."""
+
+
+class LengthError(RuntimeError):
+    """Raised when generated text length is out of the accepted range."""
+
+
+def compact_text_to_length_bounds(
+    text: str,
+    *,
+    min_length: int | None = None,
+    max_length: int | None = None,
+) -> str | None:
+    writer = SectionWriter(llm=None)
+    return writer._shrink_overlong_text(
+        text,
+        min_length=min_length,
+        max_length=max_length,
+    )
+
+
+def _dedup_keep_order(lines: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+BANNED_PHRASES = _dedup_keep_order([
+    "众所周知",
+    "综上所述",
+    "不难看出",
+    "总而言之",
+    "毫无疑问",
+    "可以说",
+    "需要注意的是",
+    "在实际工程中",
+    "按照",
+    "符合",
+    "确保",
+    "保障",
+    "严格落实",
+    "加强管理",
+    "有效措施",
+    "合理安排",
+    "现场实际情况",
+    "相关规范",
+    "有关规定",
+] + list(QINGTIAN_BANNED_PHRASES))
+
+GOLDEN_STYLE_SAMPLE = (
+    "本工程主体结构采用 C30 预拌混凝土，抗渗等级 P6。"
+    "钢筋采用 HRB400E，搭接长度严格执行 10d 规范。"
+    "现场配置 2 台 QTZ80 塔式起重机负责垂直运输。"
+)
 
 
 class SectionWriter:
-    def __init__(self, llm: LLMClient | None = None):
+    def __init__(self, llm: LLMClient | None = None, *, max_retry: int = 3, banned_phrases: List[str] | None = None):
         self.llm = llm
+        self.max_retry = max(1, int(max_retry or 3))
+        self.banned_phrases = [str(x).strip() for x in (banned_phrases or BANNED_PHRASES) if str(x).strip()]
+        self._banned_patterns: List[Tuple[str, re.Pattern[str]]] = [
+            (p, re.compile(re.escape(p), re.IGNORECASE)) for p in self.banned_phrases
+        ]
+        self._inline_internal_tag_re = re.compile(r"【(?:图谱节点|经验值|图谱经验值):[^】]+】")
+        self._scaffold_line_re = re.compile(
+            r"^\s*(?:【(?:范围|系统全局指令|图谱节点绑定|多Agent|章节结构蓝图|证据摘要|证据与追溯)[^】]*】|"
+            r"角色定位[:：]|章节标题[:：]|方案版本[:：]|输出要求[:：]|constraint_log[:：=]|provider[:：=]|model[:：=])"
+        )
 
-    async def write(self, title: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _sanitize_text(self, text: str) -> tuple[str, list[str]]:
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        normalized_lines: List[str] = []
+        for line in raw.split("\n"):
+            line = self._inline_internal_tag_re.sub("", str(line or ""))
+            if self._scaffold_line_re.match(line.strip()):
+                continue
+            normalized_lines.append(naturalize_machine_text(line))
+        cleaned = "\n".join(normalized_lines)
+        hits: List[str] = []
+        for phrase, pattern in self._banned_patterns:
+            if pattern.search(cleaned):
+                hits.append(phrase)
+                cleaned = pattern.sub("", cleaned)
+        cleaned = re.sub(r"[，,。；;、]{2,}", lambda m: m.group(0)[0], cleaned)
+        cleaned = re.sub(r"^[，,。；;、\s]+", "", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned, hits
+
+    @staticmethod
+    def _normalize_len(v: Any) -> int | None:
+        try:
+            n = int(v)
+            return n if n > 0 else None
+        except Exception:
+            return None
+
+    def _resolve_len_limits(
+        self,
+        context: Dict[str, Any],
+        min_length: int | None,
+        max_length: int | None,
+    ) -> tuple[int | None, int | None]:
+        ctx_min = self._normalize_len(context.get("min_length") or context.get("section_min_length"))
+        ctx_max = self._normalize_len(context.get("max_length") or context.get("section_max_length"))
+        lo = self._normalize_len(min_length) if min_length is not None else ctx_min
+        hi = self._normalize_len(max_length) if max_length is not None else ctx_max
+        if lo and hi and lo > hi:
+            lo, hi = hi, lo
+        return lo, hi
+
+    def _enforce_constraints(
+        self,
+        text: str,
+        *,
+        min_length: int | None,
+        max_length: int | None,
+    ) -> tuple[str, Dict[str, Any] | None]:
+        cleaned, hits = self._sanitize_text(text)
+        if len(hits) >= 3:
+            raise RewriteException(f"boilerplate_hit_count={len(hits)}")
+        size = len(cleaned)
+        if min_length and size < min_length:
+            raise LengthError(f"length_out_of_range:{size}<min{min_length}")
+        if max_length and size > max_length:
+            compacted = self._shrink_overlong_text(cleaned, min_length=min_length, max_length=max_length)
+            if compacted:
+                return compacted, {
+                    "status": "compacted",
+                    "reason": f"length_out_of_range:{size}>max{max_length}",
+                    "original_length": size,
+                    "compacted_length": len(compacted),
+                }
+            raise LengthError(f"length_out_of_range:{size}>max{max_length}")
+        return cleaned, None
+
+    def _shrink_overlong_text(
+        self,
+        text: str,
+        *,
+        min_length: int | None,
+        max_length: int | None,
+    ) -> str | None:
+        limit = self._normalize_len(max_length)
+        if not limit:
+            return None
+        normalized = re.sub(r"\n{3,}", "\n\n", str(text or "").strip())
+        if len(normalized) <= limit:
+            return normalized
+
+        paragraphs = [str(p or "").strip() for p in re.split(r"\n{2,}", normalized) if str(p or "").strip()]
+        if not paragraphs:
+            paragraphs = [normalized]
+
+        kept: List[str] = []
+        for para in paragraphs:
+            candidate = ("\n\n".join(kept + [para])).strip() if kept else para
+            if len(candidate) <= limit:
+                kept.append(para)
+                continue
+
+            sentences = [s.strip() for s in re.split(r"(?<=[。！？；])\s*|\n+", para) if s.strip()]
+            if not sentences:
+                sentences = [para]
+            local: List[str] = []
+            for sentence in sentences:
+                joined_local = "".join(local + [sentence]).strip()
+                candidate = ("\n\n".join(kept + [joined_local])).strip() if kept else joined_local
+                if len(candidate) <= limit:
+                    local.append(sentence)
+                    continue
+                break
+            if local:
+                kept.append("".join(local).strip())
+            break
+
+        compacted = "\n\n".join([x for x in kept if str(x or "").strip()]).strip()
+        if not compacted:
+            compacted = normalized[:limit].rstrip("，,；;、")
+        if len(compacted) > limit:
+            compacted = compacted[:limit].rstrip("，,；;、").strip()
+        compacted = re.sub(r"[ \t]{2,}", " ", compacted)
+        compacted = re.sub(r"\n{3,}", "\n\n", compacted).strip()
+
+        min_required = self._normalize_len(min_length)
+        if min_required and len(compacted) < min_required:
+            return None
+        return compacted or None
+
+    def _build_retry_prompt(
+        self,
+        base_prompt: str,
+        reason: str,
+        *,
+        min_length: int | None,
+        max_length: int | None,
+    ) -> str:
+        len_guard = ""
+        if min_length or max_length:
+            len_guard = f"- 字数范围：{min_length or 0}-{max_length or 99999} 字。\n"
+        return (
+            f"{base_prompt}\n\n"
+            "【重写指令】\n"
+            f"- 上一版未通过原因：{reason}\n"
+            "- 删除所有套话、过渡语、解释性句子，只保留可执行动作和量化指标。\n"
+            f"{len_guard}"
+            "- 仅输出正文，不要附加解释。\n"
+        )
+
+    @staticmethod
+    def _limit_block_lines(
+        lines: List[str],
+        *,
+        max_lines: int,
+        max_chars: int,
+    ) -> str:
+        out: List[str] = []
+        used = 0
+        for raw in lines:
+            s = str(raw or "").strip()
+            if not s:
+                continue
+            if len(out) >= max(1, int(max_lines or 1)):
+                break
+            room = max(0, int(max_chars or 0) - used)
+            if room <= 0:
+                break
+            if len(s) > room:
+                s = s[:room]
+            out.append(s)
+            used += len(s) + 1
+        return "\n".join(out)
+
+    def _resolve_timeout_sec(self, context: Dict[str, Any]) -> float:
+        raw = context.get("llm_timeout_sec")
+        if raw is None:
+            raw = context.get("timeout_sec")
+        try:
+            sec = float(raw)
+        except Exception:
+            sec = 120.0
+        return max(30.0, min(240.0, sec))
+
+    def _estimate_max_output_tokens(
+        self,
+        *,
+        min_length: int | None,
+        max_length: int | None,
+        context: Dict[str, Any],
+    ) -> int:
+        lo = self._normalize_len(min_length)
+        hi = self._normalize_len(max_length)
+        target = self._normalize_len(context.get("section_target_length") or context.get("target_length"))
+        basis = hi or target or lo or 3200
+        # 中文技术文稿按 1.1x 近似 token 预算，留出少量裕量，避免超长拖慢。
+        mot = int(float(basis) * 1.1)
+        hint = self._normalize_len(context.get("max_output_tokens_hint"))
+        if hint:
+            mot = min(mot, int(hint))
+        return max(900, min(6000, mot))
+
+    async def write(
+        self,
+        title: str,
+        context: Dict[str, Any],
+        *,
+        min_length: int | None = None,
+        max_length: int | None = None,
+        max_retry: int | None = None,
+    ) -> Dict[str, Any]:
         prompt = self._build_prompt(title, context)
+        prompt_cache = text_prompt_cache_settings(task_type=str(context.get("task_type") or "section_generation"))
+        lo, hi = self._resolve_len_limits(context, min_length, max_length)
+        retry_limit = max(1, int(max_retry or self.max_retry))
+        timeout_sec = self._resolve_timeout_sec(context)
+        max_output_tokens = self._estimate_max_output_tokens(
+            min_length=lo,
+            max_length=hi,
+            context=context,
+        )
+        constraint_log: List[Dict[str, Any]] = []
+        resource_usage_attempts: List[Dict[str, Any]] = []
+
+        def _attempt_meta(resp: Dict[str, Any], *, attempt_idx: int) -> Dict[str, Any]:
+            token_usage = resp.get("token_usage") if isinstance(resp.get("token_usage"), dict) else None
+            return {
+                "attempt": int(attempt_idx),
+                "section_title": title,
+                "provider": resp.get("provider"),
+                "model": resp.get("model"),
+                "request_id": resp.get("request_id"),
+                "client_request_id": resp.get("client_request_id"),
+                "service_tier": resp.get("service_tier"),
+                "used_key_alias": resp.get("used_key_alias") or context.get("used_key_alias"),
+                "latency_ms": resp.get("latency_ms"),
+                "token_usage": token_usage,
+                "cache_key": resp.get("cache_key"),
+                "cache_hit": bool(resp.get("cache_hit", False)),
+                "cached_tokens": resp.get("cached_tokens"),
+                "error": resp.get("error"),
+            }
+
         if not self.llm:
-            return {"title": title, "content": self._fallback(title, context), "prompt": prompt}
-        resp = await self.llm.complete(prompt)
-        text = resp.get("text") or ""
-        if not text.strip() or resp.get("error"):
-            # 失败降级：回退模板 + 证据摘要
-            text = self._fallback(title, context)
-            text += "\n\n【证据摘要】\n"
-            text += "\n".join(context.get("kg_evidence", [])[:3])
-            text += "\n"
-            text += "\n".join(context.get("doc_evidence", [])[:3])
+            fb = self._fallback(title, context)
+            sanitized, hits = self._sanitize_text(fb)
+            return {
+                "title": title,
+                "content": sanitized,
+                "prompt": prompt,
+                "constraint_log": [{"attempt": 0, "status": "fallback_no_llm", "boilerplate_hits": hits}],
+                "requested_timeout_sec": timeout_sec,
+                "requested_max_output_tokens": max_output_tokens,
+                "requested_section_retry_limit": retry_limit,
+                "runtime_budget_reason": str(context.get("runtime_budget_reason") or ""),
+                "resource_usage_attempts": resource_usage_attempts,
+            }
+
+        last_resp: Dict[str, Any] = {}
+        last_reason = ""
+        for attempt in range(1, retry_limit + 1):
+            req_prompt = prompt if attempt == 1 else self._build_retry_prompt(prompt, last_reason, min_length=lo, max_length=hi)
+            resp = await self.llm.complete(
+                req_prompt,
+                timeout_sec=timeout_sec,
+                max_output_tokens=max_output_tokens,
+                temperature=0.1,
+                prompt_cache_key=str(prompt_cache.get("prompt_cache_key") or "") if prompt_cache.get("enabled") else "",
+                prompt_cache_retention=str(prompt_cache.get("prompt_cache_retention") or "") if prompt_cache.get("enabled") else "",
+                client_request_id=f"zhifei-section-{int(time.time())}-{attempt}",
+                used_key_alias=str(context.get("used_key_alias") or ""),
+            )
+            if not isinstance(resp, dict):
+                resp = {}
+            last_resp = resp
+            resource_usage_attempts.append(_attempt_meta(resp, attempt_idx=attempt))
+            text = str(resp.get("text") or "")
+            if not text.strip() or resp.get("error"):
+                last_reason = str(resp.get("error") or "empty_response")
+                constraint_log.append(
+                    {"attempt": attempt, "status": "retry", "reason": last_reason, "raw_length": len(text)}
+                )
+                if attempt < retry_limit:
+                    continue
+                break
+            try:
+                cleaned, adjust = self._enforce_constraints(text, min_length=lo, max_length=hi)
+                if adjust:
+                    constraint_log.append(
+                        {
+                            "attempt": attempt,
+                            "status": str(adjust.get("status") or "ok"),
+                            "reason": str(adjust.get("reason") or ""),
+                            "clean_length": int(adjust.get("compacted_length") or len(cleaned)),
+                            "original_length": int(adjust.get("original_length") or len(text)),
+                        }
+                    )
+                else:
+                    constraint_log.append({"attempt": attempt, "status": "ok", "clean_length": len(cleaned)})
+                return {
+                    "title": title,
+                    "content": cleaned,
+                    "prompt": prompt,
+                    "provider": resp.get("provider"),
+                    "model": resp.get("model"),
+                    "error": resp.get("error"),
+                    "request_id": resp.get("request_id"),
+                    "client_request_id": resp.get("client_request_id"),
+                    "service_tier": resp.get("service_tier"),
+                    "used_key_alias": resp.get("used_key_alias") or context.get("used_key_alias"),
+                    "latency_ms": resp.get("latency_ms"),
+                    "token_usage": resp.get("token_usage") if isinstance(resp.get("token_usage"), dict) else None,
+                    "cache_key": resp.get("cache_key"),
+                    "cache_hit": bool(resp.get("cache_hit", False)),
+                    "cached_tokens": resp.get("cached_tokens"),
+                    "constraint_log": constraint_log,
+                    "requested_timeout_sec": timeout_sec,
+                    "requested_max_output_tokens": max_output_tokens,
+                    "requested_section_retry_limit": retry_limit,
+                    "runtime_budget_reason": str(context.get("runtime_budget_reason") or ""),
+                    "resource_usage_attempts": resource_usage_attempts,
+                }
+            except (RewriteException, LengthError) as e:
+                last_reason = str(e)
+                constraint_log.append(
+                    {
+                        "attempt": attempt,
+                        "status": "retry",
+                        "reason": last_reason,
+                        "raw_length": len(text),
+                    }
+                )
+                if attempt < retry_limit:
+                    continue
+                break
+
+        # 失败降级：回退模板（保留可追溯锚点，但不输出任何脚手架或质检日志）
+        text = self._fallback(title, context)
+        text, _ = self._sanitize_text(text)
+        if not last_resp.get("error"):
+            last_resp["error"] = last_reason or "constraints_retry_exhausted"
+        constraint_log.append({"attempt": retry_limit, "status": "fallback", "reason": last_resp.get("error")})
         return {
             "title": title,
             "content": text,
             "prompt": prompt,
-            "provider": resp.get("provider"),
-            "model": resp.get("model"),
-            "error": resp.get("error"),
+            "provider": last_resp.get("provider"),
+            "model": last_resp.get("model"),
+            "error": last_resp.get("error"),
+            "request_id": last_resp.get("request_id"),
+            "client_request_id": last_resp.get("client_request_id"),
+            "service_tier": last_resp.get("service_tier"),
+            "used_key_alias": last_resp.get("used_key_alias") or context.get("used_key_alias"),
+            "latency_ms": last_resp.get("latency_ms"),
+            "token_usage": last_resp.get("token_usage") if isinstance(last_resp.get("token_usage"), dict) else None,
+            "cache_key": last_resp.get("cache_key"),
+            "cache_hit": bool(last_resp.get("cache_hit", False)),
+            "cached_tokens": last_resp.get("cached_tokens"),
+            "constraint_log": constraint_log,
+            "requested_timeout_sec": timeout_sec,
+            "requested_max_output_tokens": max_output_tokens,
+            "requested_section_retry_limit": retry_limit,
+            "runtime_budget_reason": str(context.get("runtime_budget_reason") or ""),
+            "resource_usage_attempts": resource_usage_attempts,
         }
 
     def _build_prompt(self, title: str, context: Dict[str, Any]) -> str:
-        req = "\n".join(context.get("requirements", []))
-        kg = "\n".join(context.get("kg_evidence", []))
-        docs = "\n".join(context.get("doc_evidence", []))
-        checklist = "\n".join(context.get("checklist", []))
-        weights = "\n".join(context.get("weights", []))
-        penalties = "\n".join(context.get("penalties", []))
-        boq_focus_lines = "\n".join((context.get("boq_focus") or {}).get("lines", []))
+        req = self._limit_block_lines(
+            [str(x) for x in (context.get("requirements") or [])],
+            max_lines=36,
+            max_chars=4200,
+        )
+        kg = self._limit_block_lines(
+            [str(x) for x in (context.get("kg_evidence") or [])],
+            max_lines=18,
+            max_chars=2600,
+        )
+        docs = self._limit_block_lines(
+            [str(x) for x in (context.get("doc_evidence") or [])],
+            max_lines=14,
+            max_chars=2200,
+        )
+        checklist = self._limit_block_lines(
+            [str(x) for x in (context.get("checklist") or [])],
+            max_lines=24,
+            max_chars=1800,
+        )
+        weights = self._limit_block_lines(
+            [str(x) for x in (context.get("weights") or [])],
+            max_lines=12,
+            max_chars=1200,
+        )
+        penalties = self._limit_block_lines(
+            [str(x) for x in (context.get("penalties") or [])],
+            max_lines=12,
+            max_chars=1200,
+        )
+        boq_focus_lines = self._limit_block_lines(
+            [str(x) for x in ((context.get("boq_focus") or {}).get("lines") or [])],
+            max_lines=24,
+            max_chars=2200,
+        )
         four_new_recs = (context.get("boq_focus") or {}).get("four_new_recommendations") or []
         four_new_lines = []
         if isinstance(four_new_recs, list):
@@ -68,6 +508,7 @@ class SectionWriter:
             variant_id = 1
         project_type = str(context.get("project_type") or "").strip()
         global_instruction = str(context.get("global_instruction") or "").strip()
+        qingtian_policy_enabled = bool(context.get("qingtian_policy_enabled", False))
 
         logic = context.get("logic_template") if isinstance(context.get("logic_template"), dict) else {}
         logic_id = str(logic.get("id") or "").strip() or ""
@@ -136,6 +577,17 @@ class SectionWriter:
         global_instruction_block = (
             f"【系统全局指令（必须无条件执行）】\n{global_instruction}\n" if global_instruction else ""
         )
+        qingtian_block = ""
+        if qingtian_policy_enabled:
+            qingtian_block = (
+                "【青天适配硬约束（本章必须执行）】\n"
+                "- 本章固定4块：适用范围与关键参数 / 重点难点与风险措施 / 验收与记录 / 引用关系。\n"
+                "- 关键段落必须具备：怎么干/用什么/量化标准/谁检查+频次/留痕载体。\n"
+                "- 每章至少1张风险控制表：风险点/控制点|措施（含参数、频次、责任）|验收动作|记录表。\n"
+                "- 缺失参数不得编造，必须标注“需补充（缺：××）”；暂定值必须写“【暂定】+需确认来源”。\n"
+                "- 通用机制不得重复展开，重复内容使用“引用：见××章/××表”。\n"
+                "- 禁语命中必须为0，出现即改写为量化动作。\n"
+            )
         agent_block = ""
         if master_agent or specialist_agents or compliance_agent:
             agent_block += "【多Agent协作】\n"
@@ -149,12 +601,13 @@ class SectionWriter:
         if graph_nodes:
             graph_node_block += "【图谱逻辑节点（必须绑定）】\n"
             graph_node_block += "\n".join([f"- {x}" for x in graph_nodes[:8]]) + "\n"
-        return f"""你是资深施工组织设计专家，请根据证据生成高分章节内容。
+        body = f"""你是资深施工组织设计专家，请根据证据生成高分章节内容。
 角色定位：{role}
 章节标题：{title}
 方案版本：v{variant_id}
 {project_type_block}
 {global_instruction_block}
+{qingtian_block}
 {agent_block}
 
 【可编辑参数（优先采用；若招标/图纸/清单有明确要求，则以证据为准）】
@@ -189,23 +642,34 @@ class SectionWriter:
 【合规检查要点】
 {checklist}
 
+【文风硬约束（必须）】
+1) 你必须严禁使用任何解释性、抒情性或过渡性废话。
+2) 你的输出必须100%模仿以下黄金样本的极简短句与数据密度。
+3) 句子只保留动作、参数、责任、验收、记录，不写背景铺垫。
+4) 禁用八股短语：{",".join(self.banned_phrases)}
+5) 输出仅正文，不要“综上/总之/建议”等结尾句。
+样本：{GOLDEN_STYLE_SAMPLE}
+
 输出要求：
 1) 结构清晰，条理分明
 2) 体现质量/安全/进度/环保
-3) 引用证据中的关键点，并在句末用“【证据:来源】”标记
+3) 引用证据中的关键点时，可在句末保留“【证据:来源】”作为内部锚点
    - 建议证据格式：文件名#定位符（例如：xx.pdf#1a2b3c4d@12345）
+   - 禁止额外输出“证据摘要/证据与追溯/图谱节点/经验值/调试日志”等后台信息
 4) 对扣分项做显式规避说明
 5) 若提供“目标页数”，请按目标页数控制篇幅
 6) 风险条目必须采用“风险→控制→验证”三元组表达，并逐条闭环
 7) 优先模板化表达：短句+要点+量化指标；每节尽量覆盖频次/阈值/间距/厚度/时长/人数/设备型号
+   - 所有量化指标必须融入连贯、专业的工程短句，禁止输出“频次=2次/日；阈值=偏差≤5mm；人数=8人/班”这种键值对串
 8) 若有“本章专属要求”，必须逐条满足
 9) 特殊材料、危险品材料、劳保用品、技术工种配置、绿色工地、信息化管理、四新技术应用需写具体措施
    - 若涉及“四新/新技术/新工艺/新材料/新设备/信息化/绿色施工”，优先从“候选清单”中选2-4条落地：适用/投入/步骤/验收指标 + 风险→控制→验证 + 记录 + 偏差处置
 10) 全文禁止官话、套话、空话，不得出现“加强、确保、严格、压实责任、形成合力、高质量推进”等词
 11) 清单重点项必须逐项写清：工程量/材料要点/资源配置 + 量化指标 + 风险→控制→验证 + 证据标注
-12) 每节至少绑定1个图谱逻辑节点，正文中以“【图谱节点:xxx】”标注
-13) 当采用经验值补位时，必须写明“【经验值:同类工程】”及“【图谱经验值:来源】”
+12) 严禁输出系统脚手架、图谱节点标记、经验值标记、JSON、校验日志、Prompt 回显或任何键值调试字段
+13) 如证据不足，可写“需补充××资料后复核”，但不得暴露后台判定过程
 """
+        return f"{build_text_fixed_prefix()}\n{body}"
 
     def _fallback(self, title: str, context: Dict[str, Any]) -> str:
         # 无外部模型 API 时仍输出“可执行+可验收”的最小合格稿：
@@ -273,282 +737,235 @@ class SectionWriter:
         bp_anchors = bp.get("anchors") if isinstance(bp.get("anchors"), list) else []
         bp_anchors = [str(x).strip() for x in bp_anchors if str(x).strip()]
 
-        lines = []
-        lines.append(f"【范围】本章：{title}；负责人：{role}；逻辑模版={logic_id}。")
+        def _metric_sentence() -> str:
+            return naturalize_machine_text(
+                "【量化指标】"
+                + "；".join(
+                    [
+                        f"频次={quant['频次']}",
+                        f"阈值={quant['阈值']}",
+                        f"间距={quant['间距']}",
+                        f"厚度={quant['厚度']}",
+                        f"时长={quant['时长']}",
+                        f"人数={quant['人数']}",
+                        f"设备型号={quant['设备型号']}",
+                    ]
+                )
+            )
+
+        def _quality_sentence() -> str:
+            return naturalize_machine_text(
+                "【控制指标矩阵】"
+                + "；".join(
+                    [
+                        f"采购比价={card_defaults['采购比价']}",
+                        f"抽检频次={card_defaults['抽检频次']}",
+                        f"合格率阈值={card_defaults['合格率阈值']}",
+                        f"一次验收通过率={card_defaults['一次验收通过率']}",
+                    ]
+                )
+            )
+
+        def _append_sentence(lines: List[str], text: str, *, evidence: str | None = evidence_src) -> None:
+            sentence = str(text or "").strip()
+            if not sentence:
+                return
+            if evidence:
+                sentence = f"{sentence}【证据:{evidence}】"
+            lines.append(sentence)
+
+        lines: List[str] = []
+        intro = f"{title}由{role}牵头组织实施。"
         if project_type:
-            lines.append(f"【项目类型】{project_type}。")
-        if global_instruction:
-            lines.append(f"【系统全局指令】{global_instruction}。")
-        master_agent = str(context.get("master_agent") or "").strip()
-        specialist_agents = [str(x).strip() for x in (context.get("specialist_agents") or []) if str(x).strip()]
-        compliance_agent = str(context.get("compliance_agent") or "").strip()
-        if master_agent or specialist_agents or compliance_agent:
-            lines.append(
-                "【多Agent】"
-                + f"主控={master_agent or '主控Agent'}；"
-                + f"专业={'/'.join(specialist_agents[:4]) if specialist_agents else '专业Agent:通用施工'}；"
-                + f"合规={compliance_agent or '合规Agent'}。"
-            )
-        graph_nodes = [str(x).strip() for x in (context.get("graph_nodes") or []) if str(x).strip()]
-        if graph_nodes:
-            lines.append(f"【图谱节点绑定】{';'.join(graph_nodes[:4])}。")
-        if bp_name:
-            lines.append(f"【章节结构蓝图】{bp_name}。")
-        if focus:
-            lines.append(f"【清单重点项】{';'.join(focus[:6])}。")
+            intro = f"{project_type}项目的{title}由{role}牵头组织实施。"
         if target_pages:
-            lines.append(f"【篇幅约束】目标页数：{target_pages}页（正文允许±20%浮动）。")
+            intro += f" 本章按约{target_pages}页篇幅组织内容，重点突出可执行动作、检查频次和验收标准。"
+        if global_instruction:
+            intro += f" 编制时同步落实“{global_instruction}”的工程约束。"
+        _append_sentence(lines, intro)
+        _append_sentence(lines, _metric_sentence())
+        _append_sentence(lines, _quality_sentence())
+        if focus:
+            _append_sentence(lines, f"本章重点覆盖{ '、'.join(focus[:6]) }等清单重点项，逐项写清资源配置、工序做法和验收口径。")
 
-        # Common metric line (used across all templates)
-        metric_line = (
-            "频次：{freq}；阈值：{th}；间距：{sp}；厚度：{thk}；时长：{dur}；人数：{hc}；设备型号：{eq}。".format(
-                freq=quant["频次"],
-                th=quant["阈值"],
-                sp=quant["间距"],
-                thk=quant["厚度"],
-                dur=quant["时长"],
-                hc=quant["人数"],
-                eq=quant["设备型号"],
-            )
-        )
-        # Keep a stable heading for downstream checks/tests.
-        lines.append("【量化指标】" + metric_line)
-        for exp in [str(x).strip() for x in (context.get("graph_experience_values") or []) if str(x).strip()][:3]:
-            lines.append(f"【经验值:同类工程】{exp}")
-
-        # Blueprint anchors (only when matched): ensure chapter follows the user-provided structure.
-        # Keep content minimal but executable so dry-run can still pass quality gates.
         if bp_anchors:
             for anc in bp_anchors[:6]:
-                lines.append(f"【{anc}】")
+                lines.append(anc)
                 if bp_id == "BP01" and anc == "工程特点":
-                    lines.append(f"- 核心参数来自清单重点项：{';'.join(focus[:5]) if focus else '以清单Top项为准'}；写清数量/单位/做法与对资源的影响。【证据:{evidence_src}】")
-                    lines.append("- 约束：场地限制/交通组织/周边敏感点，均以证据可追溯条款为准；缺失项列为需澄清清单。【证据:{evidence_src}】")
+                    _append_sentence(lines, f"工程特点围绕{ '、'.join(focus[:5]) if focus else '清单重点项' }展开，重点交代数量、做法和对现场组织的影响。")
+                    _append_sentence(lines, "场地限制、交通组织和周边敏感点均以现有证据为准，暂缺资料项列入后续补充清单。")
                 elif bp_id == "BP01" and anc == "总体部署":
-                    lines.append("- 关键路径/里程碑：按总工期拆分关键节点，并与资源峰值一致；冲突以计划一致性口径统一。【证据:进度计划/资源计划】")
-                    lines.append(f"- 资源配置：人数={quant['人数']}；设备型号={quant['设备型号']}；信息化=台账上传1次/日；四新=选2项落地并给验收指标。【证据:{evidence_src}】")
+                    _append_sentence(lines, "总体部署按总工期拆分关键节点，并将资源峰值、作业面移交和专业穿插统一到同一调度节奏。", evidence="进度计划/资源计划")
+                    _append_sentence(lines, naturalize_machine_text(f"人数={quant['人数']}；设备型号={quant['设备型号']}；抽检频次={card_defaults['抽检频次']}"))
                 elif bp_id == "BP02" and anc == "劳保用品":
-                    ppe_txt = "；".join([str(x).strip() for x in (ppe_items or []) if str(x).strip()][:8])
-                    if ppe_txt:
-                        lines.append(f"- 清单口径劳保用品：{ppe_txt}。【证据:{evidence_src}】")
-                    lines.append(f"- 配发标准：安全帽1顶/人；反光背心1件/人；安全带1条/人（高处作业）；抽查频次={quant['频次']}；破损48h内更换；记录=《劳保发放与抽查台账》。【证据:{evidence_src}】")
+                    if ppe_items:
+                        _append_sentence(lines, f"本项目劳保用品重点包括{'、'.join([str(x).strip() for x in ppe_items[:8] if str(x).strip()])}，均按人员入场节点足额发放。")
+                    _append_sentence(lines, naturalize_machine_text(f"抽检频次={quant['频次']}；时长=48h内完成破损更换"))
                 elif bp_id == "BP02" and anc == "存储":
-                    lines.append(f"- 存储：分类分区+防潮/避光/通风；堆码间距≥{quant['间距']}；领用双人复核=1次/单；记录=《劳保库房与领用台账》。【证据:{evidence_src}】")
-                elif bp_id == "BP04" and anc in {"特殊材料", "危化品"}:
-                    if anc == "特殊材料" and special_materials:
-                        sm = "；".join([str(x).strip() for x in (special_materials or []) if str(x).strip()][:8])
-                        lines.append(f"- 清单口径特殊材料：{sm}。【证据:{evidence_src}】")
-                        lines.append(f"- 到货验收=1次/批+复验=每批次1次；批次隔离；二维码追溯；记录=《特殊材料到货验收+复验台账》。【证据:{evidence_src}】")
-                    if anc == "危化品" and hazardous_materials:
-                        hz = "；".join([str(x).strip() for x in (hazardous_materials or []) if str(x).strip()][:8])
-                        lines.append(f"- 清单口径危化品材料：{hz}。【证据:{evidence_src}】")
-                        lines.append(f"- 专库通风防火+MSDS随货；可燃气体检测=1次/班；领用双人复核=1次/单；应急演练=1次/季度；记录=《危险品检查与应急台账》。【证据:{evidence_src}】")
+                    _append_sentence(lines, naturalize_machine_text(f"间距={quant['间距']}；时长=1次/单完成双人复核"))
+                elif bp_id == "BP04" and anc == "特殊材料":
+                    if special_materials:
+                        _append_sentence(lines, f"特殊材料重点包括{'、'.join([str(x).strip() for x in special_materials[:8] if str(x).strip()])}，到货后先做批次隔离和复验。")
+                    _append_sentence(lines, "特殊材料到货后执行一批一验、一批一台账，复验结论未闭合前不得投入作业面。")
+                elif bp_id == "BP04" and anc == "危化品":
+                    if hazardous_materials:
+                        _append_sentence(lines, f"危化品材料重点包括{'、'.join([str(x).strip() for x in hazardous_materials[:8] if str(x).strip()])}，入库后按专库专账管理。")
+                    _append_sentence(lines, naturalize_machine_text(f"应急演练频次={card_defaults['应急演练频次']}；频次=1次/班完成可燃气体检测"))
                 elif bp_id == "BP05" and anc in {"适用条件", "验收指标"}:
-                    lines.append(f"- 适用条件：与本项目清单重点项/关键工序匹配，写清适用范围与投入（人材机）。【证据:{evidence_src}】")
-                    lines.append(f"- 验收指标：按阈值={quant['阈值']}；抽检频次={card_defaults['抽检频次']}；记录=《四新实施与验收记录》；偏差处置=超差≤2h纠偏复验关闭。【证据:{evidence_src}】")
+                    _append_sentence(lines, "四新技术应用以本项目清单重点项和关键工序为准，先明确适用条件，再写清投入方式和验收口径。")
+                    _append_sentence(lines, naturalize_machine_text(f"阈值={quant['阈值']}；抽检频次={card_defaults['抽检频次']}"))
                 elif bp_id == "BP08" and anc == "技术工种配置":
-                    lines.append(f"- 配置口径：测量工/钢筋工/模板工/混凝土工/防水工/电工/焊工等按关键工序配置；峰值以资源计划为准；记录=《劳动力计划》。【证据:{evidence_src}】")
+                    _append_sentence(lines, "测量工、钢筋工、模板工、混凝土工、防水工、电工和焊工均按关键工序同步配置，并结合峰值作业量动态调整。")
                 elif bp_id == "BP08" and anc in {"检验", "试验"}:
-                    lines.append(f"- 抽检：{card_defaults['抽检频次']}；阈值：{quant['阈值']}；首件确认=1次/工序；隐蔽验收=100%覆盖；记录=《首件+抽检+隐蔽验收记录》。【证据:{evidence_src}】")
-                elif bp_id == "BP11" and anc in {"技术管理人员", "培训"}:
-                    if anc == "技术管理人员":
-                        lines.append(f"- 配置：技术负责人1人；质量负责人1人；安全负责人1人；测量负责人1人（口径可按项目规模调整）；到岗率=100%；记录=《人员到岗与证书台账》。【证据:{evidence_src}】")
-                    else:
-                        lines.append(f"- 培训：班前交底=1次/班；关键工序培训=1次/工序；考核通过率≥95%；记录=《培训与考核记录》。【证据:{evidence_src}】")
-                else:
-                    lines.append(f"- 本节按蓝图展开，输出可验收动作与量化指标；示例：频次={quant['频次']}；阈值={quant['阈值']}；记录=《检查表》。【证据:{evidence_src}】")
+                    _append_sentence(lines, naturalize_machine_text(f"抽检频次={card_defaults['抽检频次']}；阈值={quant['阈值']}"))
+                elif bp_id == "BP11" and anc == "技术管理人员":
+                    _append_sentence(lines, "技术负责人、质量负责人、安全负责人和测量负责人到岗后形成联审联签链，所有证书和到岗记录同步归档。")
+                elif bp_id == "BP11" and anc == "培训":
+                    _append_sentence(lines, "班前交底和关键工序培训按班组滚动组织，培训后即时考核并留存签到、试题和影像记录。")
 
         if logic_id == "B":
-            lines.append("【工序流程】")
-            lines.append("- 步骤1：准备与交底（班前交底=1次/班；交底记录齐全率=100%）。")
-            lines.append("- 步骤2：测量复核（复核频次=1次/段；偏差按阈值执行）。")
-            lines.append("- 步骤3：材料到场与验收（到货验收=1次/批；批次隔离；台账字段齐全率=100%）。")
-            lines.append("- 步骤4：作业实施（按工序参数控制；旁站=1人/班）。")
-            lines.append("- 步骤5：检查验收与归档（首件确认=1次/工序；抽检频次按默认值）。")
-
-            lines.append("【步骤控制点（量化）】")
-            lines.append(f"- 控制指标：{metric_line}")
-
-            lines.append("【风险→控制→验证（按步骤）】")
-            lines.append(
-                f"- 风险：交叉作业导致人员伤害；控制：作业分区+警戒线2m+指挥1人/班+巡检频次=2次/日；"
-                f"验证：违规=0次/日，记录=《交叉作业巡检表》。【证据:{evidence_src}】"
-            )
-            lines.append(
-                f"- 风险：材料批次混用导致不可追溯；控制：入库按批次分区+二维码领用+双人复核=1次/单；"
-                f"验证：台账字段齐全率=100%，抽查频次={card_defaults['台账抽查频次']}。【证据:{evidence_src}】"
-            )
+            lines.append("施工工序流程")
+            _append_sentence(lines, "施工前先完成作业面验收、班前交底和测量复核，确认条件具备后再组织材料到场和工序穿插。")
+            _append_sentence(lines, "材料到场后执行批次验收、二维码追溯和台账复核，关键作业段安排专人旁站并在收工前完成结果复盘。")
+            lines.append("风险→控制→验证")
+            lines.append(f"风险：交叉作业导致人员伤害；控制：作业分区、警戒线2m、专人指挥并执行{quant['频次']}巡检；验证：当日违章为零并完成《交叉作业巡检表》记录。【证据:{evidence_src}】")
+            lines.append(f"风险：材料批次混用导致不可追溯；控制：入库按批次分区、二维码领用并执行双人复核；验证：台账字段齐全率保持100%，按{card_defaults['台账抽查频次']}完成抽查。【证据:{evidence_src}】")
         elif logic_id == "C":
-            lines.append("【控制指标矩阵】")
-            lines.append(f"- {metric_line}")
-            lines.append(f"- 采购比价：{card_defaults['采购比价']}；抽检频次：{card_defaults['抽检频次']}；合格率阈值：{card_defaults['合格率阈值']}。")
-
-            lines.append("【人机料法环落地】")
-            lines.append("- 人：工种按班组配置；关键工序旁站=1人/班；责任岗位写到人。")
-            lines.append(f"- 机：设备型号={quant['设备型号']}；进场点检=1次/日；记录=《机械点检表》。")
-            lines.append("- 料：到货验收=1次/批；批次隔离；二维码追溯；记录=《材料台账》。")
-            lines.append("- 法：首件确认=1次/工序；过程抽检按频次；记录=《首件+抽检记录》。")
-            lines.append("- 环：扬尘/噪声/污水按阈值控制；记录=《环保巡检表》。")
-
-            lines.append("【风险→控制→验证（按维度）】")
-            lines.append(
-                f"- 质量风险：关键参数超差导致返工；控制：首件确认=1次/工序+抽检频次={card_defaults['抽检频次']}；"
-                f"验证：偏差{quant['阈值']}，合格率{card_defaults['合格率阈值']}。【证据:{evidence_src}】"
-            )
-            lines.append(
-                f"- 安全风险：临边/交叉作业导致伤害；控制：防护到位+巡检=2次/日；验证：违章=0次/日。【证据:{evidence_src}】"
-            )
-            lines.append(
-                f"- 进度风险：关键线路滞后；控制：日计划分解=1次/日；验证：完成量/计划量≥0.95（日统计）。【证据:{evidence_src}】"
-            )
-            lines.append(
-                f"- 成本风险：材料超耗；控制：领用按构件核算=1次/日；验证：超耗≤2%（周统计）。【证据:{evidence_src}】"
-            )
-            lines.append(
-                f"- 环保风险：扬尘/噪声超标；控制：喷淋2次/日+噪声监测；验证：夜间噪声≤55dB。【证据:环保监测记录】"
-            )
+            lines.append("人机料法环控制要点")
+            _append_sentence(lines, "人员按工种和作业段成组配置，关键工序设置旁站岗位，材料执行一批一验一追溯，机械设备按日点检后投入使用。")
+            _append_sentence(lines, "扬尘、噪声、污水和废弃物收集同步纳入现场巡检清单，确保环保指标与施工组织同步闭环。", evidence="环保监测记录")
+            lines.append("风险→控制→验证")
+            lines.append(f"风险：关键参数超差导致返工；控制：首件确认后按{card_defaults['抽检频次']}实施过程抽检；验证：关键偏差控制在{quant['阈值']}以内，合格率稳定在{card_defaults['合格率阈值']}以上。【证据:{evidence_src}】")
+            lines.append(f"风险：关键线路滞后影响总工期；控制：日计划滚动分解并在滞后当日完成资源调整；验证：计划兑现率保持在0.95以上。【证据:{evidence_src}】")
         elif logic_id == "D":
             if is_qse_title:
-                lines.append("【监管红线清单】")
-                lines.append("- 红线1：高处/临边防护缺失即停工。")
-                lines.append("- 红线2：临时用电漏保失效即停用。")
-                lines.append("- 红线3：危化品混放即封存整改。")
-                lines.append("【岗位联签链】")
-                lines.append("- 发现人=班组长；处置人=施工员/电工；复核人=安全员；关闭批准=项目经理。")
-                lines.append("【闭环时限表】")
-                lines.append("- 高风险：10min启动处置+2h复核关闭；一般风险：2h启动处置+24h关闭。")
-                lines.append("【风险→控制→验证】")
-                lines.append(
-                    f"- 风险：临时用电漏保失效；控制：停用+更换+复测；验证：试跳记录齐全率=100%，记录=《红线联签闭环单》。【证据:{evidence_src}】"
-                )
+                lines.append("监管红线清单")
+                _append_sentence(lines, "高处和临边防护缺失、临时用电漏保失效、危化品混放三类问题一经发现立即停工整改，并同步触发联签闭环流程。")
+                _append_sentence(lines, "高风险事项要求10分钟内启动处置、2小时内复核关闭，一般问题要求24小时内销项闭环。")
+                lines.append("风险→控制→验证")
+                lines.append(f"风险：临时用电漏保失效；控制：立即停用、完成更换并组织复测；验证：试跳记录齐全率保持100%，联签单据闭环后方可恢复送电。【证据:{evidence_src}】")
             else:
-                lines.append("【资源-工序耦合表】")
-                lines.append(f"- 工序=测量复核；班组人数={quant['人数']}；设备={quant['设备型号']}；节拍={quant['时长']}。")
-                lines.append(f"- 工序=关键作业；频次={quant['频次']}；阈值={quant['阈值']}；抽检={card_defaults['抽检频次']}。")
-                lines.append("【接口冲突清单】")
-                lines.append("- 冲突：交叉作业抢占作业面；控制：错峰2h+封控线2m。")
-                lines.append("- 冲突：吊装与地面作业交叉；控制：分区封锁+专人指挥1人/班。")
-                lines.append("【关键路径纠偏卡】")
-                lines.append("- 触发：节点滞后>1天；动作：增配1班组；时限：24h内；复核：次日兑现率≥95%。")
-                lines.append("【风险→控制→验证（资源视角）】")
-                lines.append(
-                    f"- 风险：资源错配导致返工；控制：班组-工序绑定+交接清单；验证：偏差{quant['阈值']}，记录=《资源耦合检查表》。【证据:{evidence_src}】"
-                )
+                lines.append("资源-工序耦合表")
+                lines.append(f"工序={title}准备；班组人数={quant['人数']}；设备={quant['设备型号']}；节拍={quant['时长']}。【证据:{evidence_src}】")
+                lines.append(f"工序=关键作业；人数={quant['人数']}；抽检频次={card_defaults['抽检频次']}；阈值={quant['阈值']}。【证据:{evidence_src}】")
+                _append_sentence(lines, "交叉作业抢占作业面和吊装穿插冲突均通过错峰作业、分区封控和专人指挥进行协调。")
+                lines.append("风险→控制→验证")
+                lines.append(f"风险：资源错配导致返工；控制：班组与工序一一绑定并在交接节点逐项复核；验证：关键偏差控制在{quant['阈值']}以内，资源耦合检查记录完整闭环。【证据:{evidence_src}】")
         elif logic_id == "E":
             if is_qse_title:
-                lines.append("【区域网格】")
-                lines.append("- 网格A=主体区；网格B=材料区；网格C=临电区。")
-                lines.append("【班组行为清单】")
-                lines.append("- 必做：班前交底/PPE自检/作业许可；禁做：无证上岗/危化品混放。")
-                lines.append("【红黄牌处置】")
-                lines.append("- 黄牌：2h内整改复核；红牌：立即停工并经项目经理签批复工。")
-                lines.append("【复核与销项】")
-                lines.append(
-                    f"- 风险：PPE佩戴不规范；控制：班前检查=1次/班；验证：抽查{quant['频次']}，记录=《网格巡检台账》。【证据:{evidence_src}】"
-                )
+                lines.append("区域网格划分")
+                _append_sentence(lines, "现场按主体区、材料区和临电区划分网格，网格责任落实到班组长和安全员，问题处置按红黄牌机制执行。")
+                lines.append("班组行为清单")
+                _append_sentence(lines, "复杂交叉作业、动火、临电和高处作业班前必须完成交底、PPE自检和作业许可，无证上岗、危化品混放和越级操作列为否决项。")
+                lines.append("红黄牌处置")
+                _append_sentence(lines, "重大偏差按红黄牌处置，黄牌问题2h内整改复核，红牌问题立即停工并经项目经理签批后恢复作业。")
+                lines.append("风险→控制→验证")
+                lines.append(f"风险：劳保用品佩戴不规范；控制：班前逐人检查并在网格巡检中滚动复核；验证：按{quant['频次']}完成抽查，问题当班整改闭环。【证据:{evidence_src}】")
             else:
-                lines.append("【实施场景卡片】")
-                lines.append("- 场景1：主体作业面；场景2：材料中转区；场景3：交叉作业区。")
-                lines.append("【参数对照表】")
-                lines.append(f"- 频次={quant['频次']}；阈值={quant['阈值']}；间距={quant['间距']}；厚度={quant['厚度']}；时长={quant['时长']}。")
-                lines.append("【验收样表】")
-                lines.append("- 字段：场景编号/责任岗位/实测值/结论/整改时限/复核人/证据定位。")
-                lines.append("【风险→控制→验证（场景）】")
-                lines.append(
-                    f"- 风险：场景参数超差；控制：首件确认+过程抽检；验证：合格率{card_defaults['合格率阈值']}，记录=《场景验收样表》。【证据:{evidence_src}】"
-                )
+                lines.append("实施场景卡片")
+                _append_sentence(lines, "主体作业面、材料中转区和交叉作业区分别建立参数控制、责任岗位和验收记录模板，确保不同场景下的控制逻辑一致。")
+                lines.append("参数对照表")
+                _append_sentence(lines, naturalize_machine_text(f"频次={quant['频次']}；阈值={quant['阈值']}；间距={quant['间距']}；厚度={quant['厚度']}；时长={quant['时长']}"))
+                lines.append("风险→控制→验证")
+                lines.append(f"风险：场景参数超差；控制：首件确认后按工序执行过程抽检；验证：合格率稳定在{card_defaults['合格率阈值']}以上，并完成《场景验收样表》记录。【证据:{evidence_src}】")
         else:
-            # Template A (default): deliverable-first
-            lines.append("【本章交付物】")
-            lines.append("- 交底记录、首件确认记录、抽检记录、验收记录、照片与台账条目。")
+            _append_sentence(lines, "本章按准备、测量、材料、作业、验收五个步骤组织实施，每一步均落实到责任岗位、检查动作和台账记录。")
+            _append_sentence(lines, "交底记录、首件确认记录、抽检记录、验收记录和影像资料同步形成，避免出现作业完成后再补记台账的情况。")
+            lines.append("风险→控制→验证")
+            lines.append(f"风险：交叉作业导致人员伤害；控制：作业分区、警戒线2m、专人指挥并执行{quant['频次']}巡检；验证：当日违章为零并形成《交叉作业巡检表》。【证据:{evidence_src}】")
+            lines.append(f"风险：材料批次混用导致质量不可追溯；控制：入库按批次分区、二维码领用并执行双人复核；验证：台账字段齐全率保持100%，并按{card_defaults['台账抽查频次']}完成抽查。【证据:{evidence_src}】")
 
-            lines.append("【约束条件】")
-            lines.append(f"- 控制指标：{metric_line}")
+        if "施工部署" in str(title):
+            _append_sentence(lines, "施工部署将重难点工序、关键进度节点和扣分项风险统一纳入总工期周计划，复杂穿插作业先排后干，重大偏差和否决项对应工序在班前复核清单中逐项确认。")
 
-            lines.append("【执行步骤】")
-            lines.append("- 准备：作业面验收+班前交底=1次/班。")
-            lines.append("- 测量：复核=1次/段；偏差按阈值执行。")
-            lines.append("- 材料：到货验收=1次/批；批次隔离；二维码追溯。")
-            lines.append("- 作业：关键参数旁站=1人/班；过程抽检按频次。")
-            lines.append("- 验收：首件确认=1次/工序；一次验收通过率按默认值。")
-
-            lines.append("【风险→控制→验证】")
+        if is_qse_title:
+            lines.append("闭环卡片")
             lines.append(
-                f"- 风险：交叉作业导致人员伤害；控制：作业分区+警戒线2m+指挥1人/班+巡检频次=2次/日；"
-                f"验证：违规=0次/日，记录=《交叉作业巡检表》。【证据:{evidence_src}】"
+                f"风险：关键工序质量偏差超限；控制：首件确认=1次/工序并按{card_defaults['抽检频次']}实施过程抽检；"
+                f"验证：偏差控制在{quant['阈值']}以内，记录=《质量抽检记录》；偏差处置：超限后30min内复检，未达标立即整改并在2h内关闭。【证据:{evidence_src}】"
             )
             lines.append(
-                f"- 风险：材料批次混用导致质量不可追溯；控制：入库按批次分区+二维码领用+双人复核=1次/单；"
-                f"验证：台账字段齐全率=100%，抽查频次={card_defaults['台账抽查频次']}。【证据:{evidence_src}】"
+                f"风险：临边防护和交叉作业失控；控制：安全员按{quant['频次']}巡检，警戒线保持2m，班前交底100%覆盖；"
+                f"验证：违章数=0，记录=《安全巡检表》；偏差处置：发现问题立即停工，60min内完成整改复查后恢复作业。【证据:{evidence_src}】"
             )
+            lines.append(
+                f"风险：扬尘或噪声超限引发投诉；控制：喷淋=2次/日、车辆冲洗=1次/车、夜间高噪设备22:00后停用；"
+                f"验证：PM10{qse_defaults['PM10阈值']}、夜间噪声{qse_defaults['夜间噪声阈值']}，记录=《环境监测台账》；偏差处置：超限15min内启动加密喷淋并2h内复测关闭。【证据:{evidence_src}】"
+            )
+            lines.append(
+                f"风险：应急响应迟缓导致事故扩大；控制：应急物资按清单到位并执行{card_defaults['应急演练频次']}演练，值班电话24h畅通；"
+                f"验证：响应时长≤10min，记录=《应急演练记录》；偏差处置：响应超时立即复盘整改，24h内完成责任闭环和再培训。【证据:{evidence_src}】"
+            )
+            lines.append(
+                f"风险：劳保用品失效或佩戴不规范导致人员伤害；控制：劳保用品发放=1套/人，班前检查={quant['频次']}，破损件48h内更换；"
+                f"验证：抽查覆盖率=100%，记录=《劳保用品发放与检查台账》；偏差处置：未佩戴立即停工整改，复查合格后当班关闭。【证据:{evidence_src}】"
+            )
+            lines.append(
+                f"风险：危险品材料或易燃物储运失控引发火灾/中毒；控制：专库专账+领用双人复核=1次/单+可燃气体检测=1次/班；"
+                f"验证：检测记录齐全率=100%，记录=《危险品材料储运与领用台账》；偏差处置：异常物料立即隔离，2h内复核关闭并补做应急交底。【证据:{evidence_src}】"
+            )
+            if "安全" in str(title):
+                _append_sentence(lines, "复杂交叉作业、动火、临电和高处作业作为重难点及扣分项风险纳入红线清单，重大偏差和否决项触发立即停工复核。")
 
-        # 专项：必须给出“采购-储运-领用-作业-应急/验收”的可落地动作
-        lines.append("【专项（可直接落地）】")
         if special_materials:
-            lines.append(
-                f"- 特殊材料：{';'.join([str(x) for x in special_materials[:6] if str(x).strip()])}；"
-                "到货复验频次=每批次1次；不合格批次=100%隔离。"
-            )
+            _append_sentence(lines, f"特殊材料重点包括{'、'.join([str(x) for x in special_materials[:6] if str(x).strip()])}，到货后执行一批一验、一批一复核和一批一台账，不合格批次全部隔离。")
         else:
-            lines.append("- 特殊材料：到货复验频次=每批次1次；复验项目按技术规格书；不合格批次=100%隔离。")
+            _append_sentence(lines, "特殊材料到货后执行一批一验、一批一复核和一批一台账，不合格批次全部隔离。")
 
         if hazardous_materials:
-            lines.append(
-                f"- 危险品材料：{';'.join([str(x) for x in hazardous_materials[:6] if str(x).strip()])}；"
-                f"采购-储运-领用-作业-应急闭环；库内分类分区；领用双人复核1次/单；应急演练={card_defaults['应急演练频次']}。"
-            )
+            _append_sentence(lines, f"危险品材料重点包括{'、'.join([str(x) for x in hazardous_materials[:6] if str(x).strip()])}，采购、储运、领用、作业和应急处置全部纳入专库专账闭环。")
         else:
-            lines.append(f"- 危险品材料：采购-储运-领用-作业-应急闭环；领用双人复核1次/单；应急演练={card_defaults['应急演练频次']}。")
+            _append_sentence(lines, "危险品材料的采购、储运、领用、作业和应急处置全部纳入专库专账闭环。")
+        _append_sentence(lines, naturalize_machine_text(f"应急演练频次={card_defaults['应急演练频次']}"))
 
         if ppe_items:
-            lines.append(
-                f"- 劳保用品：{';'.join([str(x) for x in ppe_items[:8] if str(x).strip()])}；"
-                "入场发放=1套/人；检查频次=1次/周；破损48h内更换。"
-            )
+            _append_sentence(lines, f"劳保用品以{'、'.join([str(x) for x in ppe_items[:8] if str(x).strip()])}为主，人员入场前一次性发放到位，破损件在48小时内完成替换。")
         else:
-            lines.append(
-                "- 劳保用品：安全帽/反光背心/安全带/防割手套/绝缘手套；发放标准=1套/人；检查频次=1次/周；破损48h内更换。"
-            )
+            _append_sentence(lines, "安全帽、反光背心、安全带、防割手套和绝缘手套按岗位足额发放，破损件在48小时内完成替换。")
 
         if trades:
             demo = trades[:6]
-            pairs = [f"{t}2人/班" for t in demo]
-            lines.append(f"- 技术工种配置：{';'.join(pairs)}；峰值人数=8人/班（随关键工序调整）。")
+            _append_sentence(
+                lines,
+                f"技术工种配置：{demo[0]}人数=1人/班；{demo[1] if len(demo) > 1 else '钢筋工'}人数=2人/班；{demo[2] if len(demo) > 2 else '模板工'}人数=2人/班；"
+                f"{demo[3] if len(demo) > 3 else '混凝土工'}人数=2人/班；{demo[4] if len(demo) > 4 else '电工'}人数=1人/班；{demo[5] if len(demo) > 5 else '焊工'}人数=1人/班。",
+            )
+            _append_sentence(lines, f"测量、钢筋、模板、混凝土、电工和焊工作业班组按关键工序峰值同步配置，避免关键工序等待资源。")
         else:
-            lines.append("- 技术工种配置：钢筋工2人/班；模板工2人/班；混凝土工2人/班；电工1人/班；焊工1人/班。")
+            _append_sentence(lines, "技术工种配置：测量工人数=1人/班；钢筋工人数=2人/班；模板工人数=2人/班；混凝土工人数=2人/班；电工人数=1人/班；焊工人数=1人/班。")
+            _append_sentence(lines, "钢筋工、模板工、混凝土工、电工和焊工按关键工序峰值同步配置，避免关键工序等待资源。")
 
-        lines.append(
-            "- 绿色工地：扬尘控制=围挡喷淋2次/日+道路硬化；车辆冲洗1次/车；噪声监测1套（超阈值联动降噪）；"
-            "污水=三级沉淀池1套，排放pH=6-9。"
+        _append_sentence(
+            lines,
+            f"绿色施工方面，扬尘控制按围挡喷淋执行{quant['频次']}，车辆做到一车一冲洗，噪声和污水指标分别按昼间{qse_defaults['昼间噪声阈值']}、夜间{qse_defaults['夜间噪声阈值']}和排放 pH 6-9 控制。",
+            evidence="环保监测记录",
         )
-        lines.append(
-            "- 信息化管理：材料入库/领用二维码闭环；台账字段=批次/数量/责任人/时间；当日上传率=100%；照片≥2张/工序/日；"
-            "问题整改闭环≤48h。"
-        )
-        # 四新技术：优先使用“可编辑库+清单/工序匹配”的推荐清单，保证可执行与可验收。
+        _append_sentence(lines, "信息化管理方面，材料入库、领用、过程检查和问题整改全部使用二维码台账闭环，当日上传率保持100%，每道关键工序至少留存2张现场照片。")
+
         four_new_recs = boq_focus.get("four_new_recommendations") if isinstance(boq_focus, dict) else None
         try:
-            from backend.zhifei_autoplan.four_new_tech import recommend_four_new, render_four_new_recommendations
+            from backend.zhifei_autoplan.four_new_tech import recommend_four_new
 
             recs = four_new_recs if isinstance(four_new_recs, list) else []
             if not recs:
                 fake_boq = {"items": [{"name": x, "process": {"name": ""}} for x in focus[:24]]}
-                recs = recommend_four_new(fake_boq, outline=[str(title)], limit=4)
+                recs = recommend_four_new(fake_boq, outline=[str(title)], limit=3)
             if recs:
-                lines.append("【四新技术（按清单匹配）】")
-                lines.append(
-                    render_four_new_recommendations(
-                        recs,
-                        quant=quant,
-                        card=card_defaults,
-                        qse=qse_defaults,
-                        evidence_src=evidence_src,
+                for it in recs[:3]:
+                    if not isinstance(it, dict):
+                        continue
+                    name = str(it.get("name") or "").strip()
+                    cat = str(it.get("category") or "四新技术").strip()
+                    matched = it.get("matched") if isinstance(it.get("matched"), list) else []
+                    matched_txt = "、".join([str(x).strip() for x in matched[:4] if str(x).strip()])
+                    _append_sentence(
+                        lines,
+                        f"{cat}优先采用{name}，适用场景以{matched_txt or '关键工序'}为主，实施前先做样板验证，实施后按抽检记录和验收记录闭环。",
                     )
-                )
             else:
-                lines.append("- 四新技术：移动端隐蔽验收+二维码材料追溯；适用=材料批次多/隐蔽验收多；验收=台账字段齐全率100%。")
+                _append_sentence(lines, "四新技术优先采用移动端隐蔽验收和二维码材料追溯，适用于材料批次多、隐蔽验收点位密集的工序。")
         except Exception:
-            lines.append("- 四新技术：移动端隐蔽验收+二维码材料追溯；适用=材料批次多/隐蔽验收多；验收=台账字段齐全率100%。")
+            _append_sentence(lines, "四新技术优先采用移动端隐蔽验收和二维码材料追溯，适用于材料批次多、隐蔽验收点位密集的工序。")
 
-        lines.append(f"【证据与追溯】证据标注格式：文件名#p页_sha@offset；本章可用示例：{evidence_src}。")
-        return "\n".join(lines).strip() + "\n"
+        _append_sentence(lines, "过程检查、验收记录、影像资料和台账条目同步归档，缺失证据项在当日收工前补齐后再提交复核。")
+        return "\n".join([str(x).strip() for x in lines if str(x).strip()]).strip() + "\n"

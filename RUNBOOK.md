@@ -14,6 +14,7 @@
     DOCGEN_RUN_LOCAL_UI_ADMIN_SMOKE=1 ./scripts/run_smoke.sh
 
 说明：
+- 当前默认 smoke 以 `/actions` 主链为准，覆盖 `tender/parse -> boq/parse -> plan/save -> generate_async -> job_status -> result/download`
 - 该开关默认关闭，不影响现有 `run_smoke.sh` 默认行为
 - 打开后会在核心 smoke 结束后，额外串行执行：
   - `scripts/verify_local_ui_admin_chain.sh`
@@ -27,6 +28,93 @@
 ## 3) 常用自检（可选）
     curl -s http://127.0.0.1:8000/openapi.json | head -n 5
     curl -s http://127.0.0.1:8000/audit | python3 -m json.tool | head -n 60
+    curl -s http://127.0.0.1:8000/health | python3 -m json.tool | head -n 80
+    curl -s http://127.0.0.1:8000/config | python3 -m json.tool | head -n 120
+
+### 主链配置自检判读
+- `/health` 的 `config_status.level`：
+  - `ok`：主链发布所需配置齐全
+  - `warn`：服务可启动，但存在鉴权、管理员接口或降级链缺口
+  - `error`：真实生成链仍有阻断项，优先看 `blocking` 和 `warnings`
+- `/health` 的 `config_status.release_ready=false` 时，不要直接对外发布；先处理返回里的 `warnings`
+- `/config` 与 `/capabilities` 的 `runtime_config` 会列出当前单一真理源边界：
+  - `backend/data/autoplan/config.json`
+  - `backend/data/autoplan/agent_roles.json`
+  - `kg_config.json`
+  - 环境变量
+
+## 4) 发布快照与回滚（建议变更前先做）
+### 4.1 先做一次配置/KG 状态快照
+    cd "$HOME/Desktop/文档生成系统"
+    python3 scripts/release_snapshot.py snapshot --label before_change
+
+输出目录：
+- `build/_release_snapshots/<timestamp>_before_change/`
+- 其中 `manifest.json` 会记录：
+  - 当前 `config.json / agent_roles.json / quota_policy.json / kg_config.json / active_kg.json`
+  - 当前主链 `runtime_config`
+  - 当前 git commit / branch（若仓库可读）
+
+### 4.2 查看最新快照
+    python3 scripts/release_snapshot.py status
+
+### 4.3 预演回滚（默认不落盘）
+    python3 scripts/release_snapshot.py restore --snapshot latest
+
+### 4.4 执行配置/KG 状态回滚
+    python3 scripts/release_snapshot.py restore --snapshot latest --yes
+
+执行后必须重新验收：
+    ./scripts/run_smoke.sh
+
+### 4.5 五类回滚边界
+- 代码回滚：
+  - 使用 git/worktree 回到上一已知稳定提交；快照脚本不会替你回滚代码。
+- 配置回滚：
+  - 用 `scripts/release_snapshot.py restore --yes` 恢复 `config.json / agent_roles.json / quota_policy.json`。
+- KG 回滚：
+  - 首选 `python3 scripts/kg_pack.py rollback --smoke`；
+  - 若只是配置漂移，也可用发布快照恢复 `kg_config.json` 与 `backend/data/kg/active_kg.json`。
+- Job 回滚：
+  - 查 `backend/data/autoplan/archive/jobs/` 的 zip 和 `backend/data/autoplan/jobs/*.archived.json` tombstone。
+- 交付产物回滚：
+  - 优先复用 `build/actions_runs/<job_id>/`、`build/` 下上一轮已验收产物，不直接覆盖历史交付件。
+
+## 5) 固定回归样本集（发布前必跑）
+样本清单：
+- `backend/data/autoplan/release_regression_suite.json`
+
+先校验样本是否齐全：
+    python3 scripts/release_regression_suite.py check
+
+查看发布门禁样本：
+    python3 scripts/release_regression_suite.py list --release-only
+
+打印发布门禁命令：
+    python3 scripts/release_regression_suite.py command --release-only
+
+执行单个样本（默认 dry-run）：
+    python3 scripts/release_regression_suite.py run --case real_baseline_summary
+
+当前 3 组发布门禁样本：
+- `real_baseline_summary`
+- `real_qa_decor`
+- `factory_building_with_drawing`
+
+当前 2 组扩展样本：
+- `factory_weak_current`
+- `factory_hvac_core`
+
+说明：
+- 这些样本全部引用仓库内已存在的真实输入文件，不使用临时伪造文件。
+- 当前自动回归口径仍受 `run_actions_pipeline.py` 约束：
+  - 支持多份招标/补疑文件
+  - 支持单个清单文件
+  - 支持多份额外 ingest 资料（图纸/标准等）
+- 因此样本定义按“每次一组清单 + 可附带补疑/图纸”组织，不把多清单整包自动回归写成既成事实。
+- 样本默认使用清单内固定 outline，并关闭自动修订：
+  - 目的是把门禁目标收敛为“真实输入仍能稳定跑通主链”
+  - 不把发布前门禁变成长文生产压测
 
 ## KG Pack 管理（可替换/可升级知识图谱）
 

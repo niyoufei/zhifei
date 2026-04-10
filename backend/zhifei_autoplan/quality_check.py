@@ -5,9 +5,34 @@ import re
 from pathlib import Path
 from typing import Dict, Any, List
 
+from backend.zhifei_autoplan.qingtian_policy import QINGTIAN_BANNED_PHRASES
+from backend.zhifei_autoplan.remediation_strategy import (
+    build_execution_audit,
+    build_execution_profile,
+    build_strategy_audit,
+    enrich_strategy_rows,
+)
+from backend.zhifei_autoplan.workspace import workspace_paths
+
+
+def _ingest_audit_path(workspace_dir: str | None = None) -> Path:
+    return workspace_paths(workspace_dir)["ingest_audit"] if workspace_dir else Path("backend/data/audit/ingest.jsonl")
+
 
 def _normalize_text(s: str) -> str:
     return (s or "").replace(" ", "").replace("\n", "")
+
+
+def _dedup_text_list(lines: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
 
 EVIDENCE_SRC_RE = re.compile(r"【证据:(?P<src>[^】]{1,80})】")
 TRACEABLE_EVIDENCE_RE = re.compile(r"#(?:p\d+_)?[0-9a-f]{6,}@\d+", re.IGNORECASE)
@@ -154,14 +179,22 @@ def _check_engineering_by_section(sections: List[Dict[str, Any]]):
 
 
 def _check_template_style(text: str):
-    avg_len = _avg_sentence_len(text)
-    has_bullets = _has_bullets(text)
+    cleaned = str(text or "")
+    # Style check should judge prose shape, not traceability tags or oversized item codes.
+    cleaned = re.sub(r"【证据:[^】]+】", "", cleaned)
+    cleaned = re.sub(r"\b\d+(?:\.\d+)?e\+\d+\b", "NUM", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b[0-9A-Za-z]{12,}\b", "CODE", cleaned)
+    cleaned = re.sub(r"\b\d{6,}\b", "NUM", cleaned)
+    avg_len = _avg_sentence_len(cleaned)
+    has_bullets = _has_bullets(cleaned)
     ok = has_bullets and (avg_len == 0.0 or avg_len <= 40)
     return {"ok": ok, "avg_sentence_len": avg_len, "has_bullets": has_bullets}
 
 
 RISK_TRIPLET_RE = re.compile(
-    r"风险[:：]\s*(?P<risk>[^。\n；;]+).*?(?:控制|措施)[:：]\s*(?P<control>[^。\n；;]+).*?验证[:：]\s*(?P<verify>[^。\n；;]+)",
+    r"风险(?:[:：=]|按)\s*(?P<risk>.+?)(?=(?:[，,；;。]\s*|\s+)(?:控制|措施)(?:[:：=]|按))"
+    r".*?(?:控制|措施)(?:[:：=]|按)\s*(?P<control>.+?)(?=(?:[，,；;。]\s*|\s+)验证(?:[:：=]|按))"
+    r".*?验证(?:[:：=]|按)\s*(?P<verify>[^。\n；;]+)",
     re.DOTALL,
 )
 QUANT_KEYS = ["频次", "阈值", "间距", "厚度", "时长", "人数", "设备型号"]
@@ -169,8 +202,10 @@ QUANT_UNIT_RE = re.compile(
     r"\d+(?:\.\d+)?\s*(?:mm|cm|m|km|kg|t|h|小时|天|d|min|分钟|次|人|台|套|%|MPa|kN|mm2|m2|m3|dB|db|ug/m3|μg/m3|m/s|℃)",
     re.IGNORECASE,
 )
-VAGUE_WORDS = ["加强", "确保", "严格", "及时", "充分", "有效", "合理", "全面"]
-HARD_BANNED_WORDS = ["加强", "确保", "严格"]
+VAGUE_WORDS = _dedup_text_list(
+    ["加强", "确保", "严格", "及时", "充分", "有效", "合理", "全面"] + list(QINGTIAN_BANNED_PHRASES)
+)
+HARD_BANNED_WORDS = _dedup_text_list(["加强", "确保", "严格"] + list(QINGTIAN_BANNED_PHRASES))
 OFFICIALESE_PHRASES = [
     "提高政治站位",
     "统一思想认识",
@@ -194,6 +229,16 @@ NONCONCRETE_REPLACEMENTS = {
     "加强": "",
     "确保": "",
     "严格": "",
+    "按照": "",
+    "符合": "",
+    "保障": "",
+    "严格落实": "",
+    "加强管理": "",
+    "有效措施": "",
+    "合理安排": "",
+    "现场实际情况": "",
+    "相关规范": "",
+    "有关规定": "",
 }
 STANDARD_TRADES = [
     "测量工",
@@ -423,11 +468,42 @@ def _check_core_conclusion_evidence_by_section(sections: List[Dict[str, Any]]):
     Core conclusions (带约束/阈值/必须动作) must carry traceable evidence markers.
     """
     core_kw = ("必须", "应", "需", "禁止", "风险", "控制", "验证", "工期", "关键线路", "资源峰值", "合格率", "偏差")
+    meta_hints = (
+        "【自动补充】",
+        "已为本章回填",
+        "需继续人工复核",
+        "示例：",
+        "量化指标示例",
+        "对必选专项补齐",
+        "每条写清",
+        "评分点命中关键词",
+        "用于本章覆盖校核",
+        "在每条关键结论句末追加",
+        "至少 1 条/章",
+        "不得使用",
+        "格式=文件名#p页_sha@offset",
+    )
     results = []
     for s in sections:
         title = s.get("title") or ""
         text = str(s.get("content") or "")
-        fragments = [x.strip() for x in re.split(r"[。；;\n]+", text) if x.strip()]
+        # Merge soft-wrapped line breaks inside IDs / item codes so one logical bullet
+        # is not miscounted as multiple uncovered core fragments.
+        text = re.sub(
+            r"(?<=[A-Za-z0-9])\n(?=[A-Za-z0-9\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])\n(?=[A-Za-z0-9])",
+            "",
+            text,
+        )
+        fragments: List[str] = []
+        for raw_line in text.splitlines():
+            line = str(raw_line or "").strip()
+            if not line or line.startswith("【自动补充】"):
+                continue
+            units = [line] if "【证据:" in line else [x.strip() for x in re.split(r"[。\n]+", line) if x.strip()]
+            for frag in units:
+                if any(h in frag for h in meta_hints):
+                    continue
+                fragments.append(frag)
         core_total = 0
         covered = 0
         missing_snippets: List[str] = []
@@ -465,8 +541,14 @@ def _is_key_process_chapter(title: str) -> bool:
     return any(k in t for k in keys)
 
 
-def _load_drawing_filenames(project_id: str | None = None, limit: int = 80) -> List[str]:
-    p = Path("backend/data/audit/ingest.jsonl")
+def _load_drawing_filenames(
+    project_id: str | None = None,
+    limit: int = 80,
+    *,
+    audit_path: str | Path | None = None,
+    workspace_dir: str | None = None,
+) -> List[str]:
+    p = Path(audit_path) if audit_path is not None else _ingest_audit_path(workspace_dir)
     if not p.exists():
         return []
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
@@ -553,12 +635,18 @@ def _check_drawing_anchor_binding_by_section(sections: List[Dict[str, Any]], dra
     return results
 
 
-def _load_standard_filenames(project_id: str | None = None, limit: int = 80) -> List[str]:
+def _load_standard_filenames(
+    project_id: str | None = None,
+    limit: int = 80,
+    *,
+    audit_path: str | Path | None = None,
+    workspace_dir: str | None = None,
+) -> List[str]:
     """
     Load enterprise standard/work-instruction filenames from ingest audit.
     Uses ingest tag "standard" (from filename heuristic).
     """
-    p = Path("backend/data/audit/ingest.jsonl")
+    p = Path(audit_path) if audit_path is not None else _ingest_audit_path(workspace_dir)
     if not p.exists():
         return []
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
@@ -1217,9 +1305,11 @@ def apply_remediation(
     sections: List[Dict[str, Any]],
     remediation: List[Dict[str, Any]],
     *,
+    tender: Dict[str, Any] | None = None,
     project_id: str | None = None,
     boq_focus: Dict[str, Any] | None = None,
     params: Dict[str, Any] | None = None,
+    workspace_dir: str | None = None,
 ):
     # Use editable parameter registry (backend/data/autoplan/params.json) so users can tune numbers globally.
     try:
@@ -1284,6 +1374,8 @@ def apply_remediation(
         "standard_evidence_gap": "【自动补充】企业标准/工法引用与落地",
     }
 
+    audit_path = _ingest_audit_path(workspace_dir)
+
     def _already_applied(content: str, rtype: str | None) -> bool:
         key = str(rtype or "").strip()
         marker = applied_markers.get(key)
@@ -1323,20 +1415,111 @@ def apply_remediation(
             return ev_cache[title]
         src = "招标文件/工程量清单/图纸"
         try:
-            from backend.zhifei_autoplan.evidence import best_ingested_hit
+            from backend.zhifei_autoplan.evidence import best_ingested_hit, best_tender_source_span_hit
 
             hit = best_ingested_hit(
                 f"{title} 招标 清单 图纸",
                 limit=10,
                 prefer_filename_keywords=["招标", "清单", "图纸", "BOQ", "工程量", "报价"],
                 project_id=project_id,
+                audit_path=audit_path,
             )
             if hit and hit.get("locator"):
                 src = str(hit.get("locator"))
+            if (not src or "@" not in src or "#" not in src) and isinstance(tender, dict):
+                tender_hit = best_tender_source_span_hit(
+                    tender,
+                    f"{title} 招标要求 质量 安全 工期",
+                    prefer_filename_keywords=["招标", "清单", "BOQ", "工程量"],
+                )
+                if tender_hit and tender_hit.get("locator"):
+                    src = str(tender_hit.get("locator"))
         except Exception:
             pass
         ev_cache[title] = src
         return src
+
+    def _append_strategy_trace(sec: Dict[str, Any], rec: Dict[str, Any]) -> None:
+        trace_rows = sec.setdefault("remediation_strategy_trace", [])
+        if not isinstance(trace_rows, list):
+            trace_rows = []
+            sec["remediation_strategy_trace"] = trace_rows
+        trace = {
+            "type": str(rec.get("type") or "").strip(),
+            "indicator_group": str(rec.get("indicator_group") or "").strip(),
+            "strategy_id": str(rec.get("strategy_id") or "").strip(),
+            "strategy_name": str(rec.get("strategy_name") or "").strip(),
+            "strategy_family": str(rec.get("strategy_family") or "").strip(),
+            "strategy_priority": int(rec.get("strategy_priority") or 0),
+            "chapter_domain": str(rec.get("chapter_domain") or "").strip(),
+            "template_id": str(rec.get("template_id") or "").strip(),
+            "audit_key": str(rec.get("audit_key") or "").strip(),
+        }
+        key = (
+            trace["type"],
+            trace["strategy_id"],
+            trace["audit_key"],
+        )
+        seen = {
+            (
+                str(item.get("type") or "").strip(),
+                str(item.get("strategy_id") or "").strip(),
+                str(item.get("audit_key") or "").strip(),
+            )
+            for item in trace_rows
+            if isinstance(item, dict)
+        }
+        if key not in seen:
+            trace_rows.append(trace)
+
+    def _append_execution_trace(sec: Dict[str, Any], rec: Dict[str, Any], *, before_text: str, after_text: str) -> None:
+        trace_rows = sec.setdefault("remediation_execution_trace", [])
+        if not isinstance(trace_rows, list):
+            trace_rows = []
+            sec["remediation_execution_trace"] = trace_rows
+        trace = build_execution_profile(rec, before_text=before_text, after_text=after_text)
+        key = (
+            str(trace.get("type") or "").strip(),
+            str(trace.get("strategy_id") or "").strip(),
+            str(trace.get("audit_key") or "").strip(),
+        )
+        seen = {
+            (
+                str(item.get("type") or "").strip(),
+                str(item.get("strategy_id") or "").strip(),
+                str(item.get("audit_key") or "").strip(),
+            )
+            for item in trace_rows
+            if isinstance(item, dict)
+        }
+        if key not in seen:
+            trace_rows.append(trace)
+
+    def _annotate_core_conclusions(text: str, ev_src: str) -> tuple[str, int]:
+        core_kw = ("必须", "应", "需", "禁止", "风险", "控制", "验证", "工期", "关键线路", "资源峰值", "合格率", "偏差")
+        parts = re.split(r"([。；;\n]+)", str(text or ""))
+        out: List[str] = []
+        annotated = 0
+        for idx, part in enumerate(parts):
+            if idx % 2 == 1:
+                out.append(part)
+                continue
+            frag = str(part or "")
+            stripped = frag.strip()
+            if not stripped:
+                out.append(frag)
+                continue
+            is_core = any(k in stripped for k in core_kw) and (
+                bool(re.search(r"\d", stripped))
+                or any(x in stripped for x in QUANT_KEYS)
+            )
+            has_marker = "【证据:" in stripped
+            has_traceable = bool(re.search(r"#(?:p\d+_)?[0-9a-f]{6,}@\d+", stripped, flags=re.IGNORECASE))
+            if is_core and not (has_marker and has_traceable):
+                frag = frag.rstrip() + f"【证据:{ev_src}】"
+                annotated += 1
+            out.append(frag)
+        return "".join(out), annotated
 
     for rec in remediation or []:
         title = rec.get("title")
@@ -1346,42 +1529,57 @@ def apply_remediation(
         if not sec:
             continue
         content = sec.get("content") or ""
+        before_text = str(content or "")
         if _already_applied(content, rtype):
             continue
         ev_src = _pick_traceable_evidence(str(sec.get("title") or title or "章节"))
         sec_title = str(sec.get("title") or title or "章节")
+        sec_domain = str(sec.get("chapter_domain") or rec.get("chapter_domain") or "").strip().lower()
 
         if rtype == "score_point_missing":
             miss_dims = rec.get("missing_dimensions") if isinstance(rec.get("missing_dimensions"), list) else []
             miss_dims = [str(x).strip() for x in miss_dims if str(x).strip()]
             miss_kws = rec.get("missing_keywords") if isinstance(rec.get("missing_keywords"), list) else []
             miss_kws = [str(x).strip() for x in miss_kws if str(x).strip()]
-            content += (
+            if sec_domain == "qse" and any(k in sec_title for k in ("安全", "应急", "消防")):
+                # Tail-appended score patches can be truncated by chapter compaction.
+                # Seed the critical safety score anchors near the top so they survive max-length cleanup.
+                safety_anchor = (
+                    "安全重难点与扣分项：复杂交叉作业、动火、临电和高处作业列为本章重难点；"
+                    "无证上岗、临时用电漏保失效、危化品混放和临边防护缺失列为扣分项/否决项；"
+                    f"重大偏差触发红黄牌处置并立即停工复核。【证据:{ev_src}】"
+                )
+                if "安全重难点与扣分项：" not in content:
+                    content = safety_anchor + "\n" + content
+            block = (
                 "\n\n【自动补充】评分点覆盖建议：\n"
                 f"- {suggestion}\n"
                 f"- 量化指标示例：合格率≥98%，一次验收通过率≥95%。【证据:{ev_src}】\n"
             )
             if miss_dims:
-                content += f"- 评分维度回填：{'、'.join(miss_dims[:40])}。\n"
+                block += f"- 评分维度回填：{'、'.join(miss_dims[:40])}。\n"
             if miss_kws:
                 # Force explicit keyword hits so score coverage checks become deterministic.
-                content += (
+                block += (
                     "- 评分点命中关键词（用于本章覆盖校核）："
                     + "、".join(miss_kws[:120])
                     + f"。【证据:{ev_src}】\n"
                 )
+            content += block
         elif rtype == "risk_measure_gap":
-            content += (
+            block = (
                 "\n\n【自动补充】风险-措施对应（风险三元组闭环）：\n"
                 "- 风险：交叉作业导致人员伤害；措施：作业分区+警戒线2m+专人指挥；"
                 "控制：班前交底=1次/班（责任岗位：安全员）+巡检频次=2次/日；"
                 f"验证：违章=0次，记录=《交叉作业巡检表》。【证据:{ev_src}】\n"
             )
+            content += block
         elif rtype == "risk_triplet_gap":
             content += (
                 "\n\n【自动补充】风险→控制→验证：\n"
                 "- 风险：关键参数超差导致返工/超支；控制：首件确认=1次/工序+过程抽检频次=每100m2 1次；"
-                f"验证：偏差≤5mm，抽检合格率≥98%，记录=《抽检记录表》。【证据:{ev_src}】\n"
+                f"验证：偏差≤5mm，抽检合格率≥98%，记录=《抽检记录表》；"
+                f"偏差处置：超差即停工整改≤2h，复验合格后关闭。【证据:{ev_src}】\n"
             )
         elif rtype == "qse_closed_loop_gap":
             # Title-aware closed-loop cards for 质量/安全/文明环保章节.
@@ -1566,11 +1764,10 @@ def apply_remediation(
             tid = str(rec.get("template_id") or sec.get("logic_template_id") or "").strip().upper() or "A"
             dom = str(rec.get("chapter_domain") or sec.get("chapter_domain") or "").strip().lower() or "general"
             dom = "qse" if dom == "qse" else "general"
-
-            content += f"\n\n【自动补充】章内逻辑锚点（模版{tid}；域={dom}）：\n"
+            block = f"\n\n【自动补充】章内逻辑锚点（模版{tid}；域={dom}）：\n"
             if dom == "qse":
                 if tid == "B":
-                    content += (
+                    block += (
                         "- 【场景拆分】夜间施工/高处作业/材料堆放（每个场景至少2条闭环）。\n"
                         f"- 【闭环卡片（按场景）】场景=夜间施工；风险：噪声扰民；控制：高噪设备禁用时段=22:00-06:00+监测=1次/日；"
                         f"验证：夜间噪声{_qse.get('夜间噪声阈值','≤55dB')}，记录=《噪声监测记录》；偏差处置：超限30min内复测达标。【证据:{ev_src}】\n"
@@ -1578,28 +1775,28 @@ def apply_remediation(
                         "- 【记录表清单】《巡检表》/《监测记录》/《整改闭环单》。\n"
                     )
                 elif tid == "C":
-                    content += (
+                    block += (
                         f"- 【指标矩阵】PM10{_qse.get('PM10阈值','≤150ug/m3')}/夜间噪声{_qse.get('夜间噪声阈值','≤55dB')}；频次=1次/日；责任岗位=安全员；记录=《环境监测台账》。\n"
                         "- 【数据闭环】采集(谁/工具/频次)->判定(阈值)->处置(动作+时限)->复核(复测)->归档(台账字段+上传频次)。\n"
                         f"- 【闭环卡片】风险：扬尘超限；控制：喷淋=2次/日+车辆冲洗=1次/车；"
                         f"验证：PM10{_qse.get('PM10阈值','≤150ug/m3')}，记录=《扬尘监测+巡检台账》；偏差处置：超限≤15min启动加密喷淋并2h内复测达标。【证据:{ev_src}】\n"
                     )
                 elif tid == "D":
-                    content += (
+                    block += (
                         "- 【监管红线清单】高处防护/临时用电/危化品管理三条红线逐条列出触发条件。\n"
                         "- 【岗位联签链】发现人->处置人->复核人->关闭批准人，四级责任不可缺失。\n"
                         "- 【闭环时限表】高风险10min启动处置+2h复核关闭；一般风险2h启动处置+24h复核关闭。\n"
                         f"- 【闭环卡片】风险：临时用电漏保失效；控制：停用+更换+复测；验证：试跳记录齐全率=100%，记录=《红线联签闭环单》。【证据:{ev_src}】\n"
                     )
                 elif tid == "E":
-                    content += (
+                    block += (
                         "- 【区域网格】网格A主体区/网格B材料区/网格C临电区，逐网格定义责任岗位和巡检频次。\n"
                         "- 【班组行为清单】必做动作（交底/PPE/许可）与禁止动作（无证上岗/危化品混放）并列。\n"
                         "- 【红黄牌处置】黄牌2h内整改复核；红牌立即停工并经项目经理签批复工。\n"
                         f"- 【复核与销项】风险：PPE不规范；控制：班前检查=1次/班；验证：抽查{_quant['频次']}，记录=《网格巡检台账》。【证据:{ev_src}】\n"
                     )
                 else:
-                    content += (
+                    block += (
                         "- 【闭环清单】字段固定：风险/问题->控制(岗位+频次)->验证(阈值+方法)->记录->偏差处置(时限)。\n"
                         f"- 【闭环卡片】风险：临边坠落；控制：防护到位+系挂检查={_quant['频次']}(安全员)；"
                         "验证：违章=0次/日，记录=《高处作业巡检表》；偏差处置：发现未系挂立即停工并10min内整改关闭。"
@@ -1607,40 +1804,41 @@ def apply_remediation(
                     )
             else:
                 if tid == "B":
-                    content += (
+                    block += (
                         "- 【工序流程】步骤1=准备与交底；步骤2=测量复核；步骤3=材料进场与验收；步骤4=作业实施；步骤5=检查验收与归档。\n"
                         f"- 【步骤控制点】频次={_quant['频次']}；阈值={_quant['阈值']}；间距={_quant['间距']}；厚度={_quant['厚度']}。\n"
                         f"- 【风险→控制→验证（按步骤）】风险：关键参数超差返工；控制：首件确认=1次/工序+抽检={_card['抽检频次']}；"
                         f"验证：偏差{_quant['阈值']}，合格率{_card['合格率阈值']}，记录=《抽检记录》；偏差处置：超差≤2h返修复验关闭。【证据:{ev_src}】\n"
                     )
                 elif tid == "C":
-                    content += (
+                    block += (
                         f"- 【控制指标矩阵】频次={_quant['频次']}；阈值={_quant['阈值']}；间距={_quant['间距']}；厚度={_quant['厚度']}；时长={_quant['时长']}；人数={_quant['人数']}；设备型号={_quant['设备型号']}。\n"
                         "- 【人机料法环落地】人=责任岗位写到人；机=进场点检=1次/日；料=到货验收=1次/批；法=首件确认=1次/工序；环=扬尘/噪声按阈值监测。\n"
                         f"- 【信息化与台账】字段齐全率=100%+上传频次=1次/日；记录=《台账》。【证据:{ev_src}】\n"
                     )
                 elif tid == "D":
-                    content += (
+                    block += (
                         f"- 【资源-工序耦合表】工序对应班组人数={_quant['人数']}、设备={_quant['设备型号']}、节拍={_quant['时长']}。\n"
                         "- 【接口冲突清单】交叉作业冲突位/避让窗口/责任岗位逐条列出。\n"
                         "- 【关键路径纠偏卡】触发阈值、纠偏动作、时限、复核标准逐条闭环。\n"
                         f"- 【风险→控制→验证（资源视角）】风险：资源错配；控制：日排产+交接清单；验证：偏差{_quant['阈值']}，记录=《资源耦合检查表》。【证据:{ev_src}】\n"
                     )
                 elif tid == "E":
-                    content += (
+                    block += (
                         "- 【实施场景卡片】按作业面/材料区/交叉区拆分场景并定义边界。\n"
                         f"- 【参数对照表】频次={_quant['频次']}；阈值={_quant['阈值']}；间距={_quant['间距']}；厚度={_quant['厚度']}；时长={_quant['时长']}。\n"
                         "- 【验收样表】字段=场景编号/责任岗位/实测值/结论/整改时限/复核人/证据定位。\n"
                         f"- 【风险→控制→验证（场景）】风险：参数超差；控制：首件确认+过程抽检；验证：合格率{_card['合格率阈值']}，记录=《场景验收样表》。【证据:{ev_src}】\n"
                     )
                 else:
-                    content += (
-                        "- 【本章交付物】《检查/验收记录》+《过程抽检记录》+《台账》（字段齐全率=100%）。\n"
-                        f"- 【约束条件】关键参数/位置/范围从证据提取并标注。【证据:{ev_src}】\n"
-                        "- 【执行步骤】准备->测量复核->材料->作业->检查验收->资料归档。\n"
-                        f"- 【风险→控制→验证】风险：参数超差返工；控制：首件确认=1次/工序+抽检={_card['抽检频次']}；"
-                        f"验证：偏差{_quant['阈值']}，合格率{_card['合格率阈值']}，记录=《抽检记录》；偏差处置：超差≤2h返修复验关闭。【证据:{ev_src}】\n"
+                    block += (
+                        "- 【本章交付物】《日排产表》+《资源协调台账》+《检查/验收记录》；字段齐全率=100%。\n"
+                        f"- 【交付物】交底=1次/班；接口清单=1份/专业；问题闭环时长≤4h。【证据:{ev_src}】\n"
+                        f"- 【约束条件】作业面、材料到货、班组人数、设备投入必须同口径联动校核。【证据:{ev_src}】\n"
+                        f"- 【风险→控制→验证】风险：资源错配导致工序等待；控制：班前协调=1次/班+日排产复核=1次/日；"
+                        f"验证：等待时长≤30min，记录=《资源协调记录》；偏差处置：超时≤2h纠偏关闭。【证据:{ev_src}】\n"
                     )
+            content = block + content
         elif rtype == "engineering_gap":
             content += (
                 "\n\n【自动补充】工程落地要素：\n"
@@ -1698,14 +1896,23 @@ def apply_remediation(
                 f"- 动作：班前交底+过程巡检+隐蔽验收；参数：偏差≤5mm；频次：2次/日；责任岗位：工长/质量员；验收标准：一次验收通过率≥95%。【证据:{ev_src}】\n"
             )
         elif rtype == "boq_focus_item_closure_gap":
-            content += (
-                "\n\n【自动补充】重点清单项闭环（每项至少 1 条）：\n"
-                "- 清单项：本章出现的重点项（工程量/单位/单价/合价按清单条目抄录）。\n"
-                f"  量化指标：频次={_quant['频次']}；阈值={_quant['阈值']}；间距={_quant['间距']}；厚度={_quant['厚度']}；"
-                f"时长={_quant['时长']}；人数={_quant['人数']}；设备型号={_quant['设备型号']}。\n"
-                f"  风险：工序参数超差导致返工/超支；控制：采购比价{_card['采购比价']}+首件确认=1次/工序+过程抽检={_card['抽检频次']}；"
-                f"验证：合格率{_card['合格率阈值']}，记录=《重点项抽检记录》。【证据:{ev_src}】\n"
-            )
+            focus_items = []
+            if isinstance(boq_focus, dict):
+                focus_items = [str(x).strip() for x in (boq_focus.get("must_cover_keywords") or []) if str(x).strip()]
+            content += "\n\n【自动补充】重点清单项闭环（每项至少 2 条）：\n"
+            if not focus_items:
+                focus_items = ["重点清单项"]
+            for name in focus_items[:8]:
+                content += (
+                    f"- 清单项：{name}；频次={_quant['频次']}；阈值={_quant['阈值']}；间距={_quant['间距']}；厚度={_quant['厚度']}；"
+                    f"时长={_quant['时长']}；人数={_quant['人数']}；设备型号={_quant['设备型号']}；"
+                    f"风险：{name}到货或工序参数不符导致返工/超支；控制：责任岗位=工长+质量员，采购比价{_card['采购比价']}，到货验收=1次/批，首件确认=1次/工序，抽检={_card['抽检频次']}；"
+                    f"验证：合格率{_card['合格率阈值']}，记录=《{name}重点项抽检记录》；偏差处置：超差即停工整改≤2h，复验合格后关闭。【证据:{ev_src}】\n"
+                    f"- 清单项：{name}；频次={_quant['频次']}；阈值={_quant['阈值']}；间距={_quant['间距']}；厚度={_quant['厚度']}；"
+                    f"时长={_quant['时长']}；人数={_quant['人数']}；设备型号={_quant['设备型号']}；"
+                    f"风险：{name}施工偏差导致质量/进度损失；控制：责任岗位=工长+安全员，样板先行=1次/作业面，巡检={_quant['频次']}，复核=1次/班；"
+                    f"验证：一次验收通过率{_card['一次验收通过率']}，记录=《{name}过程验收记录表》；偏差处置：异常4h内纠偏并复核关闭。【证据:{ev_src}】\n"
+                )
         elif rtype == "boq_focus_item_typed_evidence_gap":
             draw_src = ""
             std_src = ""
@@ -1720,6 +1927,7 @@ def apply_remediation(
                         project_id=project_id,
                         require_tags=["drawing"],
                         exclude_tags=["logo"],
+                        audit_path=audit_path,
                     )
                     if hit and hit.get("locator"):
                         draw_src = str(hit.get("locator"))
@@ -1730,6 +1938,7 @@ def apply_remediation(
                         project_id=project_id,
                         require_tags=["standard"],
                         exclude_tags=["logo"],
+                        audit_path=audit_path,
                     )
                     if hit2 and hit2.get("locator"):
                         std_src = str(hit2.get("locator"))
@@ -1752,13 +1961,13 @@ def apply_remediation(
                 specials = [str(x).strip() for x in (boq_focus.get("special_materials") or []) if str(x).strip()]
                 hazards = [str(x).strip() for x in (boq_focus.get("hazardous_materials") or []) if str(x).strip()]
                 ppes = [str(x).strip() for x in (boq_focus.get("ppe_items") or []) if str(x).strip()]
-            content += (
+            block = (
                 "\n\n【自动补充】专项可执行细则：\n"
                 f"- {suggestion}\n"
                 f"- 每条写清：动作+参数+频次+责任岗位+验收方法/阈值+记录表（示例：危险品领用双人复核=1次/单；应急演练=1次/季度）。【证据:{ev_src}】\n"
             )
             if specials:
-                content += (
+                block += (
                     "\n- 特殊材料（按清单统计）：\n"
                     + "\n".join(
                         [
@@ -1771,7 +1980,7 @@ def apply_remediation(
                     + "\n"
                 )
             if hazards:
-                content += (
+                block += (
                     "\n- 危险品材料（按清单统计）：\n"
                     + "\n".join(
                         [
@@ -1785,7 +1994,7 @@ def apply_remediation(
                     + "\n"
                 )
             if ppes:
-                content += (
+                block += (
                     "\n- 劳保用品（按清单统计）：\n"
                     + "\n".join(
                         [
@@ -1798,10 +2007,11 @@ def apply_remediation(
                     + "\n"
                 )
             # Ensure required topics keywords appear with units/metrics.
-            content += (
+            block += (
                 "\n- 绿色工地：扬尘=围挡喷淋启停间隔10min；噪声=夜间施工噪声≤55dB；污水=沉淀池停留时长≥2h，pH=6~9。【证据:环保监测记录】\n"
                 "- 信息化管理：材料/设备/隐蔽验收二维码=1处/构件；台账上传频次=1次/日；问题闭环时长≤24h。【证据:系统台账导出】\n"
                 "- 技术工种配置：测量工1人/班；钢筋工2人/班；模板工2人/班；混凝土工2人/班；架子工2人/班；电工1人/班；焊工1人/班；起重信号司索工1人/班（起重作业时）。【证据:劳动力计划】\n"
+                f"- 四新技术：适用=防水/管道/材料追溯；投入=样板段1处+新设备1台+首批材料1批；步骤=样板交底->首件实施->过程抽检->验收归档；验收=合格率{_card['合格率阈值']}；风险=参数失配导致返工；验证=抽检=每100m2 1次，记录=《四新技术应用台账》。【证据:{ev_src}】\n"
             )
             # 四新技术：按清单/工序匹配给出可执行闭环卡片（避免“新技术应用”空话）。
             try:
@@ -1820,8 +2030,8 @@ def apply_remediation(
                                 fake_items.append({"name": sx, "process": {"name": ""}})
                     recs = recommend_four_new({"items": fake_items}, outline=[sec_title], limit=6)
                 if recs:
-                    content += "\n【四新技术闭环卡片（按清单/工序匹配）】\n"
-                    content += (
+                    block += "\n【四新技术闭环卡片（按清单/工序匹配）】\n"
+                    block += (
                         render_four_new_recommendations(
                             recs,
                             quant=_quant,
@@ -1833,6 +2043,7 @@ def apply_remediation(
                     )
             except Exception:
                 pass
+            content = block + content
         elif rtype == "evidence_gap":
             content += (
                 "\n\n【自动补充】证据标注：\n"
@@ -1844,9 +2055,10 @@ def apply_remediation(
                 f"- 本章至少保留 1 条带定位符的证据（示例：{ev_src}）。【证据:{ev_src}】\n"
             )
         elif rtype == "core_conclusion_evidence_gap":
+            content, annotated = _annotate_core_conclusions(content, ev_src)
             content += (
                 "\n\n【自动补充】核心结论证据补齐：\n"
-                f"- 对含“频次/阈值/时限/人数/型号/工期”等结论句逐条补“【证据:{ev_src}】”。\n"
+                f"- 已为本章回填 {annotated} 条核心结论证据定位符；未命中的句子需继续人工复核。\n"
                 f"- 示例：抽检频次=每100m2 1次，偏差≤5mm，偏差处置时限≤4h，责任岗位=质量员，记录=《抽检台账》。【证据:{ev_src}】\n"
             )
         elif rtype == "drawing_evidence_gap":
@@ -1861,6 +2073,7 @@ def apply_remediation(
                     project_id=project_id,
                     require_tags=["drawing"],
                     exclude_tags=["logo"],
+                    audit_path=audit_path,
                 )
                 if hit and hit.get("locator"):
                     draw_src = str(hit.get("locator"))
@@ -1891,6 +2104,7 @@ def apply_remediation(
                     project_id=project_id,
                     require_tags=["standard"],
                     exclude_tags=["logo"],
+                    audit_path=audit_path,
                 )
                 if hit and hit.get("locator"):
                     std_src = str(hit.get("locator"))
@@ -1907,6 +2121,8 @@ def apply_remediation(
 
         sec["content"] = content
         sec["auto_remediated"] = True
+        _append_strategy_trace(sec, rec)
+        _append_execution_trace(sec, rec, before_text=before_text, after_text=str(content or ""))
 
 
 def run_quality_checks(
@@ -1917,6 +2133,7 @@ def run_quality_checks(
     boq_focus: Dict[str, Any] | None = None,
     project_id: str | None = None,
     strict: bool = False,
+    workspace_dir: str | None = None,
 ) -> Dict[str, Any]:
     outline_titles = set(outline or [])
     section_titles = [s.get("title") for s in sections]
@@ -1933,8 +2150,9 @@ def run_quality_checks(
     good_evidence_count = sum(_count_good_evidence(s.get("content") or "") for s in sections)
     placeholder_evidence_count = sum(_count_placeholder_evidence(s.get("content") or "") for s in sections)
     has_ingested_docs = False
+    ingest_audit = _ingest_audit_path(workspace_dir)
     try:
-        p = Path("backend/data/audit/ingest.jsonl")
+        p = ingest_audit
         if p.exists() and p.stat().st_size > 0:
             pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
             if pid is None:
@@ -1997,7 +2215,7 @@ def run_quality_checks(
                 )
         # 风险-措施闭环
         has_risk = "风险" in text
-        has_measure = "措施" in text or "对应" in text
+        has_measure = ("措施" in text) or ("对应" in text) or bool(_extract_risk_triplets(text))
         if has_risk and not has_measure:
             rec = {
                 "title": title,
@@ -2049,10 +2267,20 @@ def run_quality_checks(
     evidence_quality_by_section = _check_evidence_quality_by_section(sections)
     evidence_traceability_by_section = _check_evidence_traceability_by_section(sections, require_traceable=has_ingested_docs)
     core_conclusion_evidence_by_section = _check_core_conclusion_evidence_by_section(sections)
-    drawing_names = _load_drawing_filenames(project_id=project_id, limit=80) if has_ingested_docs else []
+    drawing_names = _load_drawing_filenames(
+        project_id=project_id,
+        limit=80,
+        audit_path=ingest_audit,
+        workspace_dir=workspace_dir,
+    ) if has_ingested_docs else []
     drawing_evidence_by_section = _check_drawing_evidence_by_section(sections, drawing_names)
     drawing_anchor_by_section = _check_drawing_anchor_binding_by_section(sections, drawing_names)
-    standard_names = _load_standard_filenames(project_id=project_id, limit=80) if has_ingested_docs else []
+    standard_names = _load_standard_filenames(
+        project_id=project_id,
+        limit=80,
+        audit_path=ingest_audit,
+        workspace_dir=workspace_dir,
+    ) if has_ingested_docs else []
     standard_evidence = _check_standard_evidence_by_section(sections, standard_names)
     boq_focus_item_typed_evidence = _check_boq_focus_item_typed_evidence(
         boq_focus or {},
@@ -2470,6 +2698,10 @@ def run_quality_checks(
         key = (rec.get("title"), rec.get("type"), rec.get("suggestion"))
         dedup[key] = rec
     remediation = list(dedup.values())
+    remediation = enrich_strategy_rows(remediation, sec_by_title=sec_by_title)
+    issue_list = enrich_strategy_rows(issue_list, sec_by_title=sec_by_title)
+    remediation_strategy_audit = build_strategy_audit(remediation, issue_list=issue_list)
+    remediation_execution_audit = build_execution_audit(sections)
 
     return {
         "structure": {
@@ -2544,4 +2776,6 @@ def run_quality_checks(
         "issue_list": issue_list,
         "auto_revision_suggestions": remediation,
         "remediation": remediation,
+        "remediation_strategy_audit": remediation_strategy_audit,
+        "remediation_execution_audit": remediation_execution_audit,
     }

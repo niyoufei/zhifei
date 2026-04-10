@@ -331,6 +331,131 @@ class TestExtractProjectMeta:
         assert "中标通知书" not in outline
         assert "投标函及其附录" not in outline
 
+    def test_extract_outline_review_standard_stops_before_scoring_tail(self, parser):
+        text = """技术文件详细评审标准
+依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
+1）工程概况
+2）主要施工方法
+3）拟投入的主要物资计划
+4）拟投入的主要施工机械、设备计划
+5）劳动力安排计划
+6）确保工程质量的技术组织措施
+7）确保安全生产的技术组织措施
+8）确保工期的技术组织措施
+9）确保文明施工的技术组织措施
+10）施工总平面布置图
+11）重点、难点
+12）确保危险性较大工程施工的管理体系与措施（如有）
+（1）本项评委打分为一般或优秀的，评委要提出充足的理由，并在评标报告中书面记录。
+（2）本项满分5分，评标委员会综合考虑。
+对于投标人业绩（如有）提供的业绩证明资料同投标人须知前附表内容提供。"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert len(outline) == 12
+        assert outline[0] == "工程概况"
+        assert outline[-1] == "确保危险性较大工程施工的管理体系与措施（如有）"
+        assert not any("本项评委打分" in t for t in outline)
+        assert not any("本项满分" in t for t in outline)
+        assert not any("投标人业绩" in t for t in outline)
+
+    def test_extract_outline_review_standard_table_rows_without_numbering(self, parser):
+        text = """详细评审标准
+2.2.1（1）商务文件评审标准
+投标人业绩
+依据投标人提供的投标人业绩1与本项目的匹配度进行评审。
+
+2.2.1（2）技术文件评审标准
+工程项目整体理解、拟采用的新技术、新工艺
+依据投标人提供的针对工程项目整体理解、拟采用的新技术、新工艺（如有）的内容进行评审，评审为优、良、中、一般、差。
+工程重点难点及危大工程的保障体系
+依据投标人提供的工程重点难点及危大工程的保障体系与措施进行评审，评审为优、良、中、一般、差。
+确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施
+依据投标人提供的确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施进行评审，评审为优、良、中、一般、差。
+确保人、材、机的保障体系与措施
+依据投标人提供的确保人、材、机的保障体系与措施进行评审，评审为优、良、中、一般、差。
+
+2.2.1（3）报价文件评审标准
+评标价等于投标函文字报价。
+"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert outline == [
+            "工程项目整体理解、拟采用的新技术、新工艺",
+            "工程重点难点及危大工程的保障体系与措施",
+            "确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施",
+            "确保人、材、机的保障体系与措施",
+        ]
+        assert not any("投标人业绩" in t for t in outline)
+        assert not any("评标价" in t for t in outline)
+
+    def test_extract_outline_review_standard_table_rows_prefer_over_toc(self, parser):
+        text = """目录
+第一章 招标公告
+第二章 投标人须知
+第三章 评标办法
+
+2.2.1（2）技术文件评审标准
+依据投标人提供的针对工程项目整体理解、拟采用的新技术、新工艺（如有）的内容进行评审。
+依据投标人提供的工程重点难点及危大工程的保障体系与措施进行评审。
+依据投标人提供的确保工期与质量的保障体系与措施、确保安全文明生产的管理体系与措施进行评审。
+依据投标人提供的确保人、材、机的保障体系与措施进行评审。
+2.2.1（3）报价文件评审标准"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert outline[0] == "工程项目整体理解、拟采用的新技术、新工艺"
+        assert "招标公告" not in outline
+
+    def test_extract_outline_comprehensive_table_over_broken_toc(self, parser):
+        text = """目录
+第一章 招标公告 错误!未定义书签。
+第二章 投标人须知 错误!未定义书签。
+第三章 评标及定标 错误!未定义书签。
+
+综合评审表
+施工组织设计
+1、主要施工方案与技术措施：对工程建设中的重点、难点、特点是否进行分析。
+2、质量控制措施：是否有相关质量管理与保证措施。
+3、安全控制措施：施工安全保障体系是否健全。
+4、进度控制措施：进度计划是否根据项目总工期要求逐级分解。
+5、成本控制计划：成本控制计划是否做到思路科学、全面。
+6、环境保护及文明施工保障体系：是否根据本工程特点制定出科学合理措施。
+7、主要施工机械、设备计划：是否对设备数量、选型配置、进场时间安排合理。
+8、应急处置措施：是否有应对突发状况的具体措施方案。
+评标委员会结合本项目特点及招标文件要求，对投标人提供的施工组织设计进行综合评价。
+以上8项，每一项最高得5分，满分40分。"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert len(outline) == 8
+        assert outline[0] == "主要施工方案与技术措施"
+        assert outline[-1] == "应急处置措施"
+        assert not any("错误!未定义书签" in t for t in outline)
+
+    def test_extract_outline_toc_stops_before_body_paragraphs(self, parser):
+        text = """目录
+第一章 编制说明 ........ 1
+第二章 工程概况 ........ 3
+第三章 施工部署 ........ 7
+
+第一章 编制说明
+本工程位于合肥市，施工现场狭小，需严格按照总平面组织实施。
+第二章 工程概况
+本项目总建筑面积约2万平方米。
+"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") in {"toc", "toc+review"}
+        assert outline[:3] == ["编制说明", "工程概况", "施工部署"]
+        assert not any("本工程位于" in t for t in outline)
+
+    def test_parse_outline_lines_ignores_body_like_heading_sentences(self, parser):
+        lines = [
+            "第一章 编制说明",
+            "第二章 工程概况",
+            "第一章 编制说明 本工程位于合肥市，需严格按照总平面组织实施。",
+            "第三章 施工部署",
+        ]
+        outline = parser._parse_outline_lines(lines)
+        assert outline == ["编制说明", "工程概况", "施工部署"]
+
 
 # ==============================================================================
 # _read_pdf tests (with mocking)

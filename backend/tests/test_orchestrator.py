@@ -6,6 +6,14 @@ import asyncio
 
 from backend.zhifei_autoplan.orchestrator import (
     _build_weights_and_penalties,
+    _build_section_runtime_budget,
+    _build_hard_quality_gate,
+    _compress_section_requirements,
+    _collect_gate_remediation,
+    _ensure_traceable_evidence_per_section,
+    _normalize_provider_chain,
+    _quality_score,
+    _derive_section_length_bounds,
     run_autoplan,
 )
 
@@ -183,6 +191,249 @@ class TestBuildWeightsAndPenalties:
         assert "123" in weights[0]
 
 
+def test_quality_score_fallback_from_issue_list():
+    got = _quality_score({"issue_list": [{"a": 1}, {"b": 2}]})
+    assert isinstance(got, int)
+    assert 0 <= got <= 100
+    assert got == 96
+
+
+def test_build_hard_quality_gate_and_collect_remediation():
+    quality = {
+        "risk_triplet": {"by_section": [{"title": "第1章", "ok": False}]},
+        "quantitative": {"by_section": [{"title": "第1章", "ok": False, "missing": ["频次"]}]},
+        "vague_terms": {"by_section": [{"title": "第1章", "ok": False}]},
+        "evidence_quality": {"by_section": [{"title": "第1章", "ok": False}]},
+        "evidence_traceability": {"by_section": [{"title": "第1章", "ok": False}]},
+    }
+    sections = [{"title": "第1章", "content": "测试", "graph_nodes": []}]
+    evidence_tracking = {"summary": {"paragraph_count": 10, "score_point_bound_rows": 1, "traceable_locator_rows": 1}}
+    gate = _build_hard_quality_gate(quality=quality, evidence_tracking=evidence_tracking, sections=sections)
+    assert gate["ok"] is False
+    assert gate["failed"]
+    recs = _collect_gate_remediation(quality=quality, sections=sections, failed=gate["failed"])
+    assert recs
+    assert any(r.get("type") == "risk_triplet_gap" for r in recs)
+
+
+def test_build_hard_quality_gate_prefers_section_level_evidence_metrics():
+    quality = {
+        "risk_triplet": {"by_section": [{"title": "第1章", "ok": True}]},
+        "quantitative": {"by_section": [{"title": "第1章", "ok": True}]},
+        "vague_terms": {"by_section": [{"title": "第1章", "ok": True}]},
+    }
+    sections = [{"title": "第1章", "content": "测试", "graph_nodes": ["KG-1"]}]
+    evidence_tracking = {
+        "summary": {
+            "paragraph_count": 40,
+            "score_point_bound_rows": 3,
+            "evidence_bound_rows": 4,
+            "traceable_locator_rows": 4,
+            "section_count": 1,
+            "evidence_bound_sections": 1,
+            "traceable_locator_sections": 1,
+        }
+    }
+    gate = _build_hard_quality_gate(
+        quality=quality,
+        evidence_tracking=evidence_tracking,
+        sections=sections,
+    )
+    assert gate["metrics"]["evidence_binding_rate"] == 1.0
+    assert gate["metrics"]["traceable_locator_rate"] == 1.0
+
+
+def test_normalize_provider_chain_maps_display_alias_to_runtime_model():
+    chain = _normalize_provider_chain(
+        {
+            "provider_chain": [
+                {"slot": "main", "provider": "openai", "model": "ChatGPT-5.4", "api_key": "sk-main"},
+                {"slot": "fallback_1", "provider": "google", "model": "Gemini3.1pro", "api_key": "g-main"},
+            ]
+        }
+    )
+    assert chain == [
+        {"slot": "main", "provider": "openai", "model": "gpt-5.4", "api_key": "sk-main", "key_alias": ""},
+        {"slot": "fallback_1", "provider": "google", "model": "gemini-3.1-pro-preview", "api_key": "g-main", "key_alias": ""},
+    ]
+
+
+def test_derive_section_length_bounds_relaxes_single_page_floor():
+    min_len, max_len, target_len = _derive_section_length_bounds(1, 750)
+    assert target_len >= 1200
+    assert min_len >= 600
+    assert max_len >= 2600
+
+
+def test_derive_section_length_bounds_relaxes_two_page_floor():
+    min_len, max_len, target_len = _derive_section_length_bounds(2, 750)
+    assert target_len >= 2200
+    assert min_len >= 1000
+    assert max_len >= 3600
+
+
+def test_compress_section_requirements_keeps_hard_constraints_first():
+    lines = [
+        "普通背景说明A",
+        "本章目标页数：4页（建议正文约2400字，允许±20%）",
+        "本章字数边界：1800-3000字（由全局篇幅分配器自动下发）。",
+        "系统全局指令（必须无条件执行）全文禁止官话",
+        "检查频次：每周1次",
+        "特殊材料清单：防火封堵材料",
+        "普通背景说明B",
+    ]
+    got = _compress_section_requirements(lines, limit=4)
+    assert len(got) == 4
+    assert any("系统全局指令" in x for x in got)
+    assert any("本章目标页数" in x for x in got)
+    assert any("特殊材料清单" in x for x in got)
+
+
+def test_build_section_runtime_budget_compacts_simple_chapter():
+    speed_profile = {
+        "kg_top_k": 3,
+        "doc_limit": 5,
+        "standard_limit": 2,
+        "llm_timeout_sec": 120,
+    }
+    got = _build_section_runtime_budget(
+        title="编制依据与原则",
+        chapter_target_pages=1,
+        speed_profile=speed_profile,
+        specialist_count=0,
+        has_boq_focus=False,
+        has_chapter_contract=False,
+    )
+    assert got["kg_top_k"] <= 2
+    assert got["doc_limit"] <= 3
+    assert got["requirements_limit"] <= 18
+    assert got["llm_timeout_sec"] <= 55
+    assert got["max_output_tokens_hint"] <= 1800
+
+
+def test_build_section_runtime_budget_keeps_rich_budget_for_complex_chapter():
+    speed_profile = {
+        "kg_top_k": 3,
+        "doc_limit": 5,
+        "standard_limit": 2,
+        "llm_timeout_sec": 120,
+    }
+    got = _build_section_runtime_budget(
+        title="关键工序与危大工程质量安全控制",
+        chapter_target_pages=6,
+        speed_profile=speed_profile,
+        specialist_count=3,
+        has_boq_focus=True,
+        has_chapter_contract=True,
+    )
+    assert got["graph_top_k"] >= 5
+    assert got["doc_limit"] >= 5
+    assert got["requirements_limit"] >= 24
+    assert got["llm_timeout_sec"] == 120
+    assert got["max_output_tokens_hint"] >= 5200
+
+
+def test_ensure_traceable_evidence_per_section_patches_missing_traceability():
+    sections = [{"title": "主要施工方法", "content": "本章描述工艺流程。"}]
+    with patch(
+        "backend.zhifei_autoplan.orchestrator.best_ingested_hit",
+        return_value={"locator": "招标文件.pdf#p12_ab12cd34@567"},
+    ):
+        res = _ensure_traceable_evidence_per_section(
+            sections=sections,
+            project_id="P-001",
+            topic="测试项目",
+        )
+    assert int(res.get("fixed") or 0) == 1
+    assert "【证据:招标文件.pdf#p12_ab12cd34@567】" in str(sections[0].get("content") or "")
+
+
+def test_collect_gate_remediation_prefers_strategy_enriched_rows():
+    quality = {
+        "auto_revision_suggestions": [
+            {
+                "title": "工程概况",
+                "type": "quantitative_gap",
+                "suggestion": "补齐量化指标",
+                "indicator_group": "缺量化",
+                "strategy_id": "quant_fill_general_v1",
+                "strategy_priority": 95,
+            }
+        ],
+        "quantitative": {"by_section": [{"title": "工程概况", "ok": False, "missing": ["频次"]}]},
+    }
+    rows = _collect_gate_remediation(
+        quality=quality,
+        sections=[{"title": "工程概况", "content": "正文"}],
+        failed=[{"remediation_type": "quantitative_gap"}],
+    )
+    assert len(rows) == 1
+    assert rows[0]["strategy_id"] == "quant_fill_general_v1"
+    assert rows[0]["indicator_group"] == "缺量化"
+
+
+def test_collect_gate_remediation_applies_combo_learning_priority():
+    from backend.zhifei_autoplan.self_evolution import _profile_key
+
+    quality = {
+        "auto_revision_suggestions": [
+            {
+                "title": "工程概况",
+                "type": "quantitative_gap",
+                "suggestion": "补齐量化指标",
+                "indicator_group": "缺量化",
+                "strategy_id": "quant_fill_general_v1",
+                "strategy_priority": 95,
+                "expected_action_tags": ["add_quant_value", "add_record_acceptance"],
+            },
+            {
+                "title": "工程概况",
+                "type": "risk_triplet_gap",
+                "suggestion": "补齐风险控制验证",
+                "indicator_group": "缺闭环",
+                "strategy_id": "risk_triplet_closure_v1",
+                "strategy_priority": 98,
+                "expected_action_tags": ["add_risk_control_verify"],
+            },
+        ],
+        "quantitative": {"by_section": [{"title": "工程概况", "ok": False, "missing": ["频次"]}]},
+        "risk_triplet": {"by_section": [{"title": "工程概况", "ok": False, "triplet_count": 0}]},
+    }
+    profile = {
+        "version": "runtime_budget_profile_v1",
+        "entries": {
+            _profile_key("工程概况", "房建", "quality_200"): {
+                "title": "工程概况",
+                "project_type": "房建",
+                "generation_mode": "quality_200",
+                "runs": 4,
+                "combo_attempt_counts": {"缺量化||quant_fill_general_v1||add_quant_value": 4},
+                "combo_indicator_close_counts": {"缺量化||quant_fill_general_v1||add_quant_value": 3},
+                "combo_gate_pass_counts": {"缺量化||quant_fill_general_v1||add_quant_value": 2},
+            }
+        },
+    }
+    with patch(
+        "backend.zhifei_autoplan.orchestrator.load_runtime_budget_profile",
+        return_value=profile,
+    ):
+        rows = _collect_gate_remediation(
+            quality=quality,
+            sections=[{"title": "工程概况", "content": "正文"}],
+            failed=[
+                {"remediation_type": "quantitative_gap"},
+                {"remediation_type": "risk_triplet_gap"},
+            ],
+            params={"self_evolution": {"enabled": True, "combo_learning_enabled": True}},
+            project_type="房建",
+            generation_mode="quality_200",
+            runtime_budget_profile=profile,
+        )
+    assert rows[0]["strategy_id"] == "quant_fill_general_v1"
+    assert rows[0]["_combo_learning_applied"] is True
+    assert rows[0]["_combo_learning_source_runs"] == 4
+
+
 # =============================================================================
 # Tests for run_autoplan
 # =============================================================================
@@ -197,6 +448,7 @@ class TestRunAutoplan:
              patch("backend.zhifei_autoplan.orchestrator.load_boq_data") as mock_boq, \
              patch("backend.zhifei_autoplan.orchestrator.search_kg") as mock_kg, \
              patch("backend.zhifei_autoplan.orchestrator.search_ingested_docs") as mock_docs, \
+             patch("backend.zhifei_autoplan.orchestrator.build_template_chapter_learning_context") as mock_template_learning, \
              patch("backend.zhifei_autoplan.orchestrator.LLMClient") as mock_llm_cls, \
              patch("backend.zhifei_autoplan.orchestrator.SectionWriter") as mock_writer_cls, \
              patch("backend.zhifei_autoplan.orchestrator.generate_boq_chart") as mock_chart, \
@@ -208,6 +460,7 @@ class TestRunAutoplan:
             mock_boq.return_value = {}
             mock_kg.return_value = {"results": []}
             mock_docs.return_value = []
+            mock_template_learning.return_value = {"hits": [], "requirement_lines": [], "anchor_headings": [], "sample_titles": []}
             
             mock_writer = MagicMock()
             mock_writer.write = AsyncMock(return_value={"title": "test", "content": "content"})
@@ -221,6 +474,7 @@ class TestRunAutoplan:
                 "boq": mock_boq,
                 "kg": mock_kg,
                 "docs": mock_docs,
+                "template_learning": mock_template_learning,
                 "llm_cls": mock_llm_cls,
                 "writer_cls": mock_writer_cls,
                 "writer": mock_writer,
@@ -247,6 +501,163 @@ class TestRunAutoplan:
         """Topic is taken from payload."""
         result = await run_autoplan({"topic": "测试项目"})
         assert result["topic"] == "测试项目"
+
+    @pytest.mark.asyncio
+    async def test_combo_learning_applies_during_draft_remediation(self, mock_dependencies):
+        """历史高有效组合会在首轮模板修复前参与排序，而不是只在质量门重试时生效。"""
+        draft_quality = {
+            "score": 52,
+            "issue_list": [
+                {
+                    "title": "工程概况",
+                    "type": "quantitative_gap",
+                    "indicator_group": "缺量化",
+                    "strategy_id": "quant_fill_general_v1",
+                },
+                {
+                    "title": "工程概况",
+                    "type": "risk_triplet_gap",
+                    "indicator_group": "缺闭环",
+                    "strategy_id": "risk_triplet_closure_v1",
+                }
+            ],
+            "remediation": [
+                {
+                    "title": "清单重点项",
+                    "type": "quantitative_gap",
+                    "suggestion": "补齐量化指标",
+                    "indicator_group": "缺量化",
+                    "strategy_id": "quant_fill_general_v1",
+                    "strategy_priority": 95,
+                    "expected_action_tags": ["add_quant_value", "add_record_acceptance"],
+                },
+                {
+                    "title": "专项主题",
+                    "type": "risk_triplet_gap",
+                    "suggestion": "补齐风险控制验证",
+                    "indicator_group": "缺闭环",
+                    "strategy_id": "risk_triplet_closure_v1",
+                    "strategy_priority": 98,
+                    "expected_action_tags": ["add_risk_control_verify"],
+                }
+            ],
+            "remediation_strategy_audit": {
+                "indicator_groups": [{"indicator_group": "缺量化", "count": 1}, {"indicator_group": "缺闭环", "count": 1}],
+                "strategies": [{"strategy_id": "quant_fill_general_v1", "count": 1}, {"strategy_id": "risk_triplet_closure_v1", "count": 1}],
+                "mapping_rows": [
+                    {"title": "工程概况", "strategy_id": "quant_fill_general_v1"},
+                    {"title": "工程概况", "strategy_id": "risk_triplet_closure_v1"},
+                ],
+            },
+        }
+        final_quality = {
+            "score": 96,
+            "issue_list": [],
+            "remediation": [],
+            "risk_triplet": {"by_section": [{"title": "工程概况", "ok": True}]},
+            "quantitative": {"by_section": [{"title": "工程概况", "ok": True}]},
+            "vague_terms": {"by_section": [{"title": "工程概况", "ok": True}]},
+            "remediation_strategy_audit": {},
+            "remediation_execution_audit": {},
+        }
+        mock_dependencies["quality"].side_effect = [draft_quality, final_quality]
+        from backend.zhifei_autoplan.self_evolution import _profile_key
+
+        profile = {
+            "version": "runtime_budget_profile_v1",
+            "entries": {
+                _profile_key("工程概况", "房建", "quality_200"): {
+                    "title": "工程概况",
+                    "project_type": "房建",
+                    "generation_mode": "quality_200",
+                    "runs": 3,
+                    "combo_attempt_counts": {"缺量化||quant_fill_general_v1||add_quant_value": 3},
+                    "combo_indicator_close_counts": {"缺量化||quant_fill_general_v1||add_quant_value": 3},
+                    "combo_gate_pass_counts": {"缺量化||quant_fill_general_v1||add_quant_value": 2},
+                    "combo_bundle_attempt_counts": {
+                        "缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value": 3
+                    },
+                    "combo_bundle_gate_pass_counts": {
+                        "缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value": 2
+                    },
+                    "combo_context_bundle_attempt_counts": {
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value": 3
+                    },
+                    "combo_context_bundle_gate_pass_counts": {
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value": 3
+                    },
+                    "combo_context_bundle_learning_attempt_counts": {
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value": 2
+                    },
+                    "combo_context_bundle_learning_gate_pass_counts": {
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value": 2
+                    },
+                    "combo_context_metric_attempt_counts": {
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value##quantitative_ok_rate": 2,
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value##risk_triplet_ok_rate": 2,
+                    },
+                    "combo_context_metric_resolved_counts": {
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value##quantitative_ok_rate": 2,
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value##risk_triplet_ok_rate": 2,
+                    },
+                    "combo_context_metric_action_attempt_counts": {
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value##quantitative_ok_rate##add_quant_value": 2,
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value##risk_triplet_ok_rate##add_risk_control_verify": 2,
+                    },
+                    "combo_context_metric_action_resolved_counts": {
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value##quantitative_ok_rate##add_quant_value": 2,
+                        "general|A@@缺闭环||risk_triplet_closure_v1||add_risk_control_verify§§缺量化||quant_fill_general_v1||add_quant_value##risk_triplet_ok_rate##add_risk_control_verify": 2,
+                    },
+                }
+            },
+        }
+        mock_dependencies["writer"].write = AsyncMock(
+            side_effect=lambda title, ctx, **kwargs: {"title": title, "content": "content"}
+        )
+        with patch("backend.zhifei_autoplan.orchestrator.load_runtime_budget_profile", return_value=profile):
+            result = await run_autoplan(
+                {
+                    "topic": "测试项目",
+                    "project_type": "房建",
+                    "generation_mode": "quality_200",
+                    "outline": ["工程概况"],
+                    "strict_tender_outline": True,
+                    "auto_remediate": True,
+                    "remediate_mode": "template",
+                    "dry_run": True,
+                }
+            )
+        trace = result.get("generation_trace") or {}
+        self_evolution_trace = trace.get("self_evolution") or {}
+        assert self_evolution_trace.get("remediation_combo_learning_applied_count") == 1
+        assert self_evolution_trace.get("remediation_context_bundle_learning_applied_count") >= 1
+        assert self_evolution_trace.get("remediation_context_bundle_learning_effect_applied_count") >= 1
+        assert self_evolution_trace.get("remediation_context_bundle_learning_metric_effect_applied_count") >= 1
+        assert self_evolution_trace.get("remediation_context_bundle_learning_metric_action_effect_applied_count") >= 1
+        assert "量化指标达标率" in (self_evolution_trace.get("remediation_context_bundle_learning_metric_effect_metrics") or [])
+        assert any("补量化数值" in str(x) for x in (self_evolution_trace.get("remediation_context_bundle_learning_metric_action_effect_triplets") or []))
+        assert self_evolution_trace.get("remediation_combo_bundle_learning_applied_count") == 0
+        assert "工程概况" in (self_evolution_trace.get("remediation_combo_learning_titles") or [])
+        assert "general/A" in (self_evolution_trace.get("remediation_context_bundle_learning_contexts") or [])
+        assert self_evolution_trace.get("remediation_context_bundle_learning_effect_bundles")
+        assert self_evolution_trace.get("remediation_context_bundle_learning_metric_effect_bundles")
+        assert self_evolution_trace.get("remediation_context_bundle_learning_metric_action_effect_bundles")
+        assert any(
+            isinstance(stage, dict) and stage.get("stage") == "remediation_combo_learning_draft"
+            for stage in (result.get("pipeline_stages") or [])
+        )
+        assert any(
+            isinstance(stage, dict) and stage.get("stage") == "remediation_context_bundle_learning_draft"
+            for stage in (result.get("pipeline_stages") or [])
+        )
+        assert not any(
+            isinstance(stage, dict) and stage.get("stage") == "remediation_combo_bundle_learning_draft"
+            for stage in (result.get("pipeline_stages") or [])
+        )
+        assert any(
+            isinstance(stage, dict) and stage.get("stage") == "remediation_context_metric_effect_final"
+            for stage in (result.get("pipeline_stages") or [])
+        )
 
     @pytest.mark.asyncio
     async def test_outline_sections(self, mock_dependencies):
@@ -303,6 +714,39 @@ class TestRunAutoplan:
         mock_dependencies["llm_cls"].assert_called()
         call_kwargs = mock_dependencies["llm_cls"].call_args.kwargs
         assert call_kwargs["api_key"] == "env-openai-key"
+
+    @pytest.mark.asyncio
+    async def test_run_autoplan_applies_self_evolution_runtime_budget(self, mock_dependencies, monkeypatch):
+        monkeypatch.setattr(
+            "backend.zhifei_autoplan.orchestrator.build_runtime_budget_hints",
+            lambda **kwargs: {
+                "enabled": True,
+                "applied": True,
+                "llm_timeout_sec": 88,
+                "max_output_tokens_hint": 2800,
+                "section_retry_limit": 2,
+                "reason": "historical_error_rate=0.50_raise_timeout",
+                "source_runs": 3,
+            },
+        )
+        result = await run_autoplan(
+            {
+                "outline": ["工程概况"],
+                "provider": "openai",
+                "model": "gpt-4",
+                "api_key": "test-key",
+                "dry_run": False,
+            }
+        )
+        ctx = _find_ctx_by_title(mock_dependencies["writer"], "工程概况")
+        assert ctx["llm_timeout_sec"] == 88
+        assert ctx["requested_section_retry_limit"] == 2
+        assert ctx["max_output_tokens_hint"] == 2800
+        assert ctx["evolution_applied"] is True
+        assert ctx["evolution_source_runs"] == 3
+        assert result["sections"][0]["evolution_applied"] is True
+        assert result["sections"][0]["evolution_reason"] == "historical_error_rate=0.50_raise_timeout"
+        assert result["generation_trace"]["self_evolution"]["applied_count"] >= 1
 
     @pytest.mark.asyncio
     async def test_provider_api_key_fallback_from_env_google(self, mock_dependencies, monkeypatch):
@@ -473,6 +917,33 @@ class TestRunAutoplan:
         assert any("目标页数" in str(r) for r in ctx.get("requirements", []))
 
     @pytest.mark.asyncio
+    async def test_chapter_pages_allocate_length_bounds(self, mock_dependencies):
+        """Chapter page target is converted to section min/max length constraints."""
+        await run_autoplan(
+            {
+                "outline": ["第一章"],
+                "chapter_pages": {"第一章": {"pages": 5}},
+                "style": {"body_size": 14, "line_spacing_pt": 22.0},
+            }
+        )
+
+        hit = None
+        for call in mock_dependencies["writer"].write.call_args_list:
+            if call[0][0] == "第一章":
+                hit = call
+                break
+        assert hit is not None
+        kwargs = hit.kwargs or {}
+        ctx = hit[0][1] if len(hit[0]) >= 2 else {}
+        assert isinstance(ctx, dict)
+        assert int(ctx.get("chapter_target_pages") or 0) == 5
+        assert int(ctx.get("section_min_length") or 0) > 0
+        assert int(ctx.get("section_max_length") or 0) > int(ctx.get("section_min_length") or 0)
+        assert int(kwargs.get("min_length") or 0) == int(ctx.get("section_min_length") or 0)
+        assert int(kwargs.get("max_length") or 0) == int(ctx.get("section_max_length") or 0)
+        assert any("字数边界" in str(r) for r in ctx.get("requirements", []))
+
+    @pytest.mark.asyncio
     async def test_chapter_requirements_in_context(self, mock_dependencies):
         """Chapter-specific requirements are merged into context."""
         await run_autoplan({
@@ -491,6 +962,31 @@ class TestRunAutoplan:
         assert "全局要求A" in reqs
         assert "章节要求1" in reqs
         assert "章节要求2" in reqs
+
+    @pytest.mark.asyncio
+    async def test_front_matter_outline_injected_into_context(self, mock_dependencies):
+        await run_autoplan(
+            {
+                "outline": ["第一章", "第二章"],
+                "chapter_pages": {"第一章": 3, "第二章": 4},
+                "front_matter_outline": {
+                    "cover_pages": 1,
+                    "toc_pages": 2,
+                    "full_index_pages": 1,
+                    "sequence": ["封面1页", "全文索引1页", "目录2页", "正文"],
+                    "toc_entries": [
+                        {"order": 1, "title": "第一章", "start_page": 5, "planned_pages": 3},
+                        {"order": 2, "title": "第二章", "start_page": 8, "planned_pages": 4},
+                    ],
+                },
+            }
+        )
+
+        ctx = _find_ctx_by_title(mock_dependencies["writer"], "第一章")
+        reqs = ctx.get("requirements", []) if isinstance(ctx, dict) else []
+        assert any("正文编制顺序必须服从前置页计划" in str(r) for r in reqs)
+        assert any("目录定位：本章为第1章" in str(r) for r in reqs)
+        assert any("目录起始页第5页" in str(r) for r in reqs)
 
     @pytest.mark.asyncio
     async def test_style_passed_through(self, mock_dependencies):
@@ -613,6 +1109,52 @@ class TestRunAutoplan:
         assert "要求2" in ctx.get("requirements", [])
 
     @pytest.mark.asyncio
+    async def test_template_learning_injected_into_context(self, mock_dependencies):
+        """Chapter-level template learning is injected into requirements and evidence."""
+        mock_dependencies["template_learning"].return_value = {
+            "hits": [
+                {
+                    "filename": "优秀样板A.docx",
+                    "sha256": "a" * 64,
+                    "offset": 128,
+                    "page": 3,
+                    "snippet": "项目经理部组织机构、资源投入与施工顺序应前置明确。",
+                    "section_title": "施工部署",
+                    "template_theme": "施工部署",
+                }
+            ],
+            "requirement_lines": [
+                "样板学习画像：当前章节归类为“施工部署”，优先参考同类型优秀样板中的对应章节组织方式，不得改变本项目招标目录。",
+                "样板高频锚点：组织分工与岗位责任、资源配置与机械材料、流程步骤与工序衔接。",
+            ],
+            "anchor_headings": ["组织分工与岗位责任"],
+            "sample_titles": ["施工部署"],
+        }
+        await run_autoplan({
+            "project_type": "房建",
+            "outline": ["施工部署"],
+        })
+
+        ctx = _find_ctx_by_title(mock_dependencies["writer"], "施工部署")
+        reqs = [str(x) for x in (ctx.get("requirements") or [])]
+        doc_evidence = [str(x) for x in (ctx.get("doc_evidence") or [])]
+        assert any("样板学习画像" in x for x in reqs)
+        assert any("样板高频锚点" in x for x in reqs)
+        assert any("样板章节:施工部署" in x for x in doc_evidence)
+
+    @pytest.mark.asyncio
+    async def test_qingtian_requirements_injected_into_context(self, mock_dependencies):
+        """QingTian system constraints are injected by default."""
+        await run_autoplan({
+            "outline": ["关键工序控制点"],
+        })
+        call_args = mock_dependencies["writer"].write.call_args
+        ctx = call_args[0][1]
+        reqs = [str(x) for x in (ctx.get("requirements") or [])]
+        assert any("本章必须包含4块" in x for x in reqs)
+        assert any("风险点/控制点|措施（含参数、频次、责任）|验收动作|记录表" in x for x in reqs)
+
+    @pytest.mark.asyncio
     async def test_new_pipeline_outputs_present(self, mock_dependencies):
         """Enterprise profile / WBS-CPM / contract / score mapping receipts are returned."""
         result = await run_autoplan({
@@ -625,6 +1167,9 @@ class TestRunAutoplan:
         assert isinstance(result.get("agent_contract_checks"), dict)
         assert isinstance(result.get("score_mapping"), dict)
         assert isinstance(result.get("pipeline_stages"), list)
+        assert isinstance(result.get("generation_trace"), dict)
+        assert isinstance((result.get("generation_trace") or {}).get("pipeline_stages"), list)
+        assert isinstance((result.get("generation_trace") or {}).get("remediation_execution_audit"), dict)
 
     @pytest.mark.asyncio
     async def test_missing_param_fallback_injected_into_requirements(self, mock_dependencies):
@@ -646,6 +1191,36 @@ class TestRunAutoplan:
         })
         assert isinstance(result.get("sections"), list) and result["sections"]
         assert "contract_chapter_id" in result["sections"][0]
+
+    @pytest.mark.asyncio
+    async def test_final_length_clamp_keeps_section_within_page_budget(self, mock_dependencies):
+        """Late-stage expansions should still be clamped back into chapter page bounds."""
+        mock_dependencies["writer"].write = AsyncMock(return_value={"title": "工程概况", "content": "初稿内容"})
+        mock_dependencies["quality"].return_value = {
+            "score": 80,
+            "remediation": [{"title": "工程概况", "type": "length_probe", "suggestion": "补充细化"}],
+        }
+
+        def _inflate(sections, *args, **kwargs):
+            sections[0]["content"] = (
+                "工序：钢筋绑扎。设备：GW40弯曲机1台。参数：间距200mm，合格率≥98%。责任：施工员复核，质检员每班检查。"
+                * 120
+            )
+
+        mock_dependencies["remediate"].side_effect = _inflate
+        result = await run_autoplan(
+            {
+                "outline": ["工程概况"],
+                "chapter_pages": {"工程概况": 2},
+                "strict_tender_outline": True,
+            }
+        )
+        sec = (result.get("sections") or [{}])[0]
+        assert len(str(sec.get("content") or "")) <= 3740
+        logs = sec.get("constraint_log") or []
+        assert any(item.get("status") in {"postprocess_compacted", "compacted"} for item in logs)
+        stages = result.get("pipeline_stages") or []
+        assert any(str(item.get("stage")) == "final_length_clamp" for item in stages)
 
 
 # =============================================================================
@@ -878,7 +1453,7 @@ class TestOrchestratorIntegration:
         """Test that sections are generated concurrently."""
         call_times = []
         
-        async def timed_write(title, ctx):
+        async def timed_write(title, ctx, **kwargs):
             call_times.append(asyncio.get_event_loop().time())
             await asyncio.sleep(0.01)  # Small delay
             return {"title": title, "content": "content", "agent_role": ctx.get("agent_role")}
@@ -1092,7 +1667,7 @@ class TestSectionBuildFailure:
         
         # Should return fallback section
         assert len(result["sections"]) >= 1
-        assert any(s.get("content") == "章节生成失败" for s in result["sections"])
+        assert any(str(s.get("content") or "").startswith("章节生成失败") for s in result["sections"])
 
 
 # =============================================================================
@@ -1229,7 +1804,7 @@ class TestLLMRemediation:
         section = result["sections"][0]
         assert section.get("auto_remediated") == "llm"
         assert section.get("original_content") in {"原始内容", "修复后的内容"}
-        assert section.get("content") == "修复后的内容"
+        assert str(section.get("content") or "").startswith("修复后的内容")
 
     @pytest.mark.asyncio
     async def test_llm_remediation_no_provider(self, mock_deps_llm):
@@ -1310,8 +1885,8 @@ class TestPickProviderWithList:
             }
 
     @pytest.mark.asyncio
-    async def test_providers_list_rotation_with_model_map(self, mock_deps_prov):
-        """Providers list rotates with model_map mapping."""
+    async def test_providers_list_prefers_primary_with_model_map(self, mock_deps_prov):
+        """providers/model_map now forms an ordered failover chain; success stays on primary."""
         await run_autoplan({
             "outline": ["章节1", "章节2", "章节3"],
             "providers": ["provider_a", "provider_b"],
@@ -1320,13 +1895,9 @@ class TestPickProviderWithList:
         })
         
         calls = mock_deps_prov["llm_calls"]
-        # Check that providers rotate correctly
         providers_used = [c["provider"] for c in calls]
-        models_used = [c["model"] for c in calls]
-        
-        # 3 sections with 2 providers should show rotation pattern
         assert "provider_a" in providers_used
-        assert "provider_b" in providers_used
+        assert "provider_b" not in providers_used
 
     @pytest.mark.asyncio
     async def test_providers_list_fallback_model(self, mock_deps_prov):
@@ -1386,7 +1957,7 @@ class TestPickProviderWithList:
 
     @pytest.mark.asyncio
     async def test_provider_chain_supports_same_provider_with_different_keys(self, mock_deps_prov):
-        """provider_chain keeps duplicate providers and rotates by slot (not dedup by provider)."""
+        """provider_chain preserves duplicate providers, but successful sections stay on the first slot."""
         await run_autoplan(
             {
                 "outline": ["章节1", "章节2", "章节3"],
@@ -1403,8 +1974,8 @@ class TestPickProviderWithList:
         assert len(calls) >= 3
         all_pairs = {(c.get("provider"), c.get("api_key")) for c in calls}
         assert ("google", "g_key_1") in all_pairs
-        assert ("google", "g_key_2") in all_pairs
-        assert ("openai", "o_key_1") in all_pairs
+        assert ("google", "g_key_2") not in all_pairs
+        assert ("openai", "o_key_1") not in all_pairs
 
     @pytest.mark.asyncio
     async def test_provider_chain_same_provider_key_fallback(self):
@@ -1446,3 +2017,36 @@ class TestPickProviderWithList:
             keys_used = [c.get("api_key") for c in seen]
             assert "bad_key" in keys_used
             assert "good_key" in keys_used
+
+    @pytest.mark.asyncio
+    async def test_section_result_keeps_used_key_alias(self, monkeypatch):
+        """Section output should retain the resolved key alias for later traceability."""
+        monkeypatch.setenv("OPENAI_API_KEY_TEXT_MAIN", "env-main")
+        monkeypatch.setenv("OPENAI_API_KEY_TEXT_BACKUP", "env-backup")
+        with patch("backend.zhifei_autoplan.orchestrator.load_tender_matrix", return_value={}), \
+             patch("backend.zhifei_autoplan.orchestrator.load_boq_data", return_value={}), \
+             patch("backend.zhifei_autoplan.orchestrator.search_kg", return_value={"results": []}), \
+             patch("backend.zhifei_autoplan.orchestrator.search_ingested_docs", return_value=[]), \
+             patch("backend.zhifei_autoplan.orchestrator.SectionWriter") as mock_writer_cls, \
+             patch("backend.zhifei_autoplan.orchestrator.run_quality_checks", return_value={"score": 100, "remediation": []}), \
+             patch("backend.zhifei_autoplan.orchestrator.apply_remediation"), \
+             patch("backend.zhifei_autoplan.orchestrator.LLMClient"):
+
+            mock_writer = MagicMock()
+            mock_writer.write = AsyncMock(return_value={"title": "章节1", "content": "ok", "provider": "openai", "model": "gpt-5.4"})
+            mock_writer_cls.return_value = mock_writer
+
+            result = await run_autoplan(
+                {
+                    "outline": ["章节1"],
+                    "provider_chain": [
+                        {"slot": "text_main", "provider": "openai", "model": "gpt-5.4"},
+                        {"slot": "text_backup", "provider": "openai", "model": "gpt-5.4"},
+                    ],
+                    "dry_run": False,
+                    "strict_tender_outline": True,
+                }
+            )
+
+            sec = (result.get("sections") or [{}])[0]
+            assert sec.get("used_key_alias") == "OPENAI_API_KEY_TEXT_MAIN"

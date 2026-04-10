@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from backend.zhifei_autoplan import graph_dispatcher as gd
 
 
@@ -145,3 +147,64 @@ def test_search_dispatch_graphs_isolated_by_allowed_domains(monkeypatch):
     )
     assert hits
     assert all("bridge" in (h.get("domain_tags") or []) for h in hits)
+
+
+def test_prewarm_dispatch_runtime(monkeypatch):
+    _reset_caches()
+    monkeypatch.setattr(gd, "_iter_project_kg_roots", lambda: [])
+    monkeypatch.setattr(gd, "_load_domain_map", lambda: {"knowledge_graph_library": [{"maps": []}]})
+    monkeypatch.setattr(
+        gd,
+        "_load_pack_index",
+        lambda: {
+            "a.json": {"graph_name": "A图谱", "content": {"工序名称": "A", "指标": "厚度50mm"}},
+            "b.json": {"graph_name": "B图谱", "content": {"工序名称": "B", "指标": "频次2次/日"}},
+        },
+    )
+    monkeypatch.setattr(gd, "_pack_index_signature", lambda: "sig-test")
+    called = {"count": 0}
+
+    def _docs_mock(fn, gn, sig):
+        called["count"] += 1
+        return [{"logical_node": f"{fn}#$.x", "title": gn, "text": "x"}]
+
+    monkeypatch.setattr(gd, "_docs_for_graph_file", _docs_mock)
+    out = gd.prewarm_dispatch_runtime(max_docs=2)
+    assert out["ok"] is True
+    assert out["pack_count"] == 2
+    assert out["warmed_docs"] == 2
+    assert called["count"] == 2
+
+
+def test_iter_project_kg_roots_prefers_env_root(monkeypatch, tmp_path: Path):
+    _reset_caches()
+    workspace_root = tmp_path / "workspace"
+    env_root = tmp_path / "env-kg"
+    (workspace_root / "知识图谱").mkdir(parents=True)
+    env_root.mkdir(parents=True)
+
+    monkeypatch.setattr(gd, "_project_workspace_root", lambda: workspace_root)
+    monkeypatch.setenv("ZF_KG_ROOT", str(env_root))
+    monkeypatch.delenv("ZF_KG_SINGLE_ROOT", raising=False)
+
+    roots = gd._iter_project_kg_roots()
+    assert roots == [env_root.resolve()]
+
+
+def test_iter_project_kg_roots_uses_workspace_relative_dirs(monkeypatch, tmp_path: Path):
+    _reset_caches()
+    workspace_root = tmp_path / "workspace"
+    primary = workspace_root / "知识图谱"
+    secondary = workspace_root / "knowledge_graph"
+    tertiary = workspace_root / "backend" / "知识图谱"
+    primary.mkdir(parents=True)
+    secondary.mkdir(parents=True)
+    tertiary.mkdir(parents=True)
+
+    monkeypatch.setattr(gd, "_project_workspace_root", lambda: workspace_root)
+    monkeypatch.delenv("ZF_KG_ROOT", raising=False)
+    monkeypatch.setenv("ZF_KG_SINGLE_ROOT", "0")
+
+    roots = gd._iter_project_kg_roots()
+    assert roots == [primary.resolve(), secondary.resolve(), tertiary.resolve()]
+    assert all(str(root).startswith(str(workspace_root.resolve())) for root in roots)

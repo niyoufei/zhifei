@@ -1,12 +1,27 @@
+"""FastAPI current online entrypoint for the V2 Web UI.
+
+Current V2 page chain:
+    Streamlit app.py -> /actions/* -> backend.app.routers.actions_bridge -> backend.zhifei_autoplan/*
+
+Notes:
+    - /actions is the current Web UI main chain.
+    - /autoplan remains online as a compatibility layer and script-facing API surface.
+    - routers/assist_codex.py is not mounted here and is not part of the current online chain.
+"""
+
 from fastapi import FastAPI, BackgroundTasks, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os, json
+import logging
 from pathlib import Path
 from datetime import datetime
+from uuid import uuid4
 
 from backend.compose_engine import Composer
+from backend.app.runtime_config import collect_main_chain_config_status
 from backend.utils_write_docx import write_compose_to_docx
+from backend.zhifei_autoplan.workspace import maybe_cleanup_expired_workspaces, resolve_workspace_dir, workspace_paths
 
 app = FastAPI()
 
@@ -32,27 +47,77 @@ app.include_router(retrieve_router)
 app.include_router(publish_router)
 app.include_router(score_router)
 app.include_router(zhifei_autoplan_router)
+# V2 Web UI main chain: app.py -> /actions/* -> actions_bridge -> zhifei_autoplan/*
 app.include_router(actions_bridge_router)
 app.include_router(auth_router)
+
+logger = logging.getLogger("zhifei.startup")
+
+
+def _resolve_workspace_context(session_id: str | None = None, workspace_dir: str | None = None) -> dict:
+    sid = str(session_id or "").strip() or uuid4().hex
+    resolved = str(resolve_workspace_dir(session_id=sid, workspace_dir=workspace_dir))
+    maybe_cleanup_expired_workspaces(exclude_workspace=resolved)
+    return {"session_id": sid, "workspace_dir": resolved}
+
+
+def _build_dir(workspace_dir: str | None) -> Path:
+    return workspace_paths(workspace_dir)["build"] if workspace_dir else Path("build")
+
+
+def _audit_dir(workspace_dir: str | None) -> Path:
+    return workspace_paths(workspace_dir)["audit_dir"] if workspace_dir else Path("backend/data/audit")
+
+
+@app.on_event("startup")
+async def _startup_warmup() -> None:
+    try:
+        from backend.zhifei_autoplan.chief_engineer_agent import start_chief_engineer_agent
+
+        start_chief_engineer_agent()
+        logger.info("chief_engineer_agent started")
+    except Exception as e:
+        logger.warning("chief_engineer_agent start failed: %s", e)
+
+    if str(os.environ.get("ZF_DISABLE_PREWARM") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    try:
+        from backend.zhifei_autoplan.graph_dispatcher import prewarm_dispatch_runtime
+
+        rpt = prewarm_dispatch_runtime(max_docs=int(os.environ.get("ZF_PREWARM_DOCS") or 8))
+        logger.info("graph_dispatcher prewarm ok: %s", rpt)
+    except Exception as e:
+        logger.warning("graph_dispatcher prewarm failed: %s", e)
+    try:
+        from backend.zhifei_autoplan.job_store import mark_stale_running_jobs, cleanup_jobs
+
+        lease = max(60, int(os.environ.get("ZF_JOB_LEASE_SECONDS") or 900))
+        retention = max(3600, int(os.environ.get("ZF_JOB_RETENTION_SECONDS") or (14 * 24 * 3600)))
+        stale_fixed = mark_stale_running_jobs(lease_seconds=lease, limit=2000)
+        removed = cleanup_jobs(older_than_seconds=retention, archive=True)
+        logger.info("job_store startup housekeep: stale_fixed=%s removed=%s", stale_fixed, removed)
+    except Exception as e:
+        logger.warning("job_store startup housekeep failed: %s", e)
+    try:
+        runtime_cfg = collect_main_chain_config_status()
+        log_method = logger.info if runtime_cfg.get("level") == "ok" else logger.warning
+        log_method(
+            "main-chain config self-check: level=%s release_ready=%s generation_ready=%s warnings=%s blocking=%s",
+            runtime_cfg.get("level"),
+            bool(((runtime_cfg.get("checks") or {}).get("release_ready"))),
+            bool(((runtime_cfg.get("checks") or {}).get("actions_generation_ready"))),
+            len(runtime_cfg.get("warnings") or []),
+            len(runtime_cfg.get("blocking") or []),
+        )
+    except Exception as e:
+        logger.warning("main-chain config self-check failed: %s", e)
 
 
 @app.get("/health")
 def health():
-    cfg_path = Path("backend/data/autoplan/config.json")
-    cfg_mtime = cfg_path.stat().st_mtime if cfg_path.exists() else None
-    cfg_version = None
-    cfg_version_auto = None
-    try:
-        if cfg_path.exists():
-            cfg_version = json.loads(cfg_path.read_text(encoding="utf-8")).get("config_version")
-    except Exception:
-        cfg_version = None
-    if cfg_mtime is not None:
-        try:
-            import datetime as _dt
-            cfg_version_auto = _dt.datetime.fromtimestamp(cfg_mtime).strftime("%Y-%m-%d")
-        except Exception:
-            cfg_version_auto = None
+    runtime_cfg = collect_main_chain_config_status()
+    config_meta = (runtime_cfg.get("sources") or {}).get("config_json") or {}
+    checks = runtime_cfg.get("checks") or {}
     audit_ready = False
     try:
         audit_dir = Path("backend/data/audit")
@@ -66,10 +131,20 @@ def health():
         "service": "文档生成系统",
         "system_id": os.environ.get("ZF_SYSTEM_ID", "docgen-system"),
         "workspace_root": str(Path(".").resolve()),
-        "config_mtime": cfg_mtime,
-        "config_version": cfg_version,
-        "config_version_auto": cfg_version_auto,
+        "config_mtime": config_meta.get("mtime"),
+        "config_version": config_meta.get("config_version"),
+        "config_version_auto": config_meta.get("mtime_human"),
         "audit_ready": audit_ready,
+        "config_status": {
+            "level": runtime_cfg.get("level"),
+            "release_ready": bool(checks.get("release_ready")),
+            "actions_generation_ready": bool(checks.get("actions_generation_ready")),
+            "actions_api_secure": bool(((checks.get("actions_api_auth") or {}).get("secure"))),
+            "text_generation_ready": bool(((checks.get("text_generation") or {}).get("ready"))),
+            "kg_config_ready": bool(((checks.get("kg_config") or {}).get("ready"))),
+            "warnings": runtime_cfg.get("warnings") or [],
+            "blocking": runtime_cfg.get("blocking") or [],
+        },
     }
 
 
@@ -78,27 +153,13 @@ def capabilities():
     from backend.zhifei_autoplan.kg_store import get_active_kg
     from backend.zhifei_autoplan.tender_store import load_tender_matrix
     from backend.zhifei_autoplan.boq_store import load_boq_data
-    from pathlib import Path
     from backend.app.routers.zhifei_autoplan import _job_list_default_fields, _job_list_field_alias
-    roles_cfg = Path("backend/data/autoplan/agent_roles.json")
-    cfg_version = None
-    cfg_version_auto = None
-    try:
-        cfg_path = Path("backend/data/autoplan/config.json")
-        if cfg_path.exists():
-            cfg_version = json.loads(cfg_path.read_text(encoding="utf-8")).get("config_version")
-    except Exception:
-        cfg_version = None
-    if cfg_path.exists():
-        try:
-            import datetime as _dt
-            cfg_version_auto = _dt.datetime.fromtimestamp(cfg_path.stat().st_mtime).strftime("%Y-%m-%d")
-        except Exception:
-            cfg_version_auto = None
+    runtime_cfg = collect_main_chain_config_status()
+    config_meta = (runtime_cfg.get("sources") or {}).get("config_json") or {}
     return {
         "ok": True,
-        "config_version": cfg_version,
-        "config_version_auto": cfg_version_auto,
+        "config_version": config_meta.get("config_version"),
+        "config_version_auto": config_meta.get("mtime_human"),
         "models": [
             "openai",
             "anthropic",
@@ -113,7 +174,9 @@ def capabilities():
         "kg_active": bool(get_active_kg()),
         "tender_matrix_loaded": bool(load_tender_matrix()),
         "boq_loaded": bool(load_boq_data()),
-        "agent_roles_configured": roles_cfg.exists(),
+        "agent_roles_configured": bool(((runtime_cfg.get("checks") or {}).get("agent_roles") or {}).get("ready")),
+        "provider_status": ((runtime_cfg.get("providers") or {}).get("status") or {}),
+        "runtime_config": runtime_cfg,
         "modules": {
             "tender_parser": True,
             "boq_parser": True,
@@ -143,30 +206,20 @@ def config():
     # 仅输出非敏感配置（不返回密钥）
     from backend.zhifei_autoplan.utils.llm_client import LLMClient
     from backend.app.routers.zhifei_autoplan import _job_list_default_fields, _job_list_field_alias
+    runtime_cfg = collect_main_chain_config_status()
     defaults = LLMClient.load_defaults()
-    cfg_version = None
-    cfg_version_auto = None
-    try:
-        cfg_path = Path("backend/data/autoplan/config.json")
-        if cfg_path.exists():
-            cfg_version = json.loads(cfg_path.read_text(encoding="utf-8")).get("config_version")
-    except Exception:
-        cfg_version = None
-    if cfg_path.exists():
-        try:
-            import datetime as _dt
-            cfg_version_auto = _dt.datetime.fromtimestamp(cfg_path.stat().st_mtime).strftime("%Y-%m-%d")
-        except Exception:
-            cfg_version_auto = None
+    config_meta = (runtime_cfg.get("sources") or {}).get("config_json") or {}
+    resolved_defaults = runtime_cfg.get("defaults") or {}
     return {
         "ok": True,
         "autoplan_auto": os.environ.get("ZF_AUTOPLAN_AUTO", "0"),
-        "default_provider": defaults.get("default_provider") or os.environ.get("ZF_DEFAULT_PROVIDER"),
-        "default_model": defaults.get("default_model") or os.environ.get("ZF_DEFAULT_MODEL"),
+        "default_provider": resolved_defaults.get("provider") or defaults.get("default_provider") or os.environ.get("ZF_DEFAULT_PROVIDER"),
+        "default_model": resolved_defaults.get("model") or defaults.get("default_model") or os.environ.get("ZF_DEFAULT_MODEL"),
         "daily_limit_default": os.environ.get("ZF_DAILY_LIMIT", "50"),
         "job_cost": os.environ.get("ZF_JOB_COST", "1"),
-        "config_version": cfg_version,
-        "config_version_auto": cfg_version_auto,
+        "config_version": config_meta.get("config_version"),
+        "config_version_auto": config_meta.get("mtime_human"),
+        "runtime_config": runtime_cfg,
         "job_list": {
             "default_fields": sorted(_job_list_default_fields()),
             "field_alias": {k: sorted(list(v)) for k, v in _job_list_field_alias().items()},
@@ -265,14 +318,26 @@ class ComposeResponse(BaseModel):
     sections: list
     style: dict
     saved_at: str
+    session_id: str | None = None
+    workspace_dir: str | None = None
 
 composer = Composer()
 
 @app.post("/compose", response_model=ComposeResponse)
-def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
+def compose(
+    req: ComposeRequest,
+    background_tasks: BackgroundTasks,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
+    audit_dir = _audit_dir(workspace["workspace_dir"])
     # --- ProjectProfile: build for traceability & downstream rules ---
     from backend.project_profile_service import generate_project_profile
     payload = req.dict() if hasattr(req, 'dict') else req.model_dump()
+    payload["session_id"] = workspace["session_id"]
+    payload["workspace_dir"] = workspace["workspace_dir"]
     project_profile = generate_project_profile(payload)
     import os as _os, json as _json
     # --- Compose Engine: build sections using KG context (demo) ---
@@ -311,16 +376,16 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
             result = {'sections': [{'title': 'Compose Engine Fallback', 'content': f'compose_engine_service failed: {_e!r}'}]}
     # --- end Compose Engine block ---
 
-    _os.makedirs('build', exist_ok=True)
-    with open('build/project_profile.json', 'w', encoding='utf-8') as _f:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    with (build_dir / 'project_profile.json').open('w', encoding='utf-8') as _f:
         _json.dump(project_profile, _f, ensure_ascii=False, indent=2)
     # --------------------------------------------------------------
     # --- Region Upgrade: resolve 安徽/青天 upgrade rules (trace only) ---
     from backend.region_upgrade_service import resolve_region_upgrade
     upgrade = resolve_region_upgrade(payload, project_profile)
     import os as _os_up, json as _json_up
-    _os_up.makedirs('build', exist_ok=True)
-    with open('build/region_upgrade.json', 'w', encoding='utf-8') as _f_up:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    with (build_dir / 'region_upgrade.json').open('w', encoding='utf-8') as _f_up:
         _json_up.dump(upgrade, _f_up, ensure_ascii=False, indent=2)
     # --------------------------------------------------------------------
 
@@ -329,14 +394,14 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
     from backend.kg_context_service import build_kg_context
     kg_context = build_kg_context(payload, project_profile)
     import os as _os_kg, json as _json_kg
-    _os_kg.makedirs('build', exist_ok=True)
-    with open('build/kg_context.json', 'w', encoding='utf-8') as _f_kg:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    with (build_dir / 'kg_context.json').open('w', encoding='utf-8') as _f_kg:
         _json_kg.dump(kg_context, _f_kg, ensure_ascii=False, indent=2)
     # ----------------------------------------------------------------------
     # enrich project_profile (topic/domain_key/region_key) for traceability
     try:
         import os as _os_pp, json as _json_pp
-        _os_pp.makedirs('build', exist_ok=True)
+        build_dir.mkdir(parents=True, exist_ok=True)
         # normalize project_profile to dict for stable persistence
         if project_profile is None:
             project_profile = {}
@@ -380,15 +445,15 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
             if _rk and isinstance(project_profile, dict):
                 project_profile['region_key'] = project_profile.get('region_key') or _rk
         
-        with open('build/project_profile.json', 'w', encoding='utf-8') as _f_pp:
+        with (build_dir / 'project_profile.json').open('w', encoding='utf-8') as _f_pp:
             _json_pp.dump(project_profile, _f_pp, ensure_ascii=False, indent=2)
     except Exception:
         pass
     from backend.precheck_guard_service import run_precheck_guard
     precheck = run_precheck_guard(payload, project_profile)
     import os as _os2, json as _json2
-    _os2.makedirs('build', exist_ok=True)
-    with open('build/precheck_guard.json', 'w', encoding='utf-8') as _f:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    with (build_dir / 'precheck_guard.json').open('w', encoding='utf-8') as _f:
         _json2.dump(precheck, _f, ensure_ascii=False, indent=2)
     if not precheck.get('passed', False):
         _blocked = {
@@ -409,9 +474,9 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
                 'line_spacing': 1.5,
                 'auto_page_break': True
             },
-            'saved_at': 'build/compose.json'
+            'saved_at': str(build_dir / 'compose.json')
         }
-        with open('build/compose.json', 'w', encoding='utf-8') as _f2:
+        with (build_dir / 'compose.json').open('w', encoding='utf-8') as _f2:
             _json2.dump(_blocked, _f2, ensure_ascii=False, indent=2)
         return _blocked
     # ---------------------------------------------------------------------------
@@ -421,8 +486,8 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
         max_pages=50
     )
 
-    os.makedirs("build", exist_ok=True)
-    compose_json_path = "build/compose.json"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    compose_json_path = str(build_dir / "compose.json")
 
     # --- Compose Engine override (before compose.json write) ---
     try:
@@ -446,7 +511,7 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
     # --- AI 正文生成（可选，优先使用 /autoplan/generate 的结果） ---
     try:
         from pathlib import Path as _Path
-        _auto_json = _Path("build") / "autoplan_generated.json"
+        _auto_json = build_dir / "autoplan_generated.json"
         _auto_enabled = os.environ.get("ZF_AUTOPLAN_AUTO", "0") == "1"
         _auto_provider = os.environ.get("ZF_DEFAULT_PROVIDER")
         _auto_model = os.environ.get("ZF_DEFAULT_MODEL")
@@ -478,10 +543,12 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
                     "api_key": _auto_key,
                     "dry_run": False if _auto_key else True,
                     "generate_images": True,
+                    "session_id": workspace["session_id"],
+                    "workspace_dir": workspace["workspace_dir"],
                 }
                 _auto = _asyncio.run(_run_autoplan(payload))
                 _auto_json.write_text(_json.dumps({"variants": [_auto]}, ensure_ascii=False, indent=2), encoding="utf-8")
-                _export_autoplan_docx(str(_auto_json), str(_Path("build") / "autoplan_generated.docx"))
+                _export_autoplan_docx(str(_auto_json), str(build_dir / "autoplan_generated.docx"))
             background_tasks.add_task(_bg_generate)
     except Exception:
         pass
@@ -491,8 +558,8 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
         from backend.zhifei_autoplan.kg_store import get_active_kg as _get_active_kg
         from backend.zhifei_autoplan.tender_store import load_tender_matrix as _load_tender_matrix
         from backend.zhifei_autoplan.boq_store import load_boq_data as _load_boq_data
-        _ak = _get_active_kg()
-        _ingest = Path("backend/data/audit/ingest.jsonl")
+        _ak = _get_active_kg(workspace_dir=workspace["workspace_dir"])
+        _ingest = workspace_paths(workspace["workspace_dir"])["ingest_audit"]
         _ingest_cnt = len(_ingest.read_text(encoding="utf-8").splitlines()) if _ingest.exists() else 0
         _sel = (locals().get("kg_context") or {}).get("selected_packs") or []
         _sel_names = []
@@ -502,8 +569,8 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
             else:
                 _sel_names.append(str(_p))
         evidence_summary = {
-            "tender_matrix_loaded": bool(_load_tender_matrix()),
-            "boq_loaded": bool(_load_boq_data()),
+            "tender_matrix_loaded": bool(_load_tender_matrix(workspace_dir=workspace["workspace_dir"])),
+            "boq_loaded": bool(_load_boq_data(workspace_dir=workspace["workspace_dir"])),
             "active_kg_file": _ak.get("file_name") if _ak else None,
             "active_kg_sha256": _ak.get("sha256") if _ak else None,
             "ingest_records": _ingest_cnt,
@@ -520,13 +587,15 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
         "style": DocStyle().dict(),
         "kg_pack": (locals().get("kg_context") or {}).get("kg_pack"),
         "evidence_summary": evidence_summary,
-        "saved_at": compose_json_path
+        "saved_at": compose_json_path,
+        "session_id": workspace["session_id"],
+        "workspace_dir": workspace["workspace_dir"],
     }, open(compose_json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     output_docx = write_compose_to_docx(
         result["sections"],
         DocStyle().dict(),
-        output_path="build/compose_output.docx"
+        output_path=str(build_dir / "compose_output.docx")
     )
 
     return {
@@ -536,7 +605,9 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
         "sections": result["sections"],
         "style": DocStyle().dict(),
         "kg_pack": (locals().get("kg_context") or {}).get("kg_pack"),
-        "saved_at": compose_json_path
+        "saved_at": compose_json_path,
+        "session_id": workspace["session_id"],
+        "workspace_dir": workspace["workspace_dir"],
     }
 
 from fastapi.responses import FileResponse
@@ -544,9 +615,11 @@ from pathlib import Path
 import json as _json
 
 @app.post("/export")
-def export_doc():
-    compose_json_path = "build/compose.json"
-    output_path = "build/compose_output.docx"
+def export_doc(session_id: str | None = None, workspace_dir: str | None = None):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    build_dir = _build_dir(workspace["workspace_dir"])
+    compose_json_path = str(build_dir / "compose.json")
+    output_path = str(build_dir / "compose_output.docx")
 
     if not os.path.exists(compose_json_path):
         return {"error": "compose.json not found. Please run /compose first."}
@@ -563,19 +636,21 @@ def export_doc():
 
     # 审计日志写入（保持与 publish 的 trace_chain 一致）
     try:
-        audit_dir = Path("backend/data/audit")
+        audit_dir = _audit_dir(workspace["workspace_dir"])
         audit_dir.mkdir(parents=True, exist_ok=True)
         from backend.zhifei_autoplan.tender_store import load_tender_matrix as _load_tender_matrix
         from backend.zhifei_autoplan.kg_store import get_active_kg as _get_active_kg
-        ak = _get_active_kg()
+        ak = _get_active_kg(workspace_dir=workspace["workspace_dir"])
         audit = {
             "ts": datetime.now().isoformat(),
             "route": "/export",
             "compose_json": compose_json_path,
             "output_docx": output_path,
-            "tender_matrix_loaded": bool(_load_tender_matrix()),
+            "tender_matrix_loaded": bool(_load_tender_matrix(workspace_dir=workspace["workspace_dir"])),
             "active_kg_file": ak.get("file_name") if ak else None,
             "active_kg_sha256": ak.get("sha256") if ak else None,
+            "session_id": workspace["session_id"],
+            "workspace_dir": workspace["workspace_dir"],
         }
         with (audit_dir / "export.jsonl").open("a", encoding="utf-8") as f:
             f.write(_json.dumps(audit, ensure_ascii=False) + "\n")
@@ -690,9 +765,10 @@ def debug_kg_pack():
 
 
 @app.get("/audit")
-def audit():
+def audit(session_id: str | None = None, workspace_dir: str | None = None):
     from backend.audit_service import build_audit_report
-    return build_audit_report()
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    return build_audit_report(workspace_dir=workspace["workspace_dir"])
 
 # ============================
 # Retrieve (BM25-lite + trace)
@@ -704,6 +780,7 @@ class RetrieveRequest(_RetrieveBaseModel):
     top_k: int = 10
 
 @app.post("/retrieve")
-def retrieve_api(req: RetrieveRequest):
+def retrieve_api(req: RetrieveRequest, session_id: str | None = None, workspace_dir: str | None = None):
     from backend.retrieve_service import retrieve
-    return retrieve(req.query, top_k=req.top_k)
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    return retrieve(req.query, top_k=req.top_k, workspace_dir=workspace["workspace_dir"])

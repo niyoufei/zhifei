@@ -5,6 +5,7 @@ closed loop, engineering checks, template style, remediation, and main entry.
 """
 
 import pytest
+from backend.zhifei_autoplan.agents.section_writer import compact_text_to_length_bounds
 from backend.zhifei_autoplan.quality_check import (
     _normalize_text,
     _count_evidence,
@@ -20,6 +21,8 @@ from backend.zhifei_autoplan.quality_check import (
     _check_template_style,
     _check_required_topics,
     _check_required_topics_detail,
+    _check_qse_closed_loop_by_section,
+    _extract_risk_triplets,
     apply_remediation,
     run_quality_checks,
     strip_nonconcrete_language,
@@ -475,6 +478,18 @@ class TestCheckTemplateStyle:
         assert result["avg_sentence_len"] == 0.0
         assert result["has_bullets"] is False
 
+    def test_ignores_traceability_noise_and_long_codes(self):
+        text = (
+            "- 项目控制卡【证据:招标文件.pdf#p1_ab12cd34@12】\n"
+            "- 工程量=1.1006058002123101e+27m2；编码=ABCDEF1234567890；"
+            "参数对照表、验收样表均已建立。【证据:招标文件.pdf#p1_ab12cd34@12】\n"
+            "- 责任岗位、验收动作和记录表明确。"
+        )
+        result = _check_template_style(text)
+        assert result["has_bullets"] is True
+        assert result["avg_sentence_len"] < 40
+        assert result["ok"] is True
+
 
 # ========== apply_remediation ==========
 class TestApplyRemediation:
@@ -498,6 +513,49 @@ class TestApplyRemediation:
         assert "【自动补充】评分点覆盖建议" in sections[0]["content"]
         assert "补充质量" in sections[0]["content"]
         assert sections[0]["auto_remediated"] is True
+
+    def test_score_point_missing_qse_safety_seeds_tail_keywords_for_final_recheck(self):
+        sections = [
+            {
+                "title": "确保安全生产的技术组织措施",
+                "content": "监管红线清单。\n高处和临边防护缺失、临时用电漏保失效、危化品混放一经发现立即停工整改。\n" + "安全巡检记录。" * 900,
+                "chapter_domain": "qse",
+                "logic_template_id": "D",
+            }
+        ]
+        remediation = [
+            {
+                "title": "确保安全生产的技术组织措施",
+                "type": "score_point_missing",
+                "suggestion": "补充评分点覆盖：进度节点，使用短句+要点+量化指标表达。",
+                "missing_dimensions": ["进度节点"],
+                "missing_keywords": ["工期", "节点", "计划", "进度"],
+                "chapter_domain": "qse",
+                "template_id": "D",
+            }
+        ]
+
+        apply_remediation(sections, remediation)
+
+        compacted = compact_text_to_length_bounds(sections[0]["content"], min_length=3000, max_length=8100)
+        assert compacted is not None
+        assert "重难点" in compacted
+        assert "复杂" in compacted
+        assert "扣分项" in compacted
+        assert "否决项" in compacted
+        assert "重大偏差" in compacted
+
+        tender = {
+            "items": [
+                {"dimension": "重难点", "keywords": ["复杂"]},
+                {"dimension": "扣分项", "keywords": ["否决", "重大偏差"]},
+            ]
+        }
+        result = _check_score_coverage_by_section(
+            tender,
+            [{"title": "确保安全生产的技术组织措施", "content": compacted}],
+        )
+        assert result[0]["ok"] is True
 
     def test_risk_measure_gap(self):
         sections = [{"title": "章节1", "content": "原内容"}]
@@ -545,6 +603,79 @@ class TestApplyRemediation:
         apply_remediation(sections, remediation)
         assert "评分点" in sections[0]["content"]
         assert "工程落地" in sections[1]["content"]
+
+    def test_risk_triplet_gap_remediation_closes_long_qse_section(self):
+        filler = "质量过程控制说明。" * 120
+        base_content = (
+            "【闭环卡片】\n"
+            "- 风险：模板位移导致轴线偏差；控制：测量复核频次=2次/日，间距=1000mm；"
+            "验证：轴线偏差≤5mm，记录=《测量复核记录表》；偏差处置：超差立即整改，复验合格后关闭。【证据:质检记录#p1_ab12cd34@12】\n"
+            "- 风险：钢筋保护层厚度不足；控制：抽检频次=每100m2 1次，保护层垫块厚度=50mm；"
+            "验证：保护层偏差≤5mm，记录=《钢筋隐蔽验收记录表》；偏差处置：发现超差立即返工，复查合格后关闭。【证据:隐蔽验收#p2_bc23de45@18】\n"
+            "- 风险：混凝土养护时长不足；控制：养护时长=7d，巡检频次=2次/日；"
+            "验证：回弹强度满足设计要求，记录=《混凝土养护检查表》；偏差处置：未达标立即补养护，复验通过后关闭。【证据:施工日志#p3_cd34ef56@25】\n"
+            + filler
+        )
+        sections = [{"title": "确保工程质量的技术组织措施", "content": base_content}]
+        remediation = [{"title": "确保工程质量的技术组织措施", "type": "risk_triplet_gap", "suggestion": ""}]
+
+        apply_remediation(sections, remediation)
+
+        assert "偏差处置" in sections[0]["content"]
+        result = _check_qse_closed_loop_by_section(sections)
+        assert result["ok"] is True
+        assert result["by_section"][0]["closed_card_count"] >= result["by_section"][0]["target_cards"]
+
+    def test_extract_risk_triplets_accepts_legacy_an_separator(self):
+        text = (
+            "本章控制要求如下：风险按关键工序质量偏差超限执行，"
+            "控制按首件确认=1次/工序并按每100m2 1次实施过程抽检执行，"
+            "验证按偏差控制在偏差≤5mm以内执行，记录按《质量抽检记录》执行，"
+            "偏差处置按超限后30min内复检执行，未达标立即整改并在2h内关闭。"
+        )
+        triplets = _extract_risk_triplets(text)
+        assert len(triplets) == 1
+        assert "关键工序质量偏差超限" in triplets[0]["risk"]
+        assert "首件确认=1次/工序" in triplets[0]["control"]
+        assert "偏差≤5mm" in triplets[0]["verify"]
+
+    def test_logic_template_anchor_prepended_survives_compaction(self):
+        sections = [
+            {
+                "title": "施工部署",
+                "content": "施工部署正文。" * 380,
+                "logic_template_id": "A",
+                "chapter_domain": "general",
+            }
+        ]
+        remediation = [
+            {
+                "title": "施工部署",
+                "type": "logic_template_adherence_gap",
+                "suggestion": "",
+                "template_id": "A",
+                "chapter_domain": "general",
+            }
+        ]
+
+        apply_remediation(sections, remediation)
+        compacted = compact_text_to_length_bounds(sections[0]["content"], min_length=3000, max_length=4500)
+
+        assert compacted is not None
+        assert "本章交付物" in compacted
+        assert "约束条件" in compacted
+
+    def test_required_topic_detail_remediation_includes_four_new_investment(self):
+        sections = [{"title": "确保安全生产的技术组织措施", "content": "原内容"}]
+        remediation = [{"title": "专项主题", "type": "required_topic_detail_gap", "suggestion": "补齐专项细则"}]
+
+        apply_remediation(sections, remediation)
+
+        content = sections[0]["content"]
+        assert "四新技术" in content
+        assert "投入=" in content
+        assert "步骤=" in content
+        assert "记录=《四新技术应用台账》" in content
 
     def test_bureaucratic_phrase_remediation(self):
         sections = [{"title": "章节1", "content": "压实责任，形成工作合力，并加强检查。"}]
@@ -627,6 +758,16 @@ class TestRunQualityChecks:
         sections = [{"title": "章节1", "content": "存在风险需要关注"}]
         result = run_quality_checks(None, [], sections)
         assert any(r["type"] == "risk_measure_gap" for r in result["remediation"])
+
+    def test_remediation_risk_gap_skips_when_triplet_exists(self):
+        sections = [
+            {
+                "title": "章节1",
+                "content": "风险→控制→验证：风险：交叉作业导致碰撞；控制：错峰作业=1次/班；验证：违章=0次，记录=《巡检表》。",
+            }
+        ]
+        result = run_quality_checks(None, [], sections)
+        assert not any(r["type"] == "risk_measure_gap" for r in result["remediation"])
 
     def test_remediation_engineering_gap(self):
         sections = [{"title": "章节1", "content": "普通内容"}]
@@ -764,3 +905,73 @@ class TestStrictQualityGate:
         result = run_quality_checks(None, [], sections, strict=True)
         assert result["officialese"]["ok"] is False
         assert any(i["type"] == "bureaucratic_phrase" for i in result["issue_list"])
+
+    def test_remediation_strategy_audit_groups_quant_closure_and_evidence(self):
+        sections = [
+            {
+                "title": "安全管理",
+                "content": "存在风险，但仅写了措施，没有验证。待补充。【证据:待补充】",
+                "chapter_domain": "qse",
+                "logic_template_id": "B",
+            }
+        ]
+        result = run_quality_checks(None, [], sections, strict=True)
+        audit = result["remediation_strategy_audit"]
+        assert isinstance(audit, dict)
+        indicator_names = {row["indicator_group"] for row in audit["indicator_groups"]}
+        assert "缺量化" in indicator_names
+        assert "缺闭环" in indicator_names
+        assert "缺证据" in indicator_names
+        quant_rec = next(r for r in result["remediation"] if r["type"] == "quantitative_gap")
+        assert quant_rec["strategy_id"] == "quant_fill_qse_v1"
+        assert quant_rec["indicator_group"] == "缺量化"
+        closure_rec = next(r for r in result["remediation"] if r["type"] == "risk_triplet_gap")
+        assert closure_rec["strategy_id"] == "risk_triplet_qse_closure_v1"
+        evidence_rec = next(r for r in result["remediation"] if r["type"] == "evidence_gap")
+        assert evidence_rec["indicator_group"] == "缺证据"
+
+    def test_apply_remediation_writes_strategy_trace(self):
+        sections = [{"title": "工程概况", "content": "存在风险。"}]
+        remediation = [
+            {
+                "title": "工程概况",
+                "type": "quantitative_gap",
+                "suggestion": "补齐量化指标",
+                "indicator_group": "缺量化",
+                "strategy_id": "quant_fill_general_v1",
+                "strategy_name": "量化指标补齐卡",
+                "strategy_family": "quantitative_fill",
+                "strategy_priority": 95,
+                "audit_key": "缺量化/quant_fill_general_v1/工程概况",
+            }
+        ]
+        apply_remediation(sections, remediation)
+        trace = sections[0].get("remediation_strategy_trace")
+        assert isinstance(trace, list) and trace
+        assert trace[0]["strategy_id"] == "quant_fill_general_v1"
+        exec_trace = sections[0].get("remediation_execution_trace")
+        assert isinstance(exec_trace, list) and exec_trace
+        assert "add_quant_value" in exec_trace[0]["detected_action_tags"]
+        assert "add_evidence_locator" in exec_trace[0]["detected_action_tags"]
+        assert sections[0]["auto_remediated"] is True
+
+    def test_run_quality_checks_includes_remediation_execution_audit(self):
+        sections = [
+            {
+                "title": "工程概况",
+                "content": "存在风险。频次：2次/日。【证据:招标文件#p1_ab12cd@12】",
+                "remediation_execution_trace": [
+                    {
+                        "title": "工程概况",
+                        "strategy_id": "quant_fill_general_v1",
+                        "execution_status": "matched",
+                        "detected_action_tags": ["add_quant_value", "add_record_acceptance"],
+                    }
+                ],
+            }
+        ]
+        result = run_quality_checks(None, [], sections, strict=False)
+        audit = result["remediation_execution_audit"]
+        assert audit["trace_count"] == 1
+        assert audit["action_tags"][0]["action_tag"] == "add_quant_value"
+        assert audit["status_counts"][0]["status"] == "matched"

@@ -1,0 +1,181 @@
+{
+  "suite_version": "2026-04-10-release-regression-v1",
+  "description": "固定发布前回归样本集。全部样本均引用仓库内现有真实输入文件，围绕当前 /actions 主链可执行形态组织。",
+  "runner": "scripts/run_actions_pipeline.py",
+  "release_gate_cases": [
+    "real_baseline_summary",
+    "real_qa_decor",
+    "factory_building_with_drawing"
+  ],
+  "cases": [
+    {
+      "id": "real_baseline_summary",
+      "priority": "P0",
+      "release_gate": true,
+      "topic": "真实项目测试-汇总清单回归",
+      "project_id": "release_reg_real_baseline_summary",
+      "variant_id": 14,
+      "logic_template_id": "D",
+      "suggested_timeout_sec": 240,
+      "quality_strict": true,
+      "auto_remediate": false,
+      "strict_tender_outline": true,
+      "outline": [
+        "工程概况",
+        "施工部署",
+        "主要施工方法",
+        "确保工程质量的技术组织措施",
+        "确保安全生产的技术组织措施"
+      ],
+      "description": "01_真实项目测试的最小真实基线，覆盖招标 PDF + 汇总清单 PDF。",
+      "risk_tags": [
+        "主链解析",
+        "真实PDF",
+        "房建基线",
+        "无补疑基线"
+      ],
+      "tender_files": [
+        "01_真实项目测试/招标文件.pdf"
+      ],
+      "boq_file": "01_真实项目测试/工程量清单/1.工程量清单汇总表.pdf",
+      "ingest_files": [],
+      "notes": "发布前必跑。用于确认最小真实 PDF 样本仍能完成 tender/boq/plan/generate/download 主链。"
+    },
+    {
+      "id": "real_qa_decor",
+      "priority": "P0",
+      "release_gate": true,
+      "topic": "真实项目测试-答疑装修清单回归",
+      "project_id": "release_reg_real_qa_decor",
+      "variant_id": 5,
+      "logic_template_id": "E",
+      "suggested_timeout_sec": 240,
+      "quality_strict": true,
+      "auto_remediate": false,
+      "strict_tender_outline": true,
+      "outline": [
+        "工程概况",
+        "施工部署",
+        "装饰装修工程施工方案",
+        "确保工程质量的技术组织措施",
+        "确保安全生产的技术组织措施"
+      ],
+      "description": "01_真实项目测试的答疑优先场景，覆盖招标 PDF + 答疑 DOC + 装饰清单 PDF。",
+      "risk_tags": [
+        "答疑优先",
+        "装修专业",
+        "详细清单",
+        "真实DOC"
+      ],
+      "tender_files": [
+        "01_真实项目测试/招标文件.pdf",
+        "01_真实项目测试/答疑文件.doc"
+      ],
+      "boq_file": "01_真实项目测试/工程量清单/装饰工程.pdf",
+      "ingest_files": [],
+      "notes": "发布前必跑。用于确认 tender parser 的答疑优先合并没有回退。"
+    },
+    {
+      "id": "factory_building_with_drawing",
+      "priority": "P0",
+      "release_gate": true,
+      "topic": "实战演习-厂房建筑与图纸证据回归",
+      "project_id": "release_reg_factory_building_with_drawing",
+      "variant_id": 5,
+      "logic_template_id": "E",
+      "suggested_timeout_sec": 300,
+      "quality_strict": true,
+      "auto_remediate": false,
+      "strict_tender_outline": true,
+      "outline": [
+        "工程概况",
+        "施工部署",
+        "建筑工程施工方案",
+        "确保工程质量的技术组织措施",
+        "确保安全生产的技术组织措施"
+      ],
+      "description": "04_实战演习输入的建筑工程主样本，覆盖招标 + 补疑 + 建筑清单 + 建筑图纸 ingest。",
+      "risk_tags": [
+        "补疑优先",
+        "图纸证据",
+        "复杂项目",
+        "工业厂房改造"
+      ],
+      "tender_files": [
+        "04_实战演习输入/招标文件.pdf",
+        "04_实战演习输入/招标补疑文件.pdf"
+      ],
+      "boq_file": "04_实战演习输入/清单/1#厂房(原料仓库一)（建筑工程）.pdf",
+      "ingest_files": [
+        "04_实战演习输入/图纸/20250114-1#厂房（原料仓库一）-建筑_t3.pdf"
+      ],
+      "notes": "发布前必跑。用于确认补疑合并、图纸 OCR/缩略图/证据链与复杂项目解析没有断。"
+    },
+    {
+      "id": "factory_weak_current",
+      "priority": "P1",
+      "release_gate": false,
+      "topic": "实战演习-弱电智能化回归",
+      "project_id": "release_reg_factory_weak_current",
+      "suggested_timeout_sec": 240,
+      "quality_strict": true,
+      "auto_remediate": false,
+      "strict_tender_outline": true,
+      "outline": [
+        "工程概况",
+        "施工部署",
+        "智能化与弱电施工方案",
+        "确保工程质量的技术组织措施",
+        "确保安全生产的技术组织措施"
+      ],
+      "description": "04_实战演习输入的弱电智能化样本，覆盖智能化清单与弱电图纸。",
+      "risk_tags": [
+        "弱电智能化",
+        "图纸证据",
+        "专业清单"
+      ],
+      "tender_files": [
+        "04_实战演习输入/招标文件.pdf",
+        "04_实战演习输入/招标补疑文件.pdf"
+      ],
+      "boq_file": "04_实战演习输入/清单/智能化-电气.pdf",
+      "ingest_files": [
+        "04_实战演习输入/图纸/成品仓库厂房(整机车间)改造弱电智能化图纸-2026-1-6_t3.pdf"
+      ],
+      "notes": "扩展回归。用于确认弱电/智能化章节在图纸证据存在时不退化成通用模板。"
+    },
+    {
+      "id": "factory_hvac_core",
+      "priority": "P1",
+      "release_gate": false,
+      "topic": "实战演习-暖通专业回归",
+      "project_id": "release_reg_factory_hvac_core",
+      "suggested_timeout_sec": 240,
+      "quality_strict": true,
+      "auto_remediate": false,
+      "strict_tender_outline": true,
+      "outline": [
+        "工程概况",
+        "施工部署",
+        "暖通工程施工方案",
+        "确保工程质量的技术组织措施",
+        "确保安全生产的技术组织措施"
+      ],
+      "description": "04_实战演习输入的暖通样本，覆盖暖通清单与暖通施工图。",
+      "risk_tags": [
+        "暖通专业",
+        "图纸证据",
+        "机电专业"
+      ],
+      "tender_files": [
+        "04_实战演习输入/招标文件.pdf",
+        "04_实战演习输入/招标补疑文件.pdf"
+      ],
+      "boq_file": "04_实战演习输入/清单/1#厂房(原料仓库一)-暖通.pdf",
+      "ingest_files": [
+        "04_实战演习输入/图纸/20250114-1#厂房（原料仓库一）-暖通_t3.pdf"
+      ],
+      "notes": "扩展回归。用于确认暖通专业资料不会被建筑通用章节覆盖。"
+    }
+  ]
+}

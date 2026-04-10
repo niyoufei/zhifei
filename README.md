@@ -58,6 +58,13 @@ ZF_ACTIONS_KEY=zf-webui-key
 - `GEMINI_API_KEY_A`：视觉主通道
 - `GEMINI_API_KEY_B`：视觉备用通道
 
+当前主链配置的单一真理源边界为：
+
+- `backend/data/autoplan/config.json`：主链非敏感配置，包含 `config_version`、任务列表字段，以及兼容 `/compose` 用的 `default_provider/default_model`
+- `backend/data/autoplan/agent_roles.json`：章节 agent 角色规则
+- `kg_config.json`：KG pack 注册表与 `active_pack`
+- 环境变量：密钥、鉴权和运行开关；不写入上述 JSON
+
 兼容旧变量名，但服务端优先读取上述新命名。前端不再接收或展示明文 API Key。
 
 ### OCR（可选但强烈推荐）
@@ -127,6 +134,10 @@ curl http://127.0.0.1:8010/health
 {"ok": true, "version": "autoplan-0.1.0", "service": "文档生成系统", ...}
 ```
 
+补充自检：
+- `/health` 现在会额外返回 `config_status.level / release_ready / actions_generation_ready / warnings`
+- `/capabilities`、`/config` 会返回完整 `runtime_config`，仅暴露配置状态和来源，不回显任何密钥值
+
 ## 生成命令
 
 ### 生成文档（/compose，兼容接口示例）
@@ -179,14 +190,18 @@ curl http://127.0.0.1:8010/audit
 # 方式一：通过脚本
 ./scripts/run_e2e.sh
 
-# 方式二：直接运行测试（需先启动服务器）
+# 方式二：直接运行当前主链 smoke（需先启动服务器）
 python3 backend/scripts/smoke_e2e.py
 ```
+
+兼容说明：
+- `backend/scripts/smoke_e2e.py` 是当前 `/actions` 主链 release smoke
+- `scripts/smoke_e2e.py` 仍保留为遗留 `/compose` 兼容 smoke，不再作为 V2 页面发布口径
 
 ### 运行本地 Smoke 基线
 
 ```bash
-# 默认：只跑核心 smoke
+# 默认：跑当前 V2 页面主链 smoke（/actions）
 ./scripts/run_smoke.sh
 
 # 可选：在核心 smoke 后继续附加本地浏览器运维基线
@@ -199,20 +214,62 @@ DOCGEN_RUN_LOCAL_UI_ADMIN_SMOKE=1 ./scripts/run_smoke.sh
   - `scripts/verify_local_ui_admin_chain.sh`
 - 这条附加链只属于本地运维基线，不属于服务器 release/worktree 工具
 
+### 固定回归样本集
+
+发布前的真实样本集已固定在：
+- [release_regression_suite.json](/Users/youfeini/Desktop/文档生成系统/backend/data/autoplan/release_regression_suite.json)
+
+执行入口：
+
+```bash
+# 校验样本定义与文件是否齐全
+python3 scripts/release_regression_suite.py check
+
+# 只看发布门禁样本
+python3 scripts/release_regression_suite.py list --release-only
+
+# 打印发布门禁样本的实际运行命令
+python3 scripts/release_regression_suite.py command --release-only
+
+# 执行单个样本（默认 dry-run）
+python3 scripts/release_regression_suite.py run --case real_baseline_summary
+```
+
+当前固定为 5 组真实样本：
+- `real_baseline_summary`：最小真实基线，招标 PDF + 汇总清单 PDF
+- `real_qa_decor`：答疑优先 + 装修详细清单
+- `factory_building_with_drawing`：补疑 + 建筑清单 + 建筑图纸证据
+- `factory_weak_current`：弱电智能化专业扩展回归
+- `factory_hvac_core`：暖通专业扩展回归
+
+其中发布门禁必跑 3 组：
+- `real_baseline_summary`
+- `real_qa_decor`
+- `factory_building_with_drawing`
+
+执行口径说明：
+- 回归样本默认仍走 `/actions` 主链，但会使用样本清单里固定的大纲覆盖，避免真实招标全文推导出过长 outline 导致门禁时间失控
+- 回归样本默认关闭自动修订，仅验证真实输入下的解析、证据补充、生成、轮询与结果链是否稳定
+- 因此它是“发布前真实样本回归”，不是“完整长文生产压测”
+
 测试会验证：
-- `/compose` 返回 200 且 status="ok"
-- 所有产物文件存在且有效
-- `/audit` 返回 replayable=True
-- `/export` 返回 DOCX 文件
+- `/actions/tender/parse`、`/actions/boq/parse`、`/actions/plan/save` 可用
+- `/actions/generate_async` 可提交 dry-run 任务并完成
+- `/actions/job_status`、`/actions/result`、`/actions/download` 可用
+- 生成后的 JSON、DOCX、Compare DOCX 产物存在且有效
 
 ### 验证结果
 
 成功输出：
 ```
-[SUCCESS] E2E smoke test passed: /compose -> artifacts -> /audit (replayable) -> /export
+[SUCCESS] actions main-chain release smoke passed
 ```
 
 结果记录在：`build/clawdbot/e2e_result.txt`（PASS/FAIL）
+
+说明：
+- `build/clawdbot/e2e_result.txt` 由 `scripts/run_e2e.sh` 写入
+- `./scripts/run_smoke.sh` 以终端输出为准，默认不额外写该文件
 
 ### 快速接口冒烟（仅检查服务是否起来）
 
@@ -377,13 +434,18 @@ python3 scripts/run_actions_pipeline.py \\
 |------|------|------|
 | `ZF_JWT_SECRET` | 登录 JWT 密钥 | 生产环境请改为随机字符串 |
 | `ZF_ADMIN_KEY` | 管理员密钥（充值、配置版本等） | Bearer 后面的字符串 |
-| `ZF_ACTIONS_KEY` | Custom GPT Actions 调用密钥（Header: X-Actions-Key） | 强随机字符串 |
-| `ZF_GOOGLE_API_KEY` | Gemini Key（用于思维导图/插图生成与 LOGO 解析下载） | `AIza...` |
+| `ZF_ACTIONS_KEY` | `/actions/*` 调用密钥（Header: `X-Actions-Key`） | 强随机字符串 |
+| `OPENAI_API_KEY_TEXT_MAIN` | `/actions` 正文主生成 | `sk-...` |
+| `OPENAI_API_KEY_TEXT_BACKUP` | `/actions` 正文故障切换 | `sk-...` |
+| `OPENAI_API_KEY_AUTOMATION` | 自动修订 / 自检 / 排障 | `sk-...` |
+| `GEMINI_API_KEY_A` | 视觉主通道，也可作为 Gemini 文本兼容链 | `AIza...` |
+| `GEMINI_API_KEY_B` | 视觉备用通道 | `AIza...` |
 | `ZF_DAILY_LIMIT` | 用户每日调用上限 | `50` |
 | `ZF_JOB_COST` | 每次生成扣费点数 | `1` |
 | `ZF_AUTOPLAN_AUTO` | 是否在 compose 后自动触发生成 | `0` 或 `1` |
-| `ZF_DEFAULT_PROVIDER` | 默认 LLM 提供商 | `openai` |
-| `ZF_DEFAULT_MODEL` | 默认模型 | `gpt-4o-mini` |
+| `ZF_DEFAULT_PROVIDER` | 兼容 `/compose` / `model_ping` 的默认 Provider | `openai` |
+| `ZF_DEFAULT_MODEL` | 兼容 `/compose` / `model_ping` 的默认模型 | `gpt-5.4` |
+| `ZF_DEFAULT_API_KEY` | 兼容 `/compose` / `model_ping` 的默认密钥 | `sk-...` |
 | `ZF_JOB_LIST_FIELDS` | 任务列表默认返回字段（逗号分隔） | `job_id,status,updated_at` |
 
 ## 审计与清理
@@ -447,12 +509,13 @@ cat build/clawdbot/audit.log
 │   ├── app/                 # FastAPI 应用
 │   │   ├── main.py          # 主入口
 │   │   └── routers/         # 路由
-│   ├── scripts/             # 脚本
-│   │   └── smoke_e2e.py     # 端到端测试
+│   ├── scripts/             # 后端 smoke / release 脚本
+│   │   └── smoke_e2e.py     # 当前 `/actions` 主链 release smoke
 │   └── zhifei_autoplan/     # 自动规划模块
 ├── scripts/
-│   ├── run_e2e.sh           # 一键端到端脚本
-│   ├── run_smoke.sh         # 本地 smoke 入口（支持附加本地运维基线）
+│   ├── run_e2e.sh           # 兼容 `/compose` E2E 包装脚本
+│   ├── run_smoke.sh         # 当前 `/actions` 主链 smoke 入口（支持附加本地运维基线）
+│   ├── smoke_e2e.py         # 遗留 `/compose` 兼容 smoke
 │   ├── verify_local_ui_admin_chain.sh # 本地浏览器运维基线入口
 │   ├── smoke_api.py         # 快速接口冒烟（/health、/capabilities、/config）
 │   └── clean_audit_exports.py # 审计导出目录本地清理（--days / --keep）
@@ -469,10 +532,16 @@ cat build/clawdbot/audit.log
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/health` | GET | 健康检查（含 config_version、audit_ready） |
-| `/compose` | POST | 生成结构化文档 |
-| `/export` | POST | 导出 DOCX |
-| `/audit` | GET | 查看审计链 |
-| `/retrieve` | POST | 检索知识库 |
+| `/actions/tender/parse` | POST | 当前 V2 页面主链：解析招标文件 |
+| `/actions/boq/parse` | POST | 当前 V2 页面主链：解析清单文件 |
+| `/actions/plan/save` | POST | 当前 V2 页面主链：保存计划 |
+| `/actions/generate_async` | POST | 当前 V2 页面主链：提交异步生成任务 |
+| `/actions/job_status` | GET | 当前 V2 页面主链：查询任务状态 |
+| `/actions/download` | GET | 当前 V2 页面主链：下载产物 |
+| `/compose` | POST | 兼容接口：生成结构化文档 |
+| `/export` | POST | 兼容接口：导出 DOCX |
+| `/autoplan/audit` | GET | 兼容/审计链：查看审计数据 |
+| `/retrieve` | POST | 兼容检索接口 |
 | `/debug/kg_pack` | GET | 查看 KG Pack 状态 |
 
 ## 更多文档
