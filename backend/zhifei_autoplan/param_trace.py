@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from backend.zhifei_autoplan.workspace import workspace_paths
+
 
 PARAM_PLACEHOLDER_RE = re.compile(r"\[\[PARAM:(?P<key>[A-Za-z0-9_.\u4e00-\u9fff]+)\]\]")
 
@@ -140,23 +142,38 @@ def _safe_project_id(project_id: str, limit: int = 80) -> str:
     return (out[:limit] or "project").strip("_")
 
 
-def receipt_path(project_id: str | None = None) -> Path:
+def receipt_path(project_id: str | None = None, *, workspace_dir: str | None = None) -> Path:
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
+    if workspace_dir:
+        projects_dir = workspace_paths(workspace_dir)["projects"]
+        if not pid:
+            return projects_dir / "global" / "param_receipt_latest.json"
+        safe = _safe_project_id(pid)
+        return projects_dir / safe / "param_receipt.json"
     if not pid:
         return RECEIPT_LATEST_PATH
     safe = _safe_project_id(pid)
     return PROJECTS_DIR / safe / "param_receipt.json"
 
 
-def save_latest_receipt(receipt: Dict[str, Any], project_id: str | None = None) -> str:
-    path = receipt_path(project_id=project_id)
+def save_latest_receipt(
+    receipt: Dict[str, Any],
+    project_id: str | None = None,
+    *,
+    workspace_dir: str | None = None,
+) -> str:
+    path = receipt_path(project_id=project_id, workspace_dir=workspace_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(receipt or {}, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
 
 
-def load_latest_receipt(project_id: str | None = None) -> Dict[str, Any] | None:
-    path = receipt_path(project_id=project_id)
+def load_latest_receipt(
+    project_id: str | None = None,
+    *,
+    workspace_dir: str | None = None,
+) -> Dict[str, Any] | None:
+    path = receipt_path(project_id=project_id, workspace_dir=workspace_dir)
     if not path.exists():
         return None
     try:
