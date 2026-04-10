@@ -35,7 +35,13 @@ class LLMClient:
         self.secret_key = secret_key
         self.token_url = token_url
 
-        self._impl = self._init_provider()
+        self._impl = None
+        self._init_error: Exception | None = None
+        try:
+            self._impl = self._init_provider()
+        except Exception as exc:
+            self._init_error = exc
+            self._impl = None
 
     @staticmethod
     def load_defaults() -> dict:
@@ -72,7 +78,10 @@ class LLMClient:
 
     async def complete(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         if self._impl is None:
-            return {"provider": self.provider, "model": self.model, "text": "", "error": "provider_not_configured"}
+            error = "provider_not_configured"
+            if self._init_error is not None:
+                error = f"provider_init_failed:{type(self._init_error).__name__}:{self._init_error}"
+            return {"provider": self.provider, "model": self.model, "text": "", "error": error}
         try:
             return await self._impl.complete(prompt, **kwargs)
         except TimeoutError:

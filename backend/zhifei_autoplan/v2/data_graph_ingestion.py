@@ -22,6 +22,18 @@ from .revit_parser import parse_revit_payload
 SUPPORTED_EXTENSIONS = {".json", ".md", ".markdown", ".xml", ".csv", ".dxf", ".ifc", ".ifcxml", ".rvt"}
 DEFAULT_KG_ROOT = resolve_default_kg_root()
 DEFAULT_DB_PATH = Path("backend/data/autoplan/v2/knowledge_graph.sqlite3")
+POWER_V22_DEFAULT_ORDER = [
+    "00_power_manifest.md",
+    "03_power_standards.md",
+    "04_power_failfast_guardrails.md",
+    "01_power_core_nodes.json",
+    "02_power_formulas.json",
+]
+PERSONAL_PATH_PREFIX = "/Users/youfeini/"
+STANDARD_50300_2013_RE = re.compile(
+    r"(GB(?:/T)?\s*[-/]?\s*50300\s*[-/]?)2013",
+    flags=re.IGNORECASE,
+)
 
 EDGE_REQUIRES = "REQUIRES"
 EDGE_MITIGATES = "MITIGATES"
@@ -830,6 +842,264 @@ def _dict_get_case_insensitive(data: Dict[str, Any], candidates: Sequence[str]) 
     return None
 
 
+def _sanitize_personal_path_text(text: str, *, root_dir: Path | None = None) -> str:
+    raw = str(text or "")
+    if not raw:
+        return ""
+    out = raw
+    if root_dir is not None:
+        root_text = str(root_dir.expanduser().resolve())
+        if root_text and root_text in out:
+            out = out.replace(root_text, ".")
+    out = out.replace(PERSONAL_PATH_PREFIX, "./")
+    out = out.replace(PERSONAL_PATH_PREFIX.lower(), "./")
+    return out
+
+
+def _sanitize_payload_paths(payload: Any, *, root_dir: Path | None = None) -> Any:
+    if isinstance(payload, dict):
+        return {k: _sanitize_payload_paths(v, root_dir=root_dir) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return [_sanitize_payload_paths(x, root_dir=root_dir) for x in payload]
+    if isinstance(payload, str):
+        return _sanitize_personal_path_text(payload, root_dir=root_dir)
+    return payload
+
+
+def _normalize_source_path_for_store(path: Path, root_dir: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(root_dir.resolve())
+        return str(rel)
+    except Exception:
+        return _sanitize_personal_path_text(str(path), root_dir=root_dir)
+
+
+def _upgrade_standard_ref_text(text: str) -> str:
+    base = str(text or "").strip()
+    if not base:
+        return ""
+    updated = STANDARD_50300_2013_RE.sub(r"\g<1>2024", base)
+    updated = re.sub(r"GB\s*50300\s*-\s*2013", "GB 50300-2024", updated, flags=re.IGNORECASE)
+    updated = re.sub(r"GB50300\s*-\s*2013", "GB50300-2024", updated, flags=re.IGNORECASE)
+    return updated
+
+
+def _extract_tender_page_refs(node: Dict[str, Any]) -> List[int]:
+    raw = _dict_get_case_insensitive(
+        node,
+        ("tender_page_refs", "page_refs", "页码锚点", "招标页码", "source_pages"),
+    )
+    refs: List[int] = []
+    if raw is None:
+        return refs
+    values: List[Any]
+    if isinstance(raw, list):
+        values = list(raw)
+    else:
+        values = [raw]
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, int):
+            page = int(value)
+            if page > 0:
+                refs.append(page)
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        for hit in re.findall(r"\d{1,4}", text):
+            page = int(hit)
+            if page > 0:
+                refs.append(page)
+    uniq: List[int] = []
+    seen = set()
+    for page in refs:
+        if page in seen:
+            continue
+        seen.add(page)
+        uniq.append(page)
+    return uniq[:24]
+
+
+def _extract_evidence_gap_flag(node: Dict[str, Any]) -> bool:
+    raw = _dict_get_case_insensitive(
+        node,
+        ("evidence_gap_flag", "evidence_gap", "need_site_verification", "需现场核实"),
+    )
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "需", "需要", "是"}
+
+
+def _extract_power_manifest_order(root: Path) -> List[str]:
+    manifest = root / "00_power_manifest.md"
+    if not manifest.exists():
+        return []
+    text = manifest.read_text(encoding="utf-8", errors="ignore")
+    lines = text.splitlines()
+    in_order = False
+    parsed: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if "上传顺序" in stripped or "upload order" in stripped.lower():
+            in_order = True
+            continue
+        if in_order and stripped.startswith("##"):
+            break
+        if not in_order:
+            continue
+        m = re.search(
+            r"([0-9A-Za-z][0-9A-Za-z_.\-]*\.(?:json|md|markdown|xml|csv|dxf|ifc|ifcxml|rvt))",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            continue
+        fname = m.group(1).strip()
+        if fname and fname not in parsed:
+            parsed.append(fname)
+    return parsed
+
+
+def _resolve_ingestion_files(root: Path) -> List[Path]:
+    files = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS]
+    files.sort(key=lambda p: str(p))
+    if not files:
+        return files
+    order = _extract_power_manifest_order(root)
+    if not order:
+        if all((root / name).exists() for name in POWER_V22_DEFAULT_ORDER):
+            order = list(POWER_V22_DEFAULT_ORDER)
+    if not order:
+        return files
+
+    rank = {name: idx for idx, name in enumerate(order)}
+
+    def _key(path: Path) -> Tuple[int, str]:
+        name = path.name
+        if name in rank:
+            return (rank[name], str(path))
+        return (len(rank) + 5000, str(path))
+
+    return sorted(files, key=_key)
+
+
+def _infer_power_base_package_from_manifest(path: Path) -> str:
+    manifest = path.parent / "00_power_manifest.md"
+    if not manifest.exists():
+        return ""
+    text = manifest.read_text(encoding="utf-8", errors="ignore")
+    for line in text.splitlines():
+        if "基线包" not in line:
+            continue
+        parts = line.split(":", 1)
+        if len(parts) != 2:
+            continue
+        name = str(parts[1]).strip()
+        if name:
+            return name
+    return ""
+
+
+def _record_identity_key(record: Dict[str, Any], *, fallback_prefix: str, index: int) -> str:
+    for key in ("node_id", "formula_id", "entity_master_key", "id", "name", "title"):
+        value = record.get(key)
+        text = str(value or "").strip()
+        if text:
+            return f"{key}:{text}"
+    try:
+        payload_key = _sha256_bytes(json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    except Exception:
+        payload_key = f"{fallback_prefix}:{index}"
+    return f"{fallback_prefix}:{payload_key}"
+
+
+def _is_gap_patch_record(record: Dict[str, Any]) -> bool:
+    text = " ".join(
+        [
+            str(record.get("node_id") or ""),
+            str(record.get("_source_section") or ""),
+            str(record.get("_source_file") or ""),
+            str(record.get("node_type") or ""),
+        ]
+    ).lower()
+    return "gap_patch" in text or ("v22" in text and "pwr-" in text)
+
+
+def _merge_power_package_payload(raw: Any, path: Path) -> Any:
+    if not isinstance(raw, dict):
+        return raw
+    fname = path.name
+    if fname not in {"01_power_core_nodes.json", "02_power_formulas.json"}:
+        return raw
+    list_key = "nodes" if fname == "01_power_core_nodes.json" else "formulas"
+    current = raw.get(list_key)
+    if not isinstance(current, list) or not current:
+        return raw
+
+    base_package = str(raw.get("base_package") or "").strip()
+    if not base_package:
+        base_package = _infer_power_base_package_from_manifest(path)
+    if not base_package:
+        return raw
+
+    candidates = [
+        path.parent.parent / base_package / fname,
+        path.parent / base_package / fname,
+    ]
+    baseline_path = next((x for x in candidates if x.exists() and x.resolve() != path.resolve()), None)
+    if baseline_path is None:
+        return raw
+
+    try:
+        baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return raw
+    baseline = baseline_payload.get(list_key) if isinstance(baseline_payload, dict) else []
+    if not isinstance(baseline, list):
+        baseline = []
+
+    merged_map: Dict[str, Dict[str, Any]] = {}
+    ordered_keys: List[str] = []
+
+    def _upsert(records: List[Any], *, prefer_current: bool) -> None:
+        for idx, item in enumerate(records):
+            if not isinstance(item, dict):
+                continue
+            key = _record_identity_key(item, fallback_prefix=list_key, index=idx)
+            if key not in merged_map:
+                ordered_keys.append(key)
+                merged_map[key] = dict(item)
+                continue
+            if prefer_current:
+                merged = dict(merged_map[key])
+                merged.update(item)
+                if _is_gap_patch_record(item):
+                    merged["patch_precedence"] = "v2.2"
+                merged_map[key] = merged
+
+    _upsert(baseline, prefer_current=False)
+    _upsert(current, prefer_current=True)
+    if not ordered_keys:
+        return raw
+
+    merged_payload = dict(raw)
+    merged_payload[list_key] = [merged_map[key] for key in ordered_keys]
+    merged_payload["_merge_meta"] = {
+        "enabled": True,
+        "base_package": base_package,
+        "base_file": _sanitize_personal_path_text(str(baseline_path), root_dir=path.parent),
+        "list_key": list_key,
+        "baseline_count": len([x for x in baseline if isinstance(x, dict)]),
+        "current_count": len([x for x in current if isinstance(x, dict)]),
+        "merged_count": len(merged_payload[list_key]),
+        "override_policy": "v2.2_override",
+    }
+    return merged_payload
+
+
 def _split_targets(text: str) -> List[str]:
     parts = re.split(r"[;,，；、/|]+", str(text or ""))
     return [p.strip() for p in parts if p and p.strip()]
@@ -870,12 +1140,12 @@ def _extract_standard_codes(values: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
     for value in values:
-        text = str(value or "").strip()
+        text = _upgrade_standard_ref_text(str(value or "").strip())
         if not text:
             continue
         matched = False
         for m in STANDARD_CODE_RE.finditer(text):
-            code = re.sub(r"\s+", " ", m.group(0)).strip()
+            code = _upgrade_standard_ref_text(re.sub(r"\s+", " ", m.group(0)).strip())
             key = code.lower()
             if not key or key in seen:
                 continue
@@ -883,7 +1153,7 @@ def _extract_standard_codes(values: List[str]) -> List[str]:
             out.append(code)
             matched = True
         if not matched and STANDARD_CODE_RE.search(text):
-            norm = re.sub(r"\s+", " ", text).strip()
+            norm = _upgrade_standard_ref_text(re.sub(r"\s+", " ", text).strip())
             key = norm.lower()
             if key and key not in seen:
                 seen.add(key)
@@ -932,7 +1202,7 @@ def _extract_reference_materials(node: Dict[str, Any]) -> Dict[str, Any]:
         dedup: List[str] = []
         seen = set()
         for item in out:
-            text = str(item or "").strip()
+            text = _upgrade_standard_ref_text(str(item or "").strip())
             if not text:
                 continue
             low = text.lower()
@@ -1373,8 +1643,23 @@ def _extract_standard_timeline(node: Dict[str, Any]) -> Dict[str, Any]:
     out = _coerce_dict(raw)
     if "records" not in out or not isinstance(out.get("records"), list):
         out["records"] = []
+    upgraded_records: List[Dict[str, Any]] = []
+    for item in out.get("records") or []:
+        if not isinstance(item, dict):
+            continue
+        rec = dict(item)
+        for key in ("standard_code", "code", "ref_code"):
+            if key in rec and rec.get(key) not in (None, ""):
+                rec[key] = _upgrade_standard_ref_text(str(rec.get(key)))
+        upgraded_records.append(rec)
+    if upgraded_records:
+        out["records"] = upgraded_records
     if "timeline_status" not in out:
         out["timeline_status"] = "unknown"
+    if str(out.get("timeline_status") or "").strip().lower() == "unknown":
+        joined = json.dumps(out.get("records") or [], ensure_ascii=False)
+        if "50300-2024" in joined.replace(" ", ""):
+            out["timeline_status"] = "active"
     return out
 
 
@@ -1434,6 +1719,47 @@ def _extract_evidence_anchors(node: Dict[str, Any]) -> List[Dict[str, Any]]:
             if rec:
                 out.append(rec)
     return out
+
+
+def _extract_evidence_required_actions(node: Dict[str, Any]) -> List[str]:
+    raw = _dict_get_case_insensitive(
+        node,
+        (
+            "evidence_required_actions",
+            "evidence_actions",
+            "required_evidence_actions",
+            "证据补充动作",
+            "证据补全项",
+        ),
+    )
+    items: List[str] = []
+    if raw is None:
+        return items
+    if isinstance(raw, str):
+        items.extend([x.strip() for x in re.split(r"[;,，；、|\n\r]+", raw) if x.strip()])
+    elif isinstance(raw, list):
+        for item in raw:
+            text = str(item or "").strip()
+            if text:
+                items.append(text)
+    elif isinstance(raw, dict):
+        for value in raw.values():
+            text = str(value or "").strip()
+            if text:
+                items.append(text)
+    else:
+        text = str(raw).strip()
+        if text:
+            items.append(text)
+    dedup: List[str] = []
+    seen = set()
+    for item in items:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(item)
+    return dedup[:24]
 
 
 def _extract_cross_constraints(node: Dict[str, Any]) -> Dict[str, Any]:
@@ -2483,6 +2809,7 @@ def _parse_markdown(path: Path) -> List[ParsedNode]:
     def flush() -> None:
         nonlocal current_title, current_lines
         body = "\n".join(current_lines).strip()
+        body = _upgrade_standard_ref_text(body)
         if len(body) < 20:
             return
         title = current_title or path.stem
@@ -2540,6 +2867,7 @@ def _parse_csv(path: Path) -> List[ParsedNode]:
             title = _safe_title(path.stem, clean, f"row_{idx}")
             node_id = str(clean.get("node_id") or clean.get("id") or f"{path.stem}:{idx}")
             body = "\n".join(f"{k}: {v}" for k, v in clean.items())
+            body = _upgrade_standard_ref_text(body)
             source_hierarchy = _normalize_source_hierarchy(clean.get("source_hierarchy"), source_path=str(path))
             safety_level = _normalize_safety_level(clean.get("safety_level") or clean.get("risk_level"), body)
             object_key = _normalize_alias(str(clean.get("object_key") or title))
@@ -2588,6 +2916,7 @@ def _parse_xml(path: Path) -> List[ParsedNode]:
                 text_parts.append(f"{child.tag}: {child.text.strip()}")
 
         body = "\n".join(text_parts).strip()
+        body = _upgrade_standard_ref_text(body)
         if len(body) >= 20:
             title = str(elem.attrib.get("name") or elem.attrib.get("id") or elem.tag)
             node_id = str(elem.attrib.get("node_id") or elem.attrib.get("id") or x_path)
@@ -2624,8 +2953,15 @@ def _parse_xml(path: Path) -> List[ParsedNode]:
     return nodes
 
 
-def _parse_json(path: Path, *, activation_context: str | None = None) -> List[ParsedNode]:
+def _parse_json(
+    path: Path,
+    *,
+    activation_context: str | None = None,
+    root_dir: Path | None = None,
+) -> List[ParsedNode]:
     raw = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    raw = _merge_power_package_payload(raw, path)
+    raw = _sanitize_payload_paths(raw, root_dir=root_dir)
     nodes: List[ParsedNode] = []
     root_meta = raw.get("meta") if isinstance(raw, dict) else {}
     activation_ctx = _resolve_activation_context(activation_context, root_meta if isinstance(root_meta, dict) else {})
@@ -2658,13 +2994,14 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
 
             has_identity = any(
                 _dict_get_case_insensitive(node, (k,)) is not None
-                for k in ("node_id", "name", "title", "id")
+                for k in ("node_id", "formula_id", "name", "title", "id")
             )
             if has_identity:
                 title = _safe_title(path.stem, node, pointer)
-                node_id = str(_dict_get_case_insensitive(node, ("node_id", "id")) or pointer)
+                node_id = str(_dict_get_case_insensitive(node, ("node_id", "formula_id", "id")) or pointer)
                 body_lines = _flatten_scalars(node, max_items=160)
                 body = "\n".join(body_lines).strip()
+                body = _upgrade_standard_ref_text(body)
                 if len(body) >= 20:
                     node_type, formula_expression, formula_variables = _extract_formula_info(node, body)
                     applicable_conditions = _extract_applicable_conditions(node)
@@ -2689,11 +3026,14 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     regional_policy = _extract_regional_policy(node)
                     unit_dimension_model = _extract_unit_dimension_model(node)
                     evidence_anchors = _extract_evidence_anchors(node)
+                    evidence_required_actions = _extract_evidence_required_actions(node)
                     cross_constraints = _extract_cross_constraints(node)
                     retrieval_benchmark = _extract_retrieval_benchmark(node)
                     approval_workflow = _extract_approval_workflow(node)
                     formula_sensitivity = _extract_formula_sensitivity(node)
                     bim_ifc_context = _extract_bim_ifc_context(node)
+                    tender_page_refs = _extract_tender_page_refs(node)
+                    evidence_gap_flag = _extract_evidence_gap_flag(node)
                     reference_materials = _extract_reference_materials(node)
                     process_parameter_pack = _extract_process_parameter_pack(node)
                     resource_productivity_model = _extract_resource_productivity_model(node)
@@ -2784,11 +3124,14 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                         "regional_policy_layers": regional_policy,
                         "unit_dimension_model": unit_dimension_model,
                         "evidence_anchors": evidence_anchors,
+                        "evidence_required_actions": evidence_required_actions,
                         "cross_discipline_constraints": cross_constraints,
                         "retrieval_benchmark": retrieval_benchmark,
                         "approval_workflow": approval_workflow,
                         "formula_sensitivity": formula_sensitivity,
                         "bim_ifc_context": bim_ifc_context,
+                        "tender_page_refs": tender_page_refs,
+                        "evidence_gap_flag": evidence_gap_flag,
                         "process_parameter_pack": process_parameter_pack,
                         "resource_productivity_model": resource_productivity_model,
                         "risk_trigger_matrix": risk_trigger_matrix,
@@ -2834,6 +3177,7 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     keywords.extend(_extract_terms(regional_policy))
                     keywords.extend(_extract_terms(unit_dimension_model))
                     keywords.extend(_extract_terms(evidence_anchors))
+                    keywords.extend(_extract_terms(evidence_required_actions))
                     keywords.extend(_extract_terms(cross_constraints))
                     keywords.extend(_extract_terms(retrieval_benchmark))
                     keywords.extend(_extract_terms(approval_workflow))
@@ -2856,6 +3200,10 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
                     keywords.extend(_extract_terms(uncertainty_profile))
                     keywords.extend(_extract_terms(reference_materials.get("reference_standard_codes") or []))
                     keywords.extend(_extract_terms(reference_materials.get("reference_source_documents") or []))
+                    keywords.extend([f"tender_page_{int(x)}" for x in tender_page_refs if int(x) > 0])
+                    if evidence_gap_flag:
+                        tags.append("evidence_gap_flag")
+                        keywords.extend(["evidence_gap_flag", "需现场核实补强"])
                     activation_signal = ""
                     dna_verified = True
                     tactical_mode = ""
@@ -2965,7 +3313,7 @@ def _parse_json(path: Path, *, activation_context: str | None = None) -> List[Pa
     walk(raw, "$", _extract_terms(path.stem), [], _infer_source_hierarchy_from_path(str(path)))
 
     if not nodes:
-        body = "\n".join(_flatten_scalars(raw, max_items=200)).strip()
+        body = _upgrade_standard_ref_text("\n".join(_flatten_scalars(raw, max_items=200)).strip())
         if body:
             title = path.stem
             node_id = f"{path.stem}:root"
@@ -3595,6 +3943,7 @@ class KnowledgeGraphIndex:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._schema_needs_reindex = False
         self.activation_context = activation_context
+        self.ingest_root_dir: Path | None = None
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -3790,7 +4139,7 @@ class KnowledgeGraphIndex:
     def _parse_file(self, path: Path) -> List[ParsedNode]:
         ext = path.suffix.lower()
         if ext == ".json":
-            return _parse_json(path, activation_context=self.activation_context)
+            return _parse_json(path, activation_context=self.activation_context, root_dir=self.ingest_root_dir)
         if ext in {".md", ".markdown"}:
             return _parse_markdown(path)
         if ext == ".xml":
@@ -3836,6 +4185,7 @@ class KnowledgeGraphIndex:
         root = Path(root_dir)
         if not root.exists() or not root.is_dir():
             raise FileNotFoundError(f"knowledge graph root not found: {root}")
+        self.ingest_root_dir = root.resolve()
 
         if self._schema_needs_reindex and not force_reindex:
             force_reindex = True
@@ -3846,20 +4196,22 @@ class KnowledgeGraphIndex:
         total_nodes = 0
         total_edges = 0
 
-        files = [
-            p
-            for p in sorted(root.rglob("*"))
-            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
-        ]
+        files = _resolve_ingestion_files(root)
 
         with self._connect() as conn:
             for path in files:
                 data = path.read_bytes()
                 sha = _sha256_bytes(data)
+                source_path = _normalize_source_path_for_store(path, self.ingest_root_dir)
                 rec = conn.execute(
                     "SELECT id, sha256 FROM documents WHERE source_path = ?",
-                    (str(path),),
+                    (source_path,),
                 ).fetchone()
+                if rec is None:
+                    rec = conn.execute(
+                        "SELECT id, sha256 FROM documents WHERE source_path = ?",
+                        (str(path),),
+                    ).fetchone()
                 if rec and (str(rec["sha256"]) == sha) and not force_reindex:
                     skipped_files += 1
                     continue
@@ -3867,13 +4219,17 @@ class KnowledgeGraphIndex:
                 if rec:
                     doc_id = int(rec["id"])
                     self._clear_document_rows(conn, doc_id)
+                    conn.execute(
+                        "UPDATE documents SET source_path = ?, file_name = ?, ext = ? WHERE id = ?",
+                        (source_path, path.name, path.suffix.lower(), doc_id),
+                    )
                 else:
                     conn.execute(
                         """
                         INSERT INTO documents(source_path, file_name, ext, sha256, imported_at, node_count)
                         VALUES(?, ?, ?, ?, ?, 0)
                         """,
-                        (str(path), path.name, path.suffix.lower(), sha, int(time.time())),
+                        (source_path, path.name, path.suffix.lower(), sha, int(time.time())),
                     )
                     doc_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
@@ -4018,7 +4374,13 @@ class KnowledgeGraphIndex:
                         INSERT OR IGNORE INTO graph_edges(from_node_id, to_node_id, edge_type, edge_label, source_path)
                         VALUES(?, ?, ?, ?, ?)
                         """,
-                        (from_id, to_id, edge.edge_type, edge.edge_label or "", str(path)),
+                        (
+                            from_id,
+                            to_id,
+                            edge.edge_type,
+                            edge.edge_label or "",
+                            _normalize_source_path_for_store(path, self.ingest_root_dir),
+                        ),
                     )
                     edge_count += 1
 
@@ -4040,8 +4402,8 @@ class KnowledgeGraphIndex:
         duration_ms = int((time.perf_counter() - start) * 1000)
         return {
             "ok": True,
-            "root": str(root),
-            "db_path": str(self.db_path),
+            "root": _sanitize_personal_path_text(str(root), root_dir=root),
+            "db_path": _sanitize_personal_path_text(str(self.db_path), root_dir=root),
             "files_total": len(files),
             "files_parsed": parsed_files,
             "files_skipped": skipped_files,
@@ -4130,23 +4492,58 @@ class KnowledgeGraphIndex:
             if not key:
                 key = str(item.get("node_id"))
             weight = int(SOURCE_HIERARCHY_WEIGHTS.get(str(item.get("source_hierarchy") or "未知"), 0))
+            tender_refs = item.get("tender_page_refs") if isinstance(item.get("tender_page_refs"), list) else []
+            tender_anchor_bonus = 1 if len([x for x in tender_refs if str(x).strip()]) > 0 else 0
+            formula_manifest_bonus = 1 if (
+                str(item.get("node_type") or "").strip() == "FormulaNode"
+                and str(item.get("source_file") or "").strip() == "02_power_formulas.json"
+            ) else 0
             current = grouped.get(key)
             if current is None:
-                grouped[key] = {**item, "_source_weight": weight}
+                grouped[key] = {
+                    **item,
+                    "_source_weight": weight,
+                    "_tender_anchor_bonus": tender_anchor_bonus,
+                    "_formula_manifest_bonus": formula_manifest_bonus,
+                }
                 continue
             cur_weight = int(current.get("_source_weight") or 0)
+            cur_anchor_bonus = int(current.get("_tender_anchor_bonus") or 0)
+            cur_formula_bonus = int(current.get("_formula_manifest_bonus") or 0)
             cur_score = float(current.get("score") or 0.0)
             new_score = float(item.get("score") or 0.0)
-            if (weight > cur_weight) or (weight == cur_weight and new_score > cur_score):
-                grouped[key] = {**item, "_source_weight": weight}
+            if (
+                (weight > cur_weight)
+                or (weight == cur_weight and tender_anchor_bonus > cur_anchor_bonus)
+                or (
+                    weight == cur_weight
+                    and tender_anchor_bonus == cur_anchor_bonus
+                    and formula_manifest_bonus > cur_formula_bonus
+                )
+                or (
+                    weight == cur_weight
+                    and tender_anchor_bonus == cur_anchor_bonus
+                    and formula_manifest_bonus == cur_formula_bonus
+                    and new_score > cur_score
+                )
+            ):
+                grouped[key] = {
+                    **item,
+                    "_source_weight": weight,
+                    "_tender_anchor_bonus": tender_anchor_bonus,
+                    "_formula_manifest_bonus": formula_manifest_bonus,
+                }
 
         selected: List[Dict[str, Any]] = []
         for item in grouped.values():
             item.pop("_source_weight", None)
+            item.pop("_tender_anchor_bonus", None)
+            item.pop("_formula_manifest_bonus", None)
             item["authority_resolution"] = {
                 "applied": True,
                 "rule": SOURCE_HIERARCHY_RULE,
                 "selected_source_hierarchy": item.get("source_hierarchy"),
+                "tender_anchor_priority": bool(item.get("tender_page_refs")),
             }
             selected.append(item)
         return selected
@@ -4314,6 +4711,26 @@ class KnowledgeGraphIndex:
                     for x in reference_standard
                     if str(x).strip() and str(x).strip().lower() not in code_set and not STANDARD_CODE_RE.search(str(x))
                 ][:12]
+            tender_page_refs = payload.get("tender_page_refs") if isinstance(payload, dict) else []
+            if not isinstance(tender_page_refs, list):
+                tender_page_refs = []
+            normalized_tender_page_refs: List[int] = []
+            seen_tender_pages = set()
+            for value in tender_page_refs:
+                try:
+                    page = int(float(value))
+                except Exception:
+                    continue
+                if page <= 0 or page in seen_tender_pages:
+                    continue
+                seen_tender_pages.add(page)
+                normalized_tender_page_refs.append(page)
+            evidence_gap_flag = bool(payload.get("evidence_gap_flag")) if isinstance(payload, dict) else False
+            evidence_required_actions = (
+                payload.get("evidence_required_actions")
+                if isinstance(payload, dict) and isinstance(payload.get("evidence_required_actions"), list)
+                else []
+            )
             source_weight = int(SOURCE_HIERARCHY_WEIGHTS.get(str(row["source_hierarchy"] or "未知"), 0))
             if source_weight < min_source_weight_int:
                 continue
@@ -4649,7 +5066,7 @@ class KnowledgeGraphIndex:
                 "tags": tags_row[:12],
                 "keywords": keywords_row[:18],
                 "source_file": row["file_name"],
-                "source_path": row["source_path"],
+                "source_path": _sanitize_personal_path_text(str(row["source_path"] or "")),
                 "source_hierarchy": row["source_hierarchy"],
                 "source_hierarchy_weight": source_weight,
                 "node_type": row["node_type"],
@@ -4664,10 +5081,14 @@ class KnowledgeGraphIndex:
                 "auto_generated_expires_at": str(auto_lifecycle.get("expires_at") or ""),
                 "reference_standard_codes": reference_standard_codes,
                 "reference_source_documents": reference_source_documents,
+                "tender_page_refs": normalized_tender_page_refs,
+                "evidence_gap_flag": evidence_gap_flag,
+                "evidence_required_actions": [str(x).strip() for x in evidence_required_actions if str(x).strip()][:12],
                 "applicable_conditions": _safe_json_load(row["applicable_conditions_json"], {}),
                 "resource_requirements": resource_requirements,
                 "safety_level": row["safety_level"],
                 "formula_expression": formula_expression,
+                "formula_id": str(payload.get("formula_id") or payload.get("node_id") or ""),
                 "formula_variables": _safe_json_load(row["formula_variables_json"], []),
                 "data_source_type": row["data_source_type"],
                 "spatial_context": _safe_json_load(row["spatial_context_json"], {}),
@@ -4720,7 +5141,7 @@ class KnowledgeGraphIndex:
                 "payload": payload,
                 "source_provenance": {
                     "source_file": row["file_name"],
-                    "source_path": row["source_path"],
+                    "source_path": _sanitize_personal_path_text(str(row["source_path"] or "")),
                     "source_hierarchy": row["source_hierarchy"],
                     "timeline_status": standard_validity_timeline.get("timeline_status")
                     if isinstance(standard_validity_timeline, dict)
@@ -4770,10 +5191,10 @@ class KnowledgeGraphIndex:
             "min_source_weight": min_source_weight_int,
             "total": len(results),
             "results": results[:top_k],
-            "db_path": str(self.db_path),
+            "db_path": _sanitize_personal_path_text(str(self.db_path)),
             "retrieval_score_weights": score_weights,
             "retrieval_weight_profile_path": (
-                str(Path(retrieval_weight_profile_path).expanduser().resolve())
+                _sanitize_personal_path_text(str(Path(retrieval_weight_profile_path).expanduser().resolve()))
                 if retrieval_weight_profile_path not in (None, "")
                 else ""
             ),
@@ -4823,19 +5244,92 @@ class KnowledgeGraphIndex:
             node_types=["FormulaNode"],
             professional_domains=professional_domains,
             min_gemini_usefulness_score=min_gemini_usefulness_score,
-            resolve_authority=resolve_authority,
+            resolve_authority=False,
         )
 
         computed: List[Dict[str, Any]] = []
         errors: List[Dict[str, Any]] = []
-        for item in search_result.get("results") or []:
+        formula_rows = search_result.get("results") if isinstance(search_result.get("results"), list) else []
+        preferred_rows = [
+            row for row in formula_rows if str(row.get("source_file") or "").strip() == "02_power_formulas.json"
+        ]
+        selected_rows = preferred_rows if preferred_rows else formula_rows
+        for item in selected_rows:
             expr = str(item.get("formula_expression") or "").strip()
             if not expr:
                 errors.append({"node_id": item.get("node_id"), "error": "empty_formula_expression"})
                 continue
+            formula_ref = str(item.get("formula_id") or item.get("title") or "").strip()
+            source_file = str(item.get("source_file") or "")
+            require_link = source_file.endswith("02_power_formulas.json") or ("power_formulas" in source_file.lower())
+            linked_node: Dict[str, Any] = {}
+            if require_link:
+                alias = _normalize_alias(formula_ref)
+                if alias:
+                    with self._connect() as conn:
+                        row = conn.execute(
+                            """
+                            SELECT
+                                n.node_uid,
+                                n.title,
+                                d.file_name,
+                                n.source_hierarchy
+                            FROM node_aliases a
+                            JOIN nodes n ON n.id = a.node_id
+                            JOIN documents d ON d.id = n.document_id
+                            WHERE a.alias = ?
+                            ORDER BY
+                                CASE d.file_name WHEN '01_power_core_nodes.json' THEN 0 ELSE 1 END ASC,
+                                CASE n.source_hierarchy
+                                    WHEN '答疑文件' THEN 5
+                                    WHEN '设计图纸' THEN 4
+                                    WHEN '国标' THEN 3
+                                    WHEN '行标' THEN 2
+                                    WHEN '企标' THEN 1
+                                    ELSE 0
+                                END DESC,
+                                n.id DESC
+                            LIMIT 1
+                            """,
+                            (alias,),
+                        ).fetchone()
+                    if row:
+                        linked_node = {
+                            "node_id": str(row["node_uid"] or ""),
+                            "title": str(row["title"] or ""),
+                            "source_file": str(row["file_name"] or ""),
+                        }
+                if not linked_node:
+                    linked_core = self.search(
+                        query=formula_ref,
+                        top_k=3,
+                        node_types=["EngineeringNode"],
+                        professional_domains=professional_domains,
+                        min_gemini_usefulness_score=min_gemini_usefulness_score,
+                        resolve_authority=resolve_authority,
+                    )
+                    linked_rows = linked_core.get("results") if isinstance(linked_core.get("results"), list) else []
+                    linked_node = linked_rows[0] if linked_rows else {}
+                if not linked_node:
+                    errors.append(
+                        {
+                            "node_id": item.get("node_id"),
+                            "formula_id": formula_ref,
+                            "error": "missing_linked_core_node",
+                        }
+                    )
+                    continue
             try:
                 value = _safe_eval_formula(expr, variables)
-                computed.append({**item, "computed_result": value, "variables": dict(variables)})
+                computed.append(
+                    {
+                        **item,
+                        "computed_result": value,
+                        "variables": dict(variables),
+                        "linked_core_node_id": linked_node.get("node_id") if linked_node else "",
+                        "linked_core_node_title": linked_node.get("title") if linked_node else "",
+                    }
+                )
             except Exception as exc:
                 errors.append({"node_id": item.get("node_id"), "error": str(exc), "formula_expression": expr})
 
@@ -4847,7 +5341,7 @@ class KnowledgeGraphIndex:
             "results": computed,
             "errors": errors,
             "authority_resolution": search_result.get("authority_resolution"),
-            "db_path": str(self.db_path),
+            "db_path": _sanitize_personal_path_text(str(self.db_path)),
         }
 
     def get_edges(

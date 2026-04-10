@@ -14,6 +14,7 @@ from backend.zhifei_autoplan.v2.audit_failfast import FailFastAuditError, run_wi
 from backend.zhifei_autoplan.v2.data_graph_ingestion import (
     DEFAULT_DB_PATH,
     DEFAULT_KG_ROOT,
+    evaluate_formula_nodes_in_graph,
     ingest_knowledge_graph,
     search_graph_index,
 )
@@ -58,6 +59,25 @@ DEFAULT_HIT_RATE_DASHBOARD_MD = Path("build/Hit_Rate_Dashboard.md")
 DEFAULT_ENRICHMENT_DRAFT_JSON = Path("build/Auto_KG_Enrichment_Draft.json")
 FORMULA_REQUIRED_DIMENSIONS = {"进度", "重难点"}
 FORMULA_HINT_KEYWORDS = ("公式", "计算", "推算", "时长", "温控", "工期", "产能", "动力学")
+POWER_FAILFAST_KEYWORDS = (
+    "继保与二次",
+    "继电保护",
+    "二次回路",
+    "应急电源",
+    "黑启动",
+    "ups",
+    "eps",
+    "接地防雷",
+    "防雷",
+    "接地网",
+    "spd",
+    "四新技术",
+    "四新",
+)
+POWER_FORMULA_TOPIC_KEYWORDS = ("pue", "能效", "极早期火灾主动防御", "竣工归档规范", "竣工资料归档")
+CHECKER_ROLE_HINTS = ("工程师", "负责人", "资料员", "质量员", "安全员", "施工员", "主管", "监理")
+ACTION_VERB_HINTS = ("执行", "实施", "开展", "完成", "组织", "校核", "检查", "验收", "联检", "演练")
+PARAMETER_NUMERIC_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:%|ms|s|min|h|天|次|人|台|套|m3|m2|m|mm|MPa|Ω|kW|kWh|dB)")
 
 DIMENSION_PARAMETER_HINTS: Dict[str, List[str]] = {
     "质量": ["强度等级(MPa)", "允许偏差(mm)", "抽检频次(次/批)", "验收合格率(%)"],
@@ -526,6 +546,177 @@ class MultiAgentDocPipeline:
             and uncertainty_ok
         )
 
+    def _is_power_failfast_target(
+        self,
+        *,
+        dimension: str,
+        keywords: List[str],
+        section: Dict[str, Any] | None = None,
+    ) -> bool:
+        focused_terms = ("继保与二次", "继电保护", "二次回路", "应急电源", "接地防雷", "四新技术", "UPS/EPS", "黑启动")
+        dimension_text = str(dimension or "")
+        title_text = ""
+        graph_title = ""
+        if isinstance(section, dict):
+            title_text = str(section.get("title") or "")
+            graph_title = str(
+                ((section.get("graph_hit") or {}).get("title") if isinstance(section.get("graph_hit"), dict) else "") or ""
+            )
+        primary_blob = " ".join([dimension_text, title_text, graph_title]).lower()
+        if any(term.lower() in primary_blob for term in focused_terms):
+            return True
+
+        keyword_hits = 0
+        for kw in [str(x).strip() for x in (keywords or []) if str(x).strip()]:
+            low = kw.lower()
+            if any(term.lower() in low for term in focused_terms):
+                keyword_hits += 1
+        return keyword_hits >= 2
+
+    def _has_action_parameter_checker(self, text: str) -> bool:
+        content = str(text or "")
+        has_action = any(hint in content for hint in ACTION_VERB_HINTS)
+        has_parameter = bool(PARAMETER_NUMERIC_RE.search(content))
+        has_checker = any(hint in content for hint in CHECKER_ROLE_HINTS)
+        return bool(has_action and has_parameter and has_checker)
+
+    def _build_formula_runtime_variables(
+        self,
+        *,
+        formula_variables: List[str],
+        boq_support: Dict[str, Any],
+        graph_support: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        if not formula_variables:
+            return values
+        hit = graph_support if isinstance(graph_support, dict) else {}
+        resource_requirements = hit.get("resource_requirements") if isinstance(hit.get("resource_requirements"), dict) else {}
+        formula_sensitivity = hit.get("formula_sensitivity") if isinstance(hit.get("formula_sensitivity"), dict) else {}
+        sensitivity_rows = formula_sensitivity.get("sensitivity") if isinstance(formula_sensitivity.get("sensitivity"), list) else []
+        baseline_by_var: Dict[str, float] = {}
+        for row in sensitivity_rows:
+            if not isinstance(row, dict):
+                continue
+            var = str(row.get("variable") or "").strip()
+            if not var:
+                continue
+            try:
+                baseline_by_var[var] = float(row.get("baseline"))
+            except Exception:
+                continue
+        quantity = float(boq_support.get("quantity") or 0.0)
+        duration = float(boq_support.get("duration_days") or 0.0)
+        worker_count = float(len(boq_support.get("resources") or []))
+
+        for var in formula_variables:
+            key = str(var).strip()
+            lower = key.lower()
+            if not key:
+                continue
+            if key in baseline_by_var:
+                values[key] = baseline_by_var[key]
+                continue
+            if lower in {"quantity", "work_volume", "total_work_volume", "sample_count", "archive_item_total"} and quantity > 0:
+                values[key] = quantity
+                continue
+            if lower in {"duration_days", "response_hours", "time_window", "archive_days"} and duration > 0:
+                values[key] = duration
+                continue
+            if lower in {"crew_size", "workers", "resource_peak_workers"} and worker_count > 0:
+                values[key] = worker_count
+                continue
+            req_val = resource_requirements.get(key) if isinstance(resource_requirements, dict) else None
+            if req_val in (None, ""):
+                req_val = resource_requirements.get(lower) if isinstance(resource_requirements, dict) else None
+            if req_val not in (None, ""):
+                m = re.search(r"-?\d+(?:\.\d+)?", str(req_val))
+                if m:
+                    try:
+                        values[key] = float(m.group(0))
+                        continue
+                    except Exception:
+                        pass
+            values[key] = 1.0
+        return values
+
+    def _build_formula_runtime_suffix(
+        self,
+        *,
+        dimension_item: Dict[str, Any],
+        graph_support: Dict[str, Any] | None,
+        boq_support: Dict[str, Any],
+    ) -> str:
+        hit = graph_support if isinstance(graph_support, dict) else {}
+        formula_expression = str(hit.get("formula_expression") or "").strip()
+        formula_variables = hit.get("formula_variables") if isinstance(hit.get("formula_variables"), list) else []
+        if not formula_expression or not formula_variables:
+            return ""
+        keywords = [str(x).strip() for x in (dimension_item.get("keywords") or []) if str(x).strip()]
+        text = f"{dimension_item.get('dimension') or ''} {' '.join(keywords)} {hit.get('title') or ''}".lower()
+        if not any(token in text for token in POWER_FORMULA_TOPIC_KEYWORDS):
+            return ""
+
+        runtime_vars = self._build_formula_runtime_variables(
+            formula_variables=formula_variables,
+            boq_support=boq_support,
+            graph_support=hit,
+        )
+        formula_result_text = ""
+        try:
+            evaluated = evaluate_formula_nodes_in_graph(
+                query=str(hit.get("title") or ""),
+                variables=runtime_vars,
+                top_k=3,
+                db_path=self.kg_db_path,
+            )
+            rows = evaluated.get("results") if isinstance(evaluated, dict) else []
+            if isinstance(rows, list) and rows:
+                formula_result_text = str(rows[0].get("computed_result"))
+        except Exception:
+            formula_result_text = ""
+
+        sensitivity = hit.get("formula_sensitivity") if isinstance(hit.get("formula_sensitivity"), dict) else {}
+        sensitivity_rows = sensitivity.get("sensitivity") if isinstance(sensitivity.get("sensitivity"), list) else []
+        top_vars: List[str] = []
+        sensitivity_prompts: List[str] = []
+        for row in sensitivity_rows:
+            if not isinstance(row, dict):
+                continue
+            var = str(row.get("variable") or "").strip()
+            if not var:
+                continue
+            try:
+                elasticity = abs(float(row.get("elasticity")))
+            except Exception:
+                elasticity = 0.0
+            top_vars.append(f"{var}({elasticity:.3f})")
+            try:
+                delta_raw = float(row.get("delta"))
+                base_raw = float(row.get("baseline"))
+            except Exception:
+                delta_raw = 0.0
+                base_raw = 0.0
+            if base_raw != 0:
+                delta_pct = abs(delta_raw / base_raw) * 100.0
+            else:
+                delta_pct = 10.0
+            impact_pct = abs(elasticity * delta_pct)
+            sensitivity_prompts.append(
+                f"若变量[{var}]波动[{delta_pct:.1f}%]，将导致最终指标偏移约[{impact_pct:.1f}%]"
+            )
+        top_vars = top_vars[:3]
+        sensitivity_prompts = sensitivity_prompts[:2]
+
+        pieces: List[str] = []
+        if formula_result_text:
+            pieces.append(f"公式计算结果={formula_result_text}")
+        if top_vars:
+            pieces.append(f"敏感变量Top={','.join(top_vars)}")
+        if sensitivity_prompts:
+            pieces.append("；".join(sensitivity_prompts))
+        return f"；{'，'.join(pieces)}" if pieces else ""
+
     def _select_graph_hit(self, query: str, *, professional_domain: str | None = None) -> Dict[str, Any]:
         domains = [str(professional_domain).strip()] if str(professional_domain or "").strip() else None
         graph_search = search_graph_index(
@@ -647,6 +838,16 @@ class MultiAgentDocPipeline:
         graph_param_text = f"图谱参数({'; '.join(resource_params)})。" if resource_params else ""
         if auto_support and graph_param_text:
             graph_param_text = f"AI自动补全参数{graph_param_text}"
+        formula_runtime_suffix = self._build_formula_runtime_suffix(
+            dimension_item=dimension_item,
+            graph_support=graph_support,
+            boq_support=boq_support,
+        )
+        payload = graph_support.get("payload") if isinstance(graph_support, dict) and isinstance(graph_support.get("payload"), dict) else {}
+        evidence_gap_flag = bool(graph_support.get("evidence_gap_flag")) if isinstance(graph_support, dict) else False
+        if isinstance(payload, dict):
+            evidence_gap_flag = evidence_gap_flag or bool(payload.get("evidence_gap_flag"))
+        evidence_gap_note = "需现场核实补强。" if evidence_gap_flag else ""
 
         override = self._project_rule_override(dimension)
         override_text = ""
@@ -667,6 +868,8 @@ class MultiAgentDocPipeline:
             f"关键参数阈值=95%，偏差处置时限=4h。"
             f"{override_text}"
             f"{graph_param_text}"
+            f"{formula_runtime_suffix}"
+            f"{evidence_gap_note}"
             f"【证据:{graph_title}】"
         )
 
@@ -839,6 +1042,15 @@ class MultiAgentDocPipeline:
                             "formula_variables": selected_graph.get("formula_variables")
                             if isinstance(selected_graph, dict)
                             else [],
+                            "tender_page_refs": selected_graph.get("tender_page_refs")
+                            if isinstance(selected_graph, dict)
+                            else [],
+                            "evidence_gap_flag": bool(selected_graph.get("evidence_gap_flag"))
+                            if isinstance(selected_graph, dict)
+                            else False,
+                            "evidence_required_actions": selected_graph.get("evidence_required_actions")
+                            if isinstance(selected_graph, dict)
+                            else [],
                             "clause_locator": selected_graph.get("clause_locator")
                             if isinstance(selected_graph, dict)
                             else {},
@@ -1003,6 +1215,7 @@ class MultiAgentDocPipeline:
             section = by_title.get(dim) or {}
             query = section.get("graph_query") or f"{dim} {' '.join(item.get('keywords') or [])}"
             graph_hit = self._select_graph_hit(query)
+            graph_payload = graph_hit.get("payload") if isinstance(graph_hit.get("payload"), dict) else {}
             node_id = str(graph_hit.get("node_id") or "").strip()
             title = str(graph_hit.get("title") or "").strip()
             score = float(graph_hit.get("score") or 0.0)
@@ -1034,6 +1247,49 @@ class MultiAgentDocPipeline:
                 f_expr = str(formula_hit.get("formula_expression") or "").strip()
                 formula_ok = bool(f_node_id and f_score > 0 and f_expr)
 
+            power_failfast_target = self._is_power_failfast_target(
+                dimension=dim,
+                keywords=[str(x) for x in (keywords or [])],
+                section=section,
+            )
+            evidence_gap_flag = bool(graph_hit.get("evidence_gap_flag")) if isinstance(graph_hit, dict) else False
+            if isinstance(graph_payload, dict):
+                evidence_gap_flag = evidence_gap_flag or bool(graph_payload.get("evidence_gap_flag"))
+            evidence_required_actions = (
+                graph_hit.get("evidence_required_actions") if isinstance(graph_hit.get("evidence_required_actions"), list) else []
+            )
+            if (not evidence_required_actions) and isinstance(graph_payload, dict):
+                payload_actions = graph_payload.get("evidence_required_actions")
+                if isinstance(payload_actions, list):
+                    evidence_required_actions = payload_actions
+            evidence_required_actions = [str(x).strip() for x in (evidence_required_actions or []) if str(x).strip()]
+            tender_page_refs = graph_hit.get("tender_page_refs") if isinstance(graph_hit.get("tender_page_refs"), list) else []
+            if not tender_page_refs and isinstance(graph_payload, dict):
+                raw_refs = graph_payload.get("tender_page_refs")
+                if isinstance(raw_refs, list):
+                    tender_page_refs = raw_refs
+            has_tender_page_refs = len([x for x in (tender_page_refs or []) if str(x).strip()]) > 0
+
+            graph_formula_vars = graph_hit.get("formula_variables") if isinstance(graph_hit.get("formula_variables"), list) else []
+            formula_formula_vars = formula_hit.get("formula_variables") if isinstance(formula_hit.get("formula_variables"), list) else []
+            merged_formula_vars = [str(x).strip() for x in (graph_formula_vars + formula_formula_vars) if str(x).strip()]
+            requires_formula_vars = bool(power_failfast_target or formula_required or str(graph_hit.get("formula_expression") or "").strip())
+            has_formula_variables = bool(merged_formula_vars) if requires_formula_vars else True
+
+            action_parameter_checker_ok = True
+            if power_failfast_target:
+                action_parameter_checker_ok = self._has_action_parameter_checker(str(section.get("content") or ""))
+                if not action_parameter_checker_ok:
+                    parameter_ok = False
+                if not has_formula_variables:
+                    formula_ok = False
+
+            evidence_ok = self._hit_evidence_ok(graph_hit)
+            if evidence_gap_flag or bool(evidence_required_actions):
+                evidence_ok = False
+            if power_failfast_target and (not has_tender_page_refs or not has_formula_variables):
+                evidence_ok = False
+
             ok = bool(node_ok and parameter_ok and formula_ok)
             check = {
                 "dimension": dim,
@@ -1050,6 +1306,14 @@ class MultiAgentDocPipeline:
                 "formula_total": formula_total,
                 "formula_node_id": formula_hit.get("node_id") if formula_required else None,
                 "formula_title": formula_hit.get("title") if formula_required else None,
+                "power_failfast_target": power_failfast_target,
+                "evidence_gap_flag": evidence_gap_flag,
+                "evidence_required_actions": evidence_required_actions[:10],
+                "tender_page_refs": tender_page_refs[:12],
+                "has_tender_page_refs": has_tender_page_refs,
+                "formula_variables": merged_formula_vars[:12],
+                "has_formula_variables": has_formula_variables,
+                "action_parameter_checker_ok": action_parameter_checker_ok,
                 "evidence_completeness_ratio": float(
                     ((graph_hit.get("evidence_completeness") or {}).get("completeness_ratio") or 0.0)
                     if isinstance(graph_hit.get("evidence_completeness"), dict)
@@ -1065,7 +1329,7 @@ class MultiAgentDocPipeline:
                     if isinstance(graph_hit.get("evidence_completeness"), dict)
                     else ""
                 ),
-                "evidence_ok": self._hit_evidence_ok(graph_hit),
+                "evidence_ok": evidence_ok,
                 "formula_safety_ok": self._hit_formula_safety_ok(graph_hit),
                 "interface_ok": self._hit_interface_conflict_ok(graph_hit),
                 "auto_generated_support": self._is_auto_generated_hit(graph_hit),
@@ -1130,6 +1394,10 @@ class MultiAgentDocPipeline:
                     "source_file": hit.get("source_file"),
                     "gemini_usefulness_score": hit.get("gemini_usefulness_score"),
                     "formula_expression": hit.get("formula_expression"),
+                    "formula_variables": hit.get("formula_variables") or [],
+                    "tender_page_refs": hit.get("tender_page_refs") or [],
+                    "evidence_gap_flag": bool(hit.get("evidence_gap_flag")),
+                    "evidence_required_actions": hit.get("evidence_required_actions") or [],
                     "applicable_conditions": hit.get("applicable_conditions") or {},
                     "resource_requirements": hit.get("resource_requirements") or {},
                     "numeric_sources": hit.get("numeric_sources") or [],
@@ -1745,6 +2013,20 @@ class MultiAgentDocPipeline:
                             "formula_expression": source_trace.get("formula_expression")
                             or graph_hit.get("formula_expression"),
                             "formula_variables": formula_variables[:8],
+                            "tender_page_refs": (
+                                source_trace.get("tender_page_refs")
+                                if isinstance(source_trace.get("tender_page_refs"), list)
+                                else (graph_hit.get("tender_page_refs") if isinstance(graph_hit.get("tender_page_refs"), list) else [])
+                            ),
+                            "evidence_gap_flag": bool(
+                                source_trace.get("evidence_gap_flag")
+                                or graph_hit.get("evidence_gap_flag")
+                            ),
+                            "evidence_required_actions": (
+                                source_trace.get("evidence_required_actions")
+                                if isinstance(source_trace.get("evidence_required_actions"), list)
+                                else (graph_hit.get("evidence_required_actions") if isinstance(graph_hit.get("evidence_required_actions"), list) else [])
+                            ),
                             "clause_refs": clause_refs[:12],
                             "clause_anchor": (
                                 clause_anchors[0]
@@ -1845,17 +2127,41 @@ class MultiAgentDocPipeline:
                 key = ("evidence_incomplete", dim)
                 if key not in seen:
                     seen.add(key)
+                    power_target = bool(item.get("power_failfast_target"))
+                    evidence_gap_flag = bool(item.get("evidence_gap_flag"))
+                    required_actions = [
+                        str(x).strip() for x in (item.get("evidence_required_actions") or []) if str(x).strip()
+                    ]
+                    has_tender_refs = bool(item.get("has_tender_page_refs"))
+                    has_formula_vars = bool(item.get("has_formula_variables"))
+                    suggestions = [
+                        "numeric_sources: parameter/value/unit",
+                        "clause_locator: anchor_hash/clause_path",
+                        "standard_validity_timeline: effective_date",
+                    ]
+                    if required_actions:
+                        suggestions.extend(required_actions[:6])
+                    if power_target and not has_tender_refs:
+                        suggestions.append("tender_page_refs: 标书页码锚点（如 304）")
+                    if power_target and not has_formula_vars:
+                        suggestions.append("FormulaNode.formula_variables: 公式变量清单")
+                    requires_user_supplement = bool(
+                        evidence_gap_flag or required_actions or (power_target and (not has_tender_refs or not has_formula_vars))
+                    )
+                    prompt = ""
+                    if requires_user_supplement:
+                        missing = "、".join(required_actions[:6]) or "页码锚点/公式变量/现场记录编号"
+                        prompt = f"该节点证据链不完整，请补充[{missing}]以确保投标得分"
                     gaps.append(
                         {
                             "type": "evidence_incomplete",
                             "dimension": dim,
                             "required_keywords": item.get("keywords") or [],
                             "query": item.get("graph_query"),
-                            "suggested_parameters": [
-                                "numeric_sources: parameter/value/unit",
-                                "clause_locator: anchor_hash/clause_path",
-                                "standard_validity_timeline: effective_date",
-                            ],
+                            "suggested_parameters": suggestions,
+                            "severity": "blocker" if (power_target or requires_user_supplement) else "major",
+                            "requires_user_supplement": requires_user_supplement,
+                            "user_prompt": prompt,
                         }
                     )
             if item.get("node_ok"):
@@ -1932,17 +2238,22 @@ class MultiAgentDocPipeline:
                 key = ("formula_missing", dim)
                 if key not in seen:
                     seen.add(key)
+                    power_target = bool(item.get("power_failfast_target"))
+                    suggestions = [
+                        "FormulaNode.formula_expression",
+                        "FormulaNode.formula_variables",
+                        "可计算变量映射(volume/productivity等)",
+                    ]
+                    if power_target:
+                        suggestions.append("公式变量需与招标页码锚点共同出现")
                     gaps.append(
                         {
                             "type": "formula_missing",
                             "dimension": dim,
                             "required_keywords": item.get("keywords") or [],
                             "query": item.get("formula_query") or item.get("graph_query"),
-                            "suggested_parameters": [
-                                "FormulaNode.formula_expression",
-                                "FormulaNode.formula_variables",
-                                "可计算变量映射(volume/productivity等)",
-                            ],
+                            "suggested_parameters": suggestions,
+                            "severity": "blocker" if power_target else "major",
                         }
                     )
 
@@ -2202,6 +2513,8 @@ class MultiAgentDocPipeline:
                 lines.append(
                     f"| {idx} | {severity} | {gap.get('type')} | {gap.get('dimension')} | {keywords} | {hints} | `{query}` |"
                 )
+                if bool(gap.get("requires_user_supplement")) and str(gap.get("user_prompt") or "").strip():
+                    lines.append(f"> 提示：{gap.get('user_prompt')}")
             lines.append("")
             lines.append("## KG Enrichment Action")
             lines.append("")

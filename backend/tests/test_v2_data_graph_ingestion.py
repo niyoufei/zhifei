@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -1039,3 +1040,265 @@ def test_search_marks_expired_auto_generated_nodes_and_prefers_human(tmp_path: P
     assert auto_rows
     assert bool(auto_rows[0].get("auto_generated_expired")) is True
     assert str(auto_rows[0].get("auto_generated_review_status") or "") == "pending"
+
+
+def test_ingest_respects_power_manifest_order(tmp_path: Path) -> None:
+    root = tmp_path / "power_v22"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "00_power_manifest.md").write_text(
+        "\n".join(
+            [
+                "# power",
+                "## 上传顺序（建议）",
+                "1. 00_power_manifest.md",
+                "2. 03_power_standards.md",
+                "3. 04_power_failfast_guardrails.md",
+                "4. 01_power_core_nodes.json",
+                "5. 02_power_formulas.json",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (root / "03_power_standards.md").write_text("# std\n\nGB/T 50328-2015", encoding="utf-8")
+    (root / "04_power_failfast_guardrails.md").write_text("# guard\n\n动作+参数+检查人", encoding="utf-8")
+    (root / "01_power_core_nodes.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "node_id": "P-001",
+                        "name": "继保节点",
+                        "content": "继保定值校核",
+                        "source_hierarchy": "答疑文件",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (root / "02_power_formulas.json").write_text(
+        json.dumps(
+            {
+                "formulas": [
+                    {
+                        "formula_id": "F-001",
+                        "name": "PUE",
+                        "expression": "it_load / max(total_load, 1)",
+                        "variables": ["it_load", "total_load"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    with sqlite3.connect(str(db_path)) as conn:
+        rows = conn.execute("SELECT file_name FROM documents ORDER BY id ASC").fetchall()
+    names = [str(r[0]) for r in rows]
+    assert names[:5] == [
+        "00_power_manifest.md",
+        "03_power_standards.md",
+        "04_power_failfast_guardrails.md",
+        "01_power_core_nodes.json",
+        "02_power_formulas.json",
+    ]
+
+
+def test_power_core_nodes_can_merge_baseline_and_keep_v22_override(tmp_path: Path) -> None:
+    parent = tmp_path / "desktop"
+    base_root = parent / "电力工程知识图谱专项包_v2.1_电力增强版"
+    v22_root = parent / "电力工程知识图谱专项包_v2.2_逐页增强版"
+    base_root.mkdir(parents=True, exist_ok=True)
+    v22_root.mkdir(parents=True, exist_ok=True)
+
+    (v22_root / "00_power_manifest.md").write_text(
+        "# x\n\n- 基线包: 电力工程知识图谱专项包_v2.1_电力增强版\n",
+        encoding="utf-8",
+    )
+    (base_root / "01_power_core_nodes.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"node_id": "A-001", "name": "节点A", "content": "old_value", "source_hierarchy": "国标"},
+                    {"node_id": "C-001", "name": "节点C", "content": "base_only", "source_hierarchy": "行标"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (v22_root / "01_power_core_nodes.json").write_text(
+        json.dumps(
+            {
+                "base_package": "电力工程知识图谱专项包_v2.1_电力增强版",
+                "nodes": [
+                    {"node_id": "A-001", "name": "节点A", "content": "new_value", "source_hierarchy": "答疑文件"},
+                    {
+                        "node_id": "PWR-DOC-001-V22",
+                        "name": "补丁节点",
+                        "content": "gap_patch_payload",
+                        "_source_section": "gap_patch",
+                        "source_hierarchy": "答疑文件",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(v22_root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+    assert report["nodes_indexed"] >= 3
+
+    new_res = search_graph_index(query="节点A new_value", db_path=db_path, resolve_authority=False, top_k=20)
+    assert any("new_value" in str(item.get("snippet") or "") for item in (new_res.get("results") or []))
+    base_res = search_graph_index(query="base_only", db_path=db_path, resolve_authority=False, top_k=20)
+    assert base_res["total"] >= 1
+
+
+def test_search_returns_tender_page_refs_and_evidence_gap_flag(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "power.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "node_id": "PWR-NEW4-001-V22",
+                        "name": "四新技术",
+                        "content": "执行四新技术，参数：应用项>=4项，检查人：技术负责人。",
+                        "tender_page_refs": [303, "304、306"],
+                        "evidence_gap_flag": True,
+                        "source_hierarchy": "答疑文件",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+    result = search_graph_index(query="四新技术", db_path=db_path, resolve_authority=False, top_k=5)
+    assert result["total"] >= 1
+    node = result["results"][0]
+    assert bool(node.get("evidence_gap_flag")) is True
+    assert 303 in (node.get("tender_page_refs") or [])
+
+
+def test_reference_standard_can_auto_upgrade_50300_2013_to_2024(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "std.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "node_id": "STD-001",
+                        "name": "验收标准节点",
+                        "content": "执行 GB 50300-2013 第3.0.1条",
+                        "reference_standard": ["GB 50300-2013", "GB/T 50328-2015"],
+                        "source_hierarchy": "国标",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+    result = search_graph_index(query="验收标准节点", db_path=db_path, resolve_authority=False, top_k=5)
+    assert result["total"] >= 1
+    node = result["results"][0]
+    refs = [str(x) for x in (node.get("reference_standard_codes") or [])]
+    assert any("50300" in x and "2024" in x for x in refs)
+    assert all("2013" not in x for x in refs)
+
+
+def test_evaluate_formula_nodes_requires_core_link_for_power_formula_file(tmp_path: Path) -> None:
+    root = tmp_path / "power_pack"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "01_power_core_nodes.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "node_id": "PWR-DOC-001-V22",
+                        "name": "竣工资料归档与编码规范执行",
+                        "content": "执行归档，参数：编码正确率>=99%，检查人：资料主管。",
+                        "source_hierarchy": "答疑文件",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (root / "02_power_formulas.json").write_text(
+        json.dumps(
+            {
+                "formulas": [
+                    {
+                        "formula_id": "PWR-DOC-001-V22",
+                        "name": "竣工资料归档与编码规范执行",
+                        "expression": "archive_error_count * 100 / max(archive_item_total, 1)",
+                        "variables": ["archive_error_count", "archive_item_total"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    index = KnowledgeGraphIndex(db_path=db_path)
+    evaluated = index.evaluate_formula_nodes(
+        query="竣工资料归档",
+        variables={"archive_error_count": 1, "archive_item_total": 100},
+        top_k=5,
+    )
+    assert evaluated["total"] >= 1
+    row = evaluated["results"][0]
+    assert str(row.get("linked_core_node_id") or "").strip()
+    assert str(row.get("linked_core_node_title") or "").strip()
+
+
+def test_ingest_can_desensitize_users_path_in_payload_and_source(tmp_path: Path) -> None:
+    root = tmp_path / "kg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "path.json").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "node_id": "PATH-001",
+                        "name": "路径节点",
+                        "content": "来源路径 /Users/youfeini/Desktop/文档生成系统/知识图谱/abc.json",
+                        "source_hierarchy": "企标",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+    result = search_graph_index(query="路径节点", db_path=db_path, resolve_authority=False, top_k=5)
+    assert result["total"] >= 1
+    node = result["results"][0]
+    assert "/Users/youfeini/" not in str(node.get("source_path") or "")
+    assert "/Users/youfeini/" not in str(node.get("snippet") or "")

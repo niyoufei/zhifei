@@ -387,3 +387,124 @@ def test_collect_auto_generated_lifecycle_warnings() -> None:
     assert "auto_generated_node_pending_review" in types
     assert "auto_generated_node_expired" in types
     assert "auto_generated_node_overage" in types
+
+
+def test_power_failfast_audit_requires_tender_refs_and_formula_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    pipeline = MultiAgentDocPipeline(kg_db_path=Path("backend/data/autoplan/v2/test_power_guard.sqlite3"))
+    index_matrix = {"index_matrix": [{"dimension": "继保与二次", "keywords": ["继保与二次", "公式"]}]}
+    sections = [
+        {
+            "title": "继保与二次",
+            "content": "执行继保联校，参数：动作正确率=100%，检查人：继保工程师。",
+            "graph_query": "继保与二次",
+        }
+    ]
+
+    monkeypatch.setattr(
+        pipeline,
+        "_select_graph_hit",
+        lambda _query: {
+            "node_id": "N-POWER-1",
+            "title": "继保联校节点",
+            "score": 88.0,
+            "source_hierarchy": "答疑文件",
+            "applicable_conditions": {"climate": "normal"},
+            "resource_requirements": {"crew_size": 8},
+            "safety_level": "high",
+            "formula_expression": "defect_count / max(sample_count, 1)",
+            "formula_variables": [],
+            "tender_page_refs": [],
+            "evidence_completeness": {"completeness_ratio": 0.9, "verification_ratio": 0.9, "verification_status": "pass"},
+            "uncertainty_profile": {"enabled": True, "confidence_level": 0.8},
+            "formula_safety_profile": {"enabled": True, "safe": True},
+        },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_select_formula_hit",
+        lambda _query: {
+            "node_id": "F-POWER-1",
+            "title": "继保公式",
+            "score": 80.0,
+            "formula_expression": "defect_count / max(sample_count, 1)",
+            "formula_variables": [],
+        },
+    )
+    monkeypatch.setattr(
+        "backend.zhifei_autoplan.v2.multi_agent_pipeline.search_graph_index",
+        lambda **_kwargs: {"total": 1},
+    )
+
+    audit = pipeline._audit_graph_support(index_matrix=index_matrix, sections=sections)
+    assert audit["ok"] is False
+    check = (audit.get("checks") or [{}])[0]
+    assert bool(check.get("power_failfast_target")) is True
+    assert bool(check.get("has_tender_page_refs")) is False
+    assert bool(check.get("has_formula_variables")) is False
+    assert bool(check.get("evidence_ok")) is False
+
+
+def test_make_section_text_appends_formula_sensitivity_and_evidence_gap_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = MultiAgentDocPipeline(kg_db_path=Path("backend/data/autoplan/v2/test_formula_hint.sqlite3"))
+
+    monkeypatch.setattr(
+        "backend.zhifei_autoplan.v2.multi_agent_pipeline.evaluate_formula_nodes_in_graph",
+        lambda **_kwargs: {"results": [{"computed_result": 1.2345}]},
+    )
+
+    text = pipeline._make_section_text(
+        dimension_item={"dimension": "四新技术", "keywords": ["能效", "PUE"]},
+        boq_support={"process": "机电安装", "duration_days": 5, "resources": ["电工班"], "quantity": 120},
+        graph_support={
+            "title": "AI极致能效制冷(PUE锁)",
+            "resource_requirements": {"crew_size": "8人/班"},
+            "formula_expression": "rework_volume * 100 / max(total_work_volume, 1)",
+            "formula_variables": ["rework_volume", "total_work_volume"],
+            "formula_sensitivity": {
+                "enabled": True,
+                "sensitivity": [
+                    {"variable": "total_work_volume", "elasticity": -1.01},
+                    {"variable": "rework_volume", "elasticity": 1.0},
+                ],
+            },
+            "evidence_gap_flag": True,
+            "applicable_conditions": {"season": "all"},
+            "safety_level": "medium",
+            "source_hierarchy": "答疑文件",
+        },
+        attempt=1,
+    )
+    assert "需现场核实补强" in text
+    assert "公式计算结果=" in text
+    assert "敏感变量Top=" in text
+
+
+def test_collect_knowledge_gaps_emits_user_prompt_for_evidence_required_actions() -> None:
+    pipeline = MultiAgentDocPipeline(kg_db_path=Path("backend/data/autoplan/v2/test_prompt.sqlite3"))
+    gaps = pipeline._collect_knowledge_gaps(
+        graph_audit={
+            "missing": [
+                {
+                    "dimension": "四新技术",
+                    "keywords": ["四新技术"],
+                    "graph_query": "四新技术",
+                    "node_ok": True,
+                    "parameter_ok": True,
+                    "evidence_ok": False,
+                    "power_failfast_target": True,
+                    "has_tender_page_refs": False,
+                    "has_formula_variables": False,
+                    "evidence_gap_flag": True,
+                    "evidence_required_actions": ["补充现场调试记录编号", "补充页码锚点"],
+                }
+            ]
+        },
+        audit_result={"checks": []},
+    )
+    assert len(gaps) >= 1
+    row = gaps[0]
+    assert row.get("type") == "evidence_incomplete"
+    assert bool(row.get("requires_user_supplement")) is True
+    assert "证据链不完整" in str(row.get("user_prompt") or "")

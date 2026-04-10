@@ -228,6 +228,13 @@ class TestInitProvider:
             client = LLMClient(provider="openai", model="gpt-4", api_key=None)
             mock.assert_called_once_with("", "gpt-4")
 
+    def test_init_provider_exception_degrades_to_none(self):
+        """provider 初始化异常时不直接抛出，交给 complete 降级处理"""
+        with patch.object(LLMClient, "_init_provider", side_effect=ImportError("missing optional dependency")):
+            client = LLMClient(provider="google", model="gemini-pro", api_key="test-key")
+            assert client._impl is None
+            assert isinstance(client._init_error, ImportError)
+
 
 # ==============================================================================
 # complete tests
@@ -246,6 +253,19 @@ class TestComplete:
         assert result["provider"] == "unknown"
         assert result["model"] == "test"
         assert result["text"] == ""
+
+    @pytest.mark.asyncio
+    async def test_complete_provider_init_error(self):
+        """provider 初始化失败时返回结构化错误，不直接抛异常"""
+        with patch.object(LLMClient, "_init_provider", side_effect=ImportError("missing optional dependency")):
+            client = LLMClient(provider="google", model="gemini-pro", api_key="test-key")
+            result = await client.complete("test prompt")
+
+        assert result["provider"] == "google"
+        assert result["model"] == "gemini-pro"
+        assert result["text"] == ""
+        assert "provider_init_failed:ImportError" in result["error"]
+        assert "missing optional dependency" in result["error"]
 
     @pytest.mark.asyncio
     async def test_complete_success(self):
