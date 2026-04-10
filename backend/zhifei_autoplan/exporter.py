@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import math
 import re
@@ -7,16 +8,42 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm
 from docx.shared import Pt
+from docx.shared import RGBColor
 from docx.oxml.ns import qn
 from backend.zhifei_autoplan.media import generate_section_visuals
 from backend.zhifei_autoplan.terminology_guard import load_global_terminology, normalize_text_terminology
+from backend.zhifei_autoplan.style_policy import normalize_cn_font_name
+from backend.zhifei_autoplan.docx_formatter import (
+    collect_delivery_report_payload,
+    merge_style_with_bidding_fallback,
+    prepare_delivery_render,
+    render_delivery_blocks,
+)
 
 
 _AUTOFIX_MARK_RE = re.compile(r"【自动补充】(?P<name>[^\n]{1,80}?)(?:：|:)")
 _OVERVIEW_SECTION_RE = re.compile(r"(工程概况|项目概况)")
+_TOC_CHAPTER_RE = re.compile(r"^第[一二三四五六七八九十百零0-9]+章")
+_TOC_SECTION_RE = re.compile(r"^第[一二三四五六七八九十百零0-9]+节")
+_TOC_CN_ITEM_RE = re.compile(r"^[一二三四五六七八九十百零]+[、.]")
+_TOC_NUMERIC_ITEM_RE = re.compile(r"^\d+(?:\.\d+){1,3}")
+_GENERIC_COVER_IMAGE_STEMS = {
+    "",
+    "image",
+    "img",
+    "photo",
+    "picture",
+    "现场照片",
+    "现场图",
+    "现状",
+    "微信图片",
+}
+_CN_DIGITS = {"0": "零", "1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
 
 
 def _strip_internal_autofix_markers(text: str) -> str:
@@ -71,6 +98,12 @@ def _merge_style(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, An
     return merged
 
 
+def _resolve_style_with_bidding_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    style_raw = data.get("style") if isinstance(data.get("style"), dict) else {}
+    bidding_cfg = data.get("bidding_format_config") if isinstance(data.get("bidding_format_config"), dict) else {}
+    return merge_style_with_bidding_fallback(user_style=style_raw, bidding_format_config=bidding_cfg)
+
+
 def _resolve_alignment(v: Any):
     if not isinstance(v, str):
         return None
@@ -90,12 +123,13 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
     headings_cfg = style.get("headings") if isinstance(style.get("headings"), dict) else {}
     margins_cfg = style.get("margins_cm") if isinstance(style.get("margins_cm"), dict) else {}
 
-    body_font = (
+    raw_body_font = (
         style.get("body_font")
         or (style.get("font") if isinstance(style.get("font"), str) else None)
         or font_cfg.get("eastAsia")
         or "宋体"
     )
+    body_font = normalize_cn_font_name(raw_body_font) or "宋体"
     body_latin_font = style.get("body_latin_font") or font_cfg.get("latin") or body_font
     body_size = _to_float(
         style.get("body_size") or style.get("font_size") or font_cfg.get("size_pt") or 14,
@@ -110,7 +144,7 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
     if line_spacing_pt is not None and line_spacing_pt <= 0:
         line_spacing_pt = 22.0
 
-    title_font = style.get("title_font") or headings_cfg.get("eastAsia") or body_font
+    title_font = normalize_cn_font_name(style.get("title_font") or headings_cfg.get("eastAsia") or body_font) or body_font
     title_latin_font = style.get("title_latin_font") or headings_cfg.get("latin") or body_latin_font
     title_size = _to_float(style.get("title_size") or headings_cfg.get("h2_size") or max(body_size + 2, 14), 14.0)
     doc_title_size = _to_float(
@@ -165,6 +199,10 @@ def _apply_page_setup(doc: Document, style_cfg: Dict[str, Any]):
 def _set_run_font(run, east_font: str, latin_font: str, size_pt: float):
     run.font.name = latin_font or east_font
     run.font.size = Pt(size_pt)
+    try:
+        run.font.color.rgb = RGBColor(0, 0, 0)
+    except Exception:
+        pass
     rpr = run._element.get_or_add_rPr()
     rfonts = rpr.get_or_add_rFonts()
     if east_font:
@@ -174,18 +212,494 @@ def _set_run_font(run, east_font: str, latin_font: str, size_pt: float):
         rfonts.set(qn("w:hAnsi"), latin_font)
 
 
+def _append_field_run(paragraph, instruction: str) -> None:
+    run = paragraph.add_run()
+    r = run._r
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = str(instruction or "")
+    fld_separate = OxmlElement("w:fldChar")
+    fld_separate.set(qn("w:fldCharType"), "separate")
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+    r.append(fld_begin)
+    r.append(instr)
+    r.append(fld_separate)
+    r.append(fld_end)
+
+
+def _usable_page_width_cm(doc: Document) -> float:
+    try:
+        sec = doc.sections[-1]
+        width_emu = int(sec.page_width) - int(sec.left_margin) - int(sec.right_margin)
+        return max(8.0, float(width_emu) / 360000.0)
+    except Exception:
+        return 17.0
+
+
+def _clear_block_container(container) -> None:
+    try:
+        for paragraph in list(container.paragraphs):
+            p = paragraph._element
+            parent = p.getparent()
+            if parent is not None:
+                parent.remove(p)
+    except Exception:
+        pass
+    try:
+        for table in list(container.tables):
+            t = table._element
+            parent = t.getparent()
+            if parent is not None:
+                parent.remove(t)
+    except Exception:
+        pass
+
+
+def _set_cell_width(cell, width_cm: float) -> None:
+    try:
+        cell.width = Cm(float(width_cm))
+    except Exception:
+        pass
+    try:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        tc_w = tc_pr.first_child_found_in("w:tcW")
+        if tc_w is None:
+            tc_w = OxmlElement("w:tcW")
+            tc_pr.append(tc_w)
+        tc_w.set(qn("w:w"), str(int(float(width_cm) * 567)))
+        tc_w.set(qn("w:type"), "dxa")
+    except Exception:
+        pass
+
+
+def _set_cell_shading(cell, fill: str) -> None:
+    try:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        for child in list(tc_pr):
+            if child.tag == qn("w:shd"):
+                tc_pr.remove(child)
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), str(fill or "").strip() or "FFFFFF")
+        tc_pr.append(shd)
+    except Exception:
+        pass
+
+
+def _set_cell_border(cell, **kwargs) -> None:
+    try:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        tc_borders = tc_pr.first_child_found_in("w:tcBorders")
+        if tc_borders is None:
+            tc_borders = OxmlElement("w:tcBorders")
+            tc_pr.append(tc_borders)
+        for edge, cfg in kwargs.items():
+            edge_el = tc_borders.find(qn(f"w:{edge}"))
+            if edge_el is None:
+                edge_el = OxmlElement(f"w:{edge}")
+                tc_borders.append(edge_el)
+            edge_el.set(qn("w:val"), str(cfg.get("val", "single")))
+            edge_el.set(qn("w:sz"), str(cfg.get("sz", 6)))
+            edge_el.set(qn("w:space"), str(cfg.get("space", 0)))
+            edge_el.set(qn("w:color"), str(cfg.get("color", "D9EAF0")))
+    except Exception:
+        pass
+
+
+def _set_table_all_borders(table, *, color: str, sz: int = 6, top: bool = False, bottom: bool = False) -> None:
+    for row in table.rows:
+        for cell in row.cells:
+            kwargs = {}
+            if top:
+                kwargs["top"] = {"color": color, "sz": sz}
+            if bottom:
+                kwargs["bottom"] = {"color": color, "sz": sz}
+            if kwargs:
+                _set_cell_border(cell, **kwargs)
+
+
+def _hide_paragraph(paragraph) -> None:
+    for run in paragraph.runs:
+        try:
+            rpr = run._element.get_or_add_rPr()
+            vanish = OxmlElement("w:vanish")
+            rpr.append(vanish)
+        except Exception:
+            continue
+
+
+def _apply_footer_page_numbers(
+    doc: Document,
+    style_cfg: Dict[str, Any],
+    *,
+    bidder_company: str,
+    logo_path: str | None,
+) -> None:
+    font_east = str(style_cfg.get("body_font") or "宋体")
+    font_latin = str(style_cfg.get("body_latin_font") or font_east)
+    usable_width = _usable_page_width_cm(doc)
+    company = str(bidder_company or "").strip()
+    logo = str(logo_path or "").strip()
+    if logo and not Path(logo).exists():
+        logo = ""
+    for sec in doc.sections:
+        try:
+            sec.different_first_page_header_footer = True
+        except Exception:
+            pass
+        try:
+            footer = sec.footer
+        except Exception:
+            continue
+        try:
+            footer.is_linked_to_previous = False
+        except Exception:
+            pass
+        _clear_block_container(footer)
+        table = footer.add_table(rows=1, cols=2, width=Cm(usable_width))
+        try:
+            table.autofit = False
+        except Exception:
+            pass
+        _set_table_all_borders(table, color="14A6AE", sz=10, top=True, bottom=False)
+        left_cell = table.cell(0, 0)
+        right_cell = table.cell(0, 1)
+        _set_cell_width(left_cell, usable_width * 0.72)
+        _set_cell_width(right_cell, usable_width * 0.28)
+        try:
+            left_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            right_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        except Exception:
+            pass
+        p_left = left_cell.paragraphs[0] if left_cell.paragraphs else left_cell.add_paragraph()
+        p_right = right_cell.paragraphs[0] if right_cell.paragraphs else right_cell.add_paragraph()
+        try:
+            p_left.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p_right.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            p_left.paragraph_format.space_before = Pt(4)
+            p_left.paragraph_format.space_after = Pt(0)
+            p_right.paragraph_format.space_before = Pt(4)
+            p_right.paragraph_format.space_after = Pt(0)
+        except Exception:
+            pass
+        if logo:
+            try:
+                p_left.add_run().add_picture(logo, width=Cm(1.0))
+            except Exception:
+                pass
+        if company:
+            company_run = p_left.add_run(f" {company}" if logo else company)
+            _set_run_font(company_run, font_east, font_latin, 12.0)
+            try:
+                company_run.bold = True
+            except Exception:
+                pass
+        _append_field_run(p_right, "PAGE")
+        for run in p_right.runs:
+            _set_run_font(run, font_east, font_latin, 14.0)
+
+
+def _normalize_front_matter_page_mode(value: Any) -> str:
+    return "exclude" if str(value or "").strip().lower() == "exclude" else "include"
+
+
+def _normalize_full_index_enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "enable", "enabled"}
+
+
+def _resolve_front_matter_plan(
+    *,
+    style_raw: Dict[str, Any],
+    data: Dict[str, Any],
+    body_pages_estimate: int,
+) -> Dict[str, Any]:
+    cover_pages = max(1, _to_int(style_raw.get("cover_page_count"), 1))
+    configured_index_pages = max(1, _to_int(style_raw.get("full_index_page_count"), 1))
+    index_enabled = _normalize_full_index_enabled(style_raw.get("full_index_enabled"))
+    toc_pages = max(1, _to_int(style_raw.get("toc_page_count"), 2))
+    count_mode = _normalize_front_matter_page_mode(style_raw.get("front_matter_page_mode"))
+    document_total_target = max(
+        1,
+        _to_int(style_raw.get("document_total_pages_target"), 0)
+        or _to_int(data.get("total_pages_target"), 0)
+        or int(body_pages_estimate or 1),
+    )
+    full_index_pages = configured_index_pages if index_enabled else 0
+    actual_front_matter = cover_pages + toc_pages + full_index_pages
+    effective_document_pages = document_total_target if count_mode == "include" else document_total_target + actual_front_matter
+    return {
+        "cover_pages": cover_pages,
+        "toc_pages": toc_pages,
+        "configured_index_pages": configured_index_pages,
+        "full_index_enabled": index_enabled,
+        "count_mode": count_mode,
+        "full_index_pages": full_index_pages,
+        "document_total_target": document_total_target,
+        "effective_document_pages": effective_document_pages,
+    }
+
+
+def _insert_full_index_page(
+    doc: Document,
+    apply_paragraph,
+    *,
+    topic: str,
+    sections: List[Dict[str, Any]],
+    chapter_pages: Dict[str, Any],
+    effective_document_pages: int,
+    index_entries: List[Dict[str, Any]] | None = None,
+) -> None:
+    h = doc.add_heading("全文索引", level=1)
+    apply_paragraph(h, is_title=True)
+    intro = doc.add_paragraph(
+        f"{str(topic or '施工组织设计').strip()}；章节数={len(sections)}；成品预计总页数={max(1, int(effective_document_pages or 1))}页。"
+    )
+    apply_paragraph(intro)
+    if not sections:
+        note = doc.add_paragraph("当前无可索引章节。")
+        apply_paragraph(note)
+        doc.add_page_break()
+        return
+    normalized_entries = [x for x in (index_entries or []) if isinstance(x, dict)]
+    if normalized_entries:
+        for idx, item in enumerate(normalized_entries, start=1):
+            title = str(item.get("title") or f"章节{idx}").strip() or f"章节{idx}"
+            target_pages = _to_int(item.get("planned_pages"), 0)
+            line = str(item.get("summary") or "").strip() or f"{idx:02d}. {title}"
+            if target_pages and "约" not in line:
+                line += f"（约{int(target_pages)}页）"
+            p = doc.add_paragraph(line)
+            apply_paragraph(p)
+    else:
+        for idx, sec in enumerate(sections, start=1):
+            title = str(sec.get("title") or f"章节{idx}").strip() or f"章节{idx}"
+            target_pages = _extract_chapter_page_target(chapter_pages, title)
+            line = f"{idx:02d}. {title}"
+            if target_pages:
+                line += f"（约{int(target_pages)}页）"
+            p = doc.add_paragraph(line)
+            apply_paragraph(p)
+    doc.add_page_break()
+
+
+def _build_static_toc_entries(
+    *,
+    sections: List[Dict[str, Any]],
+    section_pages: List[int],
+    front_matter_plan: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    cover_pages = max(1, _to_int(front_matter_plan.get("cover_pages"), 1))
+    toc_pages = max(1, _to_int(front_matter_plan.get("toc_pages"), 1))
+    full_index_pages = max(0, _to_int(front_matter_plan.get("full_index_pages"), 0))
+    current_page = cover_pages + full_index_pages + toc_pages + 1
+    entries: List[Dict[str, Any]] = []
+    for idx, sec in enumerate(sections):
+        title = str((sec or {}).get("title") or f"章节{idx + 1}").strip() or f"章节{idx + 1}"
+        planned_pages = max(1, _to_int(section_pages[idx] if idx < len(section_pages) else 1, 1))
+        entries.append(
+            {
+                "title": title,
+                "start_page": current_page,
+                "planned_pages": planned_pages,
+            }
+        )
+        current_page += planned_pages
+    return entries
+
+
+def _paginate_toc_entries(entries: List[Dict[str, Any]], toc_pages: int) -> List[List[Dict[str, Any]]]:
+    pages = max(1, int(toc_pages or 1))
+    out: List[List[Dict[str, Any]]] = []
+    cursor = 0
+    total = len(entries)
+    for page_idx in range(pages):
+        remaining_pages = pages - page_idx
+        remaining_entries = total - cursor
+        if remaining_entries <= 0:
+            out.append([])
+            continue
+        take = max(1, math.ceil(remaining_entries / max(1, remaining_pages)))
+        out.append(entries[cursor: cursor + take])
+        cursor += take
+    return out
+
+
+def _infer_toc_level(entry: Dict[str, Any]) -> int:
+    raw = _to_int(entry.get("level"), 0) if isinstance(entry, dict) else 0
+    if raw > 0:
+        return min(3, raw)
+    title = re.sub(r"\s+", " ", str((entry or {}).get("title") or "").strip())
+    if _TOC_CHAPTER_RE.match(title):
+        return 1
+    if _TOC_SECTION_RE.match(title):
+        return 2
+    if _TOC_CN_ITEM_RE.match(title) or _TOC_NUMERIC_ITEM_RE.match(title):
+        return 3
+    return 1
+
+
+def _format_toc_display_title(title: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(title or "").strip())
+    for pattern in (_TOC_CHAPTER_RE, _TOC_SECTION_RE):
+        match = pattern.match(cleaned)
+        if match:
+            prefix = match.group(0)
+            suffix = cleaned[len(prefix):].strip(" 、.")
+            return f"{prefix}、{suffix}" if suffix else prefix
+    return cleaned
+
+
+def _toc_entry_style(style_cfg: Dict[str, Any], level: int) -> Dict[str, Any]:
+    body_font = str(style_cfg.get("body_font") or "宋体")
+    body_latin = str(style_cfg.get("body_latin_font") or body_font)
+    title_font = str(style_cfg.get("title_font") or body_font)
+    title_latin = str(style_cfg.get("title_latin_font") or body_latin)
+    body_size = _to_float(style_cfg.get("body_size"), 14.0)
+    title_size = _to_float(style_cfg.get("title_size"), body_size + 2)
+    if level <= 1:
+        return {
+            "font_east": title_font,
+            "font_latin": title_latin,
+            "size_pt": max(title_size, body_size + 2),
+            "color": RGBColor(0, 0, 0),
+            "bold": True,
+            "left_indent_cm": 0.0,
+        }
+    if level == 2:
+        return {
+            "font_east": body_font,
+            "font_latin": body_latin,
+            "size_pt": max(body_size + 1, 14.5),
+            "color": RGBColor(16, 158, 170),
+            "bold": False,
+            "left_indent_cm": 1.0,
+        }
+    return {
+        "font_east": body_font,
+        "font_latin": body_latin,
+        "size_pt": max(body_size, 13.5),
+        "color": RGBColor(0, 0, 0),
+        "bold": False,
+        "left_indent_cm": 2.0,
+    }
+
+
+def _render_toc_line(
+    doc: Document,
+    entry: Dict[str, Any],
+    *,
+    style_cfg: Dict[str, Any],
+) -> None:
+    level = _infer_toc_level(entry)
+    line_cfg = _toc_entry_style(style_cfg, level)
+    title = _format_toc_display_title(str(entry.get("title") or "章节"))
+    page_number = int(_to_int(entry.get("start_page"), 1) or 1)
+    dot_count = max(10, 52 - len(title) - max(0, level - 1) * 4)
+    line_text = f"{title}{'·' * dot_count}{page_number}"
+    paragraph = doc.add_paragraph()
+    try:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.left_indent = Cm(float(line_cfg["left_indent_cm"]))
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(4 if level == 1 else 2)
+        paragraph.paragraph_format.line_spacing = Pt(22)
+    except Exception:
+        pass
+    run = paragraph.add_run(line_text)
+    _set_run_font(run, str(line_cfg["font_east"]), str(line_cfg["font_latin"]), float(line_cfg["size_pt"]))
+    try:
+        run.bold = bool(line_cfg["bold"])
+        run.font.color.rgb = line_cfg["color"]
+    except Exception:
+        pass
+
+
+def _insert_auto_toc(
+    doc: Document,
+    apply_paragraph,
+    *,
+    style_cfg: Dict[str, Any],
+    toc_pages: int = 1,
+    toc_entries: List[Dict[str, Any]] | None = None,
+) -> None:
+    pages = max(1, int(toc_pages or 1))
+    page_chunks = _paginate_toc_entries(toc_entries or [], pages)
+    for page_idx, page_entries in enumerate(page_chunks):
+        heading_text = "目录" if page_idx == 0 else "目录（续）"
+        h = doc.add_paragraph()
+        _style_cover_paragraph(
+            h,
+            east_font=str(style_cfg.get("title_font") or "宋体"),
+            latin_font=str(style_cfg.get("title_latin_font") or style_cfg.get("body_latin_font") or "宋体"),
+            size_pt=max(_to_float(style_cfg.get("doc_title_size"), 18.0), 18.0),
+            text=heading_text,
+            color=(16, 158, 170),
+            space_before_pt=6,
+            space_after_pt=10,
+            line_spacing_pt=24,
+        )
+        p = doc.add_paragraph()
+        _append_field_run(p, 'TOC \\o "1-2" \\h \\z \\u')
+        apply_paragraph(p)
+        _hide_paragraph(p)
+        try:
+            p.paragraph_format.first_line_indent = Cm(0)
+        except Exception:
+            pass
+        if page_entries:
+            for entry in page_entries:
+                _render_toc_line(doc, entry, style_cfg=style_cfg)
+        elif page_idx == 0:
+            empty = doc.add_paragraph("当前无章节目录。")
+            apply_paragraph(empty)
+            try:
+                empty.paragraph_format.first_line_indent = Cm(0)
+                empty.paragraph_format.left_indent = Cm(0)
+            except Exception:
+                pass
+        doc.add_page_break()
+
+
 def _apply_style(doc: Document, style: Dict[str, Any]):
     cfg = _normalize_style(style)
+    def _configure_named_style(style_name: str, east_font: str, latin_font: str, size_pt: float):
+        try:
+            st = doc.styles[style_name]
+            st.font.name = latin_font or east_font
+            st.font.size = Pt(size_pt)
+            st.font.color.rgb = RGBColor(0, 0, 0)
+            rpr = st.element.get_or_add_rPr()
+            rfonts = rpr.get_or_add_rFonts()
+            if east_font:
+                rfonts.set(qn("w:eastAsia"), east_font)
+            if latin_font:
+                rfonts.set(qn("w:ascii"), latin_font)
+                rfonts.set(qn("w:hAnsi"), latin_font)
+        except Exception:
+            pass
     try:
         st = doc.styles["Normal"]
         st.font.name = cfg["body_latin_font"] or cfg["body_font"]
         st.font.size = Pt(cfg["body_size"])
+        st.font.color.rgb = RGBColor(0, 0, 0)
         if cfg.get("line_spacing_pt") is not None:
             st.paragraph_format.line_spacing = Pt(cfg["line_spacing_pt"])
         else:
             st.paragraph_format.line_spacing = cfg["line_spacing"]
     except Exception:
         pass
+    _configure_named_style("Heading 1", cfg["title_font"], cfg["title_latin_font"], cfg["doc_title_size"])
+    _configure_named_style("Heading 2", cfg["title_font"], cfg["title_latin_font"], cfg["title_size"])
+    _configure_named_style("Heading 3", cfg["title_font"], cfg["title_latin_font"], cfg["title_size"])
 
     def apply_paragraph(p, is_title: bool = False):
         font_east = cfg["title_font"] if is_title else cfg["body_font"]
@@ -209,77 +723,389 @@ def _apply_style(doc: Document, style: Dict[str, Any]):
     return apply_paragraph
 
 
-def _apply_branding_header(doc: Document, style_cfg: Dict[str, Any], *, topic: str, bidder_company: str, logo_path: str | None):
+def _apply_branding_header(
+    doc: Document,
+    style_cfg: Dict[str, Any],
+    *,
+    project_name: str,
+    doc_title: str,
+) -> None:
     """
-    Best-effort brand output:
-    - Put company name (and logo if available) into page header.
-    This is intentionally lightweight: it should not affect tender-driven chapter structure.
+    Render a lightweight tender-style header band for non-cover pages.
     """
-    company = str(bidder_company or "").strip()
-    logo = str(logo_path or "").strip()
-    if logo and not Path(logo).exists():
-        logo = ""
-    if not company and not logo:
+    project_label = str(project_name or "").strip()
+    title_label = str(doc_title or "施工组织设计").strip()
+    if not project_label and not title_label:
         return
 
     font_east = str(style_cfg.get("body_font") or "宋体")
     font_latin = str(style_cfg.get("body_latin_font") or font_east)
-    size_pt = 9.0
+    usable_width = _usable_page_width_cm(doc)
 
     for sec in doc.sections:
+        try:
+            sec.different_first_page_header_footer = True
+        except Exception:
+            pass
         try:
             header = sec.header
         except Exception:
             continue
         try:
-            # Avoid duplicate branding if caller exports multiple times into same doc instance.
+            header.is_linked_to_previous = False
+        except Exception:
+            pass
+        try:
             if getattr(header, "_zf_branding", False):
                 continue
             setattr(header, "_zf_branding", True)
         except Exception:
             pass
-
+        _clear_block_container(header)
         try:
-            table = header.add_table(rows=1, cols=2)
-            try:
-                table.autofit = True
-            except Exception:
-                pass
-            cell_logo = table.cell(0, 0)
-            cell_text = table.cell(0, 1)
-
-            # Logo (left)
-            if logo:
-                p0 = cell_logo.paragraphs[0] if cell_logo.paragraphs else cell_logo.add_paragraph()
+            table = header.add_table(rows=1, cols=4, width=Cm(usable_width))
+            table.autofit = False
+            cells = table.rows[0].cells
+            widths = [1.2, 0.55, max(8.5, usable_width - 5.15), 3.4]
+            fills = ["169CA6", "2CC7D5", None, None]
+            for idx, cell in enumerate(cells):
+                _set_cell_width(cell, widths[idx])
                 try:
-                    p0.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 except Exception:
                     pass
-                try:
-                    r0 = p0.add_run()
-                    r0.add_picture(logo, width=Cm(2.0))
-                except Exception:
-                    pass
-
-            # Text (right)
-            p1 = cell_text.paragraphs[0] if cell_text.paragraphs else cell_text.add_paragraph()
+                if fills[idx]:
+                    _set_cell_shading(cell, fills[idx])
+            _set_table_all_borders(table, color="CDEAF0", sz=8, top=False, bottom=True)
+            p_name = cells[2].paragraphs[0] if cells[2].paragraphs else cells[2].add_paragraph()
+            p_title = cells[3].paragraphs[0] if cells[3].paragraphs else cells[3].add_paragraph()
             try:
-                p1.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                p_name.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                p_title.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             except Exception:
                 pass
-            header_text = company or ""
-            if header_text and topic:
-                header_text = f"{header_text} | {topic}"
-            elif topic:
-                header_text = str(topic)
-            if header_text:
-                r1 = p1.add_run(header_text)
+            if project_label:
+                r_name = p_name.add_run(project_label)
+                _set_run_font(r_name, font_east, font_latin, 13.0)
                 try:
-                    _set_run_font(r1, font_east, font_latin, size_pt)
+                    r_name.bold = True
+                except Exception:
+                    pass
+            if title_label:
+                r_title = p_title.add_run(title_label)
+                _set_run_font(r_title, font_east, font_latin, 13.5)
+                try:
+                    r_title.bold = True
+                    r_title.font.color.rgb = RGBColor(16, 158, 170)
                 except Exception:
                     pass
         except Exception:
             continue
+
+
+def _topic_to_cover_project_name(topic: Any) -> str:
+    raw = str(topic or "").strip()
+    if not raw:
+        return ""
+    for suffix in ("施工组织设计方案", "施工组织设计"):
+        if raw.endswith(suffix):
+            return raw[: -len(suffix)].strip()
+    return raw
+
+
+def _to_cn_month(month: int) -> str:
+    month = max(1, min(12, int(month or 1)))
+    if month < 10:
+        return _CN_DIGITS[str(month)]
+    if month == 10:
+        return "十"
+    if month < 20:
+        return "十" + _CN_DIGITS[str(month % 10)]
+    return _CN_DIGITS[str(month // 10)] + "十" + (_CN_DIGITS[str(month % 10)] if month % 10 else "")
+
+
+def _format_cover_year_month(dt: _dt.datetime | None = None) -> str:
+    current = dt or _dt.datetime.now()
+    year_cn = "".join(_CN_DIGITS.get(ch, ch) for ch in f"{int(current.year):04d}")
+    return f"{year_cn}年{_to_cn_month(int(current.month))}月"
+
+
+def _style_cover_paragraph(
+    paragraph,
+    *,
+    east_font: str,
+    latin_font: str,
+    size_pt: float,
+    text: str = "",
+    bold: bool = False,
+    color: tuple[int, int, int] | None = None,
+    space_before_pt: float = 0,
+    space_after_pt: float = 0,
+    line_spacing_pt: float | None = None,
+) -> None:
+    try:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.paragraph_format.space_before = Pt(float(space_before_pt or 0))
+        paragraph.paragraph_format.space_after = Pt(float(space_after_pt or 0))
+        if line_spacing_pt is not None:
+            paragraph.paragraph_format.line_spacing = Pt(float(line_spacing_pt))
+    except Exception:
+        pass
+    run = paragraph.add_run(str(text or ""))
+    _set_run_font(run, east_font, latin_font, size_pt)
+    try:
+        run.bold = bool(bold)
+    except Exception:
+        pass
+    if color:
+        try:
+            run.font.color.rgb = RGBColor(int(color[0]), int(color[1]), int(color[2]))
+        except Exception:
+            pass
+
+
+def _cover_image_caption(project_name: str, filename: str, source_hint: str) -> str:
+    stem = Path(str(filename or "")).stem.strip()
+    stem = re.sub(r"_+", " ", stem)
+    stem = re.sub(r"\(\d+\)$", "", stem).strip()
+    stem = re.sub(r"（\d+）$", "", stem).strip()
+    stem = re.sub(r"^微信图片[_\-0-9 ]*$", "", stem).strip()
+    name = str(project_name or "").strip()
+    if source_hint == "site_photo":
+        if stem and stem not in _GENERIC_COVER_IMAGE_STEMS:
+            return f"{name} · {stem}"
+        return f"{name} · 现场实景图" if name else "现场实景图"
+    if stem and stem not in _GENERIC_COVER_IMAGE_STEMS:
+        return f"{name} · {stem}" if name else stem
+    return f"{name} · 项目效果图" if name else "项目效果图"
+
+
+def _pick_cover_image_from_audit(
+    project_id: str | None,
+    project_name: str,
+    topic: str,
+    *,
+    workspace_dir: str | None = None,
+) -> Dict[str, str] | None:
+    pid = str(project_id or "").strip()
+    if not pid:
+        return None
+    from backend.zhifei_autoplan.workspace import workspace_paths
+
+    audit_path = workspace_paths(workspace_dir)["ingest_audit"] if workspace_dir else Path("backend/data/audit/ingest.jsonl")
+    if not audit_path.exists():
+        return None
+    try:
+        records = audit_path.read_text(encoding="utf-8", errors="ignore").splitlines()[::-1]
+    except Exception:
+        return None
+    best: Dict[str, str] | None = None
+    best_rank = -1
+    for ln in records:
+        try:
+            rec = json.loads(ln)
+        except Exception:
+            continue
+        if str(rec.get("project_id") or "").strip() != pid:
+            continue
+        source_hint = str(rec.get("source_hint") or "").strip().lower()
+        tags = {str(x or "").strip().lower() for x in (rec.get("tags") or [])}
+        if source_hint not in {"site_photo", "drawing_standard"} and not ({"site_photo", "drawing"} & tags):
+            continue
+        candidate = ""
+        saved_as = str(rec.get("saved_as") or "").strip()
+        preview = str(rec.get("preview_saved_as") or "").strip()
+        saved_path = Path(saved_as) if saved_as else None
+        preview_path = Path(preview) if preview else None
+        if saved_path and saved_path.exists() and saved_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
+            candidate = str(saved_path)
+        elif preview_path and preview_path.exists():
+            candidate = str(preview_path)
+        if not candidate:
+            continue
+        rank = 30 if source_hint == "site_photo" or "site_photo" in tags else 10
+        filename = str(rec.get("filename") or Path(candidate).name)
+        lowered = filename.lower()
+        if any(k in lowered for k in ("正立面", "正北", "主入口", "门头", "效果图")):
+            rank += 5
+        if best is not None and rank < best_rank:
+            continue
+        caption = _cover_image_caption(project_name or _topic_to_cover_project_name(topic), filename, source_hint or "drawing_standard")
+        best = {"path": candidate, "caption": caption}
+        best_rank = rank
+    return best
+
+
+def _resolve_cover_meta(data: Dict[str, Any]) -> Dict[str, str]:
+    workspace_dir = str(data.get("workspace_dir") or "").strip() or None
+    branding = data.get("branding") if isinstance(data.get("branding"), dict) else {}
+    project_id = str(data.get("project_id") or branding.get("project_id") or "").strip()
+    project_name = str(data.get("project_name") or "").strip()
+    project_code = str(data.get("project_code") or "").strip()
+    if project_id and (not project_name or not project_code):
+        try:
+            from backend.zhifei_autoplan.tender_store import load_tender_matrix
+
+            tender = load_tender_matrix(project_id=project_id, workspace_dir=workspace_dir) or {}
+        except Exception:
+            tender = {}
+        if not project_name:
+            project_name = str(tender.get("project_name") or "").strip()
+        if not project_code:
+            project_code = str(tender.get("project_code") or "").strip()
+    topic = str(data.get("topic") or "施工组织设计").strip()
+    if not project_name:
+        project_name = _topic_to_cover_project_name(topic)
+    bidder_company = str(branding.get("bidder_company") or data.get("bidder_company") or "").strip()
+    logo_path = str(branding.get("logo_path") or data.get("logo_path") or "").strip()
+    if logo_path and not Path(logo_path).exists():
+        logo_path = ""
+    cover_image_path = str(data.get("cover_image_path") or "").strip()
+    cover_image_caption = str(data.get("cover_image_caption") or "").strip()
+    if cover_image_path and not Path(cover_image_path).exists():
+        cover_image_path = ""
+    if not cover_image_path:
+        picked = _pick_cover_image_from_audit(project_id, project_name, topic, workspace_dir=workspace_dir)
+        if picked:
+            cover_image_path = str(picked.get("path") or "").strip()
+            if not cover_image_caption:
+                cover_image_caption = str(picked.get("caption") or "").strip()
+    if cover_image_path and not cover_image_caption:
+        cover_image_caption = _cover_image_caption(project_name, Path(cover_image_path).name, "site_photo")
+    return {
+        "project_id": project_id,
+        "project_name": project_name,
+        "project_code": project_code,
+        "topic": topic,
+        "cover_title": "施工组织设计",
+        "cover_image_path": cover_image_path,
+        "cover_image_caption": cover_image_caption,
+        "bidder_company": bidder_company,
+        "logo_path": logo_path,
+        "issue_year_month": str(data.get("issue_year_month") or "").strip() or _format_cover_year_month(),
+    }
+
+
+def _insert_cover_page(doc: Document, style_cfg: Dict[str, Any], cover_meta: Dict[str, str]) -> None:
+    project_name = str(cover_meta.get("project_name") or "").strip()
+    project_code = str(cover_meta.get("project_code") or "").strip()
+    cover_title = str(cover_meta.get("cover_title") or "施工组织设计").strip()
+    cover_image_path = str(cover_meta.get("cover_image_path") or "").strip()
+    cover_image_caption = str(cover_meta.get("cover_image_caption") or "").strip()
+    bidder_company = str(cover_meta.get("bidder_company") or "").strip()
+    logo_path = str(cover_meta.get("logo_path") or "").strip()
+    issue_year_month = str(cover_meta.get("issue_year_month") or "").strip()
+
+    body_font = str(style_cfg.get("body_font") or "宋体")
+    body_latin_font = str(style_cfg.get("body_latin_font") or body_font)
+    cover_title_font = "华文中宋"
+    cover_title_latin_font = str(style_cfg.get("title_latin_font") or body_latin_font)
+
+    if project_name:
+        p = doc.add_paragraph()
+        _style_cover_paragraph(
+            p,
+            east_font=body_font,
+            latin_font=body_latin_font,
+            size_pt=19,
+            text=project_name,
+            space_before_pt=76,
+            space_after_pt=10,
+            line_spacing_pt=28,
+        )
+    if project_code:
+        p = doc.add_paragraph()
+        _style_cover_paragraph(
+            p,
+            east_font=body_font,
+            latin_font=body_latin_font,
+            size_pt=17,
+            text=f"招标项目编号：{project_code}",
+            space_after_pt=10,
+            line_spacing_pt=24,
+        )
+
+    p_title = doc.add_paragraph()
+    _style_cover_paragraph(
+        p_title,
+        east_font=cover_title_font,
+        latin_font=cover_title_latin_font,
+        size_pt=34,
+        text=cover_title,
+        bold=True,
+        color=(16, 158, 170),
+        space_before_pt=8,
+        space_after_pt=18,
+        line_spacing_pt=40,
+    )
+
+    if cover_image_path and Path(cover_image_path).exists():
+        p_img = doc.add_paragraph()
+        try:
+            p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_img.paragraph_format.space_before = Pt(6)
+            p_img.paragraph_format.space_after = Pt(6)
+        except Exception:
+            pass
+        try:
+            r_img = p_img.add_run()
+            r_img.add_picture(cover_image_path, width=Cm(16.8))
+        except Exception:
+            pass
+    if cover_image_caption:
+        p_cap = doc.add_paragraph()
+        _style_cover_paragraph(
+            p_cap,
+            east_font=body_font,
+            latin_font=body_latin_font,
+            size_pt=15,
+            text=cover_image_caption,
+            space_after_pt=8,
+            line_spacing_pt=22,
+        )
+
+    if logo_path and Path(logo_path).exists():
+        p_logo = doc.add_paragraph()
+        try:
+            p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_logo.paragraph_format.space_before = Pt(8)
+            p_logo.paragraph_format.space_after = Pt(4)
+        except Exception:
+            pass
+        try:
+            r_logo = p_logo.add_run()
+            r_logo.add_picture(logo_path, width=Cm(3.0))
+        except Exception:
+            pass
+
+    if bidder_company:
+        p_company = doc.add_paragraph()
+        _style_cover_paragraph(
+            p_company,
+            east_font=body_font,
+            latin_font=body_latin_font,
+            size_pt=18,
+            text=f"公司名称：{bidder_company}",
+            bold=True,
+            space_before_pt=4,
+            space_after_pt=10,
+            line_spacing_pt=24,
+        )
+
+    if issue_year_month:
+        p_date = doc.add_paragraph()
+        _style_cover_paragraph(
+            p_date,
+            east_font=body_font,
+            latin_font=body_latin_font,
+            size_pt=18,
+            text=issue_year_month,
+            bold=True,
+            space_before_pt=6,
+            line_spacing_pt=24,
+        )
+
+    doc.add_page_break()
 
 
 def _extract_chapter_page_target(chapter_pages: Dict[str, Any], title: str) -> int | None:
@@ -347,20 +1173,63 @@ def _auto_density_images_for_pages(chapter_pages: int, total_pages: int) -> int:
     return cp
 
 
+def _build_report_paths(output_path: str) -> tuple[Path, Path]:
+    out = Path(output_path)
+    return (
+        out.with_suffix(".build_report.json"),
+        out.with_suffix(".build_report.log"),
+    )
+
+
+def _write_delivery_build_report(
+    *,
+    output_path: str,
+    topic: str,
+    section_reports: List[Dict[str, Any]],
+    internal_payload: Dict[str, Any],
+) -> None:
+    report_json_path, report_log_path = _build_report_paths(output_path)
+    payload = collect_delivery_report_payload(
+        section_reports=section_reports,
+        internal_payload={"topic": topic, **(internal_payload or {})},
+    )
+    report_json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    lines = [f"topic={topic}", f"sections={len(section_reports)}"]
+    for item in section_reports:
+        title = str(item.get("title") or "章节").strip() or "章节"
+        lines.append(
+            " | ".join(
+                [
+                    f"title={title}",
+                    f"visible_length={len(str(item.get('visible_text') or ''))}",
+                    f"table_count={int(item.get('table_count') or 0)}",
+                    f"hidden_anchor_count={int(item.get('hidden_anchor_count') or 0)}",
+                    f"stripped_items={len(item.get('stripped_items') or [])}",
+                ]
+            )
+        )
+    report_log_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
 def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
-    style_raw = data.get("style") or {}
+    style_raw = _resolve_style_with_bidding_config(data)
     style_cfg = _normalize_style(style_raw)
     chapter_pages = data.get("chapter_pages") or {}
     chapter_styles = style_raw.get("chapter_styles") if isinstance(style_raw, dict) else {}
+    sections = data.get("sections") or []
 
     doc = Document()
     _apply_page_setup(doc, style_cfg)
     apply_paragraph = _apply_style(doc, style_raw)
 
     topic = data.get("topic") or "施组方案"
-    branding = data.get("branding") if isinstance(data.get("branding"), dict) else {}
-    bidder_company = str(branding.get("bidder_company") or "").strip()
-    logo_path = branding.get("logo_path")
+    workspace_dir = str(data.get("workspace_dir") or "").strip() or None
+    cover_meta = _resolve_cover_meta(data)
+    bidder_company = str(cover_meta.get("bidder_company") or "").strip()
+    logo_path = cover_meta.get("logo_path")
 
     def _brand_image_with_logo(src_path: str) -> str:
         """
@@ -403,52 +1272,77 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         except Exception:
             return src_path
 
-    # Header branding (company + logo), best-effort.
-    _apply_branding_header(doc, style_cfg, topic=str(topic), bidder_company=bidder_company, logo_path=logo_path)
+    def _effective_pages_for_section(title: str, content_doc: str, section_style_cfg: Dict[str, Any]) -> int:
+        t = _extract_chapter_page_target(chapter_pages, title)
+        if t:
+            return int(t)
+        chars_per_page = _estimate_chars_per_page(section_style_cfg)
+        return _estimate_content_pages(content_doc, chars_per_page)
 
-    # Cover page (optional): logo + project title + bidder.
-    has_cover = False
-    if isinstance(logo_path, str) and logo_path.strip() and Path(logo_path).exists():
-        try:
-            doc.add_picture(str(logo_path), width=Cm(6))
-            try:
-                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            except Exception:
-                pass
-            has_cover = True
-        except Exception:
-            pass
-    if bidder_company:
-        p = doc.add_paragraph(bidder_company)
-        apply_paragraph(p, is_title=True)
-        try:
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        except Exception:
-            pass
-        has_cover = True
+    prepared_sections: List[Dict[str, Any]] = []
+    planned_section_pages: List[int] = []
+    body_planned_pages = 0
+    for sec in sections:
+        title = str(sec.get("title") or "章节")
+        content = _strip_internal_autofix_markers(sec.get("content") or "")
+        prepared = prepare_delivery_render(content)
+        prepared_sections.append(prepared)
+        content_visible = prepared.get("visible_text") or content
+        planned_pages = _effective_pages_for_section(title, content_visible, style_cfg)
+        planned_section_pages.append(planned_pages)
+        body_planned_pages += planned_pages
+    body_planned_pages = max(1, int(body_planned_pages or 1))
+    front_matter_plan = _resolve_front_matter_plan(
+        style_raw=style_raw,
+        data=data,
+        body_pages_estimate=body_planned_pages,
+    )
+    front_matter_outline = data.get("front_matter_outline") if isinstance(data.get("front_matter_outline"), dict) else {}
+    outline_toc_entries = [x for x in (front_matter_outline.get("toc_entries") or []) if isinstance(x, dict)]
+    outline_index_entries = [x for x in (front_matter_outline.get("index_entries") or []) if isinstance(x, dict)]
 
-    h = doc.add_heading(topic, level=1)
-    apply_paragraph(h, is_title=True)
-    try:
-        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    except Exception:
-        pass
-    has_cover = True
+    # Non-cover pages use a tender-style header band and a clean footer page mark.
+    _apply_branding_header(
+        doc,
+        style_cfg,
+        project_name=str(cover_meta.get("project_name") or ""),
+        doc_title=str(cover_meta.get("cover_title") or topic),
+    )
+    _apply_footer_page_numbers(
+        doc,
+        style_cfg,
+        bidder_company=bidder_company,
+        logo_path=str(logo_path or ""),
+    )
 
-    try:
-        import datetime as _dt
+    # Cover page: project name / project code / large title / project visual / logo / company / date.
+    _insert_cover_page(doc, style_cfg, cover_meta)
 
-        dp = doc.add_paragraph(_dt.datetime.now().strftime("%Y-%m-%d"))
-        apply_paragraph(dp)
-        dp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    except Exception:
-        pass
+    if front_matter_plan["full_index_pages"] > 0:
+        _insert_full_index_page(
+            doc,
+            apply_paragraph,
+            topic=str(topic),
+            sections=sections if isinstance(sections, list) else [],
+            chapter_pages=chapter_pages if isinstance(chapter_pages, dict) else {},
+            effective_document_pages=int(front_matter_plan["effective_document_pages"]),
+            index_entries=outline_index_entries,
+        )
 
-    if has_cover:
-        doc.add_page_break()
+    toc_entries = outline_toc_entries or _build_static_toc_entries(
+        sections=sections if isinstance(sections, list) else [],
+        section_pages=planned_section_pages,
+        front_matter_plan=front_matter_plan,
+    )
+    _insert_auto_toc(
+        doc,
+        apply_paragraph,
+        style_cfg=style_cfg,
+        toc_pages=int(front_matter_plan["toc_pages"]),
+        toc_entries=toc_entries,
+    )
 
     layout_receipts = []
-    sections = data.get("sections") or []
     terminology_entries = load_global_terminology()
     media_all = data.get("media") or []
     chart_policy = style_raw.get("chart_policy") if isinstance(style_raw, dict) and isinstance(style_raw.get("chart_policy"), dict) else {}
@@ -463,23 +1357,12 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         chart_mode_auto_density = False
 
     # Planned total pages are used for automatic image density policy.
-    def _effective_pages_for_section(title: str, content_doc: str, section_style_cfg: Dict[str, Any]) -> int:
-        t = _extract_chapter_page_target(chapter_pages, title)
-        if t:
-            return int(t)
-        chars_per_page = _estimate_chars_per_page(section_style_cfg)
-        return _estimate_content_pages(content_doc, chars_per_page)
-
-    total_planned_pages = 0
-    for sec in sections:
-        title = str(sec.get("title") or "章节")
-        content = _strip_internal_autofix_markers(sec.get("content") or "")
-        total_planned_pages += _effective_pages_for_section(title, content, style_cfg)
-    total_planned_pages = max(1, int(total_planned_pages))
+    total_planned_pages = max(1, int(front_matter_plan.get("effective_document_pages") or body_planned_pages))
 
     media_cursor = 0
     media_index = 0
     chapter_media_started = False
+    section_render_reports: List[Dict[str, Any]] = []
 
     def _append_media_item(item: Any):
         nonlocal media_index
@@ -518,8 +1401,20 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         title = sec.get("title") or "章节"
         content = sec.get("content") or ""
         content_doc = _strip_internal_autofix_markers(content)
+        prepared = prepared_sections[idx] if idx < len(prepared_sections) else prepare_delivery_render(content_doc)
+        content_visible = prepared.get("visible_text") or content_doc
         try:
-            content_doc, _ = normalize_text_terminology(content_doc, terminology_entries)
+            content_visible, _ = normalize_text_terminology(content_visible, terminology_entries)
+            prepared["visible_text"] = content_visible
+            for block in prepared.get("blocks") or []:
+                if block.get("type") == "paragraph":
+                    block["text"], _ = normalize_text_terminology(str(block.get("text") or ""), terminology_entries)
+                elif block.get("type") == "table":
+                    for row in block.get("rows") or []:
+                        row["cells"] = [
+                            normalize_text_terminology(str(cell or ""), terminology_entries)[0]
+                            for cell in (row.get("cells") or [])
+                        ]
         except Exception:
             pass
         role = sec.get("agent_role")
@@ -539,13 +1434,14 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         if role:
             p = doc.add_paragraph(f"负责人：{role}")
             apply_this(p)
-        p = doc.add_paragraph(content_doc)
-        apply_this(p)
+        render_report = render_delivery_blocks(doc, apply_this, prepared)
+        render_report["title"] = title
+        section_render_reports.append(render_report)
 
         target_pages = _extract_chapter_page_target(chapter_pages, title)
         if target_pages:
             chars_per_page = _estimate_chars_per_page(section_style_cfg)
-            estimated_pages = _estimate_content_pages(content_doc, chars_per_page)
+            estimated_pages = _estimate_content_pages(content_visible, chars_per_page)
             delta = estimated_pages - target_pages
             layout_receipts.append(
                 {
@@ -560,7 +1456,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
                     doc.add_page_break()
         else:
             chars_per_page = _estimate_chars_per_page(section_style_cfg)
-            estimated_pages = _estimate_content_pages(content_doc, chars_per_page)
+            estimated_pages = _estimate_content_pages(content_visible, chars_per_page)
 
         # Auto density policy: image count follows planned pages and excludes overview chapters.
         if chart_mode_auto_density and chart_position in {"chapter", "per_chapter", "by_chapter"}:
@@ -579,9 +1475,10 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
                     pool_size = max(2, min(8, need_images))
                     section_pool = generate_section_visuals(
                         title=title,
-                        content=content_doc,
+                        content=content_visible,
                         image_count=pool_size,
                         include_mindmap=True,
+                        workspace_dir=workspace_dir,
                     )
                     if section_pool:
                         for k in range(need_images):
@@ -604,193 +1501,6 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
                 if image_budget_remaining is not None:
                     image_budget_remaining = max(0, int(image_budget_remaining) - 1)
 
-    # 图纸证据索引（可追溯）
-    drawing_index = data.get("drawing_index") or {}
-    if isinstance(drawing_index, dict) and (drawing_index.get("drawings") or drawing_index.get("chapter_bindings")):
-        doc.add_page_break()
-        hd = doc.add_heading("图纸证据索引（自动生成）", level=1)
-        apply_paragraph(hd, is_title=True)
-
-        drawings = drawing_index.get("drawings") or []
-        if drawings:
-            h1 = doc.add_heading("图纸清单", level=2)
-            apply_paragraph(h1, is_title=True)
-            for d in drawings[:30]:
-                fn = d.get("filename") or ""
-                pages = d.get("pages")
-                kws = d.get("keywords") or []
-                line = f"- {fn}"
-                if pages:
-                    line += f"（页数={pages}）"
-                if kws:
-                    line += f"；关键词={'、'.join([str(x) for x in kws[:8] if str(x).strip()])}"
-                p = doc.add_paragraph(line)
-                apply_paragraph(p)
-
-        binds = drawing_index.get("chapter_bindings") or []
-        if binds:
-            h2 = doc.add_heading("章节-图纸绑定", level=2)
-            apply_paragraph(h2, is_title=True)
-            for b in binds[:40]:
-                ch = b.get("chapter") or ""
-                loc = b.get("locator") or ""
-                p = doc.add_paragraph(f"- {ch} -> {loc}")
-                apply_paragraph(p)
-
-    # 企业标准证据索引（可追溯）
-    standard_index = data.get("standard_index") or {}
-    if isinstance(standard_index, dict) and (standard_index.get("standards") or standard_index.get("chapter_bindings")):
-        doc.add_page_break()
-        hd = doc.add_heading("企业标准证据索引（自动生成）", level=1)
-        apply_paragraph(hd, is_title=True)
-
-        standards = standard_index.get("standards") or []
-        if standards:
-            h1 = doc.add_heading("标准文件清单", level=2)
-            apply_paragraph(h1, is_title=True)
-            for d in standards[:40]:
-                fn = d.get("filename") or ""
-                pages = d.get("pages")
-                kws = d.get("keywords") or []
-                line = f"- {fn}"
-                if pages:
-                    line += f"（页数={pages}）"
-                if kws:
-                    line += f"；关键词={'、'.join([str(x) for x in kws[:8] if str(x).strip()])}"
-                p = doc.add_paragraph(line)
-                apply_paragraph(p)
-
-        binds = standard_index.get("chapter_bindings") or []
-        if binds:
-            h2 = doc.add_heading("章节-标准绑定", level=2)
-            apply_paragraph(h2, is_title=True)
-            for b in binds[:60]:
-                ch = b.get("chapter") or ""
-                loc = b.get("locator") or ""
-                p = doc.add_paragraph(f"- {ch} -> {loc}")
-                apply_paragraph(p)
-
-    # 重点项证据闭环索引（BoQ focus cross-index）
-    cross_index = data.get("cross_index") or {}
-    if isinstance(cross_index, dict) and isinstance(cross_index.get("focus_items"), list) and cross_index.get("focus_items"):
-        doc.add_page_break()
-        hd = doc.add_heading("重点项证据闭环索引（自动生成）", level=1)
-        apply_paragraph(hd, is_title=True)
-
-        fc = int(cross_index.get("focus_count") or 0)
-        mc = int(cross_index.get("mentioned_count") or 0)
-        okc = int(cross_index.get("closed_ok_count") or 0)
-        md = int(cross_index.get("missing_drawing_locator_count") or 0)
-        ms = int(cross_index.get("missing_standard_locator_count") or 0)
-        p0 = doc.add_paragraph(f"重点项={fc}；出现={mc}；闭环OK={okc}；缺图纸定位={md}；缺标准定位={ms}。")
-        apply_paragraph(p0)
-        p1 = doc.add_paragraph("闭环OK判定：同一章节内同时满足=量化（含单位数值）+风险→控制→验证+证据定位。")
-        apply_paragraph(p1)
-
-        items = cross_index.get("focus_items") or []
-        # Keep table compact to avoid layout explosion on A4.
-        table = doc.add_table(rows=1, cols=9)
-        hdr = table.rows[0].cells
-        headers = ["清单项", "类别/工序", "工程量", "单价", "合价", "落位章节", "图纸定位", "标准定位", "闭环"]
-        for i, h in enumerate(headers):
-            try:
-                hdr[i].text = h
-            except Exception:
-                pass
-
-        def _fmt_num(v: Any) -> str:
-            try:
-                if v is None:
-                    return ""
-                f = float(v)
-                if abs(f - int(f)) < 1e-6:
-                    return str(int(f))
-                return f"{f:.4g}"
-            except Exception:
-                return str(v)
-
-        for it in items[:24]:
-            if not isinstance(it, dict):
-                continue
-            name = str(it.get("name") or "").strip()
-            cats = it.get("categories") or []
-            if isinstance(cats, list):
-                cats = "、".join([str(x) for x in cats if str(x).strip()][:4])
-            else:
-                cats = str(cats) if cats else ""
-            proc = str(it.get("process_name") or "").strip()
-            cat_proc = cats
-            if proc:
-                cat_proc = (cat_proc + ("；" if cat_proc else "") + f"工序={proc}").strip()
-
-            qty = _fmt_num(it.get("quantity"))
-            unit = str(it.get("unit") or "").strip()
-            qty_disp = (qty + unit).strip()
-            up = _fmt_num(it.get("unit_price"))
-            tp = _fmt_num(it.get("total_price"))
-            ch = str(it.get("chapter") or "").strip()
-            dwg = str(it.get("drawing_locator") or "").strip()
-            std = str(it.get("standard_locator") or "").strip()
-            clo = it.get("closure") if isinstance(it.get("closure"), dict) else {}
-            clo_ok = bool(clo.get("ok"))
-            missing = clo.get("missing_parts") or []
-            if isinstance(missing, list):
-                missing = [str(x) for x in missing if str(x).strip()]
-            else:
-                missing = []
-            clo_disp = "OK" if clo_ok else ("缺:" + ",".join(missing) if missing else "缺")
-
-            row = table.add_row().cells
-            vals = [name, cat_proc, qty_disp, up, tp, ch, dwg, std, clo_disp]
-            for i, v in enumerate(vals):
-                try:
-                    row[i].text = str(v or "")
-                except Exception:
-                    pass
-
-    # 可编辑参数影响回执（参数键 -> 出现位置/影响章节）
-    param_trace = data.get("param_trace") or {}
-    receipt = param_trace.get("receipt") if isinstance(param_trace, dict) else None
-    if isinstance(receipt, dict) and isinstance(receipt.get("keys"), dict) and receipt.get("keys"):
-        doc.add_page_break()
-        hd = doc.add_heading("可编辑参数影响回执（自动生成）", level=1)
-        apply_paragraph(hd, is_title=True)
-        ver = str(receipt.get("version") or "").strip()
-        keys = receipt.get("keys") or {}
-        try:
-            impacted = set()
-            for _, item in keys.items():
-                for t in (item or {}).get("impacted_chapters") or []:
-                    if str(t).strip():
-                        impacted.add(str(t).strip())
-            impacted_count = len(impacted)
-        except Exception:
-            impacted_count = 0
-        p0 = doc.add_paragraph(
-            f"参数版本={ver or '-'}；参数键={len(keys)}；影响章节数={impacted_count}。"
-        )
-        apply_paragraph(p0)
-
-        table = doc.add_table(rows=1, cols=3)
-        hdr = table.rows[0].cells
-        hdr[0].text = "参数键"
-        hdr[1].text = "当前值"
-        hdr[2].text = "影响章节"
-
-        # Keep compact to reduce DOCX size. Keys are already limited (quant_defaults + boq_focus_card).
-        for k in sorted(keys.keys())[:60]:
-            item = keys.get(k) or {}
-            val = str(item.get("value") or "").strip()
-            chs = item.get("impacted_chapters") or []
-            if isinstance(chs, list):
-                chs = "；".join([str(x).strip() for x in chs if str(x).strip()][:10])
-            else:
-                chs = str(chs) if chs else ""
-            row = table.add_row().cells
-            row[0].text = str(k)
-            row[1].text = val
-            row[2].text = chs
-
     # Remaining chart/images (default: append at end, or chapter mode leftover).
     remaining_media = [] if chart_mode_auto_density else (media_all[media_cursor:] if isinstance(media_all, list) else [])
     if remaining_media:
@@ -799,274 +1509,38 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         apply_paragraph(hm, is_title=True)
         for item in remaining_media:
             _append_media_item(item)
-
-    # 章节版式回执
-    if layout_receipts:
-        doc.add_page_break()
-        hl = doc.add_heading("章节版式约束回执", level=1)
-        apply_paragraph(hl, is_title=True)
-        for item in layout_receipts:
-            title = item["title"]
-            target = item["target_pages"]
-            estimated = item["estimated_pages"]
-            delta = item["delta"]
-            if delta == 0:
-                status = "达成"
-            elif delta > 0:
-                status = f"超出{abs(delta)}页"
-            else:
-                status = f"不足{abs(delta)}页"
-            p = doc.add_paragraph(f"- {title}: 目标{target}页，估算{estimated}页（{status}）")
-            apply_paragraph(p)
-
-    # 质量校验摘要
-    qc = data.get("quality_checks") or {}
-    if qc:
-        doc.add_page_break()
-        hq = doc.add_heading("质量校验摘要", level=1)
-        apply_paragraph(hq, is_title=True)
-        for key in (
-            "structure",
-            "score_coverage",
-            "closed_loop",
-            "engineering",
-            "risk_triplet",
-            "qse_closed_loop",
-            "logic_template_adherence",
-            "quantitative",
-            "vague_terms",
-            "officialese",
-            "consistency",
-            "boq_focus_coverage",
-            "boq_focus_item_closure",
-            "boq_focus_item_typed_evidence",
-            "required_topics",
-            "required_topics_detail",
-            "trade_names",
-            "evidence",
-            "evidence_quality",
-            "evidence_traceability",
-            "drawing_evidence",
-            "standard_evidence",
-            "template_style",
-        ):
-            item = qc.get(key) or {}
-            ok = item.get("ok")
-            p = doc.add_paragraph(f"{key}：{'通过' if ok else '需改进'}")
-            apply_paragraph(p)
-            for k, v in item.items():
-                if k == "ok":
-                    continue
-                p2 = doc.add_paragraph(f"- {k}: {v}")
-                apply_paragraph(p2)
-        # 可勾选清单（便于评审）
-        hqc = doc.add_heading("质量校验清单", level=2)
-        apply_paragraph(hqc, is_title=True)
-        for key in (
-            "structure",
-            "score_coverage",
-            "closed_loop",
-            "engineering",
-            "risk_triplet",
-            "qse_closed_loop",
-            "logic_template_adherence",
-            "quantitative",
-            "vague_terms",
-            "officialese",
-            "consistency",
-            "boq_focus_coverage",
-            "boq_focus_item_closure",
-            "boq_focus_item_typed_evidence",
-            "required_topics",
-            "required_topics_detail",
-            "trade_names",
-            "evidence",
-            "evidence_quality",
-            "evidence_traceability",
-            "drawing_evidence",
-            "standard_evidence",
-            "template_style",
-        ):
-            item = qc.get(key) or {}
-            ok = item.get("ok")
-            mark = "☑" if ok else "☐"
-            p = doc.add_paragraph(f"{mark} {key}")
-            apply_paragraph(p)
-            details = {k: v for k, v in item.items() if k != "ok"}
-            if details and not ok:
-                for k, v in details.items():
-                    p2 = doc.add_paragraph(f"  - {k}: {v}")
-                    apply_paragraph(p2)
-
-        # 章节评分点覆盖清单
-        by_section = qc.get("score_coverage_by_section") or []
-        if by_section:
-            hsc = doc.add_heading("章节评分点覆盖清单", level=2)
-            apply_paragraph(hsc, is_title=True)
-            for sec in by_section:
-                title = sec.get("title") or "章节"
-                ok = sec.get("ok")
-                mark = "☑" if ok else "☐"
-                p = doc.add_paragraph(f"{mark} {title}")
-                apply_paragraph(p)
-                if not ok:
-                    for miss in sec.get("missing", []):
-                        p2 = doc.add_paragraph(f"  - 缺失：{miss.get('dimension')} / {miss.get('keywords')}")
-                        apply_paragraph(p2)
-
-        # 章节证据数量清单
-        by_evidence = (qc.get("evidence") or {}).get("by_section") or []
-        if by_evidence:
-            hce = doc.add_heading("章节证据数量清单", level=2)
-            apply_paragraph(hce, is_title=True)
-            for sec in by_evidence:
-                title = sec.get("title") or "章节"
-                cnt = sec.get("evidence_count")
-                p = doc.add_paragraph(f"- {title}: 证据数 {cnt}")
-                apply_paragraph(p)
-
-        # 问题清单 + 自动修订建议（便于评审/二次编辑）
-        issues = qc.get("issue_list") or []
-        hi = doc.add_heading("问题清单（自动检测）", level=2)
-        apply_paragraph(hi, is_title=True)
-        if issues:
-            for it in issues[:200]:
-                sev = it.get("severity") or "medium"
-                title = it.get("title") or "章节"
-                typ = it.get("type") or "issue"
-                prob = it.get("problem") or ""
-                sugg = it.get("suggestion") or ""
-                p = doc.add_paragraph(f"- [{sev}] {title} / {typ}: {prob}")
-                apply_paragraph(p)
-                if sugg:
-                    p2 = doc.add_paragraph(f"  建议：{sugg}")
-                    apply_paragraph(p2)
-        else:
-            p = doc.add_paragraph("- 无")
-            apply_paragraph(p)
-
-        recs = qc.get("auto_revision_suggestions") or []
-        hr = doc.add_heading("自动修订建议（按章节聚合）", level=2)
-        apply_paragraph(hr, is_title=True)
-        if recs:
-            # De-dup by (title,type,suggestion)
-            seen = set()
-            for r in recs[:300]:
-                title = r.get("title") or "章节"
-                typ = r.get("type") or "issue"
-                sugg = r.get("suggestion") or ""
-                key = (title, typ, sugg)
-                if key in seen:
-                    continue
-                seen.add(key)
-                p = doc.add_paragraph(f"- {title} / {typ}: {sugg}")
-                apply_paragraph(p)
-        else:
-            p = doc.add_paragraph("- 无")
-            apply_paragraph(p)
-
-        # 章节风险-措施闭环清单
-        by_closed = qc.get("closed_loop_by_section") or []
-        if by_closed:
-            hcl = doc.add_heading("章节风险-措施闭环清单", level=2)
-            apply_paragraph(hcl, is_title=True)
-            for sec in by_closed:
-                title = sec.get("title") or "章节"
-                ok = sec.get("ok")
-                mark = "☑" if ok else "☐"
-                p = doc.add_paragraph(f"{mark} {title}（风险: {sec.get('has_risk')} / 措施: {sec.get('has_measure')}）")
-                apply_paragraph(p)
-
-        # 章节工程落地要素清单
-        by_eng = qc.get("engineering_by_section") or []
-        if by_eng:
-            heg = doc.add_heading("章节工程落地要素清单", level=2)
-            apply_paragraph(heg, is_title=True)
-            for sec in by_eng:
-                title = sec.get("title") or "章节"
-                ok = sec.get("ok")
-                mark = "☑" if ok else "☐"
-                missing = sec.get("missing") or []
-                p = doc.add_paragraph(f"{mark} {title}（缺失: {missing}）")
-                apply_paragraph(p)
-
-        # 整改建议清单
-        remediation = qc.get("remediation") or []
-        if remediation:
-            hrs = doc.add_heading("整改建议清单", level=2)
-            apply_paragraph(hrs, is_title=True)
-            for rec in remediation:
-                title = rec.get("title") or "章节"
-                rtype = rec.get("type") or "issue"
-                suggestion = rec.get("suggestion") or ""
-                p = doc.add_paragraph(f"- {title} / {rtype}: {suggestion}")
-                apply_paragraph(p)
-
-        issue_list = qc.get("issue_list") or []
-        if issue_list:
-            hi = doc.add_heading("问题清单", level=2)
-            apply_paragraph(hi, is_title=True)
-            for it in issue_list:
-                title = it.get("title") or "章节"
-                itype = it.get("type") or "issue"
-                sev = it.get("severity") or "medium"
-                prob = it.get("problem") or ""
-                p = doc.add_paragraph(f"- [{sev}] {title} / {itype}: {prob}")
-                apply_paragraph(p)
-
-        auto_revision = qc.get("auto_revision_suggestions") or []
-        if auto_revision:
-            ha = doc.add_heading("自动修订建议", level=2)
-            apply_paragraph(ha, is_title=True)
-            for rec in auto_revision:
-                title = rec.get("title") or "章节"
-                rtype = rec.get("type") or "issue"
-                suggestion = rec.get("suggestion") or ""
-                p = doc.add_paragraph(f"- {title} / {rtype}: {suggestion}")
-                apply_paragraph(p)
-
-        # LLM整改前后对比
-        has_compare = False
-        for sec in sections:
-            if sec.get("auto_remediated") == "llm" and sec.get("original_content"):
-                has_compare = True
-                break
-        if has_compare:
-            hcp = doc.add_heading("LLM整改前后对比", level=2)
-            apply_paragraph(hcp, is_title=True)
-            compare_cfg = data.get("compare") or {}
-            mode = compare_cfg.get("mode", "full")
-            max_chars = _to_int(compare_cfg.get("max_chars"), 800)
-            titles_filter = compare_cfg.get("titles")
-            for sec in sections:
-                if sec.get("auto_remediated") != "llm" or not sec.get("original_content"):
-                    continue
-                if isinstance(titles_filter, list) and sec.get("title") not in titles_filter:
-                    continue
-                title = sec.get("title") or "章节"
-                h3 = doc.add_heading(title, level=3)
-                apply_paragraph(h3, is_title=True)
-                p1 = doc.add_paragraph("整改前：")
-                apply_paragraph(p1)
-                before = sec.get("original_content") or ""
-                after = sec.get("content") or ""
-                if mode == "summary":
-                    before = before[:max_chars] + ("..." if len(before) > max_chars else "")
-                    after = after[:max_chars] + ("..." if len(after) > max_chars else "")
-                p2 = doc.add_paragraph(before)
-                apply_paragraph(p2)
-                p3 = doc.add_paragraph("整改后：")
-                apply_paragraph(p3)
-                p4 = doc.add_paragraph(after)
-                apply_paragraph(p4)
+    internal_payload = {
+        "layout_receipts": layout_receipts,
+        "quality_checks": data.get("quality_checks") or {},
+        "drawing_index": data.get("drawing_index") or {},
+        "standard_index": data.get("standard_index") or {},
+        "cross_index": data.get("cross_index") or {},
+        "param_trace": data.get("param_trace") or {},
+        "compare": data.get("compare") or {},
+        "llm_compare_candidates": [
+            {
+                "title": str(sec.get("title") or "章节"),
+                "auto_remediated": str(sec.get("auto_remediated") or ""),
+                "has_original_content": bool(sec.get("original_content")),
+            }
+            for sec in sections
+            if isinstance(sec, dict)
+        ],
+    }
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
+    _write_delivery_build_report(
+        output_path=output_path,
+        topic=str(topic),
+        section_reports=section_render_reports,
+        internal_payload=internal_payload,
+    )
     return output_path
 
 
 def export_autoplan_compare_docx(data: Dict[str, Any], output_path: str) -> str:
-    style_raw = data.get("style") or {}
+    style_raw = _resolve_style_with_bidding_config(data)
     style_cfg = _normalize_style(style_raw)
     doc = Document()
     _apply_page_setup(doc, style_cfg)
@@ -2299,7 +2773,7 @@ def export_expert_review_brief_docx(data: Dict[str, Any], output_path: str) -> s
     10%专家复核提要版
     仅保留: 工期关键节点、资源峰值、重大安质风控、加分策略触发摘要。
     """
-    style_raw = data.get("style") if isinstance(data.get("style"), dict) else {}
+    style_raw = _resolve_style_with_bidding_config(data)
     style_cfg = _normalize_style(style_raw)
     doc = Document()
     _apply_page_setup(doc, style_cfg)

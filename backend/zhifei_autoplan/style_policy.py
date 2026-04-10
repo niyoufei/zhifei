@@ -10,6 +10,9 @@ DEFAULT_STYLE: Dict[str, Any] = {
     "body_size": 14,   # 四号
     "title_size": 16,  # 三号
     "line_spacing_pt": 22.0,
+    "cover_page_count": 1,
+    "toc_page_count": 2,
+    "front_matter_page_mode": "include",
     "margins_cm": {
         "top": 2.5,
         "right": 2.0,
@@ -48,10 +51,23 @@ def normalize_cn_font_name(v: Any) -> str:
     s = str(v or "").strip()
     if not s:
         return ""
-    if s in {"SimSun", "宋体"}:
+    lowered = s.lower()
+    if s in {"SimSun", "宋体"} or lowered == "simsun":
         return "宋体"
-    if s in {"仿宋", "仿宋体", "FangSong"}:
+    if s in {"仿宋", "仿宋体", "FangSong"} or lowered == "fangsong":
         return "仿宋体"
+    if s in {"黑体", "SimHei"} or lowered == "simhei":
+        return "黑体"
+    if s in {"楷体", "KaiTi"} or lowered == "kaiti":
+        return "楷体"
+    if "仿宋" in s:
+        return "仿宋体"
+    if "黑" in s:
+        return "黑体"
+    if "楷" in s:
+        return "楷体"
+    if "宋" in s:
+        return "宋体"
     return s
 
 
@@ -98,6 +114,12 @@ def normalize_style_input(style: Dict[str, Any] | None) -> Dict[str, Any]:
         out["paper"] = str(raw.get("paper"))
     if isinstance(raw.get("chart_policy"), dict):
         out["chart_policy"] = dict(raw.get("chart_policy") or {})
+    if raw.get("cover_page_count") is not None:
+        out["cover_page_count"] = max(1, int(_to_float(raw.get("cover_page_count"), 1.0)))
+    if raw.get("toc_page_count") is not None:
+        out["toc_page_count"] = max(1, int(_to_float(raw.get("toc_page_count"), 2.0)))
+    if raw.get("front_matter_page_mode") is not None:
+        out["front_matter_page_mode"] = "exclude" if str(raw.get("front_matter_page_mode")).strip().lower() == "exclude" else "include"
     return out
 
 

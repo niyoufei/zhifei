@@ -6,6 +6,9 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import zipfile
+import base64
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 
@@ -19,6 +22,41 @@ from backend.zhifei_autoplan.exporter import (
     export_autoplan_compare_docx,
     export_autoplan_docx_from_file,
 )
+
+
+def _doc_visible_text(docx_path: Path) -> str:
+    with zipfile.ZipFile(docx_path, "r") as zf:
+        document_xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+    root = ET.fromstring(document_xml)
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    parts = []
+    for paragraph in root.findall(".//w:p", ns):
+        runs = []
+        for run in paragraph.findall("./w:r", ns):
+            if run.find("./w:rPr/w:vanish", ns) is not None:
+                continue
+            text_nodes = run.findall("./w:t", ns)
+            if text_nodes:
+                runs.append("".join(node.text or "" for node in text_nodes))
+        if runs:
+            parts.append("".join(runs))
+    return "\n".join(parts)
+
+
+def _build_report_json_path(output_path: Path) -> Path:
+    return output_path.with_suffix(".build_report.json")
+
+
+def _write_test_png(path: Path) -> None:
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9sX6sK0AAAAASUVORK5CYII="
+    )
+    path.write_bytes(png_bytes)
+
+
+def _doc_media_count(docx_path: Path) -> int:
+    with zipfile.ZipFile(docx_path, "r") as zf:
+        return len([name for name in zf.namelist() if name.startswith("word/media/")])
 
 
 # =============================================================================
@@ -195,6 +233,38 @@ class TestExportAutoplanDocx:
         assert result == str(output_path)
         assert output_path.exists()
 
+    def test_export_cover_page_uses_special_layout(self, temp_dir, basic_data):
+        output_path = Path(temp_dir) / "cover_layout.docx"
+        cover_path = Path(temp_dir) / "cover.png"
+        logo_path = Path(temp_dir) / "logo.png"
+        _write_test_png(cover_path)
+        _write_test_png(logo_path)
+        data = dict(basic_data)
+        data.update(
+            {
+                "project_name": "肥西县公办养老机构改造提升项目",
+                "project_code": "2026AEEGZ50006",
+                "cover_image_path": str(cover_path),
+                "cover_image_caption": "肥西县公办养老机构改造提升项目 · 现场实景图",
+                "branding": {
+                    "project_id": "2026AEEGZ50006",
+                    "bidder_company": "安徽先华建筑工程有限公司",
+                    "logo_path": str(logo_path),
+                },
+            }
+        )
+
+        export_autoplan_docx(data, str(output_path))
+
+        text = _doc_visible_text(output_path)
+        assert "肥西县公办养老机构改造提升项目" in text
+        assert "招标项目编号：2026AEEGZ50006" in text
+        assert "施工组织设计" in text
+        assert "肥西县公办养老机构改造提升项目 · 现场实景图" in text
+        assert "公司名称：安徽先华建筑工程有限公司" in text
+        assert re.search(r"二零[一二三四五六七八九零]+年[一二三四五六七八九十]+月", text)
+        assert _doc_media_count(output_path) >= 1
+
     def test_export_creates_parent_directories(self, temp_dir, basic_data):
         """Test export creates nested parent directories."""
         output_path = Path(temp_dir) / "nested" / "dir" / "output.docx"
@@ -227,6 +297,99 @@ class TestExportAutoplanDocx:
         doc = Document(str(output_path))
         text = "\n".join(p.text for p in doc.paragraphs)
         assert "项目经理" in text
+
+    def test_export_includes_toc_field_and_footer_page_fields(self, temp_dir, basic_data):
+        output_path = Path(temp_dir) / "toc_footer.docx"
+        export_autoplan_docx(basic_data, str(output_path))
+
+        with zipfile.ZipFile(output_path, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+            header_files = [name for name in zf.namelist() if name.startswith("word/header")]
+            footer_files = [name for name in zf.namelist() if name.startswith("word/footer")]
+            header_xml = "".join(zf.read(name).decode("utf-8", errors="ignore") for name in header_files)
+            footer_xml = "".join(zf.read(name).decode("utf-8", errors="ignore") for name in footer_files)
+        doc = Document(str(output_path))
+        text = "\n".join(p.text for p in doc.paragraphs)
+
+        assert 'TOC \\o "1-2" \\h \\z \\u' in document_xml
+        assert re.search(r"第一章、工程概述[·.]+\s*4", text)
+        assert re.search(r"第二章、施工部署[·.]+\s*5", text)
+        assert "施工组织设计" in header_xml
+        assert "PAGE" in footer_xml
+
+    def test_export_reserves_configured_toc_pages(self, temp_dir, basic_data):
+        output_path = Path(temp_dir) / "toc_reserved.docx"
+        data = dict(basic_data)
+        data["style"] = dict(basic_data.get("style") or {})
+        data["style"].update(
+            {
+                "cover_page_count": 1,
+                "toc_page_count": 3,
+                "full_index_enabled": False,
+                "front_matter_page_mode": "include",
+                "document_total_pages_target": 200,
+            }
+        )
+
+        export_autoplan_docx(data, str(output_path))
+
+        with zipfile.ZipFile(output_path, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+        doc = Document(str(output_path))
+        text = "\n".join(p.text for p in doc.paragraphs)
+
+        assert "全文索引" not in text
+        assert document_xml.count('w:type="page"') == 4
+
+    def test_export_inserts_full_index_when_enabled(self, temp_dir, basic_data):
+        output_path = Path(temp_dir) / "full_index.docx"
+        data = dict(basic_data)
+        data["style"] = dict(basic_data.get("style") or {})
+        data["style"].update(
+            {
+                "cover_page_count": 1,
+                "toc_page_count": 3,
+                "full_index_enabled": True,
+                "front_matter_page_mode": "exclude",
+                "document_total_pages_target": 120,
+            }
+        )
+
+        export_autoplan_docx(data, str(output_path))
+
+        with zipfile.ZipFile(output_path, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+        doc = Document(str(output_path))
+        text = "\n".join(p.text for p in doc.paragraphs)
+
+        assert "全文索引" in text
+        assert text.index("全文索引") < text.index("目录")
+        assert "第一章 工程概述" in text
+        assert re.search(r"第一章、工程概述[·.]+\s*6", text)
+        assert re.search(r"第二章、施工部署[·.]+\s*7", text)
+        assert document_xml.count('w:type="page"') == 5
+
+    def test_export_does_not_insert_full_index_when_disabled_even_over_200_pages(self, temp_dir, basic_data):
+        output_path = Path(temp_dir) / "full_index_disabled.docx"
+        data = dict(basic_data)
+        data["style"] = dict(basic_data.get("style") or {})
+        data["style"].update(
+            {
+                "cover_page_count": 1,
+                "toc_page_count": 3,
+                "full_index_enabled": False,
+                "front_matter_page_mode": "exclude",
+                "document_total_pages_target": 260,
+            }
+        )
+
+        export_autoplan_docx(data, str(output_path))
+
+        text = _doc_visible_text(output_path)
+
+        assert "全文索引" not in text
+        assert re.search(r"第一章、工程概述[·.]+\s*5", text)
+        assert re.search(r"第二章、施工部署[·.]+\s*6", text)
 
     def test_export_without_agent_role(self, temp_dir):
         """Test export handles sections without agent_role."""
@@ -265,98 +428,108 @@ class TestExportAutoplanDocx:
         export_autoplan_docx(basic_data, str(output_path))
         assert output_path.exists()
 
+    def test_export_renders_risk_triplet_table_and_hidden_evidence(self, temp_dir):
+        output_path = Path(temp_dir) / "risk_table.docx"
+        data = {
+            "topic": "测试",
+            "sections": [
+                {
+                    "title": "质量控制",
+                    "content": "\n".join(
+                        [
+                            "【风险→控制→验证】",
+                            "风险：交叉作业伤人；控制：设置警戒线并专人指挥；验证：违章为零并完成巡检记录。【证据:图纸A.pdf#p9】",
+                        ]
+                    ),
+                }
+            ],
+        }
+        export_autoplan_docx(data, str(output_path))
+        doc = Document(str(output_path))
+        assert len(doc.tables) >= 1
+        with zipfile.ZipFile(output_path, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+        assert "图纸A.pdf#p9" in document_xml
+        assert "w:vanish" in document_xml
+        assert "图纸A.pdf#p9" not in _doc_visible_text(output_path)
+
     def test_export_with_quality_checks(self, temp_dir, data_with_quality_checks):
-        """Test export with full quality checks data."""
+        """Quality checks should be redirected to build report, not final DOCX."""
         output_path = Path(temp_dir) / "with_qc.docx"
         export_autoplan_docx(data_with_quality_checks, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        assert "质量校验摘要" in text
-        assert "通过" in text or "需改进" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "质量校验摘要" not in text
+        assert "quality_checks" in report["internal_payload"]
 
     def test_export_quality_checks_checklist(self, temp_dir, data_with_quality_checks):
-        """Test export generates quality check checklist with marks."""
+        """Checklist data should stay in build report."""
         output_path = Path(temp_dir) / "qc_checklist.docx"
         export_autoplan_docx(data_with_quality_checks, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        # Should have checkbox marks
-        assert "☑" in text or "☐" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "☑" not in text and "☐" not in text
+        assert report["internal_payload"]["quality_checks"]["structure"]["ok"] is True
 
     def test_export_score_coverage_by_section(self, temp_dir, data_with_quality_checks):
-        """Test export includes score coverage by section."""
+        """Score coverage section should not leak into deliverable DOCX."""
         output_path = Path(temp_dir) / "score_coverage.docx"
         export_autoplan_docx(data_with_quality_checks, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        assert "章节评分点覆盖清单" in text
-        assert "缺失" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "章节评分点覆盖清单" not in text
+        assert report["internal_payload"]["quality_checks"]["score_coverage_by_section"][1]["missing"][0]["dimension"] == "质量"
 
     def test_export_evidence_by_section(self, temp_dir, data_with_quality_checks):
-        """Test export includes evidence count by section."""
+        """Evidence count summary should stay out of deliverable DOCX."""
         output_path = Path(temp_dir) / "evidence.docx"
         export_autoplan_docx(data_with_quality_checks, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        assert "章节证据数量清单" in text
-        assert "证据数" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "章节证据数量清单" not in text
+        assert report["internal_payload"]["quality_checks"]["evidence"]["by_section"][0]["evidence_count"] == 2
 
     def test_export_closed_loop_by_section(self, temp_dir, data_with_quality_checks):
-        """Test export includes closed loop by section."""
+        """Closed loop summary should stay out of deliverable DOCX."""
         output_path = Path(temp_dir) / "closed_loop.docx"
         export_autoplan_docx(data_with_quality_checks, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        assert "章节风险-措施闭环清单" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "章节风险-措施闭环清单" not in text
+        assert report["internal_payload"]["quality_checks"]["closed_loop_by_section"][0]["ok"] is True
 
     def test_export_engineering_by_section(self, temp_dir, data_with_quality_checks):
-        """Test export includes engineering elements by section."""
+        """Engineering summary should stay out of deliverable DOCX."""
         output_path = Path(temp_dir) / "engineering.docx"
         export_autoplan_docx(data_with_quality_checks, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        assert "章节工程落地要素清单" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "章节工程落地要素清单" not in text
+        assert report["internal_payload"]["quality_checks"]["engineering_by_section"][1]["missing"] == ["人员", "设备"]
 
     def test_export_remediation_suggestions(self, temp_dir, data_with_quality_checks):
-        """Test export includes remediation suggestions."""
+        """Remediation suggestions should be redirected to build report."""
         output_path = Path(temp_dir) / "remediation.docx"
         export_autoplan_docx(data_with_quality_checks, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        assert "整改建议清单" in text
-        assert "补充证据材料" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "整改建议清单" not in text
+        assert report["internal_payload"]["quality_checks"]["remediation"][0]["suggestion"] == "补充证据材料"
 
     def test_export_llm_compare_full_mode(self, temp_dir, data_with_llm_remediation):
-        """Test export LLM compare in full mode."""
+        """LLM compare payload should not leak into deliverable DOCX."""
         output_path = Path(temp_dir) / "llm_compare.docx"
         data_with_llm_remediation["compare"] = {"mode": "full"}
         data_with_llm_remediation["quality_checks"] = {"structure": {"ok": True}}
         
         export_autoplan_docx(data_with_llm_remediation, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        assert "LLM整改前后对比" in text
-        assert "整改前" in text
-        assert "整改后" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "LLM整改前后对比" not in text
+        assert report["internal_payload"]["compare"]["mode"] == "full"
 
     def test_export_llm_compare_summary_mode(self, temp_dir, data_with_llm_remediation):
-        """Test export LLM compare in summary mode with truncation."""
+        """Visible docx should keep final content only; compare stays in build report."""
         output_path = Path(temp_dir) / "llm_summary.docx"
         # Create long content
         data_with_llm_remediation["sections"][0]["original_content"] = "A" * 1000
@@ -365,12 +538,11 @@ class TestExportAutoplanDocx:
         data_with_llm_remediation["quality_checks"] = {"structure": {"ok": True}}
         
         export_autoplan_docx(data_with_llm_remediation, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        
-        # Should be truncated with "..."
-        assert "..." in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "LLM整改前后对比" not in text
+        assert "整改前" not in text
+        assert report["internal_payload"]["compare"]["mode"] == "summary"
 
     def test_export_llm_compare_with_titles_filter(self, temp_dir, data_with_llm_remediation):
         """Test export LLM compare filters by titles."""
@@ -418,7 +590,7 @@ class TestExportAutoplanDocx:
         assert output_path.exists()
 
     def test_export_with_chapter_page_receipt(self, temp_dir):
-        """Test export includes chapter page receipt when chapter_pages provided."""
+        """Chapter page receipts should be redirected to build report."""
         output_path = Path(temp_dir) / "page_receipt.docx"
         data = {
             "topic": "测试",
@@ -428,13 +600,13 @@ class TestExportAutoplanDocx:
 
         export_autoplan_docx(data, str(output_path))
 
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        assert "章节版式约束回执" in text
-        assert "目标2页" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "章节版式约束回执" not in text
+        assert report["internal_payload"]["layout_receipts"][0]["target_pages"] == 2
 
     def test_export_with_chapter_pages_dict_format(self, temp_dir):
-        """Test export supports chapter_pages in dict target format."""
+        """Chapter page receipts keep dict target format in build report."""
         output_path = Path(temp_dir) / "page_receipt_dict.docx"
         data = {
             "topic": "测试",
@@ -443,9 +615,149 @@ class TestExportAutoplanDocx:
         }
 
         export_autoplan_docx(data, str(output_path))
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert report["internal_payload"]["layout_receipts"][0]["target_pages"] == 3
+
+    def test_export_static_toc_uses_configured_chapter_pages(self, temp_dir):
+        output_path = Path(temp_dir) / "toc_planned_pages.docx"
+        data = {
+            "topic": "测试",
+            "style": {
+                "cover_page_count": 1,
+                "toc_page_count": 2,
+                "front_matter_page_mode": "include",
+                "document_total_pages_target": 12,
+            },
+            "chapter_pages": {
+                "第一章 工程概述": 3,
+                "第二章 施工部署": 4,
+                "第三章 质量保证措施": 2,
+            },
+            "sections": [
+                {"title": "第一章 工程概述", "content": "内容A"},
+                {"title": "第二章 施工部署", "content": "内容B"},
+                {"title": "第三章 质量保证措施", "content": "内容C"},
+            ],
+        }
+
+        export_autoplan_docx(data, str(output_path))
+        text = _doc_visible_text(output_path)
+
+        assert re.search(r"第一章、工程概述[·.]+\s*4", text)
+        assert re.search(r"第二章、施工部署[·.]+\s*7", text)
+        assert re.search(r"第三章、质量保证措施[·.]+\s*11", text)
+
+    def test_export_prefers_prebuilt_front_matter_outline(self, temp_dir):
+        output_path = Path(temp_dir) / "toc_prebuilt.docx"
+        data = {
+            "topic": "测试",
+            "chapter_pages": {
+                "第一章 工程概述": 3,
+                "第二章 施工部署": 4,
+            },
+            "front_matter_outline": {
+                "cover_pages": 1,
+                "toc_pages": 2,
+                "full_index_pages": 0,
+                "toc_entries": [
+                    {"order": 1, "title": "第一章 工程概述", "start_page": 9, "planned_pages": 3},
+                    {"order": 2, "title": "第二章 施工部署", "start_page": 12, "planned_pages": 4},
+                ],
+                "index_entries": [
+                    {"order": 1, "title": "第一章 工程概述", "summary": "01. 第一章 工程概述（约3页）"},
+                    {"order": 2, "title": "第二章 施工部署", "summary": "02. 第二章 施工部署（约4页）"},
+                ],
+            },
+            "sections": [
+                {"title": "第一章 工程概述", "content": "内容A"},
+                {"title": "第二章 施工部署", "content": "内容B"},
+            ],
+        }
+
+        export_autoplan_docx(data, str(output_path))
+        text = _doc_visible_text(output_path)
+
+        assert re.search(r"第一章、工程概述[·.]+\s*9", text)
+        assert re.search(r"第二章、施工部署[·.]+\s*12", text)
+
+    def test_export_toc_renders_hierarchical_styles(self, temp_dir):
+        output_path = Path(temp_dir) / "toc_hierarchy.docx"
+        data = {
+            "topic": "测试",
+            "front_matter_outline": {
+                "cover_pages": 1,
+                "toc_pages": 1,
+                "full_index_pages": 0,
+                "toc_entries": [
+                    {"order": 1, "title": "第一章 工程概况", "start_page": 4, "planned_pages": 3, "level": 1},
+                    {"order": 2, "title": "第一节 项目工程基本概况", "start_page": 4, "planned_pages": 1, "level": 2},
+                    {"order": 3, "title": "一、重点分析：资源调度", "start_page": 5, "planned_pages": 1, "level": 3},
+                ],
+            },
+            "sections": [
+                {"title": "第一章 工程概况", "content": "内容A"},
+            ],
+        }
+
+        export_autoplan_docx(data, str(output_path))
         doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        assert "目标3页" in text
+
+        chapter_run = next(p.runs[0] for p in doc.paragraphs if "第一章、工程概况" in p.text and p.runs)
+        section_run = next(p.runs[0] for p in doc.paragraphs if "第一节、项目工程基本概况" in p.text and p.runs)
+        item_run = next(p.runs[0] for p in doc.paragraphs if "一、重点分析：资源调度" in p.text and p.runs)
+
+        assert str(chapter_run.font.color.rgb) == "000000"
+        assert str(section_run.font.color.rgb) == "109EAA"
+        assert str(item_run.font.color.rgb) == "000000"
+        assert round(chapter_run.font.size.pt, 1) >= round(section_run.font.size.pt, 1)
+        assert round(section_run.font.size.pt, 1) >= round(item_run.font.size.pt, 1)
+
+    def test_export_applies_bidding_font_size_and_black_color_to_titles_and_tables(self, temp_dir):
+        output_path = Path(temp_dir) / "bidding_style.docx"
+        data = {
+            "topic": "测试",
+            "bidding_format_config": {
+                "body_font": "宋",
+                "title_font": "宋",
+                "body_size_pt": 14,
+                "title_size_pt": 16,
+                "line_spacing_pt": 22,
+            },
+            "sections": [
+                {
+                    "title": "第一章 工程概述",
+                    "content": "\n".join(
+                        [
+                            "【风险→控制→验证】",
+                            "风险：交叉作业伤人；控制：设置警戒线并专人指挥；验证：违章为零。",
+                        ]
+                    ),
+                }
+            ],
+        }
+
+        export_autoplan_docx(data, str(output_path))
+        doc = Document(str(output_path))
+
+        title_run = next(p.runs[0] for p in doc.paragraphs if p.text == "第一章 工程概述" and p.runs)
+        assert title_run.font.name == "宋体"
+        assert round(title_run.font.size.pt, 1) == 16.0
+        assert str(title_run.font.color.rgb) == "000000"
+
+        toc_run = next(p.runs[0] for p in doc.paragraphs if "第一章、工程概述" in p.text and "·" in p.text and p.runs)
+        assert toc_run.font.name == "宋体"
+        assert round(toc_run.font.size.pt, 1) == 16.0
+        assert str(toc_run.font.color.rgb) == "000000"
+
+        table = doc.tables[0]
+        header_run = table.rows[0].cells[0].paragraphs[0].runs[0]
+        body_run = table.rows[1].cells[0].paragraphs[0].runs[0]
+        assert header_run.font.name == "宋体"
+        assert round(header_run.font.size.pt, 1) == 16.0
+        assert str(header_run.font.color.rgb) == "000000"
+        assert body_run.font.name == "宋体"
+        assert round(body_run.font.size.pt, 1) == 14.0
+        assert str(body_run.font.color.rgb) == "000000"
 
     def test_export_empty_sections(self, temp_dir):
         """Test export with empty sections list."""
@@ -692,7 +1004,8 @@ class TestExportAutoplanDocxFromFile:
         text = "\n".join(p.text for p in doc.paragraphs)
         
         # Should use first variant
-        assert "测试施工组织设计" in text
+        assert "测试" in text
+        assert "施工组织设计" in text
         assert "第二版本" not in text
 
     def test_export_from_file_with_empty_variants(self, temp_dir):
@@ -852,7 +1165,7 @@ class TestEdgeCases:
         assert output_path.exists()
 
     def test_quality_check_item_with_no_ok_field(self, temp_dir):
-        """Test quality check item without 'ok' field."""
+        """Quality check payload without ok field should still be routed to build report."""
         output_path = Path(temp_dir) / "no_ok.docx"
         data = {
             "topic": "测试",
@@ -863,8 +1176,7 @@ class TestEdgeCases:
         }
         
         export_autoplan_docx(data, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        # ok is None/falsy, should show "需改进"
-        assert "需改进" in text
+        text = _doc_visible_text(output_path)
+        report = json.loads(_build_report_json_path(output_path).read_text(encoding="utf-8"))
+        assert "需改进" not in text
+        assert report["internal_payload"]["quality_checks"]["structure"]["note"] == "仅有备注"
