@@ -2,15 +2,17 @@ from pathlib import Path
 import json, re
 from typing import List, Dict, Any
 from fastapi import APIRouter, Query, HTTPException
+from backend.zhifei_autoplan.workspace import resolve_workspace_dir, workspace_paths
 
 router = APIRouter()
 AUDIT_PATH = Path("backend/data/audit/ingest.jsonl")
 
-def _load_records() -> List[Dict[str, Any]]:
-    if not AUDIT_PATH.exists():
+def _load_records(*, workspace_dir: str | None = None) -> List[Dict[str, Any]]:
+    audit_path = workspace_paths(workspace_dir)["ingest_audit"] if workspace_dir else AUDIT_PATH
+    if not audit_path.exists():
         return []
     recs = []
-    for ln in AUDIT_PATH.read_text(encoding="utf-8").splitlines():
+    for ln in audit_path.read_text(encoding="utf-8").splitlines():
         try:
             recs.append(json.loads(ln))
         except Exception:
@@ -18,8 +20,19 @@ def _load_records() -> List[Dict[str, Any]]:
     return recs
 
 @router.get("/search")
-async def search(q: str = Query(..., min_length=1), limit: int = 20) -> Dict[str, Any]:
-    recs = _load_records()
+async def search(
+    q: str = Query(..., min_length=1),
+    limit: int = 20,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+) -> Dict[str, Any]:
+    resolved_workspace = str(
+        resolve_workspace_dir(
+            session_id=session_id,
+            workspace_dir=workspace_dir,
+        )
+    )
+    recs = _load_records(workspace_dir=resolved_workspace)
     if not recs:
         raise HTTPException(status_code=404, detail="no ingested documents")
 

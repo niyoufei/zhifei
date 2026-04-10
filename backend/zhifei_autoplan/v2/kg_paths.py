@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-EXTERNAL_KG_ROOT = Path("/Users/youfeini/Desktop/文档生成系统/知识图谱")
 ENV_KG_ROOT_KEY = "ZF_KG_ROOT"
 
 
@@ -13,6 +12,10 @@ def project_root() -> Path:
 
 def embedded_kg_root() -> Path:
     return project_root() / "知识图谱"
+
+
+def alternate_kg_root() -> Path:
+    return project_root() / "knowledge_graph"
 
 
 def _has_kg_files(root: Path) -> bool:
@@ -32,8 +35,8 @@ def resolve_default_kg_root() -> Path:
     if _has_kg_files(embedded):
         return embedded
 
-    external = EXTERNAL_KG_ROOT.expanduser().resolve()
-    if _has_kg_files(external):
-        return external
+    alternate = alternate_kg_root().resolve()
+    if _has_kg_files(alternate):
+        return alternate
 
     return embedded

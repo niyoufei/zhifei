@@ -8,10 +8,18 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend.zhifei_autoplan.workspace import workspace_paths
+
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BACKEND_DIR.parent
 BUILD_DIR = PROJECT_DIR / "build"
-BUILD_DIR.mkdir(exist_ok=True)
+
+
+def _build_dir(workspace_dir: str | None = None) -> Path:
+    if workspace_dir:
+        return workspace_paths(workspace_dir)["build"]
+    BUILD_DIR.mkdir(exist_ok=True)
+    return BUILD_DIR
 
 def _sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -160,9 +168,9 @@ def _extract_docs_from_obj(obj: Any, source: str) -> List[Dict[str, Any]]:
     walk(obj, "$")
     return docs
 
-def _load_selected_pack_paths() -> Tuple[List[Path], Dict[str, Any]]:
+def _load_selected_pack_paths(*, workspace_dir: str | None = None) -> Tuple[List[Path], Dict[str, Any]]:
     info: Dict[str, Any] = {"source": None, "details": None}
-    kg_ctx = BUILD_DIR / "kg_context.json"
+    kg_ctx = _build_dir(workspace_dir) / "kg_context.json"
     if kg_ctx.exists():
         obj, err = _safe_load_json(kg_ctx)
         if isinstance(obj, dict):
@@ -208,13 +216,13 @@ def _load_selected_pack_paths() -> Tuple[List[Path], Dict[str, Any]]:
         info["details"] = {"error": repr(e)}
         return [], info
 
-def retrieve(query: str, top_k: int = 10) -> Dict[str, Any]:
+def retrieve(query: str, top_k: int = 10, *, workspace_dir: str | None = None) -> Dict[str, Any]:
     query = (query or "").strip()
     top_k = int(top_k or 10)
     top_k = max(1, min(top_k, 50))
 
     tokens = _tokenize(query)
-    pack_paths, pack_info = _load_selected_pack_paths()
+    pack_paths, pack_info = _load_selected_pack_paths(workspace_dir=workspace_dir)
     used = [{"path": str(p), "name": p.name, "exists": p.exists()} for p in pack_paths]
 
     results: List[Dict[str, Any]] = []
@@ -263,7 +271,7 @@ def retrieve(query: str, top_k: int = 10) -> Dict[str, Any]:
         "results": results,
         "errors": errors,
     }
-    out = BUILD_DIR / "retrieve.json"
+    out = _build_dir(workspace_dir) / "retrieve.json"
     # inject kg_pack (top-level retrieve.json) for traceability
     try:
         import json as _json
@@ -272,7 +280,7 @@ def retrieve(query: str, top_k: int = 10) -> Dict[str, Any]:
         _root = _Path(__file__).resolve().parent
         _kgp = None
         # 1) prefer build/kg_context.json (already contains kg_pack)
-        _kc = _root.parent / "build" / "kg_context.json"
+        _kc = _build_dir(workspace_dir) / "kg_context.json"
         if _kc.exists():
             _kgp = _json.loads(_kc.read_text(encoding="utf-8")).get("kg_pack")
         # 2) fallback: compute from kg_config.json + manifest
