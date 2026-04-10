@@ -1,3 +1,11 @@
+"""Legacy Codex helper router.
+
+Status:
+    - Not mounted by backend/app/main.py
+    - Not part of the current V2 Web UI online chain
+    - Kept only as an unconnected helper/experimental endpoint
+"""
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 from backend.assistants.codex_agent import CodexAgent

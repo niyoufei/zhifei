@@ -3,11 +3,22 @@
 **/.DS_Store
 Thumbs.db
 
+# ===== Virtual environments =====
+venv/
+env/
+.venv/
+**/venv/
+**/env/
+**/.venv/
+
 # ===== Python cache / bytecode =====
 __pycache__/
 **/__pycache__/
 *.py[cod]
 *$py.class
+
+# ===== Logs =====
+*.log
 
 # ===== Backup folders =====
 # Local backup snapshots, never commit
@@ -96,6 +107,7 @@ __pycache__/
 /backend/data/autoplan/jobs/**
 /backend/data/autoplan/media/**
 /backend/data/autoplan/projects/**
+/backend/data/autoplan/archive/**
 /backend/data/autoplan/tender_matrix.json
 /backend/data/autoplan/boq_data.json
 /backend/data/autoplan/param_receipt_latest.json
