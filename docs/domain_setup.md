@@ -98,6 +98,12 @@ build/domain_bundle_release/doc.niyoufei.com.nginx.upload.txt
 bash ./scripts/push_linux_domain_bundle.sh doc.niyoufei.com root@199.180.118.204
 ```
 
+如只想预览将要执行的上传与远端安装命令：
+
+```bash
+DOCGEN_PREVIEW=1 bash ./scripts/push_linux_domain_bundle.sh doc.niyoufei.com root@199.180.118.204
+```
+
 如只上传不安装：
 
 ```bash
