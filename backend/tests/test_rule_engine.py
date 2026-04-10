@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.app.core.rule_engine import RuleEngine
 from backend.app.core.gap_analyzer import GapAnalyzer
+from backend.app.core import rule_engine as rule_engine_module
 
 
 # ============ Fixtures ============
@@ -198,6 +199,73 @@ class TestRuleEngineEvaluate:
         
         r1 = next(d for d in result["details"] if d["rule_id"] == "R1")
         assert not r1["matched"]  # Should not match - missing 结论
+
+
+class TestRuleExecutionLogging:
+    """测试规则执行最小日志写入"""
+
+    def test_evaluate_appends_success_log(self, single_rule_file, tmp_path, monkeypatch):
+        log_path = tmp_path / "runtime" / "logs" / "rule-execution.log"
+        monkeypatch.setattr(rule_engine_module, "_RULE_EXECUTION_LOG_PATH", log_path)
+
+        engine = RuleEngine(single_rule_file)
+        result = engine.evaluate("关键词")
+
+        assert result["details"][0]["matched"] is True
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("success=true time=")
+        assert " rule=单一规则" in lines[0]
+
+    def test_evaluate_appends_failure_log_when_rule_not_matched(self, single_rule_file, tmp_path, monkeypatch):
+        log_path = tmp_path / "runtime" / "logs" / "rule-execution.log"
+        monkeypatch.setattr(rule_engine_module, "_RULE_EXECUTION_LOG_PATH", log_path)
+
+        engine = RuleEngine(single_rule_file)
+        result = engine.evaluate("未命中内容")
+
+        assert result["details"][0]["matched"] is False
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("success=false time=")
+        assert " rule=单一规则" in lines[0]
+
+    def test_evaluate_appends_failure_log_for_empty_rules(self, empty_rules_file, tmp_path, monkeypatch):
+        log_path = tmp_path / "runtime" / "logs" / "rule-execution.log"
+        monkeypatch.setattr(rule_engine_module, "_RULE_EXECUTION_LOG_PATH", log_path)
+
+        engine = RuleEngine(empty_rules_file)
+        result = engine.evaluate("任意文本")
+
+        assert result["details"] == []
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("success=false time=")
+        assert lines[0].endswith(" rule=rule_engine_empty")
+
+    def test_evaluate_appends_failure_log_for_rule_error(self, tmp_path, monkeypatch):
+        log_path = tmp_path / "runtime" / "logs" / "rule-execution.log"
+        monkeypatch.setattr(rule_engine_module, "_RULE_EXECUTION_LOG_PATH", log_path)
+
+        bad_rules = [
+            {
+                "id": "BAD1",
+                "name": "坏规则",
+                "description": "缺少 criteria",
+                "weight": 1.0,
+            }
+        ]
+        rules_file = tmp_path / "bad_rules.json"
+        rules_file.write_text(json.dumps(bad_rules, ensure_ascii=False), encoding="utf-8")
+
+        engine = RuleEngine(str(rules_file))
+        with pytest.raises(KeyError):
+            engine.evaluate("任意文本")
+
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith("success=false time=")
+        assert " rule=坏规则" in lines[0]
 
 
 # ============ GapAnalyzer Tests ============
