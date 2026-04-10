@@ -9,7 +9,10 @@ import networkx as nx
 
 
 _DUR_RE = re.compile(r"工期[^\d]{0,8}(\d+(?:\.\d+)?)\s*(天|日|月|h|小时)", re.IGNORECASE)
-_PEAK_RE = re.compile(r"(?:资源峰值|高峰投入|投入人员|投入设备|人数)[^\d]{0,8}(\d+(?:\.\d+)?)\s*(人|台|套)", re.IGNORECASE)
+_PEAK_RE = re.compile(
+    r"(?:资源峰值|高峰投入|投入人员|投入设备|人数峰值|峰值人数)[^\d]{0,8}(\d+(?:\.\d+)?)\s*(人|台|套)",
+    re.IGNORECASE,
+)
 _CP_RE = re.compile(r"关键线路(?:间隔|步距)?[^\d]{0,8}(\d+(?:\.\d+)?)\s*(天|日|h|小时)", re.IGNORECASE)
 _DEP_RE = re.compile(r"(?:前置|依赖|需在|在)[：:\s]*([^。；;\n]{2,80})(?:后|完成后|之后)")
 
@@ -261,18 +264,21 @@ def run_cpm(activities: List[Dict[str, Any]]) -> Dict[str, Any]:
         cur = best_pred.get(cur)
     cp.reverse()
 
-    timeline: Dict[int, float] = {}
+    resource_events: List[Tuple[float, float]] = []
     for n in order:
         rs = max(0.0, _f((by_id.get(n) or {}).get("resource_units"), 0.0))
         if rs <= 0:
             continue
-        s = es.get(n, 0.0)
-        e = ef.get(n, s)
-        lo = int(math.floor(s))
-        hi = int(math.ceil(e))
-        for t in range(lo, max(lo + 1, hi)):
-            timeline[t] = timeline.get(t, 0.0) + rs
-    resource_peak = max(timeline.values()) if timeline else 0.0
+        s = max(0.0, es.get(n, 0.0))
+        e = max(s, ef.get(n, s))
+        resource_events.append((s, rs))
+        resource_events.append((e, -rs))
+    resource_events.sort(key=lambda item: (float(item[0]), 0 if float(item[1]) < 0 else 1))
+    resource_peak = 0.0
+    resource_level = 0.0
+    for _, delta in resource_events:
+        resource_level = max(0.0, resource_level + float(delta))
+        resource_peak = max(resource_peak, resource_level)
 
     cp_starts = [es.get(n, 0.0) for n in cp]
     cp_diffs = [cp_starts[i + 1] - cp_starts[i] for i in range(len(cp_starts) - 1) if (cp_starts[i + 1] - cp_starts[i]) > 0]

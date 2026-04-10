@@ -38,3 +38,15 @@ def test_plan_consistency_receipt_contains_cpm():
     assert "cpm" in receipt
     cpm = receipt.get("cpm") or {}
     assert cpm.get("algorithm") == "networkx_cpm_v1"
+
+
+def test_build_cpm_receipt_ignores_generic_crew_size_as_resource_peak():
+    sections = [
+        {"title": "资源计划", "content": "资源峰值12人。"},
+        {"title": "施工部署", "content": "技术工种配置：测量工人数=1人/班；钢筋工人数=2人/班；班组人数=8人/班。"},
+    ]
+
+    receipt = build_cpm_receipt(sections)
+
+    assert receipt.get("mentioned", {}).get("资源峰值") == "12.0人/台/套"
+    assert receipt.get("computed", {}).get("resource_peak") == 12.0
