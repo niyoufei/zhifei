@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from backend.zhifei_autoplan.evidence import best_ingested_hit
+from backend.zhifei_autoplan.workspace import workspace_paths
 from backend.zhifei_autoplan.params_runtime import get_quant_defaults, get_boq_focus_card_defaults
 
 
@@ -409,6 +410,7 @@ def ensure_boq_focus_item_cards(
     params: Dict[str, Any] | None = None,
     project_id: str | None = None,
     boq_data: Dict[str, Any] | None = None,
+    workspace_dir: str | None = None,
 ) -> Tuple[bool, List[str]]:
     """
     Enforce that each focus item has a concrete control card (quant + triplet + evidence).
@@ -473,6 +475,7 @@ def ensure_boq_focus_item_cards(
     # to avoid cross-project contamination in global runs.
     drawing_names: List[str] = []
     standard_names: List[str] = []
+    audit_path = workspace_paths(workspace_dir)["ingest_audit"] if workspace_dir else None
     if project_id:
         try:
             from backend.zhifei_autoplan.evidence import list_ingested_filenames_by_tag
@@ -482,12 +485,14 @@ def ensure_boq_focus_item_cards(
                 project_id=str(project_id),
                 limit=80,
                 exclude_tags=["logo"],
+                audit_path=audit_path,
             )
             standard_names = list_ingested_filenames_by_tag(
                 "standard",
                 project_id=str(project_id),
                 limit=80,
                 exclude_tags=["logo"],
+                audit_path=audit_path,
             )
         except Exception:
             drawing_names = []
@@ -529,6 +534,7 @@ def ensure_boq_focus_item_cards(
                     project_id=project_id,
                     require_tags=["drawing"],
                     exclude_tags=["logo"],
+                    audit_path=audit_path,
                 )
                 if hit and hit.get("locator"):
                     dwg_loc = str(hit.get("locator"))
@@ -543,6 +549,7 @@ def ensure_boq_focus_item_cards(
                     project_id=project_id,
                     require_tags=["standard"],
                     exclude_tags=["logo"],
+                    audit_path=audit_path,
                 )
                 if hit and hit.get("locator"):
                     std_loc = str(hit.get("locator"))
@@ -600,6 +607,7 @@ def ensure_boq_focus_item_cards(
                 limit=10,
                 prefer_filename_keywords=["清单", "工程量", "BOQ", "bill", "报价"],
                 project_id=project_id,
+                audit_path=audit_path,
             )
             if item_hit and item_hit.get("locator"):
                 item_ev = str(item_hit.get("locator"))
