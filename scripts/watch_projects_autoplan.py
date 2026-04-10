@@ -29,7 +29,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+import fcntl
 import requests
+
+
+_RECENT_LIMIT = 6
+_PROCESS_LOCK_FH = None
 
 
 def _now() -> str:
@@ -38,6 +43,129 @@ def _now() -> str:
 
 def _log(msg: str):
     print(f"[{_now()}] {msg}", flush=True)
+
+
+def _state_file() -> Path:
+    root = Path(__file__).resolve().parents[1]
+    p = root / ".runtime" / "docgen" / "watcher_state.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _lock_file() -> Path:
+    root = Path(__file__).resolve().parents[1]
+    p = root / ".runtime" / "docgen" / "watcher.lock"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _try_acquire_process_lock() -> bool:
+    global _PROCESS_LOCK_FH
+    if _PROCESS_LOCK_FH is not None:
+        return True
+    try:
+        fh = _lock_file().open("a+", encoding="utf-8")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _PROCESS_LOCK_FH = fh
+        return True
+    except Exception:
+        try:
+            fh.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+        return False
+
+
+def _load_state() -> dict:
+    path = _state_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _coerce_recent(items: object) -> list[dict]:
+    out: list[dict] = []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        normalized = {
+            "timestamp": str(item.get("timestamp") or "").strip(),
+            "kind": str(item.get("kind") or "").strip(),
+            "summary": str(item.get("summary") or "").strip(),
+        }
+        if out and out[-1].get("kind") == normalized["kind"] and out[-1].get("summary") == normalized["summary"]:
+            continue
+        out.append(normalized)
+    return out[-_RECENT_LIMIT:]
+
+
+def _count_visible_dirs(root: Path) -> int:
+    try:
+        return sum(1 for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+    except Exception:
+        return 0
+
+
+def _write_state(
+    *,
+    watch_root: Path,
+    inbox_dir: Path,
+    work_dir: Path,
+    done_dir: Path,
+    failed_dir: Path,
+    status: str,
+    last_action: str,
+    last_project_id: str = "",
+    last_project_name: str = "",
+    last_error: str = "",
+    record_event: bool = False,
+    event_kind: str = "",
+) -> None:
+    existing = _load_state()
+    recent = _coerce_recent(existing.get("recent"))
+    payload = {
+        "timestamp": _now(),
+        "watch_root": str(watch_root),
+        "status": str(status or "").strip() or "idle",
+        "last_action": str(last_action or "").strip() or "poll",
+        "last_project_id": str(last_project_id or "").strip(),
+        "last_project_name": str(last_project_name or "").strip(),
+        "last_error": str(last_error or "").strip(),
+        "inbox_count": _count_visible_dirs(inbox_dir),
+        "work_count": _count_visible_dirs(work_dir),
+        "done_count": _count_visible_dirs(done_dir),
+        "failed_count": _count_visible_dirs(failed_dir),
+    }
+    if record_event:
+        kind = str(event_kind or last_action or status or "watcher").strip()
+        summary = (
+            f"{str(last_action or status or 'watcher').strip()}"
+            + (f" project={str(last_project_name or '').strip()}" if str(last_project_name or "").strip() else "")
+            + (f" error={str(last_error or '').strip()}" if str(last_error or "").strip() else "")
+        ).strip()
+        if recent and recent[-1].get("kind") == kind and recent[-1].get("summary") == summary:
+            payload["recent"] = recent
+        else:
+            recent.append(
+                {
+                    "timestamp": payload["timestamp"],
+                    "kind": kind,
+                    "summary": summary,
+                }
+            )
+            recent = recent[-_RECENT_LIMIT:]
+    if recent:
+        payload["recent"] = recent
+    try:
+        _state_file().write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _safe_name(s: str, limit: int = 60) -> str:
@@ -527,6 +655,10 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    if not _try_acquire_process_lock():
+        _log("watcher skipped: process lock already held")
+        return 0
+
     root = Path(__file__).resolve().parents[1]
     watch_root = Path(os.environ.get("ZF_WATCH_ROOT") or (root / "projects"))
     inbox = watch_root / "inbox"
@@ -542,6 +674,18 @@ def main() -> int:
     actions_key = (os.environ.get("ZF_ACTIONS_KEY") or "").strip()
     if not actions_key:
         _log("[FAIL] missing ZF_ACTIONS_KEY")
+        _write_state(
+            watch_root=watch_root,
+            inbox_dir=inbox,
+            work_dir=work,
+            done_dir=done,
+            failed_dir=failed,
+            status="error",
+            last_action="missing_actions_key",
+            last_error="missing ZF_ACTIONS_KEY",
+            record_event=True,
+            event_kind="missing_actions_key",
+        )
         return 2
 
     poll_sec = float(os.environ.get("ZF_WATCH_POLL_SEC") or 3.0)
@@ -551,12 +695,32 @@ def main() -> int:
     _log(f"watch_root={watch_root}")
     _log(f"base_url={base_url}")
     _log("watcher started" + (" (once mode)" if once else ""))
+    _write_state(
+        watch_root=watch_root,
+        inbox_dir=inbox,
+        work_dir=work,
+        done_dir=done,
+        failed_dir=failed,
+        status="idle",
+        last_action="startup",
+        record_event=True,
+        event_kind="startup",
+    )
 
     while True:
         try:
             projects = [p for p in inbox.iterdir() if p.is_dir() and not p.name.startswith(".")]
         except Exception:
             projects = []
+        _write_state(
+            watch_root=watch_root,
+            inbox_dir=inbox,
+            work_dir=work,
+            done_dir=done,
+            failed_dir=failed,
+            status="idle",
+            last_action="poll",
+        )
 
         for p in sorted(projects, key=lambda x: x.name):
             try:
@@ -578,6 +742,19 @@ def main() -> int:
                     proj_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6] + "_" + _safe_name(dst.name)
                 out_dir = dst / "_output"
                 _log(f"[{proj_id}] start: {dst}")
+                _write_state(
+                    watch_root=watch_root,
+                    inbox_dir=inbox,
+                    work_dir=work,
+                    done_dir=done,
+                    failed_dir=failed,
+                    status="running",
+                    last_action="processing",
+                    last_project_id=proj_id,
+                    last_project_name=dst.name,
+                    record_event=True,
+                    event_kind="processing",
+                )
                 summary = _process_one_project(base_url, actions_key, dst, out_dir, proj_id)
                 # Move to done/failed
                 target_base = done if summary.get("ok") else failed
@@ -586,6 +763,19 @@ def main() -> int:
                     final = target_base / f"{dst.name}_{uuid.uuid4().hex[:6]}"
                 shutil.move(str(dst), str(final))
                 _log(f"[{proj_id}] completed: ok={summary.get('ok')} -> {final}")
+                _write_state(
+                    watch_root=watch_root,
+                    inbox_dir=inbox,
+                    work_dir=work,
+                    done_dir=done,
+                    failed_dir=failed,
+                    status="idle",
+                    last_action="processed",
+                    last_project_id=proj_id,
+                    last_project_name=final.name,
+                    record_event=True,
+                    event_kind="processed",
+                )
             except Exception as e:
                 try:
                     _log(f"[ERROR] {p}: {repr(e)}")
@@ -600,9 +790,33 @@ def main() -> int:
                         shutil.move(str(p), str(bad))
                 except Exception:
                     pass
+                _write_state(
+                    watch_root=watch_root,
+                    inbox_dir=inbox,
+                    work_dir=work,
+                    done_dir=done,
+                    failed_dir=failed,
+                    status="error",
+                    last_action="error",
+                    last_project_name=p.name,
+                    last_error=repr(e),
+                    record_event=True,
+                    event_kind="error",
+                )
 
         if once:
             _log("watcher once mode: exit")
+            _write_state(
+                watch_root=watch_root,
+                inbox_dir=inbox,
+                work_dir=work,
+                done_dir=done,
+                failed_dir=failed,
+                status="idle",
+                last_action="exit_once",
+                record_event=True,
+                event_kind="exit_once",
+            )
             return 0
 
         time.sleep(max(0.5, poll_sec))
