@@ -11,9 +11,18 @@ from typing import Optional, Dict, Any
 import requests
 from urllib.parse import urlparse, urljoin
 
+from backend.zhifei_autoplan.workspace import workspace_paths
 
 ASSET_DIR = Path("backend/data/autoplan/assets")
 ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _asset_dir(workspace_dir: str | None = None) -> Path:
+    return workspace_paths(workspace_dir)["assets"] if workspace_dir else ASSET_DIR
+
+
+def _ingest_audit_path(workspace_dir: str | None = None) -> Path:
+    return workspace_paths(workspace_dir)["ingest_audit"] if workspace_dir else Path("backend/data/audit/ingest.jsonl")
 
 
 def _safe_name(s: str, limit: int = 80) -> str:
@@ -25,12 +34,12 @@ def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def find_latest_ingested_logo(project_id: str | None = None) -> Optional[str]:
+def find_latest_ingested_logo(project_id: str | None = None, *, workspace_dir: str | None = None) -> Optional[str]:
     """
     Best-effort: find the latest uploaded logo from ingest audit records.
     Convention: filename contains 'logo/标志/标识/徽标' and ingest tags include 'logo'.
     """
-    audit_path = Path("backend/data/audit/ingest.jsonl")
+    audit_path = _ingest_audit_path(workspace_dir)
     if not audit_path.exists():
         return None
     try:
@@ -58,14 +67,14 @@ def find_latest_ingested_logo(project_id: str | None = None) -> Optional[str]:
     return None
 
 
-def _load_locked_logo(project_id: str | None) -> Optional[str]:
+def _load_locked_logo(project_id: str | None, *, workspace_dir: str | None = None) -> Optional[str]:
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     if not pid:
         return None
     try:
         from backend.zhifei_autoplan.branding_store import load_branding
 
-        rec = load_branding(pid) or {}
+        rec = load_branding(pid, workspace_dir=workspace_dir) or {}
         for key in ("logo_path", "logo_embed_path", "logo_raw_path"):
             p = rec.get(key)
             if isinstance(p, str) and p.strip():
@@ -77,7 +86,16 @@ def _load_locked_logo(project_id: str | None) -> Optional[str]:
     return None
 
 
-def _lock_logo(project_id: str | None, logo_path: str, *, source: str, bidder_company: str | None = None, bidder_domain: str | None = None, logo_url: str | None = None) -> None:
+def _lock_logo(
+    project_id: str | None,
+    logo_path: str,
+    *,
+    source: str,
+    bidder_company: str | None = None,
+    bidder_domain: str | None = None,
+    logo_url: str | None = None,
+    workspace_dir: str | None = None,
+) -> None:
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     if not pid:
         return
@@ -95,6 +113,7 @@ def _lock_logo(project_id: str | None, logo_path: str, *, source: str, bidder_co
                 "logo_source": str(source),
             },
             merge=True,
+            workspace_dir=workspace_dir,
         )
     except Exception:
         return
@@ -186,7 +205,7 @@ def _safe_fetch(url: str, timeout: int = 20, max_bytes: int = 2_000_000, max_red
     return None
 
 
-def download_logo_from_url(url: str, timeout: int = 20) -> Optional[str]:
+def download_logo_from_url(url: str, timeout: int = 20, *, workspace_dir: str | None = None) -> Optional[str]:
     if not isinstance(url, str) or not url.strip():
         return None
     try:
@@ -208,14 +227,16 @@ def download_logo_from_url(url: str, timeout: int = 20) -> Optional[str]:
             ext = "webp"
         elif "jpeg" in ctype or url.lower().endswith(".jpg") or url.lower().endswith(".jpeg"):
             ext = "jpg"
-        out = ASSET_DIR / f"logo_{digest}.{ext}"
+        asset_dir = _asset_dir(workspace_dir)
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        out = asset_dir / f"logo_{digest}.{ext}"
         out.write_bytes(data)
         return str(out)
     except Exception:
         return None
 
 
-def prepare_logo_for_embedding(path: str) -> Optional[str]:
+def prepare_logo_for_embedding(path: str, *, workspace_dir: str | None = None) -> Optional[str]:
     """
     Convert logo into a docx-friendly raster format when possible.
     - python-docx does not support svg; ico/webp/gif may fail depending on version.
@@ -233,25 +254,27 @@ def prepare_logo_for_embedding(path: str) -> Optional[str]:
 
         with Image.open(p) as im:
             im = im.convert("RGBA")
-            out = ASSET_DIR / f"{p.stem}_embed.png"
+            asset_dir = _asset_dir(workspace_dir)
+            asset_dir.mkdir(parents=True, exist_ok=True)
+            out = asset_dir / f"{p.stem}_embed.png"
             im.save(out, format="PNG")
         return str(out)
     except Exception:
         return None
 
 
-def resolve_logo_from_domain(domain: str) -> Optional[str]:
+def resolve_logo_from_domain(domain: str, *, workspace_dir: str | None = None) -> Optional[str]:
     d = (domain or "").strip()
     if not d:
         return None
     d = d.replace("https://", "").replace("http://", "").strip().strip("/")
     # Basic: Clearbit
-    p = download_logo_from_url(f"https://logo.clearbit.com/{d}", timeout=15)
+    p = download_logo_from_url(f"https://logo.clearbit.com/{d}", timeout=15, workspace_dir=workspace_dir)
     if p:
         return p
     # Favicon fallback
     for path in ("/favicon.ico", "/apple-touch-icon.png"):
-        p = download_logo_from_url(f"https://{d}{path}", timeout=15)
+        p = download_logo_from_url(f"https://{d}{path}", timeout=15, workspace_dir=workspace_dir)
         if p:
             return p
     return None
@@ -309,7 +332,7 @@ def _wiki_page_image(title: str, lang: str) -> Optional[str]:
     return None
 
 
-def resolve_logo_from_wikipedia(company_name: str) -> Optional[str]:
+def resolve_logo_from_wikipedia(company_name: str, *, workspace_dir: str | None = None) -> Optional[str]:
     """
     Best-effort public source. Not guaranteed "official standard", but often good enough as a starting point.
     """
@@ -325,7 +348,7 @@ def resolve_logo_from_wikipedia(company_name: str) -> Optional[str]:
         img_url = _wiki_page_image(title, lang=lang)
         if not img_url:
             continue
-        p = download_logo_from_url(img_url)
+        p = download_logo_from_url(img_url, workspace_dir=workspace_dir)
         if p:
             return p
     return None
@@ -336,6 +359,7 @@ def resolve_logo(
     logo_url: str | None = None,
     bidder_domain: str | None = None,
     project_id: str | None = None,
+    workspace_dir: str | None = None,
 ) -> Optional[str]:
     """
     Resolution order:
@@ -346,25 +370,57 @@ def resolve_logo(
     4) wikipedia best-effort (requires company name)
     """
     if isinstance(logo_url, str) and logo_url.strip():
-        p = download_logo_from_url(logo_url.strip())
+        p = download_logo_from_url(logo_url.strip(), workspace_dir=workspace_dir)
         if p:
-            _lock_logo(project_id, p, source="url", bidder_company=bidder_company, bidder_domain=bidder_domain, logo_url=logo_url)
+            _lock_logo(
+                project_id,
+                p,
+                source="url",
+                bidder_company=bidder_company,
+                bidder_domain=bidder_domain,
+                logo_url=logo_url,
+                workspace_dir=workspace_dir,
+            )
             return p
-    locked = _load_locked_logo(project_id)
+    locked = _load_locked_logo(project_id, workspace_dir=workspace_dir)
     if locked:
         return locked
-    p = find_latest_ingested_logo(project_id=project_id)
+    p = find_latest_ingested_logo(project_id=project_id, workspace_dir=workspace_dir)
     if p:
-        _lock_logo(project_id, p, source="ingest", bidder_company=bidder_company, bidder_domain=bidder_domain, logo_url=logo_url)
+        _lock_logo(
+            project_id,
+            p,
+            source="ingest",
+            bidder_company=bidder_company,
+            bidder_domain=bidder_domain,
+            logo_url=logo_url,
+            workspace_dir=workspace_dir,
+        )
         return p
     if isinstance(bidder_domain, str) and bidder_domain.strip():
-        p = resolve_logo_from_domain(bidder_domain.strip())
+        p = resolve_logo_from_domain(bidder_domain.strip(), workspace_dir=workspace_dir)
         if p:
-            _lock_logo(project_id, p, source="domain", bidder_company=bidder_company, bidder_domain=bidder_domain, logo_url=logo_url)
+            _lock_logo(
+                project_id,
+                p,
+                source="domain",
+                bidder_company=bidder_company,
+                bidder_domain=bidder_domain,
+                logo_url=logo_url,
+                workspace_dir=workspace_dir,
+            )
             return p
     if isinstance(bidder_company, str) and bidder_company.strip():
-        p = resolve_logo_from_wikipedia(bidder_company.strip())
+        p = resolve_logo_from_wikipedia(bidder_company.strip(), workspace_dir=workspace_dir)
         if p:
-            _lock_logo(project_id, p, source="wikipedia", bidder_company=bidder_company, bidder_domain=bidder_domain, logo_url=logo_url)
+            _lock_logo(
+                project_id,
+                p,
+                source="wikipedia",
+                bidder_company=bidder_company,
+                bidder_domain=bidder_domain,
+                logo_url=logo_url,
+                workspace_dir=workspace_dir,
+            )
             return p
     return None

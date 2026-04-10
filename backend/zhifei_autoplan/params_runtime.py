@@ -52,6 +52,56 @@ def _default_params() -> Dict[str, Any]:
             "relaxed_chapter_threshold": 0.97,
             "auto_fix_rounds": 1,
         },
+        "self_evolution": {
+            "enabled": True,
+            "ignore_dry_run_learning": True,
+            "runtime_profile_soft_limit": 160,
+            "runtime_profile_stale_days": 21,
+            "runtime_profile_min_runs_to_keep": 2,
+            "min_runs_for_adjustment": 2,
+            "max_timeout_delta_sec": 20,
+            "max_token_delta": 600,
+            "allow_retry_promotion": True,
+            "quality_issue_rate_raise_retry": 0.50,
+            "error_rate_raise_timeout": 0.35,
+            "fallback_rate_raise_timeout": 0.35,
+            "quality_issue_rate_raise_tokens": 0.50,
+            "compaction_rate_trim_tokens": 0.50,
+            "combo_learning_enabled": True,
+            "combo_learning_min_runs": 2,
+            "combo_learning_min_success_rate": 0.55,
+            "combo_learning_gate_pass_bonus": 0.10,
+            "combo_learning_max_priority_boost": 8,
+            "combo_bundle_learning_enabled": True,
+            "combo_bundle_min_runs": 2,
+            "combo_bundle_min_pass_rate": 0.55,
+            "combo_bundle_gate_pass_bonus": 0.10,
+            "combo_bundle_max_priority_boost": 10,
+            "combo_context_bundle_learning_enabled": True,
+            "combo_context_bundle_min_runs": 2,
+            "combo_context_bundle_min_pass_rate": 0.60,
+            "combo_context_bundle_gate_pass_bonus": 0.12,
+            "combo_context_bundle_max_priority_boost": 12,
+            "combo_context_bundle_partial_match_enabled": True,
+            "combo_context_bundle_partial_min_match_count": 2,
+            "combo_context_bundle_partial_min_match_ratio": 0.50,
+            "combo_context_bundle_partial_score_penalty": 0.08,
+            "combo_context_metric_effect_enabled": True,
+            "combo_context_metric_effect_min_runs": 2,
+            "combo_context_metric_effect_resolve_bonus": 0.10,
+            "combo_context_metric_action_effect_enabled": True,
+            "combo_context_metric_action_effect_min_runs": 2,
+            "combo_context_metric_action_effect_resolve_bonus": 0.08,
+            "task_parallelism_enabled": True,
+            "task_parallelism_min_runs": 2,
+            "task_parallelism_max_delta": 2,
+            "task_parallelism_error_rate_reduce": 0.35,
+            "task_parallelism_fallback_rate_reduce": 0.40,
+            "task_parallelism_quality_issue_rate_reduce": 0.50,
+            "task_parallelism_profile_soft_limit": 96,
+            "task_parallelism_profile_stale_days": 30,
+            "task_parallelism_profile_min_runs_to_keep": 2,
+        },
     }
 
 
@@ -65,7 +115,7 @@ def load_params() -> Dict[str, Any]:
         merged = _default_params()
         merged.update(data)
         # Shallow merge nested dicts we care about.
-        for k in ("quant_defaults", "boq_focus_card", "qse_defaults", "image_defaults", "variant_diversity"):
+        for k in ("quant_defaults", "boq_focus_card", "qse_defaults", "image_defaults", "variant_diversity", "self_evolution"):
             if isinstance(data.get(k), dict):
                 merged[k] = {**(merged.get(k) or {}), **data.get(k)}
         return merged
