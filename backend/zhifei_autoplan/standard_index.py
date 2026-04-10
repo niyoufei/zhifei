@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from backend.zhifei_autoplan.evidence import best_ingested_hit
+from backend.zhifei_autoplan.workspace import workspace_paths
 
 
 _HAN_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
@@ -49,7 +50,13 @@ def _is_key_process_chapter(title: str) -> bool:
     return any(k in t for k in keys)
 
 
-def build_standard_index(topic: str, outline: List[str], project_id: str | None = None) -> Dict[str, Any]:
+def build_standard_index(
+    topic: str,
+    outline: List[str],
+    project_id: str | None = None,
+    *,
+    workspace_dir: str | None = None,
+) -> Dict[str, Any]:
     """
     Build a lightweight “企业标准/工法/作业指导 目录 + 章节-标准绑定”索引。
     Sources:
@@ -58,7 +65,7 @@ def build_standard_index(topic: str, outline: List[str], project_id: str | None 
     - standards: file list + keywords
     - chapter_bindings: best-effort locator bindings for key chapters
     """
-    audit_path = Path("backend/data/audit/ingest.jsonl")
+    audit_path = workspace_paths(workspace_dir)["ingest_audit"] if workspace_dir else Path("backend/data/audit/ingest.jsonl")
     if not audit_path.exists():
         return {"ok": False, "standards": [], "chapter_bindings": [], "reason": "no_ingest_audit"}
 
@@ -112,6 +119,7 @@ def build_standard_index(topic: str, outline: List[str], project_id: str | None 
             project_id=pid,
             require_tags=["standard"],
             exclude_tags=["logo"],
+            audit_path=audit_path,
         )
         if not hit or not hit.get("locator"):
             continue
@@ -132,4 +140,3 @@ def build_standard_index(topic: str, outline: List[str], project_id: str | None 
         "standards": standards[:40],
         "chapter_bindings": bindings[:30],
     }
-

@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 _EVID_RE = re.compile(r"【证据:([^】]{1,260})】")
 _GRAPH_RE = re.compile(r"【图谱节点:([^】]{1,200})】")
 _SPACE_RE = re.compile(r"\s+")
+_AUTO_SRC_PREFIX = "AUTO://"
 
 
 def _clean(s: Any) -> str:
@@ -138,6 +139,13 @@ def _extract_evidence(paragraph: str, section_graph_nodes: List[str]) -> Dict[st
     return {"sources": sources, "typed": typed}
 
 
+def _is_explicit_evidence_source(src: Any) -> bool:
+    s = _clean(src)
+    if not s:
+        return False
+    return not s.startswith(_AUTO_SRC_PREFIX)
+
+
 def build_evidence_tracking(
     *,
     sections: List[Dict[str, Any]],
@@ -149,19 +157,34 @@ def build_evidence_tracking(
     chapter_pages = chapter_pages if isinstance(chapter_pages, dict) else {}
 
     page_cursor = 1
+    section_count = 0
+    score_bound_sections = 0
+    explicit_evidence_sections = 0
+    traceable_locator_sections = 0
     for s_idx, sec in enumerate(sections or [], start=1):
         if not isinstance(sec, dict):
             continue
+        section_count += 1
         title = _clean(sec.get("title")) or f"章节{s_idx}"
         content = str(sec.get("content") or "")
         paras = _split_paragraphs(content)
         sec_pages = _chapter_target_pages(chapter_pages, title, content)
         sec_para_count = max(1, len(paras))
         section_graph_nodes = [str(x).strip() for x in (sec.get("graph_nodes") or []) if str(x).strip()]
+        sec_has_score_hit = False
+        sec_has_explicit_evidence = False
+        sec_has_traceable = False
 
         for p_idx, para in enumerate(paras, start=1):
             ev = _extract_evidence(para, section_graph_nodes)
             score_hits = _detect_score_hits(para, score_points)
+            if score_hits:
+                sec_has_score_hit = True
+            sources = [str(x).strip() for x in (ev.get("sources") or []) if str(x).strip()]
+            if any(_is_explicit_evidence_source(x) for x in sources):
+                sec_has_explicit_evidence = True
+            if any(("#" in x and "@" in x) for x in sources):
+                sec_has_traceable = True
             page_est = page_cursor + min(sec_pages - 1, math.floor((p_idx - 1) * sec_pages / sec_para_count))
             rows.append(
                 {
@@ -176,10 +199,20 @@ def build_evidence_tracking(
                     "evidence_typed": ev["typed"],
                 }
             )
+        if sec_has_score_hit:
+            score_bound_sections += 1
+        if sec_has_explicit_evidence:
+            explicit_evidence_sections += 1
+        if sec_has_traceable:
+            traceable_locator_sections += 1
         page_cursor += max(1, sec_pages)
 
     matched_rows = sum(1 for r in rows if (r.get("tender_score_points") or []))
-    evidence_rows = sum(1 for r in rows if (r.get("evidence_sources") or []))
+    evidence_rows = sum(
+        1
+        for r in rows
+        if any(_is_explicit_evidence_source(x) for x in (r.get("evidence_sources") or []))
+    )
     trace_rows = sum(
         1
         for r in rows
@@ -192,6 +225,9 @@ def build_evidence_tracking(
             "score_point_bound_rows": matched_rows,
             "evidence_bound_rows": evidence_rows,
             "traceable_locator_rows": trace_rows,
+            "section_count": section_count,
+            "score_point_bound_sections": score_bound_sections,
+            "evidence_bound_sections": explicit_evidence_sections,
+            "traceable_locator_sections": traceable_locator_sections,
         },
     }
-
