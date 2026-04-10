@@ -10,6 +10,7 @@ from backend.zhifei_autoplan.v2.data_graph_ingestion import (
     ingest_knowledge_graph,
     search_graph_index,
 )
+from backend.zhifei_autoplan.v2.kg_paths import embedded_kg_root
 
 
 def _build_sample_files(root: Path) -> None:
@@ -141,12 +142,12 @@ def test_ingestion_stamps_domain_tag_from_first_level_directory(tmp_path: Path) 
 
 
 def test_real_desktop_kg_path_can_be_scanned_if_exists(tmp_path: Path) -> None:
-    desktop_path = Path("/Users/youfeini/Desktop/文档生成系统/知识图谱")
-    if not desktop_path.exists():
-        pytest.skip("desktop knowledge graph path is not present in this environment")
+    kg_root = embedded_kg_root()
+    if not kg_root.exists():
+        pytest.skip("embedded knowledge graph path is not present in this environment")
 
     db_path = tmp_path / "desktop.sqlite3"
-    report = ingest_knowledge_graph(desktop_path, db_path=db_path)
+    report = ingest_knowledge_graph(kg_root, db_path=db_path)
 
     assert report["ok"] is True
     assert report["files_total"] > 0

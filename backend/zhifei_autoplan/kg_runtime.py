@@ -26,24 +26,49 @@ def _extract_docs(obj: Any, path: str = "$") -> List[Dict[str, Any]]:
     docs: List[Dict[str, Any]] = []
 
     def add_doc(title: str, text: str, p: str):
-        if not text or len(text) < 30:
+        if not text or len(text) < 20:
             return
         docs.append({"title": title, "text": text, "path": p})
 
-    def walk(x: Any, p: str):
+    def flatten(x: Any, prefix: str = "") -> List[str]:
+        out: List[str] = []
+        if x in (None, "", [], {}):
+            return out
         if isinstance(x, dict):
-            # 优先工序结构
-            name = x.get("工序名称") or x.get("name") or x.get("title")
-            if name:
-                parts = []
-                for k, v in x.items():
+            for k, v in x.items():
+                np = f"{prefix}.{k}" if prefix else str(k)
+                if isinstance(v, (dict, list)):
+                    out.extend(flatten(v, np))
+                else:
                     if v in (None, "", [], {}):
                         continue
-                    if isinstance(v, (dict, list)):
+                    out.append(f"{np}: {v}")
+        elif isinstance(x, list):
+            for i, v in enumerate(x):
+                np = f"{prefix}[{i}]" if prefix else f"[{i}]"
+                if isinstance(v, (dict, list)):
+                    out.extend(flatten(v, np))
+                else:
+                    if v in (None, "", [], {}):
                         continue
-                    parts.append(f"{k}: {v}")
+                    out.append(f"{np}: {v}")
+        else:
+            out.append(f"{prefix}: {x}" if prefix else str(x))
+        return out
+
+    def walk(x: Any, p: str):
+        if isinstance(x, dict):
+            title = (
+                x.get("工序名称")
+                or x.get("name")
+                or x.get("title")
+                or x.get("node_id")
+                or x.get("id")
+            )
+            if title:
+                parts = flatten(x)
                 if parts:
-                    add_doc(str(name), "\n".join(parts), p)
+                    add_doc(str(title), "\n".join(parts), p)
             for k, v in x.items():
                 if isinstance(v, (dict, list)):
                     walk(v, f"{p}.{k}")
@@ -54,9 +79,8 @@ def _extract_docs(obj: Any, path: str = "$") -> List[Dict[str, Any]]:
     walk(obj, path)
     return docs
 
-
-def search_kg(query: str, top_k: int = 6) -> Dict[str, Any]:
-    active = get_active_kg()
+def search_kg(query: str, top_k: int = 6, *, workspace_dir: str | None = None) -> Dict[str, Any]:
+    active = get_active_kg(workspace_dir=workspace_dir)
     if not active:
         return {"results": [], "error": "no_active_kg"}
 

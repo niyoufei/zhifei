@@ -15,6 +15,7 @@ import json
 import hashlib
 
 from backend import kg_loader
+from backend.zhifei_autoplan.workspace import workspace_paths
 
 
 
@@ -26,6 +27,13 @@ mode = QUALITY_GATE_MODE
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BACKEND_DIR.parent
 BUILD_DIR = PROJECT_DIR / "build"
+
+
+def _build_dir(workspace_dir: str | None = None) -> Path:
+    if workspace_dir:
+        return workspace_paths(workspace_dir)["build"]
+    BUILD_DIR.mkdir(exist_ok=True)
+    return BUILD_DIR
 
 
 def _sha256_file(p: Optional[Path]) -> Optional[str]:
@@ -74,17 +82,17 @@ def _first_str(d: Any, keys: List[str]) -> Optional[str]:
     return None
 
 
-def build_audit_report() -> Dict[str, Any]:
-    BUILD_DIR.mkdir(exist_ok=True)
+def build_audit_report(*, workspace_dir: str | None = None) -> Dict[str, Any]:
+    build_dir = _build_dir(workspace_dir)
     cfg = kg_loader.load_kg_config()
 
     artifacts = {
-        "project_profile": BUILD_DIR / "project_profile.json",
-        "kg_context": BUILD_DIR / "kg_context.json",
-        "region_upgrade": BUILD_DIR / "region_upgrade.json",
-        "precheck_guard": BUILD_DIR / "precheck_guard.json",
-        "compose": BUILD_DIR / "compose.json",
-        "retrieve": BUILD_DIR / "retrieve.json",
+        "project_profile": build_dir / "project_profile.json",
+        "kg_context": build_dir / "kg_context.json",
+        "region_upgrade": build_dir / "region_upgrade.json",
+        "precheck_guard": build_dir / "precheck_guard.json",
+        "compose": build_dir / "compose.json",
+        "retrieve": build_dir / "retrieve.json",
     }
 
     parsed: Dict[str, Any] = {}
@@ -110,7 +118,7 @@ def build_audit_report() -> Dict[str, Any]:
         "top_k": rt.get("top_k") if isinstance(rt, dict) else None,
         "docs_scanned": rt.get("docs_scanned") if isinstance(rt, dict) else None,
         "results_count": (len(rt.get("results") or []) if isinstance(rt, dict) else None),
-        "trace_file": str(BUILD_DIR / "retrieve.json"),
+        "trace_file": str(build_dir / "retrieve.json"),
     }
 
     project_profile = {
@@ -336,9 +344,9 @@ def build_audit_report() -> Dict[str, Any]:
     try:
         import json as _json
         from pathlib import Path as _Path
-        _build_dir = globals().get("BUILD_DIR") or _Path("build")
+        _report_build_dir = build_dir
         def _safe_load(_fn: str):
-            _p = _build_dir / _fn
+            _p = _report_build_dir / _fn
             if not _p.exists():
                 return None
             return _json.loads(_p.read_text(encoding="utf-8"))
@@ -536,8 +544,7 @@ def build_audit_report() -> Dict[str, Any]:
     # persist audit report to build/audit_report.json
     try:
         import json as _json
-        from pathlib import Path as _Path
-        _out = _Path("build") / "audit_report.json"
+        _out = build_dir / "audit_report.json"
         _out.parent.mkdir(parents=True, exist_ok=True)
         _out.write_text(_json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
