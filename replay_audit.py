@@ -1,3 +1,9 @@
+"""Offline historical audit replay script.
+
+This script replays a local jsonl file for inspection.
+It is not mounted into FastAPI and is not part of the current online request chain.
+"""
+
 import json
 from datetime import datetime
 

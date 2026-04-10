@@ -1,3 +1,12 @@
+"""Legacy local launcher shim.
+
+Current production-like online chain runs:
+    python -m uvicorn backend.app.main:app ...
+
+This file is kept only for local historical compatibility and should not be
+treated as the authoritative online entrypoint for the V2 Web UI.
+"""
+
 from fastapi import FastAPI
 from export_router_clean import router as export_router
 app = FastAPI()

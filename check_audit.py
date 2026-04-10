@@ -1,3 +1,9 @@
+"""Offline audit verification script.
+
+This script reads a local audit log and verifies one saved file on disk.
+It is not mounted into FastAPI and is not part of the current online request chain.
+"""
+
 import json, hashlib, pathlib
 
 audit = pathlib.Path("backend/data/audit/ingest.jsonl")
