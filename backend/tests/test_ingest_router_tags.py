@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.app.routers.ingest import _classify_tags
+from backend.app.routers.ingest import _classify_tags, _normalize_source_hint
 
 
 def test_site_photo_hint_not_marked_as_drawing() -> None:
@@ -23,3 +23,13 @@ def test_drawing_standard_hint_keeps_drawing_by_filename() -> None:
 def test_drawing_standard_hint_keeps_standard_by_filename() -> None:
     tags = _classify_tags("企业标准-模板工程.pdf", "pdf", None, source_hint="drawing_standard")
     assert "standard" in tags
+
+
+def test_template_library_hint_adds_template_tags() -> None:
+    tags = _classify_tags("优秀房建施组案例.docx", "docx", None, source_hint="template_library")
+    assert "template_library" in tags
+    assert "benchmark_case" in tags
+
+
+def test_template_library_alias_normalized() -> None:
+    assert _normalize_source_hint("样板库") == "template_library"

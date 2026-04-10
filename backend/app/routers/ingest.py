@@ -9,7 +9,25 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel
 from pypdf import PdfReader
+
+from backend.zhifei_autoplan.project_types import normalize_project_type
+from backend.zhifei_autoplan.workspace import maybe_cleanup_expired_workspaces, resolve_workspace_dir, workspace_paths
+from backend.zhifei_autoplan.template_library import (
+    TEMPLATE_BENCHMARK_TAG,
+    TEMPLATE_LIBRARY_SCOPE,
+    TEMPLATE_LIBRARY_TAG,
+    build_template_chapter_profiles,
+    delete_template_library_item,
+    infer_template_scene_tags,
+    list_template_library_items,
+    normalize_template_page_bucket,
+    normalize_template_scene_tags,
+    summarize_template_learning_digest,
+    summarize_template_library,
+    template_page_bucket_label,
+)
 
 router = APIRouter(prefix="/ingest", tags=["文档解析"])
 
@@ -19,6 +37,22 @@ PREVIEW_DIR = Path("backend/data/previews")
 AUDIT_DIR = Path("backend/data/audit")
 for d in (UPLOAD_DIR, EXTRACT_DIR, PREVIEW_DIR, AUDIT_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+
+class TemplateLibraryDeletePayload(BaseModel):
+    record_id: str
+
+
+def _resolve_workspace_context(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+) -> Dict[str, str]:
+    resolved = resolve_workspace_dir(session_id=session_id, workspace_dir=workspace_dir)
+    maybe_cleanup_expired_workspaces(exclude_workspace=resolved)
+    return {
+        "session_id": str(session_id or resolved.name).strip() or resolved.name,
+        "workspace_dir": str(resolved),
+    }
 
 
 def _sha256(b: bytes) -> str:
@@ -114,8 +148,32 @@ def _normalize_source_hint(source_hint: str | None) -> str:
         "photo": "site_photo",
         "site_photo": "site_photo",
         "现场照片": "site_photo",
+        "template_library": "template_library",
+        "benchmark": "template_library",
+        "benchmark_library": "template_library",
+        "template": "template_library",
+        "样板库": "template_library",
+        "样板": "template_library",
+        "案例库": "template_library",
+        "优秀案例": "template_library",
     }
     return aliases.get(raw, raw)
+
+
+def _normalize_library_scope(library_scope: str | None, source_hint: str | None = None) -> str:
+    raw = str(library_scope or "").strip().lower()
+    if not raw:
+        raw = _normalize_source_hint(source_hint)
+    aliases = {
+        "template_library": TEMPLATE_LIBRARY_SCOPE,
+        "benchmark": TEMPLATE_LIBRARY_SCOPE,
+        "benchmark_library": TEMPLATE_LIBRARY_SCOPE,
+        "template": TEMPLATE_LIBRARY_SCOPE,
+        "样板库": TEMPLATE_LIBRARY_SCOPE,
+        "样板": TEMPLATE_LIBRARY_SCOPE,
+        "案例库": TEMPLATE_LIBRARY_SCOPE,
+    }
+    return aliases.get(raw, "")
 
 
 def _classify_tags(filename: str | None, ext: str, parsed_type: str | None, source_hint: str | None = None) -> list[str]:
@@ -134,6 +192,8 @@ def _classify_tags(filename: str | None, ext: str, parsed_type: str | None, sour
         pass
     elif hint == "site_photo":
         tags.append("site_photo")
+    elif hint == "template_library":
+        tags.extend([TEMPLATE_LIBRARY_TAG, TEMPLATE_BENCHMARK_TAG])
 
     if any(k in name for k in ("logo", "标志", "标识", "徽标")):
         tags.append("logo")
@@ -247,17 +307,59 @@ async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> str | Non
             return None
     return None
 
-async def _handle_upload(files: List[UploadFile], project_id: str | None = None, source_hint: str | None = None):
+async def _handle_upload(
+    files: List[UploadFile],
+    project_id: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    source_hint: str | None = None,
+    project_type: str | None = None,
+    library_scope: str | None = None,
+    library_note: str | None = None,
+    template_page_bucket: str | None = None,
+    template_scene_tags: str | None = None,
+    template_feedback_score: int | None = None,
+    template_feedback_origin: str | None = None,
+    source_job_id: str | None = None,
+    source_variant: int | None = None,
+):
     if not files:
         raise HTTPException(status_code=400, detail="no files uploaded")
 
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    ws_paths = workspace_paths(workspace["workspace_dir"])
     day = datetime.utcnow().strftime("%Y%m%d")
-    target_dir = UPLOAD_DIR / day
+    target_dir = ws_paths["uploads"] / day
     target_dir.mkdir(parents=True, exist_ok=True)
+    extract_dir = ws_paths["extracts"]
+    preview_dir = ws_paths["previews"]
+    audit_file = ws_paths["ingest_audit"]
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    audit_file.parent.mkdir(parents=True, exist_ok=True)
 
     records = []
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     normalized_hint = _normalize_source_hint(source_hint)
+    normalized_project_type = normalize_project_type(project_type)
+    normalized_library_scope = _normalize_library_scope(library_scope, normalized_hint)
+    normalized_library_note = str(library_note or "").strip()
+    normalized_library_note = normalized_library_note[:240] if normalized_library_note else ""
+    requested_template_page_bucket = normalize_template_page_bucket(template_page_bucket)
+    normalized_scene_tags = normalize_template_scene_tags(template_scene_tags)
+    normalized_feedback_origin = str(template_feedback_origin or "").strip().lower()[:48] or None
+    try:
+        normalized_feedback_score = int(template_feedback_score) if template_feedback_score is not None else 0
+    except Exception:
+        normalized_feedback_score = 0
+    normalized_feedback_score = max(0, min(normalized_feedback_score, 100))
+    normalized_source_job_id = str(source_job_id or "").strip()[:64] or None
+    try:
+        normalized_source_variant = int(source_variant) if source_variant is not None else None
+    except Exception:
+        normalized_source_variant = None
+    if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE and not normalized_project_type:
+        raise HTTPException(status_code=400, detail="template library upload requires valid project_type")
     for uf in files:
         content = await uf.read()
         if not content:
@@ -304,7 +406,7 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None,
         preview_path = None
         try:
             preview_name = f"{digest[:8]}_preview.png"
-            preview_out = PREVIEW_DIR / preview_name
+            preview_out = preview_dir / preview_name
             if ext in {"png", "jpg", "jpeg"}:
                 preview_path = _make_preview_image(out_path, preview_out)
             elif ext == "pdf":
@@ -313,15 +415,34 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None,
             preview_path = None
 
         extract_path = None
+        extract_text = str(parsed.get("extract_text") or "").strip()
         if parsed.get("extract_text") is not None:
-            extract_path = EXTRACT_DIR / f"{digest[:8]}.txt"
+            extract_path = extract_dir / f"{digest[:8]}.txt"
             extract_path.write_text(parsed["extract_text"], encoding="utf-8")
             parsed.pop("extract_text", None)
+        template_chapter_profiles = (
+            build_template_chapter_profiles(extract_text)
+            if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE and extract_text
+            else []
+        )
+        inferred_scene_tags = (
+            infer_template_scene_tags(
+                uf.filename,
+                normalized_library_note,
+                extract_text,
+                project_type=normalized_project_type,
+            )
+            if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE
+            else []
+        )
+        merged_scene_tags = normalize_template_scene_tags(normalized_scene_tags + inferred_scene_tags)
 
         rec = {
             "ts": datetime.utcnow().isoformat() + "Z",
             "module": "ingest",
             "project_id": pid,
+            "session_id": workspace["session_id"],
+            "workspace_dir": workspace["workspace_dir"],
             "filename": uf.filename,
             "saved_as": str(out_path),
             "bytes": len(content),
@@ -332,10 +453,38 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None,
             "parsed_type": parsed_type,
             "parsed_meta": parsed_meta,
             "source_hint": normalized_hint or None,
+            "project_type": normalized_project_type or None,
+            "library_scope": normalized_library_scope or None,
+            "library_note": normalized_library_note or None,
+            "template_scene_tags": merged_scene_tags if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else [],
+            "template_feedback_score": normalized_feedback_score if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else 0,
+            "template_feedback_origin": normalized_feedback_origin if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else None,
+            "source_job_id": normalized_source_job_id if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else None,
+            "source_variant": normalized_source_variant if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else None,
+            "template_page_bucket": (
+                normalize_template_page_bucket(requested_template_page_bucket, page_count=parsed.get("pages"))
+                if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE
+                else None
+            ),
+            "template_chapter_profiles": template_chapter_profiles if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else [],
+            "template_chapter_profile_count": (
+                len(template_chapter_profiles)
+                if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE
+                else 0
+            ),
+            "template_page_bucket_label": (
+                template_page_bucket_label(
+                    normalize_template_page_bucket(requested_template_page_bucket, page_count=parsed.get("pages"))
+                )
+                if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE
+                else None
+            ),
             "tags": _classify_tags(uf.filename, ext, parsed_type, normalized_hint),
         }
+        if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE and not str(rec.get("template_page_bucket") or "").strip():
+            raise HTTPException(status_code=400, detail="template library upload requires valid template_page_bucket")
         records.append(rec)
-        with (AUDIT_DIR / "ingest.jsonl").open("a", encoding="utf-8") as f:
+        with audit_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     if not records:
@@ -349,10 +498,142 @@ async def ping():
 
 
 @router.post("/upload")
-async def upload(files: List[UploadFile] = File(...), project_id: str | None = None, source_hint: str | None = None):
-    return await _handle_upload(files, project_id=project_id, source_hint=source_hint)
+async def upload(
+    files: List[UploadFile] = File(...),
+    project_id: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    source_hint: str | None = None,
+    project_type: str | None = None,
+    library_scope: str | None = None,
+    library_note: str | None = None,
+    template_page_bucket: str | None = None,
+    template_scene_tags: str | None = None,
+    template_feedback_score: int | None = None,
+    template_feedback_origin: str | None = None,
+    source_job_id: str | None = None,
+    source_variant: int | None = None,
+):
+    return await _handle_upload(
+        files,
+        project_id=project_id,
+        session_id=session_id,
+        workspace_dir=workspace_dir,
+        source_hint=source_hint,
+        project_type=project_type,
+        library_scope=library_scope,
+        library_note=library_note,
+        template_page_bucket=template_page_bucket,
+        template_scene_tags=template_scene_tags,
+        template_feedback_score=template_feedback_score,
+        template_feedback_origin=template_feedback_origin,
+        source_job_id=source_job_id,
+        source_variant=source_variant,
+    )
 
 
 @router.post("/ingest")
-async def ingest(files: List[UploadFile] = File(...), project_id: str | None = None, source_hint: str | None = None):
-    return await _handle_upload(files, project_id=project_id, source_hint=source_hint)
+async def ingest(
+    files: List[UploadFile] = File(...),
+    project_id: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    source_hint: str | None = None,
+    project_type: str | None = None,
+    library_scope: str | None = None,
+    library_note: str | None = None,
+    template_page_bucket: str | None = None,
+    template_scene_tags: str | None = None,
+    template_feedback_score: int | None = None,
+    template_feedback_origin: str | None = None,
+    source_job_id: str | None = None,
+    source_variant: int | None = None,
+):
+    return await _handle_upload(
+        files,
+        project_id=project_id,
+        session_id=session_id,
+        workspace_dir=workspace_dir,
+        source_hint=source_hint,
+        project_type=project_type,
+        library_scope=library_scope,
+        library_note=library_note,
+        template_page_bucket=template_page_bucket,
+        template_scene_tags=template_scene_tags,
+        template_feedback_score=template_feedback_score,
+        template_feedback_origin=template_feedback_origin,
+        source_job_id=source_job_id,
+        source_variant=source_variant,
+    )
+
+
+@router.get("/template-library/summary")
+async def template_library_summary(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    return {"ok": True, "summary": summarize_template_library(audit_path=workspace_paths(workspace["workspace_dir"])["ingest_audit"])}
+
+
+@router.get("/template-library/items")
+async def template_library_items(
+    project_type: str | None = None,
+    template_page_bucket: str | None = None,
+    template_scene_tags: str | None = None,
+    sort_by: str | None = None,
+    limit: int = 20,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    return {
+        "ok": True,
+        "items": list_template_library_items(
+            project_type=project_type,
+            template_page_bucket=template_page_bucket,
+            scene_tags=normalize_template_scene_tags(template_scene_tags),
+            sort_by=sort_by,
+            limit=max(1, min(int(limit or 20), 60)),
+            audit_path=workspace_paths(workspace["workspace_dir"])["ingest_audit"],
+        ),
+    }
+
+
+@router.get("/template-library/learning-digest")
+async def template_library_learning_digest(
+    project_type: str | None = None,
+    template_page_bucket: str | None = None,
+    template_scene_tags: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    return {
+        "ok": True,
+        "digest": summarize_template_learning_digest(
+            project_type=project_type,
+            template_page_bucket=template_page_bucket,
+            scene_tags=normalize_template_scene_tags(template_scene_tags),
+            audit_path=workspace_paths(workspace["workspace_dir"])["ingest_audit"],
+        ),
+    }
+
+
+@router.post("/template-library/delete")
+async def template_library_delete(
+    payload: TemplateLibraryDeletePayload,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+):
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    try:
+        deleted = delete_template_library_item(
+            payload.record_id,
+            audit_path=workspace_paths(workspace["workspace_dir"])["ingest_audit"],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="template library item not found") from e
+    return {"ok": True, "deleted": deleted}
