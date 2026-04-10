@@ -104,6 +104,13 @@ class TestLoadDefaults:
 class TestInitProvider:
     """测试 _init_provider 方法"""
 
+    def test_init_openai_provider_normalizes_display_model_alias(self):
+        """ChatGPT 展示名应映射到 OpenAI 真实模型 ID。"""
+        with patch("backend.zhifei_autoplan.utils.llm_client.OpenAIProvider") as mock:
+            mock.return_value = MagicMock()
+            LLMClient(provider="openai", model="ChatGPT-5.4", api_key="test-key")
+            mock.assert_called_once_with("test-key", "gpt-5.4")
+
     def test_init_openai_provider(self):
         """初始化 OpenAI provider"""
         with patch("backend.zhifei_autoplan.utils.llm_client.OpenAIProvider") as mock:
@@ -143,6 +150,13 @@ class TestInitProvider:
             mock.return_value = MagicMock()
             client = LLMClient(provider="google", model="gemini-pro", api_key="test-key")
             mock.assert_called_once_with("test-key", "gemini-pro")
+
+    def test_init_google_provider_normalizes_display_model_alias(self):
+        """Gemini 展示名应映射到 Google 真实模型 ID。"""
+        with patch("backend.zhifei_autoplan.utils.llm_client.GeminiProvider") as mock:
+            mock.return_value = MagicMock()
+            LLMClient(provider="google", model="Gemini3.1pro", api_key="test-key")
+            mock.assert_called_once_with("test-key", "gemini-3.1-pro-preview")
 
     def test_init_zhipu_provider(self):
         """初始化智谱 provider"""

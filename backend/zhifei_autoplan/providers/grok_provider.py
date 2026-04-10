@@ -17,9 +17,23 @@ class GrokProvider(BaseProvider):
 
     async def complete(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         timeout_sec = float(kwargs.get("timeout_sec", kwargs.get("timeout", 180)))
+        max_output_tokens = kwargs.get("max_output_tokens")
+        temperature = kwargs.get("temperature")
 
         def _call() -> Dict[str, Any]:
-            resp = self.client.responses.create(model=self.model, input=prompt)
+            req: Dict[str, Any] = {"model": self.model, "input": prompt}
+            try:
+                mot = int(max_output_tokens)
+                if mot > 0:
+                    req["max_output_tokens"] = mot
+            except Exception:
+                pass
+            try:
+                if temperature is not None:
+                    req["temperature"] = float(temperature)
+            except Exception:
+                pass
+            resp = self.client.responses.create(**req)
             text = resp.output_text if hasattr(resp, "output_text") else str(resp)
             return {"provider": self.name, "model": self.model, "text": text}
 

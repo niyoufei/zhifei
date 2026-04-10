@@ -12,6 +12,7 @@ from backend.zhifei_autoplan.providers.baidu_provider import BaiduProvider
 from backend.zhifei_autoplan.providers.iflytek_provider import IflytekProvider
 from backend.zhifei_autoplan.providers.tencent_provider import TencentProvider
 from backend.zhifei_autoplan.providers.grok_provider import GrokProvider
+from backend.zhifei_autoplan.model_aliases import normalize_provider_model_pair
 
 
 class LLMClient:
@@ -29,8 +30,7 @@ class LLMClient:
         secret_key: Optional[str] = None,
         token_url: Optional[str] = None,
     ):
-        self.provider = str(provider or "").strip().lower()
-        self.model = model
+        self.provider, self.model = normalize_provider_model_pair(provider, model)
         self.api_key = api_key
         self.base_url = base_url
         self.secret_key = secret_key
@@ -107,11 +107,24 @@ class LLMClient:
                 "provider": self.provider,
                 "model": self.model,
                 "text": "",
+                "used_key_alias": kwargs.get("used_key_alias"),
                 "error": self._init_error or "provider_not_configured",
             }
         try:
             return await self._impl.complete(prompt, **kwargs)
         except TimeoutError:
-            return {"provider": self.provider, "model": self.model, "text": "", "error": "timeout"}
+            return {
+                "provider": self.provider,
+                "model": self.model,
+                "text": "",
+                "used_key_alias": kwargs.get("used_key_alias"),
+                "error": "timeout",
+            }
         except Exception as e:
-            return {"provider": self.provider, "model": self.model, "text": "", "error": repr(e)}
+            return {
+                "provider": self.provider,
+                "model": self.model,
+                "text": "",
+                "used_key_alias": kwargs.get("used_key_alias"),
+                "error": repr(e),
+            }
