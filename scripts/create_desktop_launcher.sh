@@ -3,28 +3,43 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DESKTOP="${HOME}/Desktop"
-START_NAME="${1:-智飞文档生成}"
+APP_NAME="${1:-施组专家系统}"
+BUILD_SCRIPT="${ROOT}/scripts/build_quick_launch_app.sh"
+RENDER_SCRIPT="${ROOT}/scripts/render_desktop_launcher_icon.py"
+PREVIEW_DIR="${ROOT}/build/desktop_launcher"
+TMP_DIR="$(mktemp -d /tmp/docgen_desktop_launcher.XXXXXX)"
+ICONSET_DIR="${TMP_DIR}/AppIcon.iconset"
+ICON_ICNS="${TMP_DIR}/AppIcon.icns"
 
-if ! command -v osacompile >/dev/null 2>&1; then
-  echo "osacompile not found (macOS required)" >&2
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "[ERROR] python3 not found" >&2
   exit 1
 fi
 
-START_APP="${DESKTOP}/${START_NAME}.app"
-TMP_START="$(mktemp /tmp/zhifei_start_launcher.XXXXXX)"
+if ! command -v iconutil >/dev/null 2>&1; then
+  echo "[ERROR] iconutil not found (macOS required)" >&2
+  exit 1
+fi
 
-cat > "$TMP_START" <<EOF
-set rootPath to POSIX path of "${ROOT}/"
-set cmd to "cd " & quoted form of rootPath & " && ./scripts/run_web_ui.sh"
-tell application "Terminal"
-  activate
-  do script "/bin/bash -lc " & quoted form of cmd
-end tell
-EOF
+if [[ ! -x "$BUILD_SCRIPT" ]]; then
+  echo "[ERROR] build script not executable: $BUILD_SCRIPT" >&2
+  exit 1
+fi
 
-rm -rf "$START_APP"
-osacompile -o "$START_APP" "$TMP_START"
+mkdir -p "$PREVIEW_DIR"
 
-rm -f "$TMP_START"
+python3 "$RENDER_SCRIPT" \
+  --iconset-dir "$ICONSET_DIR" \
+  --preview-png "$PREVIEW_DIR/${APP_NAME}.png"
 
-echo "created: $START_APP"
+iconutil -c icns "$ICONSET_DIR" -o "$ICON_ICNS"
+
+ICON_ICNS_SOURCE="$ICON_ICNS" "$BUILD_SCRIPT" "$APP_NAME" "$DESKTOP"
+
+echo "[OK] 已在桌面生成启动入口: ${DESKTOP}/${APP_NAME}.app"
+echo "[OK] 图标预览已输出: ${PREVIEW_DIR}/${APP_NAME}.png"

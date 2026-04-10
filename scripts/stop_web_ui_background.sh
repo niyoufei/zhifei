@@ -32,11 +32,13 @@ is_our_backend_pid() {
   local cmd cwd
   cmd="$(pid_cmdline "$pid")"
   cwd="$(pid_cwd "$pid")"
-  [[ "$cmd" == *"uvicorn"* ]] || return 1
-  [[ "$cmd" == *"backend.app.main:app"* ]] || return 1
-  [[ "$cmd" == *"--port ${BACKEND_PORT}"* ]] || return 1
-  [[ "$cmd" == *"--app-dir ${ROOT}"* || "$cwd" == "$ROOT" ]] || return 1
-  return 0
+  if [[ "$cmd" == *"uvicorn"* ]] && [[ "$cmd" == *"backend.app.main:app"* ]] && [[ "$cmd" == *"--port ${BACKEND_PORT}"* ]] && [[ "$cmd" == *"--app-dir ${ROOT}"* || "$cwd" == "$ROOT" ]]; then
+    return 0
+  fi
+  if [[ "$cmd" == *"$ROOT/scripts/run_backend_service.py"* || "$cmd" == *"$ROOT/scripts/run_backend_service.sh"* ]]; then
+    return 0
+  fi
+  return 1
 }
 
 is_our_streamlit_pid() {

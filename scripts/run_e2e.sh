@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键端到端验证脚本 - 无人工交互
 # DoD: 无交互即可跑通一次端到端流程，产出 build/ 下结构化中间产物（JSON）+ DOCX
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -16,7 +16,7 @@ log() {
 
 cleanup() {
     log "Cleaning up..."
-    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    if [ "${SERVER_STARTED:-false}" = "true" ] && [ -n "${SERVER_PID:-}" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
     fi
@@ -41,12 +41,18 @@ if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     pip3 install -r requirements.txt --quiet
 fi
 
-# 3) Start server in background
-log "Starting FastAPI server..."
-export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
-python3 -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8010 &
-SERVER_PID=$!
-log "Server PID: $SERVER_PID"
+# 3) Start server in background (or reuse existing healthy server)
+SERVER_STARTED=false
+export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
+if curl -s http://127.0.0.1:8010/health >/dev/null 2>&1; then
+    log "[OK] Existing FastAPI server detected on 8010, reuse."
+else
+    log "Starting FastAPI server..."
+    python3 -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8010 &
+    SERVER_PID=$!
+    SERVER_STARTED=true
+    log "Server PID: $SERVER_PID"
+fi
 
 # 4) Wait for server ready (max 30s)
 log "Waiting for server to be ready..."
@@ -71,23 +77,26 @@ E2E_STATUS=${PIPESTATUS[0]}
 
 # 6) Verify artifacts
 log "Verifying artifacts..."
-ARTIFACTS=("build/project_profile.json" "build/precheck_guard.json" "build/region_upgrade.json" "build/compose.json")
+LATEST_JSON="$(ls -1t build/actions_*.json 2>/dev/null | head -n1 || true)"
+LATEST_DOCX="$(ls -1t build/actions_*_v1.docx 2>/dev/null | head -n1 || true)"
+LATEST_COMPARE="$(ls -1t build/actions_*_compare_v1.docx 2>/dev/null | head -n1 || true)"
 ALL_OK=true
-for f in "${ARTIFACTS[@]}"; do
-    if [ -f "$f" ]; then
-        log "[OK] $f exists ($(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null) bytes)"
-    else
-        log "[FAIL] $f missing"
-        ALL_OK=false
-    fi
-done
-
-# Check DOCX output
-if [ -f "build/compose_output.docx" ] || [ -f "build/compose_exported.docx" ]; then
-    DOCX_FILE=$(ls -1 build/compose*.docx 2>/dev/null | head -1)
-    log "[OK] DOCX output: $DOCX_FILE"
+if [ -n "$LATEST_JSON" ] && [ -f "$LATEST_JSON" ]; then
+    log "[OK] JSON output: $LATEST_JSON"
 else
-    log "[FAIL] No DOCX output found"
+    log "[FAIL] Missing actions json output"
+    ALL_OK=false
+fi
+if [ -n "$LATEST_DOCX" ] && [ -f "$LATEST_DOCX" ]; then
+    log "[OK] DOCX output: $LATEST_DOCX"
+else
+    log "[FAIL] Missing actions DOCX output"
+    ALL_OK=false
+fi
+if [ -n "$LATEST_COMPARE" ] && [ -f "$LATEST_COMPARE" ]; then
+    log "[OK] Compare DOCX output: $LATEST_COMPARE"
+else
+    log "[FAIL] Missing actions compare DOCX output"
     ALL_OK=false
 fi
 

@@ -28,6 +28,7 @@ HOST="${ZF_HOST:-127.0.0.1}"
 BACKEND_PORT="${ZF_BACKEND_PORT:-8010}"
 WEB_PORT="${ZF_WEB_PORT:-8501}"
 SYSTEM_ID="${ZF_SYSTEM_ID:-docgen-system}"
+PUBLIC_WEB_URL="${ZF_PUBLIC_WEB_URL:-}"
 
 PYTHON=""
 if [ -x "$ROOT_DIR/venv/bin/python3" ]; then
@@ -112,8 +113,14 @@ cat >"$PLIST_PATH_WATCHDOG" <<EOF
       <string>${ZF_GOOGLE_API_KEY}</string>
       <key>BACKEND_PORT</key>
       <string>${BACKEND_PORT}</string>
+      <key>BACKEND_HOST</key>
+      <string>${HOST}</string>
       <key>WEB_PORT</key>
       <string>${WEB_PORT}</string>
+      <key>WEB_HOST</key>
+      <string>${HOST}</string>
+      <key>ZF_PUBLIC_WEB_URL</key>
+      <string>${PUBLIC_WEB_URL}</string>
       <key>ZF_WATCHDOG_INTERVAL</key>
       <string>6</string>
     </dict>
@@ -152,7 +159,7 @@ launchctl kickstart -k "gui/$UID/${PLIST_ID_WATCHDOG}" >/dev/null 2>&1 || true
 
 echo "[OK] Web UI launchd 已安装并启动"
 echo "     后端: http://${HOST}:${BACKEND_PORT}/health"
-echo "     Web 控制台: http://${HOST}:${WEB_PORT}"
+echo "     Web 控制台: ${PUBLIC_WEB_URL:-http://${HOST}:${WEB_PORT}}"
 echo "     日志: logs/webui_watchdog.*.log, logs/webui_backend.*.log, logs/streamlit.*.log"
 echo ""
 echo "     卸载: ./scripts/uninstall_web_ui_launchd.sh"

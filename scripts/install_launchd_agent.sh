@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Install a macOS launchd LaunchAgent to keep the FastAPI backend running.
 # Usage:
-#   ZF_ACTIONS_KEY=... ZF_GOOGLE_API_KEY=... ./scripts/install_launchd_agent.sh
+#   ZF_ACTIONS_KEY=... ./scripts/install_launchd_agent.sh
+# or rely on .runtime/local_keys.env for model provider keys.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +34,7 @@ mkdir -p "$ROOT_DIR/logs"
 
 # Optional env vars
 ZF_ACTIONS_KEY="${ZF_ACTIONS_KEY:-}"
-ZF_GOOGLE_API_KEY="${ZF_GOOGLE_API_KEY:-${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}}"
+ZF_KEYS_FILE="${ZF_KEYS_FILE:-${ROOT_DIR}/.runtime/local_keys.env}"
 
 cat >"$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -49,7 +50,7 @@ cat >"$PLIST_PATH" <<EOF
     <true/>
 
     <key>WorkingDirectory</key>
-    <string>${ROOT_DIR}</string>
+    <string>${HOME}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -57,20 +58,18 @@ cat >"$PLIST_PATH" <<EOF
       <string>${ROOT_DIR}</string>
       <key>ZF_ACTIONS_KEY</key>
       <string>${ZF_ACTIONS_KEY}</string>
-      <key>ZF_GOOGLE_API_KEY</key>
-      <string>${ZF_GOOGLE_API_KEY}</string>
+      <key>ZF_KEYS_FILE</key>
+      <string>${ZF_KEYS_FILE}</string>
+      <key>ZF_HOST</key>
+      <string>${HOST}</string>
+      <key>ZF_PORT</key>
+      <string>${PORT}</string>
     </dict>
 
     <key>ProgramArguments</key>
     <array>
       <string>${PYTHON}</string>
-      <string>-m</string>
-      <string>uvicorn</string>
-      <string>backend.app.main:app</string>
-      <string>--host</string>
-      <string>${HOST}</string>
-      <string>--port</string>
-      <string>${PORT}</string>
+      <string>${ROOT_DIR}/scripts/run_backend_service.py</string>
     </array>
 
     <key>StandardOutPath</key>
