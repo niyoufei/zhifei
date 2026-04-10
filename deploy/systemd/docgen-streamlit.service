@@ -1,0 +1,23 @@
+[Unit]
+Description=DocGen Streamlit Web UI Service
+After=network-online.target docgen-autoplan.service
+Wants=network-online.target docgen-autoplan.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/docgen
+Environment=PYTHONPATH=/opt/docgen
+Environment=ZF_KEYS_FILE=/opt/docgen/.runtime/local_keys.env
+Environment=ZF_BACKEND_BASE_URL=http://127.0.0.1:8010
+Environment=ZF_SYSTEM_ID=docgen-system
+Environment=ZF_PUBLIC_WEB_URL=https://__DOCGEN_DOMAIN__
+EnvironmentFile=-/opt/docgen/.runtime/local_keys.env
+ExecStart=/opt/docgen/.venv/bin/python3 -m streamlit run /opt/docgen/app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true --server.fileWatcherType none --server.runOnSave false
+Restart=always
+RestartSec=3
+
+StandardOutput=append:/opt/docgen/logs/streamlit.out.log
+StandardError=append:/opt/docgen/logs/streamlit.err.log
+
+[Install]
+WantedBy=multi-user.target
