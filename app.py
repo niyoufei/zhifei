@@ -6466,6 +6466,20 @@ def _recent_job_sort_key(item: dict[str, Any]) -> tuple[int, float]:
     return (priority, -ts)
 
 
+def _recent_job_matches_filter(item: dict[str, Any], filter_key: str) -> bool:
+    if not isinstance(item, dict):
+        return False
+    status = str(item.get("status") or "").strip().lower()
+    key = str(filter_key or "all").strip().lower()
+    if key == "active":
+        return status in {"queued", "running"}
+    if key == "review_needed":
+        return status == "done" and item.get("quality_gate_ok") is False
+    if key == "exceptions":
+        return status in {"failed", "cancelled"}
+    return status in {"queued", "running", "done", "failed", "cancelled"}
+
+
 def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[str, Any]:
     raw_json = _download_bytes(base_url, actions_key, job_id, "json", 1, timeout=600)
     data = json.loads(raw_json.decode("utf-8", errors="ignore"))
@@ -7341,6 +7355,19 @@ def _render_recent_job_recovery(
         st.caption("用于查看后台任务、最近成品和异常任务。在途任务可直接接回，已完成成品可直接载入。")
         if review_needed_count > 0:
             st.caption(f"待复核成品 {review_needed_count} 个，已自动前置展示。")
+        filter_labels = {
+            "all": "全部",
+            "active": "在途",
+            "review_needed": "待复核",
+            "exceptions": "异常",
+        }
+        selected_filter = st.radio(
+            "任务筛选",
+            options=list(filter_labels.keys()),
+            format_func=lambda key: filter_labels.get(key, key),
+            horizontal=True,
+            key="recent_job_filter",
+        )
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("在途任务", counts["queued"] + counts["running"])
         m2.metric("最近成品", counts["done"])
@@ -7353,7 +7380,12 @@ def _render_recent_job_recovery(
             except Exception:
                 return int(default)
 
-        for item in display_items[:6]:
+        filtered_items = [item for item in display_items if _recent_job_matches_filter(item, selected_filter)]
+        if not filtered_items:
+            st.caption("当前筛选下暂无任务。")
+            return
+
+        for item in filtered_items[:6]:
             job_id = str(item.get("job_id") or "").strip()
             status = str(item.get("status") or "").strip().lower()
             title = str(item.get("topic") or "").strip() or "施工组织设计方案"

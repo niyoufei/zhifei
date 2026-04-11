@@ -16,6 +16,7 @@ def _load_helpers() -> SimpleNamespace:
         "_recent_job_mode_quality_caption",
         "_recent_job_quality_signal",
         "_recent_job_sort_key",
+        "_recent_job_matches_filter",
     }
     wanted_assigns = {
         "GENERATION_MODE_CATALOG",
@@ -134,3 +135,19 @@ def test_recent_job_sort_key_prioritizes_running_then_review_needed_done():
     )
 
     assert ordered == [running, queued, review_needed_done, failed, clean_done]
+
+
+def test_recent_job_matches_filter_supports_active_review_needed_and_exceptions():
+    helpers = _load_helpers()
+
+    running = {"status": "running"}
+    review_needed_done = {"status": "done", "quality_gate_ok": False}
+    clean_done = {"status": "done", "quality_gate_ok": True}
+    failed = {"status": "failed"}
+
+    assert helpers._recent_job_matches_filter(running, "all") is True
+    assert helpers._recent_job_matches_filter(running, "active") is True
+    assert helpers._recent_job_matches_filter(review_needed_done, "review_needed") is True
+    assert helpers._recent_job_matches_filter(clean_done, "review_needed") is False
+    assert helpers._recent_job_matches_filter(failed, "exceptions") is True
+    assert helpers._recent_job_matches_filter(clean_done, "exceptions") is False
