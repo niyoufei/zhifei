@@ -410,9 +410,9 @@ def test_review_chapter_shortcuts_prioritize_pending_high_risk_titles():
     shortcuts = helpers._review_chapter_shortcuts(rows, limit=3)
 
     assert shortcuts == [
-        {"title": "主要施工方法", "label": "主要施工方法（待处理高优1 / 待处理1 / 问题1）", "filter_key": "high"},
-        {"title": "安全措施", "label": "安全措施（高优1 / 待处理1 / 问题2 / 已填1）", "filter_key": "all"},
-        {"title": "质量保证措施", "label": "质量保证措施（待处理1 / 问题1）", "filter_key": "all"},
+        {"title": "主要施工方法", "label": "主要施工方法（待处理高优1 / 待处理1 / 问题1 / 进度0/1）", "filter_key": "high"},
+        {"title": "安全措施", "label": "安全措施（高优1 / 待处理1 / 问题2 / 进度1/2 / 已填1）", "filter_key": "all"},
+        {"title": "质量保证措施", "label": "质量保证措施（待处理1 / 问题1 / 进度0/1）", "filter_key": "all"},
     ]
 
 
@@ -439,7 +439,7 @@ def test_review_next_pending_shortcut_returns_first_pending_focus_target():
 
     assert shortcut == {
         "title": "主要施工方法",
-        "label": "主要施工方法（待处理高优1 / 待处理1 / 问题1）",
+        "label": "主要施工方法（待处理高优1 / 待处理1 / 问题1 / 进度0/1）",
         "filter_key": "high",
     }
 
@@ -470,7 +470,7 @@ def test_review_apply_followup_message_calls_out_next_pending_target_or_completi
     next_message = helpers._review_apply_followup_message(next_rows)
     done_message = helpers._review_apply_followup_message(done_rows)
 
-    assert next_message == "下一步建议处理：主要施工方法（待处理高优1 / 待处理1 / 问题1）"
+    assert next_message == "下一步建议处理：主要施工方法（待处理高优1 / 待处理1 / 问题1 / 进度0/1）"
     assert done_message == "当前方案已无待处理问题，可复核最新质量结果。"
 
 

@@ -6841,6 +6841,9 @@ def _review_chapter_shortcuts(rows: list[dict[str, Any]] | None, limit: int = 3)
             detail_bits.insert(0, f"待处理高优{int(item.get('pending_high') or 0)}")
         elif int(item.get("high") or 0) > 0:
             detail_bits.insert(0, f"高优{int(item.get('high') or 0)}")
+        progress_label = str(item.get("progress_label") or "").strip()
+        if progress_label:
+            detail_bits.append(f"进度{progress_label}")
         if int(item.get("replacement_ready") or 0) > 0:
             detail_bits.append(f"已填{int(item.get('replacement_ready') or 0)}")
         shortcuts.append(
