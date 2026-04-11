@@ -6150,6 +6150,17 @@ def _render_downloads() -> None:
     job_id = result.get("job_id", "")
     variants = int(result.get("variants") or 1)
     st.write(f"job_id: `{job_id}`")
+    generation_mode_summary = result.get("generation_mode_summary") if isinstance(result.get("generation_mode_summary"), dict) else {}
+    if generation_mode_summary:
+        profile = str(generation_mode_summary.get("profile") or "").strip()
+        mode_effective = str(generation_mode_summary.get("mode_effective") or "").strip()
+        deterministic_template = str(generation_mode_summary.get("deterministic_logic_template_id") or "").strip()
+        st.caption(
+            f"生成档位={GENERATION_MODE_LABELS.get(profile, profile or '-')}；"
+            f"执行策略={GENERATION_ENGINE_LABELS.get(mode_effective, mode_effective or '-')}；"
+            f"稳定交付={'是' if generation_mode_summary.get('stable_output') else '否'}；"
+            f"固定模板={deterministic_template or '-'}"
+        )
     result_project_type = str(result.get("project_type") or st.session_state.get("project_type") or "").strip()
     result_topic = str(result.get("topic") or st.session_state.get("topic_text") or "施工组织设计方案").strip()
     result_project_id = _safe_project_id(st.session_state.get("project_id_text") or result_topic)
@@ -6219,6 +6230,13 @@ def _render_downloads() -> None:
                     width="stretch",
                 )
             q = (result.get("quality_by_variant") or {}).get(i) or {}
+            if q:
+                st.caption(
+                    f"模板={str(q.get('logic_template_name') or q.get('logic_template_id') or '-').strip() or '-'}；"
+                    f"质量分={q.get('quality_score') if q.get('quality_score') is not None else '-'}；"
+                    f"质量闸门={'通过' if q.get('quality_gate_ok') else '未通过'}；"
+                    f"未通过项={q.get('quality_gate_failed_count') if q.get('quality_gate_failed_count') is not None else '-'}"
+                )
             if q:
                 st.json(q)
             runtime = (result.get("runtime_by_variant") or {}).get(i) or {}
@@ -6340,6 +6358,39 @@ def _cancel_active_job(base_url: str, actions_key: str) -> None:
     st.session_state["active_job"] = None
 
 
+def _coerce_variant_position(raw: Any) -> int | None:
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    text = str(raw or "").strip().lower()
+    if text.startswith("v") and text[1:].isdigit():
+        text = text[1:]
+    try:
+        value = int(text)
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
+def _normalize_variant_dict_map(raw: Any) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        idx = (
+            _coerce_variant_position(value.get("variant_index"))
+            or _coerce_variant_position(key)
+            or _coerce_variant_position(value.get("variant_id"))
+        )
+        if idx is None:
+            continue
+        out[idx] = dict(value)
+    return out
+
+
 def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[str, Any]:
     raw_json = _download_bytes(base_url, actions_key, job_id, "json", 1, timeout=600)
     data = json.loads(raw_json.decode("utf-8", errors="ignore"))
@@ -6351,8 +6402,15 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
         timeout=60,
     )
     job_status = job_status_payload.get("job") if isinstance(job_status_payload, dict) else {}
+    persisted_runtime_map = _normalize_variant_dict_map(job_status.get("runtime_by_variant"))
+    persisted_quality_map = _normalize_variant_dict_map(job_status.get("quality_by_variant"))
+    generation_mode_summary = (
+        job_status.get("generation_mode_summary")
+        if isinstance(job_status.get("generation_mode_summary"), dict)
+        else {}
+    )
     variants_data = data.get("variants") or []
-    variants_n = max(1, len(variants_data))
+    variants_n = max(1, len(variants_data), len(persisted_runtime_map), len(persisted_quality_map))
 
     artifacts: dict[int, dict[str, bytes]] = {}
     quality_map: dict[int, dict[str, Any]] = {}
@@ -6391,15 +6449,29 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
         except Exception:
             pass
         rec = variants_data[v - 1] if v <= len(variants_data) else {}
+        persisted_runtime = persisted_runtime_map.get(v) if isinstance(persisted_runtime_map.get(v), dict) else {}
+        persisted_quality = persisted_quality_map.get(v) if isinstance(persisted_quality_map.get(v), dict) else {}
         qc = rec.get("quality_checks") or {}
         mode_policy = rec.get("mode_policy") if isinstance(rec.get("mode_policy"), dict) else {}
         agent_contract_checks = rec.get("agent_contract_checks") if isinstance(rec.get("agent_contract_checks"), dict) else {}
         score_mapping = rec.get("score_mapping") if isinstance(rec.get("score_mapping"), dict) else {}
+        logic_template = rec.get("logic_template") if isinstance(rec.get("logic_template"), dict) else {}
         runtime_map[v] = {
-            "generation_mode": rec.get("generation_mode"),
-            "mode_effective": mode_policy.get("mode_effective"),
+            "generation_mode": persisted_runtime.get("generation_mode") or rec.get("generation_mode"),
+            "mode_effective": persisted_runtime.get("mode_effective") or mode_policy.get("mode_effective"),
             "planned_total_pages": mode_policy.get("planned_total_pages"),
-            "pipeline_stages": rec.get("pipeline_stages") if isinstance(rec.get("pipeline_stages"), list) else [],
+            "section_count": persisted_runtime.get("section_count"),
+            "pipeline_stages": persisted_runtime.get("pipeline_stages")
+            if isinstance(persisted_runtime.get("pipeline_stages"), list)
+            else (rec.get("pipeline_stages") if isinstance(rec.get("pipeline_stages"), list) else []),
+            "retrieval_cache": persisted_runtime.get("retrieval_cache") if isinstance(persisted_runtime.get("retrieval_cache"), dict) else {},
+            "self_evolution": persisted_runtime.get("self_evolution") if isinstance(persisted_runtime.get("self_evolution"), dict) else {},
+            "section_runtime_budget_preview": persisted_runtime.get("section_runtime_budget_preview")
+            if isinstance(persisted_runtime.get("section_runtime_budget_preview"), list)
+            else [],
+            "resource_usage_summary": persisted_runtime.get("resource_usage_summary")
+            if isinstance(persisted_runtime.get("resource_usage_summary"), dict)
+            else {},
             "agent_contract_ok": agent_contract_checks.get("ok"),
             "agent_contract_error_count": agent_contract_checks.get("error_count"),
             "score_high_risk_count": ((score_mapping.get("summary") or {}).get("high_risk_item_count") if isinstance(score_mapping, dict) else None),
@@ -6447,10 +6519,26 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
                 for item in pipeline_stages
                 if isinstance(item, dict) and "final_length_clamp" in str(item.get("stage") or "")
             ),
-            "remediation_strategy_audit": qc.get("remediation_strategy_audit") if isinstance(qc.get("remediation_strategy_audit"), dict) else {},
-            "remediation_execution_audit": qc.get("remediation_execution_audit") if isinstance(qc.get("remediation_execution_audit"), dict) else {},
+            "remediation_strategy_audit": persisted_quality.get("remediation_strategy_audit")
+            if isinstance(persisted_quality.get("remediation_strategy_audit"), dict)
+            else (qc.get("remediation_strategy_audit") if isinstance(qc.get("remediation_strategy_audit"), dict) else {}),
+            "remediation_execution_audit": persisted_quality.get("remediation_execution_audit")
+            if isinstance(persisted_quality.get("remediation_execution_audit"), dict)
+            else (qc.get("remediation_execution_audit") if isinstance(qc.get("remediation_execution_audit"), dict) else {}),
         }
         quality_map[v] = {
+            "logic_template_id": persisted_quality.get("logic_template_id")
+            or rec.get("logic_template_id")
+            or logic_template.get("id"),
+            "logic_template_name": persisted_quality.get("logic_template_name")
+            or rec.get("logic_template_name")
+            or logic_template.get("name"),
+            "quality_score": persisted_quality.get("quality_score", qc.get("score")),
+            "quality_gate_ok": persisted_quality.get("quality_gate_ok", quality_gate.get("ok")),
+            "quality_gate_failed_count": persisted_quality.get(
+                "quality_gate_failed_count",
+                len(quality_gate.get("failed") or []) if isinstance(quality_gate.get("failed"), list) else 0,
+            ),
             "structure": (qc.get("structure") or {}).get("ok"),
             "officialese": (qc.get("officialese") or {}).get("ok"),
             "risk_triplet": (qc.get("risk_triplet") or {}).get("ok"),
@@ -6465,6 +6553,12 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
             "standard_evidence": (qc.get("standard_evidence") or {}).get("ok"),
             "boq_focus_item_typed_evidence": (qc.get("boq_focus_item_typed_evidence") or {}).get("ok"),
             "consistency": (qc.get("consistency") or {}).get("ok"),
+            "remediation_strategy_audit": persisted_quality.get("remediation_strategy_audit")
+            if isinstance(persisted_quality.get("remediation_strategy_audit"), dict)
+            else {},
+            "remediation_execution_audit": persisted_quality.get("remediation_execution_audit")
+            if isinstance(persisted_quality.get("remediation_execution_audit"), dict)
+            else {},
         }
 
     return {
@@ -6475,6 +6569,7 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
         "artifacts": artifacts,
         "quality_by_variant": quality_map,
         "runtime_by_variant": runtime_map,
+        "generation_mode_summary": generation_mode_summary,
         "generation_trace_by_variant": generation_trace_map,
         "runtime_budget_by_variant": runtime_budget_map,
         "remediation_by_variant": remediation_map,
