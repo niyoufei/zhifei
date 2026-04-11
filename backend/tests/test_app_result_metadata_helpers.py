@@ -23,6 +23,9 @@ def _load_helpers() -> SimpleNamespace:
         "_review_apply_feedback",
         "_review_issue_signature",
         "_review_issue_delta_feedback",
+        "_review_severity_priority",
+        "_review_rows_for_editor",
+        "_review_editor_focus_summary",
         "_review_priority_summary",
         "_recent_job_quality_signal",
         "_review_workspace_focus_notice",
@@ -246,6 +249,38 @@ def test_review_issue_delta_feedback_reports_resolved_and_remaining_items():
     assert "高优 1 项" in feedback["message"]
     assert "新增 1 项" in feedback["message"]
     assert "残留重点=安全措施/risk_triplet_gap / 质量保证措施/consistency_gap" in feedback["message"]
+
+
+def test_review_rows_for_editor_prioritize_high_severity_first():
+    helpers = _load_helpers()
+
+    rows = [
+        {"issue_id": "R0002", "title": "安全措施", "type": "risk_triplet_gap", "severity": "medium"},
+        {"issue_id": "I0001", "title": "主要施工方法", "type": "quantitative_gap", "severity": "high"},
+        {"issue_id": "R0003", "title": "质量保证措施", "type": "consistency_gap", "severity": "low"},
+    ]
+
+    ordered = helpers._review_rows_for_editor(rows)
+    assert [row["issue_id"] for row in ordered] == ["I0001", "R0002", "R0003"]
+    assert helpers._review_severity_priority("high") == 3
+    assert helpers._review_severity_priority("medium") == 2
+
+
+def test_review_editor_focus_summary_calls_out_high_priority_rows():
+    helpers = _load_helpers()
+
+    summary = helpers._review_editor_focus_summary(
+        [
+            {"issue_id": "I0001", "title": "主要施工方法", "type": "quantitative_gap", "severity": "high"},
+            {"issue_id": "I0002", "title": "安全措施", "type": "risk_triplet_gap", "severity": "high"},
+            {"issue_id": "R0003", "title": "质量保证措施", "type": "consistency_gap", "severity": "medium"},
+        ]
+    )
+
+    assert summary["level"] == "warning"
+    assert "当前高优问题 2 项" in summary["message"]
+    assert "主要施工方法/quantitative_gap" in summary["message"]
+    assert "安全措施/risk_triplet_gap" in summary["message"]
 
 
 def test_review_workspace_focus_notice_only_for_review_needed_current_job():

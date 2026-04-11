@@ -6684,6 +6684,52 @@ def _review_issue_delta_feedback(
     return {"level": level, "message": "；".join(parts)}
 
 
+def _review_severity_priority(value: Any) -> int:
+    level = str(value or "").strip().lower()
+    if level == "high":
+        return 3
+    if level == "medium":
+        return 2
+    if level == "low":
+        return 1
+    return 0
+
+
+def _review_rows_for_editor(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    ordered = [dict(row) for row in (rows or []) if isinstance(row, dict)]
+    ordered.sort(
+        key=lambda row: (
+            -_review_severity_priority(row.get("severity")),
+            str(row.get("title") or ""),
+            str(row.get("type") or ""),
+            str(row.get("issue_id") or ""),
+        )
+    )
+    return ordered
+
+
+def _review_editor_focus_summary(rows: list[dict[str, Any]] | None) -> dict[str, str]:
+    ordered = _review_rows_for_editor(rows)
+    high_rows = [row for row in ordered if _review_severity_priority(row.get("severity")) >= 3]
+    if not high_rows:
+        return {}
+    labels: list[str] = []
+    seen: set[str] = set()
+    for row in high_rows:
+        title = str(row.get("title") or "").strip() or "章节"
+        issue_type = str(row.get("type") or "").strip()
+        label = f"{title}/{issue_type}" if issue_type else title
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+        if len(labels) >= 2:
+            break
+    message = f"当前高优问题 {len(high_rows)} 项，已自动前置显示。"
+    if labels:
+        message += " 建议先处理：" + " / ".join(labels)
+    return {"level": "warning", "message": message}
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -8015,9 +8061,13 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     if not rows:
         st.info("点击“载入问题清单”后可进行审核回写。")
         return
+    ordered_rows = _review_rows_for_editor(rows)
+    focus_summary = _review_editor_focus_summary(ordered_rows)
+    if str(focus_summary.get("level") or "") == "warning":
+        st.warning(str(focus_summary.get("message") or ""))
 
     edited = st.data_editor(
-        rows,
+        ordered_rows,
         hide_index=True,
         width="stretch",
         key=f"review_editor_{job_id}_v{variant}",
