@@ -5744,6 +5744,8 @@ def _init_state() -> None:
         "sample_library_note": "",
         "template_library_flash": "",
         "recent_job_flash": "",
+        "review_focus_job_id": "",
+        "review_focus_variant": 1,
         "latest_admission": None,
         "kg_search_query": "",
         "kg_search_top_k": 5,
@@ -6440,6 +6442,44 @@ def _recent_job_quality_signal(item: dict[str, Any]) -> dict[str, str]:
     return {"level": "warning", "message": message}
 
 
+def _recent_job_needs_review(item: dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    status = str(item.get("status") or "").strip().lower()
+    return status == "done" and item.get("quality_gate_ok") is False
+
+
+def _recent_job_action_label(item: dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return "载入结果"
+    status = str(item.get("status") or "").strip().lower()
+    if status in {"queued", "running"}:
+        return "接回任务"
+    if _recent_job_needs_review(item):
+        return "载入复核"
+    return "载入结果"
+
+
+def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
+    if not isinstance(result, dict):
+        return ""
+    job_id = str(result.get("job_id") or "").strip()
+    if not job_id or job_id != str(focus_job_id or "").strip():
+        return ""
+    quality_map = result.get("quality_by_variant") if isinstance(result.get("quality_by_variant"), dict) else {}
+    failed_variants = sum(
+        1
+        for info in quality_map.values()
+        if isinstance(info, dict) and info.get("quality_gate_ok") is False
+    )
+    if failed_variants <= 0:
+        return ""
+    return (
+        f"当前载入的是待复核成品，共 {failed_variants} 个方案未通过质量闸门。"
+        "建议先载入问题清单并完成回写后再交付。"
+    )
+
+
 def _recent_job_sort_key(item: dict[str, Any]) -> tuple[int, float]:
     if not isinstance(item, dict):
         return (99, 0.0)
@@ -6474,7 +6514,7 @@ def _recent_job_matches_filter(item: dict[str, Any], filter_key: str) -> bool:
     if key == "active":
         return status in {"queued", "running"}
     if key == "review_needed":
-        return status == "done" and item.get("quality_gate_ok") is False
+        return _recent_job_needs_review(item)
     if key == "exceptions":
         return status in {"failed", "cancelled"}
     return status in {"queued", "running", "done", "failed", "cancelled"}
@@ -7260,6 +7300,8 @@ def _restore_recent_job(base_url: str, actions_key: str, item: dict[str, Any]) -
     if not job_id:
         raise ValueError("缺少 job_id")
     st.session_state["kg_trace_sample"] = None
+    st.session_state["review_focus_job_id"] = ""
+    st.session_state["review_focus_variant"] = 1
     if status in {"queued", "running"}:
         st.session_state["run_result"] = None
         st.session_state["active_job"] = {
@@ -7278,10 +7320,21 @@ def _restore_recent_job(base_url: str, actions_key: str, item: dict[str, Any]) -
     if status == "done" and bool(item.get("result_available")):
         bundle = _collect_job_result(base_url, actions_key, job_id)
         bundle["project_id"] = item.get("project_id")
+        quality_map = bundle.get("quality_by_variant") if isinstance(bundle.get("quality_by_variant"), dict) else {}
+        review_needed = any(
+            isinstance(info, dict) and info.get("quality_gate_ok") is False for info in quality_map.values()
+        ) or _recent_job_needs_review(item)
         st.session_state["active_job"] = None
         st.session_state["run_result"] = bundle
-        _append_log(f"已载入最近成品：{job_id}")
-        st.session_state["recent_job_flash"] = f"已载入最近成品：{job_id}"
+        if review_needed:
+            st.session_state["review_focus_job_id"] = job_id
+            st.session_state["review_focus_variant"] = 1
+            st.session_state[f"review_variant_{job_id}"] = 1
+            _append_log(f"已载入待复核成品：{job_id}")
+            st.session_state["recent_job_flash"] = f"已载入待复核成品：{job_id}，请优先查看问题清单审核区"
+        else:
+            _append_log(f"已载入最近成品：{job_id}")
+            st.session_state["recent_job_flash"] = f"已载入最近成品：{job_id}"
         return
     raise ValueError("当前任务状态不可恢复")
 
@@ -7352,7 +7405,7 @@ def _render_recent_job_recovery(
     has_running = counts["queued"] > 0 or counts["running"] > 0
 
     with st.expander("任务中心（后台任务 / 成品 / 异常）", expanded=has_running):
-        st.caption("用于查看后台任务、最近成品和异常任务。在途任务可直接接回，已完成成品可直接载入。")
+        st.caption("用于查看后台任务、最近成品和异常任务。在途任务可直接接回，待复核成品会直接进入审核提示。")
         if review_needed_count > 0:
             st.caption(f"待复核成品 {review_needed_count} 个，已自动前置展示。")
         filter_labels = {
@@ -7526,7 +7579,7 @@ def _render_recent_job_recovery(
                         st.caption(f"阶段留痕目录：{stage_artifacts_dir}")
                 with right:
                     if recoverable:
-                        action_label = "接回任务" if status in {"queued", "running"} else "载入结果"
+                        action_label = _recent_job_action_label(item)
                         if st.button(action_label, key=f"restore_recent_job_{job_id}", width="stretch"):
                             try:
                                 _restore_recent_job(base_url, actions_key, item)
@@ -7704,6 +7757,10 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         return
 
     st.subheader("问题清单审核与原文回写")
+    focus_job_id = str(st.session_state.get("review_focus_job_id") or "").strip()
+    focus_notice = _review_workspace_focus_notice(result, focus_job_id)
+    if focus_notice:
+        st.warning(focus_notice)
     c1, c2, c3 = st.columns([1, 1, 2])
     variant = c1.selectbox("审核方案", options=list(range(1, variants + 1)), format_func=lambda x: f"v{x}", key=f"review_variant_{job_id}")
     if c2.button("载入问题清单", key=f"load_review_{job_id}", width="stretch"):

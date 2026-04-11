@@ -14,7 +14,10 @@ def _load_helpers() -> SimpleNamespace:
         "_coerce_variant_position",
         "_normalize_variant_dict_map",
         "_recent_job_mode_quality_caption",
+        "_recent_job_needs_review",
+        "_recent_job_action_label",
         "_recent_job_quality_signal",
+        "_review_workspace_focus_notice",
         "_recent_job_sort_key",
         "_recent_job_matches_filter",
     }
@@ -118,6 +121,35 @@ def test_recent_job_quality_signal_marks_warning_and_success_cases():
     assert success_signal["level"] == "success"
     assert "质量闸门已通过" in success_signal["message"]
     assert "质量分=100" in success_signal["message"]
+
+
+def test_recent_job_action_label_marks_review_needed_done_jobs():
+    helpers = _load_helpers()
+
+    assert helpers._recent_job_action_label({"status": "running"}) == "接回任务"
+    assert helpers._recent_job_action_label({"status": "done", "quality_gate_ok": False}) == "载入复核"
+    assert helpers._recent_job_action_label({"status": "done", "quality_gate_ok": True}) == "载入结果"
+
+
+def test_review_workspace_focus_notice_only_for_review_needed_current_job():
+    helpers = _load_helpers()
+
+    message = helpers._review_workspace_focus_notice(
+        {
+            "job_id": "job-1",
+            "quality_by_variant": {
+                1: {"quality_gate_ok": False},
+                2: {"quality_gate_ok": True},
+                3: {"quality_gate_ok": False},
+            },
+        },
+        "job-1",
+    )
+
+    assert "待复核成品" in message
+    assert "2 个方案未通过质量闸门" in message
+    assert helpers._review_workspace_focus_notice({"job_id": "job-1", "quality_by_variant": {}}, "job-1") == ""
+    assert helpers._review_workspace_focus_notice({"job_id": "job-2", "quality_by_variant": {1: {"quality_gate_ok": False}}}, "job-1") == ""
 
 
 def test_recent_job_sort_key_prioritizes_running_then_review_needed_done():
