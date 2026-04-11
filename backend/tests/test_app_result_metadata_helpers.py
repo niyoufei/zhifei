@@ -28,6 +28,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_editor_focus_summary",
         "_review_rows_match_filter",
         "_review_filter_counts",
+        "_review_chapter_summaries",
         "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
@@ -324,6 +325,31 @@ def test_review_rows_match_filter_and_counts_support_high_selected_and_replaceme
     assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "replacement_ready")] == ["I0001"]
     assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "all", "安全措施")] == ["I0002"]
     assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "selected", "质量保证措施")] == ["R0003"]
+
+
+def test_review_chapter_summaries_group_counts_and_prioritize_high_risk_titles():
+    helpers = _load_helpers()
+
+    rows = [
+        {"issue_id": "I0001", "title": "安全措施", "severity": "high", "apply": True, "replacement": "修订段落 A"},
+        {"issue_id": "I0002", "title": "主要施工方法", "severity": "high", "apply": False, "replacement": ""},
+        {"issue_id": "I0003", "title": "安全措施", "severity": "medium", "apply": False, "replacement": ""},
+        {"issue_id": "I0004", "title": "", "severity": "medium", "apply": True, "replacement": "修订段落 B"},
+    ]
+
+    summaries = helpers._review_chapter_summaries(rows)
+
+    assert [item["title"] for item in summaries] == ["安全措施", "主要施工方法", "未命名章节"]
+    assert summaries[0] == {
+        "title": "安全措施",
+        "all": 2,
+        "high": 1,
+        "selected": 1,
+        "replacement_ready": 1,
+    }
+    assert summaries[2]["all"] == 1
+    assert summaries[2]["selected"] == 1
+    assert summaries[2]["replacement_ready"] == 1
 
 
 def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():

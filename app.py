@@ -6759,6 +6759,39 @@ def _review_filter_counts(rows: list[dict[str, Any]] | None) -> dict[str, int]:
     }
 
 
+def _review_chapter_summaries(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    ordered = _review_rows_for_editor(rows)
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in ordered:
+        title = str(row.get("title") or "").strip() or "未命名章节"
+        item = grouped.setdefault(
+            title,
+            {
+                "title": title,
+                "all": 0,
+                "high": 0,
+                "selected": 0,
+                "replacement_ready": 0,
+            },
+        )
+        item["all"] += 1
+        if _review_severity_priority(row.get("severity")) >= 3:
+            item["high"] += 1
+        if bool(row.get("apply")):
+            item["selected"] += 1
+        if str(row.get("replacement") or "").strip():
+            item["replacement_ready"] += 1
+    return sorted(
+        grouped.values(),
+        key=lambda item: (
+            -int(item.get("high") or 0),
+            -int(item.get("all") or 0),
+            -int(item.get("selected") or 0),
+            str(item.get("title") or ""),
+        ),
+    )
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -8119,6 +8152,22 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     if str(focus_summary.get("level") or "") == "warning":
         st.warning(str(focus_summary.get("message") or ""))
     filter_counts = _review_filter_counts(ordered_rows)
+    chapter_summaries = _review_chapter_summaries(ordered_rows)
+    if chapter_summaries:
+        st.caption("章节概览：优先处理高优问题集中的章节，已填替换文本可视为已完成初步修订。")
+        st.dataframe(
+            chapter_summaries,
+            hide_index=True,
+            width="stretch",
+            column_order=["title", "all", "high", "selected", "replacement_ready"],
+            column_config={
+                "title": st.column_config.TextColumn("章节", width="medium"),
+                "all": st.column_config.NumberColumn("问题数", width="small"),
+                "high": st.column_config.NumberColumn("高优", width="small"),
+                "selected": st.column_config.NumberColumn("已勾选", width="small"),
+                "replacement_ready": st.column_config.NumberColumn("已填替换文本", width="small"),
+            },
+        )
     chapter_options = ["全部章节"]
     chapter_options.extend(
         sorted(
@@ -8134,6 +8183,14 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         options=chapter_options,
         key=f"review_chapter_filter_{job_id}_v{variant}",
     )
+    if selected_chapter != "全部章节":
+        chapter_summary = next((item for item in chapter_summaries if item.get("title") == selected_chapter), None)
+        if chapter_summary:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("当前章节问题", int(chapter_summary.get("all") or 0))
+            m2.metric("当前章节高优", int(chapter_summary.get("high") or 0))
+            m3.metric("当前章节已勾选", int(chapter_summary.get("selected") or 0))
+            m4.metric("当前章节已填替换", int(chapter_summary.get("replacement_ready") or 0))
     filter_labels = {
         "all": f"全部（{filter_counts.get('all', 0)}）",
         "high": f"高优（{filter_counts.get('high', 0)}）",
