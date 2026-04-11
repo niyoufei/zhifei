@@ -25,6 +25,17 @@ NOISE_PATH_PARTS = {
     "output",
     "04_实战演习输入",
 }
+RUNTIME_PATH_PREFIXES = (
+    "backend/data/workspaces/",
+    "backend/data/uploads/",
+    "backend/data/extracts/",
+    "backend/data/previews/",
+    "backend/data/autoplan/media/",
+    "backend/data/autoplan/archive/",
+    "backend/data/autoplan/projects/",
+    "backend/data/autoplan/cache/",
+    "backend/data/autoplan/evolution/",
+)
 ENTRY_SUFFIXES = {".py", ".sh"}
 ENTRY_PATH_BOOSTS = {
     "app.py": ("V2页面入口", 6),
@@ -49,6 +60,9 @@ NOISE_FILE_TOKENS = (
     "_clean",
     "clean_",
 )
+SAFE_READ_CACHE = {}
+CACHEABLE_TEXT_EXTS = {".py", ".sh", ".md", ".txt", ".toml", ".ini", ".cfg", ".yaml", ".yml"}
+MAX_CACHE_BYTES = 200000
 
 def rel(p: Path) -> str:
     try:
@@ -65,6 +79,8 @@ def is_noise_path(p: Path) -> bool:
     if p.name.startswith(".") and p.suffix.lower() == ".py":
         return True
     if any(token in rp_lower for token in NOISE_FILE_TOKENS):
+        return True
+    if any(rp_lower.startswith(prefix) for prefix in RUNTIME_PATH_PREFIXES):
         return True
     return False
 
@@ -84,10 +100,18 @@ def walk_files(root: Path):
             yield p
 
 def safe_read(p: Path) -> str:
+    key = str(p)
+    cached = SAFE_READ_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
-        if p.suffix.lower() not in TEXT_EXTS and p.stat().st_size > MAX_BYTES:
+        size = p.stat().st_size
+        if p.suffix.lower() not in TEXT_EXTS and size > MAX_BYTES:
             return ""
-        return p.read_text(encoding="utf-8", errors="ignore")
+        out = p.read_text(encoding="utf-8", errors="ignore")
+        if p.suffix.lower() in CACHEABLE_TEXT_EXTS and size <= MAX_CACHE_BYTES:
+            SAFE_READ_CACHE[key] = out
+        return out
     except Exception:
         return ""
 
