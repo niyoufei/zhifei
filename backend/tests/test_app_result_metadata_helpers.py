@@ -340,20 +340,33 @@ def test_review_chapter_summaries_group_counts_and_prioritize_high_risk_titles()
 
     summaries = helpers._review_chapter_summaries(rows)
 
-    assert [item["title"] for item in summaries] == ["安全措施", "主要施工方法", "未命名章节"]
+    assert [item["title"] for item in summaries] == ["主要施工方法", "安全措施", "未命名章节"]
     assert summaries[0] == {
+        "title": "主要施工方法",
+        "all": 1,
+        "high": 1,
+        "selected": 0,
+        "replacement_ready": 0,
+        "pending": 1,
+        "pending_high": 1,
+    }
+    assert summaries[1] == {
         "title": "安全措施",
         "all": 2,
         "high": 1,
         "selected": 1,
         "replacement_ready": 1,
+        "pending": 1,
+        "pending_high": 0,
     }
     assert summaries[2]["all"] == 1
     assert summaries[2]["selected"] == 1
     assert summaries[2]["replacement_ready"] == 1
+    assert summaries[2]["pending"] == 0
+    assert summaries[2]["pending_high"] == 0
 
 
-def test_review_chapter_shortcuts_return_top_titles_with_compact_labels():
+def test_review_chapter_shortcuts_prioritize_pending_high_risk_titles():
     helpers = _load_helpers()
 
     rows = [
@@ -361,13 +374,15 @@ def test_review_chapter_shortcuts_return_top_titles_with_compact_labels():
         {"issue_id": "I0002", "title": "主要施工方法", "severity": "high", "apply": False, "replacement": ""},
         {"issue_id": "I0003", "title": "安全措施", "severity": "medium", "apply": False, "replacement": ""},
         {"issue_id": "I0004", "title": "", "severity": "medium", "apply": True, "replacement": "修订段落 B"},
+        {"issue_id": "I0005", "title": "质量保证措施", "severity": "medium", "apply": False, "replacement": ""},
     ]
 
-    shortcuts = helpers._review_chapter_shortcuts(rows, limit=2)
+    shortcuts = helpers._review_chapter_shortcuts(rows, limit=3)
 
     assert shortcuts == [
-        {"title": "安全措施", "label": "安全措施（高优1 / 问题2 / 已填1）"},
-        {"title": "主要施工方法", "label": "主要施工方法（高优1 / 问题1）"},
+        {"title": "主要施工方法", "label": "主要施工方法（待处理高优1 / 待处理1 / 问题1）"},
+        {"title": "安全措施", "label": "安全措施（高优1 / 待处理1 / 问题2 / 已填1）"},
+        {"title": "质量保证措施", "label": "质量保证措施（待处理1 / 问题1）"},
     ]
 
 

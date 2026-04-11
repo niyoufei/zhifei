@@ -6772,18 +6772,30 @@ def _review_chapter_summaries(rows: list[dict[str, Any]] | None) -> list[dict[st
                 "high": 0,
                 "selected": 0,
                 "replacement_ready": 0,
+                "pending": 0,
+                "pending_high": 0,
             },
         )
         item["all"] += 1
-        if _review_severity_priority(row.get("severity")) >= 3:
+        is_high = _review_severity_priority(row.get("severity")) >= 3
+        if is_high:
             item["high"] += 1
-        if bool(row.get("apply")):
+        is_selected = bool(row.get("apply"))
+        if is_selected:
             item["selected"] += 1
-        if str(row.get("replacement") or "").strip():
+        has_replacement = bool(str(row.get("replacement") or "").strip())
+        if has_replacement:
             item["replacement_ready"] += 1
+        is_pending = not is_selected and not has_replacement
+        if is_pending:
+            item["pending"] += 1
+            if is_high:
+                item["pending_high"] += 1
     return sorted(
         grouped.values(),
         key=lambda item: (
+            -int(item.get("pending_high") or 0),
+            -int(item.get("pending") or 0),
             -int(item.get("high") or 0),
             -int(item.get("all") or 0),
             -int(item.get("selected") or 0),
@@ -6796,12 +6808,16 @@ def _review_chapter_shortcuts(rows: list[dict[str, Any]] | None, limit: int = 3)
     summaries = _review_chapter_summaries(rows)
     shortcut_limit = max(0, int(limit or 0))
     shortcuts: list[dict[str, str]] = []
-    for item in summaries[:shortcut_limit]:
+    pending_first = [item for item in summaries if int(item.get("pending") or 0) > 0]
+    source = pending_first or summaries
+    for item in source[:shortcut_limit]:
         title = str(item.get("title") or "").strip()
         if not title:
             continue
-        detail_bits = [f"问题{int(item.get('all') or 0)}"]
-        if int(item.get("high") or 0) > 0:
+        detail_bits = [f"待处理{int(item.get('pending') or 0)}", f"问题{int(item.get('all') or 0)}"]
+        if int(item.get("pending_high") or 0) > 0:
+            detail_bits.insert(0, f"待处理高优{int(item.get('pending_high') or 0)}")
+        elif int(item.get("high") or 0) > 0:
             detail_bits.insert(0, f"高优{int(item.get('high') or 0)}")
         if int(item.get("replacement_ready") or 0) > 0:
             detail_bits.append(f"已填{int(item.get('replacement_ready') or 0)}")
@@ -8172,14 +8188,16 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     chapter_summaries = _review_chapter_summaries(ordered_rows)
     chapter_filter_key = f"review_chapter_filter_{job_id}_v{variant}"
     if chapter_summaries:
-        st.caption("章节概览：优先处理高优问题集中的章节，已填替换文本可视为已完成初步修订。")
+        st.caption("章节概览：优先处理仍有待处理高优问题的章节，已勾选或已填替换文本视为已进入处理。")
         st.dataframe(
             chapter_summaries,
             hide_index=True,
             width="stretch",
-            column_order=["title", "all", "high", "selected", "replacement_ready"],
+            column_order=["title", "pending_high", "pending", "all", "high", "selected", "replacement_ready"],
             column_config={
                 "title": st.column_config.TextColumn("章节", width="medium"),
+                "pending_high": st.column_config.NumberColumn("待处理高优", width="small"),
+                "pending": st.column_config.NumberColumn("待处理", width="small"),
                 "all": st.column_config.NumberColumn("问题数", width="small"),
                 "high": st.column_config.NumberColumn("高优", width="small"),
                 "selected": st.column_config.NumberColumn("已勾选", width="small"),
@@ -8207,8 +8225,8 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         chapter_summary = next((item for item in chapter_summaries if item.get("title") == selected_chapter), None)
         if chapter_summary:
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("当前章节问题", int(chapter_summary.get("all") or 0))
-            m2.metric("当前章节高优", int(chapter_summary.get("high") or 0))
+            m1.metric("当前章节待处理", int(chapter_summary.get("pending") or 0))
+            m2.metric("当前章节待处理高优", int(chapter_summary.get("pending_high") or 0))
             m3.metric("当前章节已勾选", int(chapter_summary.get("selected") or 0))
             m4.metric("当前章节已填替换", int(chapter_summary.get("replacement_ready") or 0))
     filter_labels = {
