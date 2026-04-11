@@ -30,6 +30,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_filter_counts",
         "_review_chapter_summaries",
         "_review_chapter_shortcuts",
+        "_review_shortcut_filter_key",
         "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
@@ -380,10 +381,20 @@ def test_review_chapter_shortcuts_prioritize_pending_high_risk_titles():
     shortcuts = helpers._review_chapter_shortcuts(rows, limit=3)
 
     assert shortcuts == [
-        {"title": "主要施工方法", "label": "主要施工方法（待处理高优1 / 待处理1 / 问题1）"},
-        {"title": "安全措施", "label": "安全措施（高优1 / 待处理1 / 问题2 / 已填1）"},
-        {"title": "质量保证措施", "label": "质量保证措施（待处理1 / 问题1）"},
+        {"title": "主要施工方法", "label": "主要施工方法（待处理高优1 / 待处理1 / 问题1）", "filter_key": "high"},
+        {"title": "安全措施", "label": "安全措施（高优1 / 待处理1 / 问题2 / 已填1）", "filter_key": "all"},
+        {"title": "质量保证措施", "label": "质量保证措施（待处理1 / 问题1）", "filter_key": "all"},
     ]
+
+
+def test_review_shortcut_filter_key_prefers_high_then_replacement_then_selected():
+    helpers = _load_helpers()
+
+    assert helpers._review_shortcut_filter_key({"pending_high": 2, "pending": 2, "replacement_ready": 1, "selected": 0}) == "high"
+    assert helpers._review_shortcut_filter_key({"pending_high": 0, "pending": 1, "replacement_ready": 1, "selected": 0}) == "all"
+    assert helpers._review_shortcut_filter_key({"pending_high": 0, "pending": 0, "replacement_ready": 2, "selected": 1}) == "replacement_ready"
+    assert helpers._review_shortcut_filter_key({"pending_high": 0, "pending": 0, "replacement_ready": 0, "selected": 1}) == "selected"
+    assert helpers._review_shortcut_filter_key({}) == "all"
 
 
 def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():

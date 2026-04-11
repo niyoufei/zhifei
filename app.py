@@ -6821,8 +6821,28 @@ def _review_chapter_shortcuts(rows: list[dict[str, Any]] | None, limit: int = 3)
             detail_bits.insert(0, f"高优{int(item.get('high') or 0)}")
         if int(item.get("replacement_ready") or 0) > 0:
             detail_bits.append(f"已填{int(item.get('replacement_ready') or 0)}")
-        shortcuts.append({"title": title, "label": f"{title}（{' / '.join(detail_bits)}）"})
+        shortcuts.append(
+            {
+                "title": title,
+                "label": f"{title}（{' / '.join(detail_bits)}）",
+                "filter_key": _review_shortcut_filter_key(item),
+            }
+        )
     return shortcuts
+
+
+def _review_shortcut_filter_key(chapter_summary: dict[str, Any] | None) -> str:
+    if not isinstance(chapter_summary, dict):
+        return "all"
+    if int(chapter_summary.get("pending_high") or 0) > 0:
+        return "high"
+    if int(chapter_summary.get("pending") or 0) > 0:
+        return "all"
+    if int(chapter_summary.get("replacement_ready") or 0) > 0:
+        return "replacement_ready"
+    if int(chapter_summary.get("selected") or 0) > 0:
+        return "selected"
+    return "all"
 
 
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
@@ -8187,6 +8207,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     filter_counts = _review_filter_counts(ordered_rows)
     chapter_summaries = _review_chapter_summaries(ordered_rows)
     chapter_filter_key = f"review_chapter_filter_{job_id}_v{variant}"
+    review_filter_key = f"review_filter_{job_id}_v{variant}"
     if chapter_summaries:
         st.caption("章节概览：优先处理仍有待处理高优问题的章节，已勾选或已填替换文本视为已进入处理。")
         st.dataframe(
@@ -8215,6 +8236,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
                     width="stretch",
                 ):
                     st.session_state[chapter_filter_key] = item["title"]
+                    st.session_state[review_filter_key] = item.get("filter_key") or "all"
     chapter_options = ["全部章节"] + [str(item.get("title") or "").strip() for item in chapter_summaries if str(item.get("title") or "").strip()]
     selected_chapter = st.selectbox(
         "章节筛选",
@@ -8240,7 +8262,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         options=list(filter_labels.keys()),
         format_func=lambda key: filter_labels.get(key, key),
         horizontal=True,
-        key=f"review_filter_{job_id}_v{variant}",
+        key=review_filter_key,
     )
     filtered_rows = _review_rows_match_filter(
         ordered_rows,
