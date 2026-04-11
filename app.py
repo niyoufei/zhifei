@@ -6792,6 +6792,23 @@ def _review_chapter_summaries(rows: list[dict[str, Any]] | None) -> list[dict[st
     )
 
 
+def _review_chapter_shortcuts(rows: list[dict[str, Any]] | None, limit: int = 3) -> list[dict[str, str]]:
+    summaries = _review_chapter_summaries(rows)
+    shortcut_limit = max(0, int(limit or 0))
+    shortcuts: list[dict[str, str]] = []
+    for item in summaries[:shortcut_limit]:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        detail_bits = [f"问题{int(item.get('all') or 0)}"]
+        if int(item.get("high") or 0) > 0:
+            detail_bits.insert(0, f"高优{int(item.get('high') or 0)}")
+        if int(item.get("replacement_ready") or 0) > 0:
+            detail_bits.append(f"已填{int(item.get('replacement_ready') or 0)}")
+        shortcuts.append({"title": title, "label": f"{title}（{' / '.join(detail_bits)}）"})
+    return shortcuts
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -8153,6 +8170,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         st.warning(str(focus_summary.get("message") or ""))
     filter_counts = _review_filter_counts(ordered_rows)
     chapter_summaries = _review_chapter_summaries(ordered_rows)
+    chapter_filter_key = f"review_chapter_filter_{job_id}_v{variant}"
     if chapter_summaries:
         st.caption("章节概览：优先处理高优问题集中的章节，已填替换文本可视为已完成初步修订。")
         st.dataframe(
@@ -8168,20 +8186,22 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
                 "replacement_ready": st.column_config.NumberColumn("已填替换文本", width="small"),
             },
         )
-    chapter_options = ["全部章节"]
-    chapter_options.extend(
-        sorted(
-            {
-                str(row.get("title") or "").strip()
-                for row in ordered_rows
-                if str(row.get("title") or "").strip()
-            }
-        )
-    )
+        shortcut_items = _review_chapter_shortcuts(ordered_rows)
+        if shortcut_items:
+            st.caption("快捷定位：")
+            shortcut_cols = st.columns(len(shortcut_items))
+            for idx, (col, item) in enumerate(zip(shortcut_cols, shortcut_items), start=1):
+                if col.button(
+                    item["label"],
+                    key=f"review_chapter_jump_{job_id}_v{variant}_{idx}",
+                    width="stretch",
+                ):
+                    st.session_state[chapter_filter_key] = item["title"]
+    chapter_options = ["全部章节"] + [str(item.get("title") or "").strip() for item in chapter_summaries if str(item.get("title") or "").strip()]
     selected_chapter = st.selectbox(
         "章节筛选",
         options=chapter_options,
-        key=f"review_chapter_filter_{job_id}_v{variant}",
+        key=chapter_filter_key,
     )
     if selected_chapter != "全部章节":
         chapter_summary = next((item for item in chapter_summaries if item.get("title") == selected_chapter), None)

@@ -29,6 +29,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_rows_match_filter",
         "_review_filter_counts",
         "_review_chapter_summaries",
+        "_review_chapter_shortcuts",
         "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
@@ -350,6 +351,24 @@ def test_review_chapter_summaries_group_counts_and_prioritize_high_risk_titles()
     assert summaries[2]["all"] == 1
     assert summaries[2]["selected"] == 1
     assert summaries[2]["replacement_ready"] == 1
+
+
+def test_review_chapter_shortcuts_return_top_titles_with_compact_labels():
+    helpers = _load_helpers()
+
+    rows = [
+        {"issue_id": "I0001", "title": "安全措施", "severity": "high", "apply": True, "replacement": "修订段落 A"},
+        {"issue_id": "I0002", "title": "主要施工方法", "severity": "high", "apply": False, "replacement": ""},
+        {"issue_id": "I0003", "title": "安全措施", "severity": "medium", "apply": False, "replacement": ""},
+        {"issue_id": "I0004", "title": "", "severity": "medium", "apply": True, "replacement": "修订段落 B"},
+    ]
+
+    shortcuts = helpers._review_chapter_shortcuts(rows, limit=2)
+
+    assert shortcuts == [
+        {"title": "安全措施", "label": "安全措施（高优1 / 问题2 / 已填1）"},
+        {"title": "主要施工方法", "label": "主要施工方法（高优1 / 问题1）"},
+    ]
 
 
 def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():
