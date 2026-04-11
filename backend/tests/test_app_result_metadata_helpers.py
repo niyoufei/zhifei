@@ -32,6 +32,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_chapter_shortcuts",
         "_review_shortcut_filter_key",
         "_review_next_pending_shortcut",
+        "_review_apply_followup_message",
         "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
@@ -425,6 +426,25 @@ def test_review_next_pending_shortcut_returns_empty_when_everything_is_already_i
     ]
 
     assert helpers._review_next_pending_shortcut(rows) == {}
+
+
+def test_review_apply_followup_message_calls_out_next_pending_target_or_completion():
+    helpers = _load_helpers()
+
+    next_rows = [
+        {"issue_id": "I0001", "title": "主要施工方法", "severity": "high", "apply": False, "replacement": ""},
+        {"issue_id": "I0002", "title": "安全措施", "severity": "medium", "apply": True, "replacement": ""},
+    ]
+    done_rows = [
+        {"issue_id": "I0001", "title": "主要施工方法", "severity": "high", "apply": True, "replacement": ""},
+        {"issue_id": "I0002", "title": "安全措施", "severity": "medium", "apply": False, "replacement": "已补全文本"},
+    ]
+
+    next_message = helpers._review_apply_followup_message(next_rows)
+    done_message = helpers._review_apply_followup_message(done_rows)
+
+    assert next_message == "下一步建议处理：主要施工方法（待处理高优1 / 待处理1 / 问题1）"
+    assert done_message == "当前方案已无待处理问题，可复核最新质量结果。"
 
 
 def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():

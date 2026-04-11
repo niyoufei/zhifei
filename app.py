@@ -6859,6 +6859,13 @@ def _review_next_pending_shortcut(rows: list[dict[str, Any]] | None) -> dict[str
     }
 
 
+def _review_apply_followup_message(rows: list[dict[str, Any]] | None) -> str:
+    next_pending = _review_next_pending_shortcut(rows)
+    if next_pending:
+        return f"下一步建议处理：{str(next_pending.get('label') or next_pending.get('title') or '').strip()}"
+    return "当前方案已无待处理问题，可复核最新质量结果。"
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -8360,10 +8367,21 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             final_level = quality_feedback.get("level") or "info"
             if level_priority.get(str(issue_feedback.get("level") or ""), 0) > level_priority.get(str(final_level), 0):
                 final_level = str(issue_feedback.get("level") or "info")
+            followup_message = _review_apply_followup_message(after_rows)
             st.session_state["review_apply_flash"] = {
                 "level": final_level,
-                "message": f"{quality_feedback.get('message') or ''}；{issue_feedback.get('message') or ''}".strip("；"),
+                "message": (
+                    f"{quality_feedback.get('message') or ''}；"
+                    f"{issue_feedback.get('message') or ''}；"
+                    f"{followup_message}"
+                ).strip("；"),
             }
+            next_pending = _review_next_pending_shortcut(after_rows)
+            if next_pending:
+                st.session_state[f"review_chapter_filter_{job_id}_v{variant}"] = next_pending.get("title") or "全部章节"
+                st.session_state[f"review_filter_{job_id}_v{variant}"] = next_pending.get("filter_key") or "all"
+            else:
+                st.session_state[f"review_chapter_filter_{job_id}_v{variant}"] = "全部章节"
             focus_variant = _first_failed_variant_index(
                 refreshed.get("quality_by_variant") if isinstance(refreshed.get("quality_by_variant"), dict) else {}
             )
@@ -8408,10 +8426,21 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             final_level = quality_feedback.get("level") or "info"
             if level_priority.get(str(issue_feedback.get("level") or ""), 0) > level_priority.get(str(final_level), 0):
                 final_level = str(issue_feedback.get("level") or "info")
+            followup_message = _review_apply_followup_message(after_rows)
             st.session_state["review_apply_flash"] = {
                 "level": final_level,
-                "message": f"{quality_feedback.get('message') or ''}；{issue_feedback.get('message') or ''}".strip("；"),
+                "message": (
+                    f"{quality_feedback.get('message') or ''}；"
+                    f"{issue_feedback.get('message') or ''}；"
+                    f"{followup_message}"
+                ).strip("；"),
             }
+            next_pending = _review_next_pending_shortcut(after_rows)
+            if next_pending:
+                st.session_state[f"review_chapter_filter_{job_id}_v{variant}"] = next_pending.get("title") or "全部章节"
+                st.session_state[f"review_filter_{job_id}_v{variant}"] = next_pending.get("filter_key") or "all"
+            else:
+                st.session_state[f"review_chapter_filter_{job_id}_v{variant}"] = "全部章节"
             focus_variant = _first_failed_variant_index(
                 refreshed.get("quality_by_variant") if isinstance(refreshed.get("quality_by_variant"), dict) else {}
             )
