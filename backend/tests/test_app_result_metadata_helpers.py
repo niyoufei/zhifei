@@ -34,6 +34,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_next_pending_shortcut",
         "_review_apply_followup_message",
         "_review_completion_progress_message",
+        "_review_progress_overview",
         "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
@@ -469,6 +470,27 @@ def test_review_completion_progress_message_reports_closed_and_remaining_chapter
 
     assert progress_message == "本轮已完成章节：主要施工方法；剩余待处理章节 1 个"
     assert done_message == "本轮已完成章节：主要施工方法 / 安全措施；待处理章节已全部清空"
+
+
+def test_review_progress_overview_summarizes_pending_and_completed_chapters():
+    helpers = _load_helpers()
+
+    rows = [
+        {"issue_id": "I0001", "title": "主要施工方法", "severity": "high", "apply": False, "replacement": ""},
+        {"issue_id": "I0002", "title": "安全措施", "severity": "medium", "apply": False, "replacement": ""},
+        {"issue_id": "I0003", "title": "安全措施", "severity": "medium", "apply": True, "replacement": ""},
+        {"issue_id": "I0004", "title": "质量保证措施", "severity": "medium", "apply": False, "replacement": "已补全文本"},
+    ]
+
+    overview = helpers._review_progress_overview(rows)
+
+    assert overview == {
+        "chapters_total": 3,
+        "chapters_pending": 2,
+        "chapters_completed": 1,
+        "issues_pending": 2,
+        "issues_pending_high": 1,
+    }
 
 
 def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():

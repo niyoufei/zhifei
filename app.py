@@ -6898,6 +6898,21 @@ def _review_completion_progress_message(
     return "；".join(parts)
 
 
+def _review_progress_overview(rows: list[dict[str, Any]] | None) -> dict[str, int]:
+    summaries = _review_chapter_summaries(rows)
+    total_chapters = len(summaries)
+    pending_chapters = sum(1 for item in summaries if int(item.get("pending") or 0) > 0)
+    pending_high = sum(int(item.get("pending_high") or 0) for item in summaries)
+    pending_issues = sum(int(item.get("pending") or 0) for item in summaries)
+    return {
+        "chapters_total": total_chapters,
+        "chapters_pending": pending_chapters,
+        "chapters_completed": max(0, total_chapters - pending_chapters),
+        "issues_pending": pending_issues,
+        "issues_pending_high": pending_high,
+    }
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -8262,6 +8277,16 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     chapter_filter_key = f"review_chapter_filter_{job_id}_v{variant}"
     review_filter_key = f"review_filter_{job_id}_v{variant}"
     if chapter_summaries:
+        overview = _review_progress_overview(ordered_rows)
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("章节总数", int(overview.get("chapters_total") or 0))
+        o2.metric("待处理章节", int(overview.get("chapters_pending") or 0))
+        o3.metric("已完成章节", int(overview.get("chapters_completed") or 0))
+        o4.metric("待处理高优", int(overview.get("issues_pending_high") or 0))
+        st.caption(
+            f"当前待处理问题 {int(overview.get('issues_pending') or 0)} 项。"
+            "章节进度卡会随勾选和替换文本实时更新。"
+        )
         st.caption("章节概览：优先处理仍有待处理高优问题的章节，已勾选或已填替换文本视为已进入处理。")
         st.dataframe(
             chapter_summaries,
