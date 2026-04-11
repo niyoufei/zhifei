@@ -6791,6 +6791,11 @@ def _review_chapter_summaries(rows: list[dict[str, Any]] | None) -> list[dict[st
             item["pending"] += 1
             if is_high:
                 item["pending_high"] += 1
+    for item in grouped.values():
+        total = max(0, int(item.get("all") or 0))
+        pending = max(0, int(item.get("pending") or 0))
+        completed = max(0, total - pending)
+        item["completion_rate"] = f"{round((completed / total) * 100):d}%" if total > 0 else "0%"
     return sorted(
         grouped.values(),
         key=lambda item: (
@@ -8315,9 +8320,10 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             chapter_summaries,
             hide_index=True,
             width="stretch",
-            column_order=["title", "pending_high", "pending", "all", "high", "selected", "replacement_ready"],
+            column_order=["title", "completion_rate", "pending_high", "pending", "all", "high", "selected", "replacement_ready"],
             column_config={
                 "title": st.column_config.TextColumn("章节", width="medium"),
+                "completion_rate": st.column_config.TextColumn("完成率", width="small"),
                 "pending_high": st.column_config.NumberColumn("待处理高优", width="small"),
                 "pending": st.column_config.NumberColumn("待处理", width="small"),
                 "all": st.column_config.NumberColumn("问题数", width="small"),
