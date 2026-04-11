@@ -5,9 +5,11 @@ LLM Providers 单元测试
 
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, Any
 from unittest.mock import MagicMock, patch, AsyncMock
 
+import httpx
 import pytest
 
 from backend.zhifei_autoplan.providers.base import BaseProvider
@@ -53,11 +55,20 @@ class TestOpenAIProvider:
 
     def test_init(self):
         """初始化"""
-        with patch("backend.zhifei_autoplan.providers.openai_provider.OpenAI") as mock_openai:
+        with (
+            patch("backend.zhifei_autoplan.providers.openai_provider._provider_trust_env", return_value=False),
+            patch("backend.zhifei_autoplan.providers.openai_provider.httpx.Client") as mock_http_client_cls,
+            patch("backend.zhifei_autoplan.providers.openai_provider.OpenAI") as mock_openai,
+        ):
+            mock_http_client = MagicMock()
+            mock_http_client_cls.return_value = mock_http_client
             mock_openai.return_value = MagicMock()
+
             provider = OpenAIProvider(api_key="test-key", model="gpt-4")
+
             assert provider.model == "gpt-4"
-            mock_openai.assert_called_once_with(api_key="test-key")
+            mock_http_client_cls.assert_called_once_with(trust_env=False)
+            mock_openai.assert_called_once_with(api_key="test-key", http_client=mock_http_client)
 
     def test_name_attribute(self):
         """name 属性"""
@@ -282,14 +293,26 @@ class TestGeminiProvider:
 
     def test_init(self):
         """初始化 - 使用新的 google.genai Client API"""
-        with patch("backend.zhifei_autoplan.providers.google_gemini_provider.genai") as mock_genai:
+        with (
+            patch("backend.zhifei_autoplan.providers.google_gemini_provider._provider_trust_env", return_value=False),
+            patch("backend.zhifei_autoplan.providers.google_gemini_provider.genai") as mock_genai,
+        ):
             mock_client = MagicMock()
             mock_genai.Client.return_value = mock_client
             provider = GeminiProvider(api_key="test-key", model="gemini-pro")
-            # 新 API 存储 client 和 model_name
-            assert provider.client == mock_client
-            assert provider.model_name == "gemini-pro"
-            mock_genai.Client.assert_called_once_with(api_key="test-key")
+            try:
+                # 新 API 存储 client 和 model_name
+                assert provider.client == mock_client
+                assert provider.model_name == "gemini-pro"
+                mock_genai.Client.assert_called_once()
+                kwargs = mock_genai.Client.call_args.kwargs
+                assert kwargs["api_key"] == "test-key"
+                http_options = kwargs["http_options"]
+                assert isinstance(getattr(http_options, "httpx_client", None), httpx.Client)
+                assert isinstance(getattr(http_options, "httpx_async_client", None), httpx.AsyncClient)
+            finally:
+                provider._http_client.close()
+                asyncio.run(provider._http_async_client.aclose())
 
     def test_name_attribute(self):
         """name 属性"""

@@ -9,6 +9,7 @@ Notes:
     - routers/assist_codex.py is not mounted here and is not part of the current online chain.
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -23,53 +24,9 @@ from backend.app.runtime_config import collect_main_chain_config_status
 from backend.utils_write_docx import write_compose_to_docx
 from backend.zhifei_autoplan.workspace import maybe_cleanup_expired_workspaces, resolve_workspace_dir, workspace_paths
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Routers: ingest/retrieve/publish/score
-from .routers.ingest import router as ingest_router
-from .routers.retrieve import router as retrieve_router
-from .routers.publish_router import router as publish_router
-from .routers.score_router import router as score_router
-from .routers.zhifei_autoplan import router as zhifei_autoplan_router
-from .routers.actions_bridge import router as actions_bridge_router
-from .routers.auth import router as auth_router
-
-app.include_router(ingest_router)
-app.include_router(retrieve_router)
-app.include_router(publish_router)
-app.include_router(score_router)
-app.include_router(zhifei_autoplan_router)
-# V2 Web UI main chain: app.py -> /actions/* -> actions_bridge -> zhifei_autoplan/*
-app.include_router(actions_bridge_router)
-app.include_router(auth_router)
-
 logger = logging.getLogger("zhifei.startup")
 
 
-def _resolve_workspace_context(session_id: str | None = None, workspace_dir: str | None = None) -> dict:
-    sid = str(session_id or "").strip() or uuid4().hex
-    resolved = str(resolve_workspace_dir(session_id=sid, workspace_dir=workspace_dir))
-    maybe_cleanup_expired_workspaces(exclude_workspace=resolved)
-    return {"session_id": sid, "workspace_dir": resolved}
-
-
-def _build_dir(workspace_dir: str | None) -> Path:
-    return workspace_paths(workspace_dir)["build"] if workspace_dir else Path("build")
-
-
-def _audit_dir(workspace_dir: str | None) -> Path:
-    return workspace_paths(workspace_dir)["audit_dir"] if workspace_dir else Path("backend/data/audit")
-
-
-@app.on_event("startup")
 async def _startup_warmup() -> None:
     try:
         from backend.zhifei_autoplan.chief_engineer_agent import start_chief_engineer_agent
@@ -111,6 +68,56 @@ async def _startup_warmup() -> None:
         )
     except Exception as e:
         logger.warning("main-chain config self-check failed: %s", e)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await _startup_warmup()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Routers: ingest/retrieve/publish/score
+from .routers.ingest import router as ingest_router
+from .routers.retrieve import router as retrieve_router
+from .routers.publish_router import router as publish_router
+from .routers.score_router import router as score_router
+from .routers.zhifei_autoplan import router as zhifei_autoplan_router
+from .routers.actions_bridge import router as actions_bridge_router
+from .routers.auth import router as auth_router
+
+app.include_router(ingest_router)
+app.include_router(retrieve_router)
+app.include_router(publish_router)
+app.include_router(score_router)
+app.include_router(zhifei_autoplan_router)
+# V2 Web UI main chain: app.py -> /actions/* -> actions_bridge -> zhifei_autoplan/*
+app.include_router(actions_bridge_router)
+app.include_router(auth_router)
+
+
+def _resolve_workspace_context(session_id: str | None = None, workspace_dir: str | None = None) -> dict:
+    sid = str(session_id or "").strip() or uuid4().hex
+    resolved = str(resolve_workspace_dir(session_id=sid, workspace_dir=workspace_dir))
+    maybe_cleanup_expired_workspaces(exclude_workspace=resolved)
+    return {"session_id": sid, "workspace_dir": resolved}
+
+
+def _build_dir(workspace_dir: str | None) -> Path:
+    return workspace_paths(workspace_dir)["build"] if workspace_dir else Path("build")
+
+
+def _audit_dir(workspace_dir: str | None) -> Path:
+    return workspace_paths(workspace_dir)["audit_dir"] if workspace_dir else Path("backend/data/audit")
 
 
 @app.get("/health")

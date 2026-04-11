@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from backend.app import main as main_module
 from backend.app.runtime_config import collect_main_chain_config_status
@@ -109,3 +110,16 @@ def test_health_exposes_runtime_config_summary(monkeypatch):
     assert out["config_status"]["level"] == "warn"
     assert out["config_status"]["release_ready"] is False
     assert out["config_status"]["warnings"] == ["warn-a"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_runs_startup_warmup(monkeypatch):
+    seen = []
+
+    async def _fake_startup():
+        seen.append("startup")
+
+    monkeypatch.setattr(main_module, "_startup_warmup", _fake_startup)
+
+    async with main_module.lifespan(main_module.app):
+        assert seen == ["startup"]
