@@ -35,6 +35,8 @@ def test_execute_job_persists_stage_artifacts(tmp_path, monkeypatch):
             "topic": payload.get("topic") or "",
             "project_type": "房建",
             "generation_mode": "quality_200",
+            "logic_template_id": "A",
+            "logic_template_name": "交付清单驱动",
             "sections": [
                 {
                     "title": "工程概况",
@@ -62,11 +64,20 @@ def test_execute_job_persists_stage_artifacts(tmp_path, monkeypatch):
             "quality_gate": {"ok": True, "failed": []},
             "pipeline_stages": [{"stage": "draft_generation", "ok": True}],
             "generation_trace": {
+                "generation_mode": "quality_200",
+                "mode_effective": "quality_200",
+                "stable_output": False,
+                "deterministic_variant_forced": False,
+                "deterministic_logic_template_id": "A",
                 "pipeline_stages": [{"stage": "draft_generation", "ok": True}],
                 "self_evolution": {"enabled": True, "applied_count": 0},
             },
             "quality_checks": {
                 "score": 92,
+                "remediation_strategy_audit": {
+                    "audit_version": "v1",
+                    "applied": True,
+                },
                 "remediation_execution_audit": {
                     "trace_count": 1,
                     "action_tags": [{"action_tag": "add_quant_value", "label": "补量化数值", "count": 1}],
@@ -114,6 +125,21 @@ def test_execute_job_persists_stage_artifacts(tmp_path, monkeypatch):
     assert store["job-1"]["stage_artifacts_dir"] == str(stage_dir)
     assert store["job-1"]["result"]["resource_usage_summary"]["total_tokens_total"] == 140
     assert store["job-1"]["result"]["resource_usage_summary"]["call_count"] == 1
+    assert store["job-1"]["result"]["generation_mode_summary"]["profile"] == "standard_auto"
+    assert store["job-1"]["result"]["generation_mode_summary"]["mode_effective"] == "quality_200"
+    assert store["job-1"]["result"]["generation_mode_summary"]["stable_output"] is False
+    assert store["job-1"]["result"]["generation_mode_summary"]["deterministic_logic_template_id"] == "A"
+    assert store["job-1"]["result"]["logic_template_id"] == "A"
+    assert store["job-1"]["result"]["logic_template_name"] == "交付清单驱动"
+    runtime_variant = next(iter(store["job-1"]["result"]["runtime_by_variant"].values()))
+    quality_variant = next(iter(store["job-1"]["result"]["quality_by_variant"].values()))
+    assert runtime_variant["pipeline_stages"][0]["stage"] == "draft_generation"
+    assert runtime_variant["section_runtime_budget_preview"][0]["requested_timeout_sec"] == 77
+    assert quality_variant["quality_score"] == 92
+    assert quality_variant["quality_gate_ok"] is True
+    assert quality_variant["logic_template_name"] == "交付清单驱动"
+    assert quality_variant["remediation_strategy_audit"]["audit_version"] == "v1"
+    assert quality_variant["remediation_execution_audit"]["trace_count"] == 1
 
 
 def test_execute_job_persists_hard_failure_artifact(tmp_path, monkeypatch):

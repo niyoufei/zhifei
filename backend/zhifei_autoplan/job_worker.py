@@ -186,6 +186,9 @@ def _variant_result_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         quality = item.get("quality_checks") if isinstance(item.get("quality_checks"), dict) else {}
         quality_gate = item.get("quality_gate") if isinstance(item.get("quality_gate"), dict) else {}
         generation_trace = item.get("generation_trace") if isinstance(item.get("generation_trace"), dict) else {}
+        logic_template = item.get("logic_template") if isinstance(item.get("logic_template"), dict) else {}
+        logic_template_id = _normalize_logic_template_id(item.get("logic_template_id") or logic_template.get("id"))
+        logic_template_name = str(item.get("logic_template_name") or logic_template.get("name") or "").strip() or None
         remediation_strategy_audit = quality.get("remediation_strategy_audit") if isinstance(quality.get("remediation_strategy_audit"), dict) else {}
         remediation_execution_audit = quality.get("remediation_execution_audit") if isinstance(quality.get("remediation_execution_audit"), dict) else {}
         section_runtime_budget_preview = []
@@ -210,6 +213,22 @@ def _variant_result_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "variant_index": idx,
                 "variant_id": item.get("variant_id"),
                 "topic": str(item.get("topic") or "").strip(),
+                "generation_mode": str(generation_trace.get("generation_mode") or item.get("generation_mode") or "").strip() or None,
+                "mode_effective": str(
+                    generation_trace.get("mode_effective")
+                    or generation_trace.get("generation_mode")
+                    or item.get("generation_mode")
+                    or ""
+                ).strip()
+                or None,
+                "stable_output": bool(generation_trace.get("stable_output", False)),
+                "deterministic_variant_forced": bool(generation_trace.get("deterministic_variant_forced", False)),
+                "deterministic_logic_template_id": str(
+                    generation_trace.get("deterministic_logic_template_id") or logic_template_id or ""
+                ).strip()
+                or None,
+                "logic_template_id": logic_template_id,
+                "logic_template_name": logic_template_name,
                 "section_count": len(sections),
                 "section_titles": [str(sec.get("title") or "").strip() for sec in sections if isinstance(sec, dict)],
                 "quality_score": quality.get("score"),
@@ -225,6 +244,82 @@ def _variant_result_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             }
         )
     return {"variant_count": len(rows), "variants": rows}
+
+
+def _variant_result_key(row: Dict[str, Any]) -> str:
+    variant_id = str(row.get("variant_id") or "").strip()
+    if variant_id:
+        return variant_id
+    return f"v{max(1, int(row.get('variant_index') or 1))}"
+
+
+def _persisted_job_result_metadata(results: List[Dict[str, Any]], payload: Dict[str, Any]) -> Dict[str, Any]:
+    summary = _variant_result_summary(results)
+    rows = summary.get("variants") if isinstance(summary.get("variants"), list) else []
+    mode_policy = payload.get("_mode_policy") if isinstance(payload.get("_mode_policy"), dict) else {}
+    first = rows[0] if rows else {}
+    metadata: Dict[str, Any] = {
+        "generation_mode_summary": {
+            "profile": str(mode_policy.get("profile") or first.get("generation_mode") or payload.get("generation_mode") or "").strip() or None,
+            "mode_effective": str(
+                mode_policy.get("mode_effective")
+                or first.get("mode_effective")
+                or first.get("generation_mode")
+                or payload.get("generation_mode")
+                or ""
+            ).strip()
+            or None,
+            "stable_output": bool(mode_policy.get("stable_output", first.get("stable_output", False))),
+            "deterministic_variant_forced": bool(
+                mode_policy.get("deterministic_variant_forced", first.get("deterministic_variant_forced", False))
+            ),
+            "deterministic_logic_template_id": str(
+                mode_policy.get("deterministic_logic_template_id")
+                or first.get("deterministic_logic_template_id")
+                or first.get("logic_template_id")
+                or payload.get("logic_template_id")
+                or ""
+            ).strip()
+            or None,
+        },
+        "runtime_by_variant": {},
+        "quality_by_variant": {},
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        variant_key = _variant_result_key(row)
+        metadata["runtime_by_variant"][variant_key] = {
+            "variant_index": row.get("variant_index"),
+            "variant_id": row.get("variant_id"),
+            "generation_mode": row.get("generation_mode"),
+            "mode_effective": row.get("mode_effective"),
+            "section_count": row.get("section_count"),
+            "pipeline_stages": row.get("pipeline_stages"),
+            "retrieval_cache": row.get("retrieval_cache"),
+            "self_evolution": row.get("self_evolution"),
+            "section_runtime_budget_preview": row.get("section_runtime_budget_preview"),
+            "resource_usage_summary": row.get("resource_usage_summary"),
+        }
+        metadata["quality_by_variant"][variant_key] = {
+            "variant_index": row.get("variant_index"),
+            "variant_id": row.get("variant_id"),
+            "logic_template_id": row.get("logic_template_id"),
+            "logic_template_name": row.get("logic_template_name"),
+            "quality_score": row.get("quality_score"),
+            "quality_gate_ok": row.get("quality_gate_ok"),
+            "quality_gate_failed_count": row.get("quality_gate_failed_count"),
+            "remediation_strategy_audit": row.get("remediation_strategy_audit"),
+            "remediation_execution_audit": row.get("remediation_execution_audit"),
+        }
+    if len(rows) == 1 and isinstance(first, dict):
+        logic_template_id = str(first.get("logic_template_id") or "").strip() or None
+        logic_template_name = str(first.get("logic_template_name") or "").strip() or None
+        if logic_template_id:
+            metadata["logic_template_id"] = logic_template_id
+        if logic_template_name:
+            metadata["logic_template_name"] = logic_template_name
+    return metadata
 
 
 def _clamp_int(v: Any, default: int, lo: int, hi: int) -> int:
@@ -1053,7 +1148,12 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
         )
         outputs = _save_outputs_compat(f"actions_{job_id}", results, workspace_dir=resolved_workspace)
         resource_usage_summary = summarize_variants(results)
-        job_result = {**outputs, "resource_usage_summary": resource_usage_summary}
+        result_metadata = _persisted_job_result_metadata(results, local_payload)
+        job_result = {
+            **outputs,
+            "resource_usage_summary": resource_usage_summary,
+            **result_metadata,
+        }
         _write_stage_artifact(
             job_id,
             "04_outputs.json",
@@ -1123,8 +1223,7 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
             topic=payload.get("topic"),
             file_count=sum(
                 len(value) if isinstance(value, list) else int(bool(value))
-                for key, value in job_result.items()
-                if key != "resource_usage_summary"
+                for value in outputs.values()
             ),
             duration_ms=int(float(done_sla.get("total_seconds") or 0.0) * 1000),
             resource_usage_summary=resource_usage_summary,
