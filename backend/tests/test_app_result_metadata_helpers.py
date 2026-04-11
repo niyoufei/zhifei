@@ -21,6 +21,8 @@ def _load_helpers() -> SimpleNamespace:
         "_quality_failure_brief",
         "_quality_variant_snapshot",
         "_review_apply_feedback",
+        "_review_issue_signature",
+        "_review_issue_delta_feedback",
         "_review_priority_summary",
         "_recent_job_quality_signal",
         "_review_workspace_focus_notice",
@@ -222,6 +224,28 @@ def test_quality_variant_snapshot_and_review_apply_feedback_capture_delta():
     assert "未通过项 3->0" in feedback["message"]
     assert "质量闸门 未通过->通过" in feedback["message"]
     assert "当前问题=问题=缺闭环×1；动作=补验收记录×1" in feedback["message"]
+
+
+def test_review_issue_delta_feedback_reports_resolved_and_remaining_items():
+    helpers = _load_helpers()
+
+    before_rows = [
+        {"source": "issue_list", "title": "主要施工方法", "type": "quantitative_gap", "problem": "量化不足", "suggestion": "补量化", "severity": "high"},
+        {"source": "issue_list", "title": "安全措施", "type": "risk_triplet_gap", "problem": "闭环不足", "suggestion": "补闭环", "severity": "medium"},
+    ]
+    after_rows = [
+        {"source": "issue_list", "title": "安全措施", "type": "risk_triplet_gap", "problem": "闭环不足", "suggestion": "补闭环", "severity": "high"},
+        {"source": "auto_revision_suggestions", "title": "质量保证措施", "type": "consistency_gap", "problem": "", "suggestion": "统一表述", "severity": "medium"},
+    ]
+
+    assert helpers._review_issue_signature(before_rows[0]).startswith("issue_list||主要施工方法||quantitative_gap")
+    feedback = helpers._review_issue_delta_feedback(before_rows, after_rows)
+    assert feedback["level"] == "warning"
+    assert "已闭合 1 项" in feedback["message"]
+    assert "仍残留 2 项" in feedback["message"]
+    assert "高优 1 项" in feedback["message"]
+    assert "新增 1 项" in feedback["message"]
+    assert "残留重点=安全措施/risk_triplet_gap / 质量保证措施/consistency_gap" in feedback["message"]
 
 
 def test_review_workspace_focus_notice_only_for_review_needed_current_job():

@@ -6626,6 +6626,64 @@ def _review_apply_feedback(before: dict[str, Any], after: dict[str, Any], *, var
     return {"level": level, "message": "；".join(parts)}
 
 
+def _review_issue_signature(item: dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return "||".join(
+        [
+            str(item.get("source") or "").strip(),
+            str(item.get("title") or "").strip(),
+            str(item.get("type") or "").strip(),
+            str(item.get("problem") or "").strip(),
+            str(item.get("suggestion") or "").strip(),
+        ]
+    )
+
+
+def _review_issue_delta_feedback(
+    before_rows: list[dict[str, Any]] | None,
+    after_rows: list[dict[str, Any]] | None,
+) -> dict[str, str]:
+    before_list = [row for row in (before_rows or []) if isinstance(row, dict)]
+    after_list = [row for row in (after_rows or []) if isinstance(row, dict)]
+    before_signatures = {_review_issue_signature(row) for row in before_list if _review_issue_signature(row)}
+    after_signatures = {_review_issue_signature(row) for row in after_list if _review_issue_signature(row)}
+    resolved_count = len(before_signatures - after_signatures)
+    new_count = len(after_signatures - before_signatures)
+    remaining_count = len(after_signatures)
+    high_remaining = sum(1 for row in after_list if str(row.get("severity") or "").strip().lower() == "high")
+
+    parts = [f"问题清单：已闭合 {resolved_count} 项", f"仍残留 {remaining_count} 项"]
+    if high_remaining > 0:
+        parts.append(f"高优 {high_remaining} 项")
+    if new_count > 0:
+        parts.append(f"新增 {new_count} 项")
+
+    top_remaining: list[str] = []
+    seen_titles: set[str] = set()
+    for row in after_list:
+        title = str(row.get("title") or "").strip()
+        issue_type = str(row.get("type") or "").strip()
+        label = title or "章节"
+        if issue_type:
+            label = f"{label}/{issue_type}"
+        if label and label not in seen_titles:
+            seen_titles.add(label)
+            top_remaining.append(label)
+        if len(top_remaining) >= 2:
+            break
+    if top_remaining:
+        parts.append("残留重点=" + " / ".join(top_remaining))
+
+    if remaining_count == 0 and resolved_count > 0 and new_count == 0:
+        level = "success"
+    elif high_remaining > 0 or new_count > 0 or remaining_count > 0:
+        level = "warning"
+    else:
+        level = "info"
+    return {"level": level, "message": "；".join(parts)}
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -7983,6 +8041,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
             before_snapshot = _quality_variant_snapshot(result, int(variant))
+            before_rows = [dict(r) for r in (rows or []) if isinstance(r, dict)]
             decisions = []
             for r in edited or []:
                 if not isinstance(r, dict):
@@ -8006,12 +8065,22 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             refreshed = _collect_job_result(base_url, actions_key, job_id)
             st.session_state["run_result"] = refreshed
             after_snapshot = _quality_variant_snapshot(refreshed, int(variant))
-            st.session_state["review_apply_flash"] = _review_apply_feedback(
+            quality_feedback = _review_apply_feedback(
                 before_snapshot,
                 after_snapshot,
                 variant=int(variant),
                 applied_count=applied,
             )
+            after_rows = _load_review_items(base_url, actions_key, job_id, int(variant))
+            issue_feedback = _review_issue_delta_feedback(before_rows, after_rows)
+            level_priority = {"warning": 3, "success": 2, "info": 1}
+            final_level = quality_feedback.get("level") or "info"
+            if level_priority.get(str(issue_feedback.get("level") or ""), 0) > level_priority.get(str(final_level), 0):
+                final_level = str(issue_feedback.get("level") or "info")
+            st.session_state["review_apply_flash"] = {
+                "level": final_level,
+                "message": f"{quality_feedback.get('message') or ''}；{issue_feedback.get('message') or ''}".strip("；"),
+            }
             focus_variant = _first_failed_variant_index(
                 refreshed.get("quality_by_variant") if isinstance(refreshed.get("quality_by_variant"), dict) else {}
             )
@@ -8022,7 +8091,6 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             else:
                 st.session_state["review_focus_job_id"] = ""
                 st.session_state["review_focus_variant"] = 1
-            _load_review_items(base_url, actions_key, job_id, int(variant))
             st.rerun()
         except Exception as e:
             st.error(f"回写失败: {e}")
@@ -8032,6 +8100,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
             before_snapshot = _quality_variant_snapshot(result, int(variant))
+            before_rows = [dict(r) for r in (rows or []) if isinstance(r, dict)]
             resp = _post_json(
                 base_url,
                 "/actions/review/apply",
@@ -8044,12 +8113,22 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             refreshed = _collect_job_result(base_url, actions_key, job_id)
             st.session_state["run_result"] = refreshed
             after_snapshot = _quality_variant_snapshot(refreshed, int(variant))
-            st.session_state["review_apply_flash"] = _review_apply_feedback(
+            quality_feedback = _review_apply_feedback(
                 before_snapshot,
                 after_snapshot,
                 variant=int(variant),
                 applied_count=applied,
             )
+            after_rows = _load_review_items(base_url, actions_key, job_id, int(variant))
+            issue_feedback = _review_issue_delta_feedback(before_rows, after_rows)
+            level_priority = {"warning": 3, "success": 2, "info": 1}
+            final_level = quality_feedback.get("level") or "info"
+            if level_priority.get(str(issue_feedback.get("level") or ""), 0) > level_priority.get(str(final_level), 0):
+                final_level = str(issue_feedback.get("level") or "info")
+            st.session_state["review_apply_flash"] = {
+                "level": final_level,
+                "message": f"{quality_feedback.get('message') or ''}；{issue_feedback.get('message') or ''}".strip("；"),
+            }
             focus_variant = _first_failed_variant_index(
                 refreshed.get("quality_by_variant") if isinstance(refreshed.get("quality_by_variant"), dict) else {}
             )
@@ -8060,7 +8139,6 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             else:
                 st.session_state["review_focus_job_id"] = ""
                 st.session_state["review_focus_variant"] = 1
-            _load_review_items(base_url, actions_key, job_id, int(variant))
             st.rerun()
         except Exception as e:
             st.error(f"全量回写失败: {e}")
