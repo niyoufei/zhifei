@@ -1,5 +1,5 @@
 {
-  "suite_version": "2026-04-10-release-regression-v1",
+  "suite_version": "2026-04-11-release-regression-v2",
   "description": "固定发布前回归样本集。全部样本均引用仓库内现有真实输入文件，围绕当前 /actions 主链可执行形态组织。",
   "runner": "scripts/run_actions_pipeline.py",
   "release_gate_cases": [
@@ -176,6 +176,38 @@
         "04_实战演习输入/图纸/20250114-1#厂房（原料仓库一）-暖通_t3.pdf"
       ],
       "notes": "扩展回归。用于确认暖通专业资料不会被建筑通用章节覆盖。"
+    },
+    {
+      "id": "real_baseline_stable_delivery",
+      "priority": "P1",
+      "release_gate": false,
+      "topic": "真实项目测试-稳定交付模式回归",
+      "project_id": "release_reg_real_baseline_stable_delivery",
+      "generation_mode": "stable_delivery",
+      "suggested_timeout_sec": 240,
+      "quality_strict": true,
+      "auto_remediate": true,
+      "strict_tender_outline": true,
+      "outline": [
+        "工程概况",
+        "施工部署",
+        "主要施工方法",
+        "确保工程质量的技术组织措施",
+        "确保安全生产的技术组织措施"
+      ],
+      "description": "01_真实项目测试的稳定交付模式样本，验证 stable_delivery 在未显式指定模板和 variant 时仍能稳定落到确定性策略。",
+      "risk_tags": [
+        "稳定交付",
+        "模式回归",
+        "确定性模板",
+        "真实PDF"
+      ],
+      "tender_files": [
+        "01_真实项目测试/招标文件.pdf"
+      ],
+      "boq_file": "01_真实项目测试/工程量清单/1.工程量清单汇总表.pdf",
+      "ingest_files": [],
+      "notes": "扩展回归。用于确认 stable_delivery 真实链路会锁定确定性模式元数据，而不依赖临时探针。"
     }
   ]
 }

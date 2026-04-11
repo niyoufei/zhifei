@@ -90,6 +90,7 @@ def validate_release_regression_suite(
             "release_gate": bool(raw_case.get("release_gate")),
             "topic": _clean_text(raw_case.get("topic")) or cid,
             "project_id": _clean_text(raw_case.get("project_id")) or f"release_reg_{cid}",
+            "generation_mode": _clean_text(raw_case.get("generation_mode")) or None,
             "variant_id": _clean_int(raw_case.get("variant_id"), 0),
             "logic_template_id": _clean_text(raw_case.get("logic_template_id")).upper(),
             "description": _clean_text(raw_case.get("description")),
@@ -114,6 +115,17 @@ def validate_release_regression_suite(
                 missing_paths.append(rel)
         if missing_paths:
             errors.append(f"{cid}: missing files -> {', '.join(missing_paths)}")
+        if normalized["generation_mode"] and normalized["generation_mode"] not in {
+            "standard_auto",
+            "speed_fast",
+            "pro_polish",
+            "stable_delivery",
+            "quality_200",
+            "hq_speed_500",
+        }:
+            errors.append(
+                f"{cid}: generation_mode must be one of standard_auto/speed_fast/pro_polish/stable_delivery/quality_200/hq_speed_500"
+            )
         if normalized["variant_id"] < 0:
             errors.append(f"{cid}: variant_id must be >= 0")
         if normalized["logic_template_id"] and normalized["logic_template_id"] not in {"A", "B", "C", "D", "E"}:
@@ -204,6 +216,8 @@ def build_release_regression_command(
         cmd.append("--no-auto-remediate")
     if case.get("strict_tender_outline", False):
         cmd.append("--strict-tender-outline")
+    if _clean_text(case.get("generation_mode")):
+        cmd.extend(["--generation-mode", _clean_text(case.get("generation_mode"))])
     if int(case.get("variant_id") or 0) > 0:
         cmd.extend(["--variant-id", str(int(case["variant_id"]))])
     if _clean_text(case.get("logic_template_id")):
