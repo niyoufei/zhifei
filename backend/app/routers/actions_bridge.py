@@ -2655,8 +2655,58 @@ async def actions_job_status(
     }
     result = job.get("result") or {}
     if isinstance(result, dict):
+        result_generation_mode_summary = result.get("generation_mode_summary") if isinstance(result.get("generation_mode_summary"), dict) else {}
+        if result_generation_mode_summary:
+            out["generation_mode_summary"] = {
+                "profile": str(
+                    result_generation_mode_summary.get("profile")
+                    or out["generation_mode_summary"].get("profile")
+                    or ""
+                ).strip()
+                or None,
+                "mode_effective": str(
+                    result_generation_mode_summary.get("mode_effective")
+                    or out["generation_mode_summary"].get("mode_effective")
+                    or ""
+                ).strip()
+                or None,
+                "stable_output": bool(
+                    result_generation_mode_summary.get("stable_output", out["generation_mode_summary"].get("stable_output", False))
+                ),
+                "deterministic_variant_forced": bool(
+                    result_generation_mode_summary.get(
+                        "deterministic_variant_forced",
+                        out["generation_mode_summary"].get("deterministic_variant_forced", False),
+                    )
+                ),
+                "deterministic_logic_template_id": str(
+                    result_generation_mode_summary.get("deterministic_logic_template_id")
+                    or out["generation_mode_summary"].get("deterministic_logic_template_id")
+                    or ""
+                ).strip()
+                or None,
+            }
         out["files"] = result
         out["resource_usage_summary"] = result.get("resource_usage_summary") if isinstance(result.get("resource_usage_summary"), dict) else {}
+        if isinstance(result.get("runtime_by_variant"), dict):
+            out["runtime_by_variant"] = result.get("runtime_by_variant")
+        if isinstance(result.get("quality_by_variant"), dict):
+            out["quality_by_variant"] = result.get("quality_by_variant")
+            quality_rows = sorted(
+                [item for item in result["quality_by_variant"].values() if isinstance(item, dict)],
+                key=lambda item: (int(item.get("variant_index") or 0), str(item.get("variant_id") or "")),
+            )
+            if quality_rows:
+                out["quality_ok"] = [bool(item.get("quality_gate_ok", False)) for item in quality_rows]
+        runtime_rows = out.get("runtime_by_variant") if isinstance(out.get("runtime_by_variant"), dict) else {}
+        quality_rows_map = out.get("quality_by_variant") if isinstance(out.get("quality_by_variant"), dict) else {}
+        variant_count = max(len(runtime_rows), len(quality_rows_map))
+        if variant_count > 0:
+            out["variants"] = variant_count
+        if str(result.get("logic_template_id") or "").strip():
+            out["logic_template_id"] = str(result.get("logic_template_id") or "").strip() or None
+        if str(result.get("logic_template_name") or "").strip():
+            out["logic_template_name"] = str(result.get("logic_template_name") or "").strip() or None
         json_path = result.get("json")
         if json_path and Path(json_path).exists():
             try:
