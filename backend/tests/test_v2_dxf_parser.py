@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.zhifei_autoplan.v2.data_graph_ingestion import ingest_knowledge_graph
+from backend.zhifei_autoplan.v2.data_graph_ingestion import KnowledgeGraphIndex, ingest_knowledge_graph
 from backend.zhifei_autoplan.v2.dxf_parser import parse_dxf_payload
 
 
@@ -46,3 +46,25 @@ def test_ingest_knowledge_graph_accepts_dxf(tmp_path: Path) -> None:
     assert report["files_total"] == 1
     assert report["nodes_indexed"] >= 1
 
+
+def test_connection_context_closes_sqlite_handle(tmp_path: Path) -> None:
+    events = []
+
+    class _FakeConn:
+        def commit(self):
+            events.append("commit")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    index = KnowledgeGraphIndex(db_path=tmp_path / "kg.sqlite3")
+    fake = _FakeConn()
+
+    index._connect = lambda: fake  # type: ignore[method-assign]
+    with index._connection() as conn:
+        assert conn is fake
+
+    assert events == ["commit", "close"]

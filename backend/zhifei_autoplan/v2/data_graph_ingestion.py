@@ -9,6 +9,7 @@ import re
 import sqlite3
 import time
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -1763,6 +1764,18 @@ class KnowledgeGraphIndex:
         conn.execute("PRAGMA foreign_keys=ON;")
         return conn
 
+    @contextmanager
+    def _connection(self) -> Iterable[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column_def: str) -> None:
         col_name = column_def.split()[0].strip()
         cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -1771,7 +1784,7 @@ class KnowledgeGraphIndex:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS metadata (
@@ -1984,7 +1997,7 @@ class KnowledgeGraphIndex:
             if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
         ]
 
-        with self._connect() as conn:
+        with self._connection() as conn:
             for path in files:
                 data = path.read_bytes()
                 sha = _sha256_bytes(data)
@@ -2266,7 +2279,7 @@ class KnowledgeGraphIndex:
                 norm_domains.append(term)
         min_gemini_score = max(0.0, min(100.0, _safe_float(min_gemini_usefulness_score, 0.0)))
 
-        with self._connect() as conn:
+        with self._connection() as conn:
             candidates = self._candidate_ids_by_terms(conn, tags=norm_tags, keywords=norm_keywords)
             rank_map = self._fts_rank_map(conn, query, limit=max(180, top_k * 8)) if query.strip() else {}
 
@@ -2522,14 +2535,14 @@ class KnowledgeGraphIndex:
 
         node_id: Optional[int] = None
         if node_ref:
-            with self._connect() as conn:
+            with self._connection() as conn:
                 node_id = self._resolve_node_id(conn, str(node_ref), {})
             if node_id:
                 clauses.append("(e.from_node_id = ? OR e.to_node_id = ?)")
                 params.extend([node_id, node_id])
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 f"""
                 SELECT
@@ -2567,7 +2580,7 @@ class KnowledgeGraphIndex:
         return {"ok": True, "total": len(items), "edges": items, "db_path": str(self.db_path)}
 
     def validate_requires_closure(self) -> Dict[str, Any]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT
