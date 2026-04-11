@@ -356,6 +356,7 @@ def test_review_chapter_summaries_group_counts_and_prioritize_high_risk_titles()
         "replacement_ready": 0,
         "pending": 1,
         "pending_high": 1,
+        "completed": 0,
         "completion_rate": "0%",
         "status_label": "待处理高优",
     }
@@ -367,10 +368,12 @@ def test_review_chapter_summaries_group_counts_and_prioritize_high_risk_titles()
         "replacement_ready": 1,
         "pending": 1,
         "pending_high": 0,
+        "completed": 1,
         "completion_rate": "50%",
         "status_label": "待处理",
     }
     assert summaries[2]["all"] == 1
+    assert summaries[2]["completed"] == 1
     assert summaries[2]["selected"] == 1
     assert summaries[2]["replacement_ready"] == 1
     assert summaries[2]["pending"] == 0
