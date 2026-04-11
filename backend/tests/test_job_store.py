@@ -3,6 +3,7 @@ Unit tests for backend/zhifei_autoplan/job_store.py
 """
 import json
 import pytest
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -233,6 +234,47 @@ class TestUpdateJob:
             job_store.update_job(job_id, result=result)
             
             rec = job_store.get_job(job_id)
+            assert rec["result"] == result
+
+    def test_update_job_keeps_done_state_under_concurrent_worker_refresh(self, tmp_path):
+        from backend.zhifei_autoplan import job_store
+
+        job_dir = tmp_path / "jobs"
+        job_dir.mkdir()
+
+        with patch.object(job_store, "JOB_DIR", job_dir):
+            job_id = job_store.create_job({"action": "test"})
+            job_store.update_job(job_id, status="running")
+            worker_read_started = threading.Event()
+            result = {"json": str(tmp_path / "done.json")}
+            original_read = job_store._read_job_from_path
+
+            def _slow_read(path):
+                rec = original_read(path)
+                if threading.current_thread().name == "worker-refresh" and not worker_read_started.is_set():
+                    worker_read_started.set()
+                    time.sleep(0.15)
+                return rec
+
+            def _worker_refresh():
+                job_store.update_job(job_id, worker={"alive": False, "pid": 123})
+
+            def _mark_done():
+                assert worker_read_started.wait(timeout=1.0) is True
+                job_store.update_job(job_id, status="done", result=result)
+
+            with patch.object(job_store, "_read_job_from_path", side_effect=_slow_read):
+                t1 = threading.Thread(target=_worker_refresh, name="worker-refresh")
+                t2 = threading.Thread(target=_mark_done, name="job-finalize")
+                t1.start()
+                t2.start()
+                t1.join(timeout=2)
+                t2.join(timeout=2)
+
+            assert t1.is_alive() is False
+            assert t2.is_alive() is False
+            rec = job_store.get_job(job_id)
+            assert rec["status"] == "done"
             assert rec["result"] == result
 
 

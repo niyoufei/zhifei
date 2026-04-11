@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -150,3 +151,174 @@ async def test_search_kg_api_returns_structured_kg_not_active(tmp_path):
     assert detail["code"] == "kg_not_active"
     assert detail["stage"] == "kg_search"
     assert detail["log_anchor"].startswith("autoplan.kg_search.")
+
+
+@pytest.mark.asyncio
+async def test_actions_result_exposes_generation_mode_summary_and_logic_template(tmp_path):
+    from backend.app.routers.actions_bridge import actions_result
+    from backend.zhifei_autoplan import job_store
+    from backend.zhifei_autoplan import workspace as ws
+
+    workspaces = tmp_path / "workspaces"
+    with patch.object(ws, "WORKSPACE_ROOT", workspaces), patch.dict(
+        os.environ,
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ):
+        workspace_dir = str(ws.resolve_workspace_dir(session_id="result-mode"))
+        result_json = tmp_path / "result.json"
+        result_json.write_text(
+            json.dumps(
+                {
+                    "variants": [
+                        {
+                            "variant_id": 1,
+                            "topic": "稳定交付模式探针",
+                            "outline": ["工程概况"],
+                            "quality_checks": {},
+                            "logic_template_id": "A",
+                            "logic_template_name": "交付清单驱动",
+                            "generation_mode": "stable_delivery",
+                            "mode_policy": {
+                                "profile": "stable_delivery",
+                                "mode_effective": "stable_delivery",
+                                "stable_output": True,
+                                "deterministic_variant_forced": True,
+                                "deterministic_logic_template_id": "A",
+                            },
+                            "generation_trace": {
+                                "generation_mode": "stable_delivery",
+                                "mode_effective": "stable_delivery",
+                                "stable_output": True,
+                                "deterministic_variant_forced": True,
+                                "deterministic_logic_template_id": "A",
+                            },
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        job_id = job_store.create_job(
+            {
+                "topic": "稳定交付模式探针",
+                "workspace_dir": workspace_dir,
+                "request_id": "req-result-mode",
+                "trace_id": "trace-result-mode",
+            },
+            workspace_dir=workspace_dir,
+        )
+        job_store.update_job(
+            job_id,
+            workspace_dir=workspace_dir,
+            status="done",
+            result={"json": str(result_json)},
+        )
+
+        response = await actions_result(
+            job_id=job_id,
+            variant=1,
+            session_id="result-mode",
+            x_actions_key="test-actions-key",
+        )
+
+    assert response["ok"] is True
+    assert response["variant_id"] == 1
+    assert response["logic_template_id"] == "A"
+    assert response["logic_template_name"] == "交付清单驱动"
+    assert response["generation_mode_summary"]["profile"] == "stable_delivery"
+    assert response["generation_mode_summary"]["mode_effective"] == "stable_delivery"
+    assert response["generation_mode_summary"]["stable_output"] is True
+    assert response["generation_mode_summary"]["deterministic_variant_forced"] is True
+    assert response["generation_mode_summary"]["deterministic_logic_template_id"] == "A"
+
+
+@pytest.mark.asyncio
+async def test_actions_job_status_exposes_generation_mode_summary_and_logic_template(tmp_path):
+    from backend.app.routers.actions_bridge import actions_job_status
+    from backend.zhifei_autoplan import job_store
+    from backend.zhifei_autoplan import workspace as ws
+
+    workspaces = tmp_path / "workspaces"
+    with patch.object(ws, "WORKSPACE_ROOT", workspaces), patch.dict(
+        os.environ,
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ):
+        workspace_dir = str(ws.resolve_workspace_dir(session_id="status-mode"))
+        result_json = tmp_path / "status-result.json"
+        result_json.write_text(
+            json.dumps(
+                {
+                    "variants": [
+                        {
+                            "variant_id": 1,
+                            "topic": "稳定交付模式状态探针",
+                            "outline": ["工程概况"],
+                            "quality_checks": {},
+                            "logic_template_id": "A",
+                            "logic_template_name": "交付清单驱动",
+                            "generation_mode": "stable_delivery",
+                            "mode_policy": {
+                                "profile": "stable_delivery",
+                                "mode_effective": "stable_delivery",
+                                "stable_output": True,
+                                "deterministic_variant_forced": True,
+                                "deterministic_logic_template_id": "A",
+                            },
+                            "generation_trace": {
+                                "generation_mode": "stable_delivery",
+                                "mode_effective": "stable_delivery",
+                                "stable_output": True,
+                                "deterministic_variant_forced": True,
+                                "deterministic_logic_template_id": "A",
+                            },
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        job_id = job_store.create_job(
+            {
+                "topic": "稳定交付模式状态探针",
+                "workspace_dir": workspace_dir,
+                "request_id": "req-status-mode",
+                "trace_id": "trace-status-mode",
+                "generation_mode": "stable_delivery",
+                "logic_template_id": "A",
+                "_mode_policy": {
+                    "profile": "stable_delivery",
+                    "mode_effective": "stable_delivery",
+                    "stable_output": True,
+                    "deterministic_variant_forced": True,
+                    "deterministic_logic_template_id": "A",
+                },
+            },
+            workspace_dir=workspace_dir,
+        )
+        job_store.update_job(
+            job_id,
+            workspace_dir=workspace_dir,
+            status="done",
+            result={"json": str(result_json)},
+        )
+
+        response = await actions_job_status(
+            job_id=job_id,
+            session_id="status-mode",
+            x_actions_key="test-actions-key",
+        )
+
+    assert response["ok"] is True
+    job = response["job"]
+    assert job["status"] == "done"
+    assert job["logic_template_id"] == "A"
+    assert job["logic_template_name"] == "交付清单驱动"
+    assert job["generation_mode_summary"]["profile"] == "stable_delivery"
+    assert job["generation_mode_summary"]["mode_effective"] == "stable_delivery"
+    assert job["generation_mode_summary"]["stable_output"] is True
+    assert job["generation_mode_summary"]["deterministic_variant_forced"] is True
+    assert job["generation_mode_summary"]["deterministic_logic_template_id"] == "A"

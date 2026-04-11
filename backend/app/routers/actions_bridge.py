@@ -1284,7 +1284,7 @@ def _normalize_generation_mode_profile(raw: str | None) -> tuple[str, str | None
     mode = str(raw or "").strip()
     if mode in {"quality_200", "hq_speed_500"}:
         return "standard_auto", mode
-    if mode in {"speed_fast", "standard_auto", "pro_polish"}:
+    if mode in {"speed_fast", "standard_auto", "pro_polish", "stable_delivery"}:
         return mode, None
     return "standard_auto", None
 
@@ -1292,6 +1292,7 @@ def _normalize_generation_mode_profile(raw: str | None) -> tuple[str, str | None
 def _apply_generation_mode_policy(payload: dict) -> dict:
     mode_profile, legacy_mode = _normalize_generation_mode_profile(payload.get("generation_mode"))
     pages = _planned_total_pages(payload)
+    existing_mode_policy = payload.get("_mode_policy") if isinstance(payload.get("_mode_policy"), dict) else {}
     auto_switched = False
     if legacy_mode == "hq_speed_500":
         mode_effective = "hq_speed_500"
@@ -1300,11 +1301,38 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
         auto_switched = pages > 200
     elif mode_profile == "speed_fast":
         mode_effective = "speed_fast"
+    elif mode_profile == "stable_delivery":
+        mode_effective = "stable_delivery"
     elif mode_profile == "pro_polish":
         mode_effective = "pro_polish"
     else:
         mode_effective = "hq_speed_500" if pages > 200 else "quality_200"
         auto_switched = pages > 200
+
+    explicit_template_id = _normalize_logic_template_id(payload.get("logic_template_id") or payload.get("logic_template"))
+    explicit_selected_templates = _normalize_selected_templates(payload.get("selected_templates"))
+    explicit_variant_id = _to_positive_int(payload.get("variant_id"))
+    try:
+        variants_requested = int(payload.get("variants") or 1)
+    except Exception:
+        variants_requested = 1
+    variants_requested = max(1, min(5, variants_requested))
+    stable_variant_forced = bool(existing_mode_policy.get("deterministic_variant_forced", False))
+    deterministic_logic_template_id = str(
+        existing_mode_policy.get("deterministic_logic_template_id")
+        or payload.get("logic_template_id")
+        or ""
+    ).strip() or None
+    if (
+        mode_profile == "stable_delivery"
+        and not explicit_template_id
+        and not explicit_selected_templates
+        and not explicit_variant_id
+        and variants_requested == 1
+    ):
+        payload["variant_id"] = 1
+        payload["logic_template_id"] = "A"
+        stable_variant_forced = True
 
     if mode_effective == "quality_200":
         payload["quality_strict"] = True
@@ -1352,6 +1380,22 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
             payload["generate_images"] = False
         if payload.get("compare_max_chars") is None:
             payload["compare_max_chars"] = 600
+    elif mode_effective == "stable_delivery":
+        payload["quality_strict"] = True
+        payload["auto_remediate"] = True
+        payload["variant_parallelism"] = 1
+        if payload.get("enable_section_cache") is None:
+            payload["enable_section_cache"] = True
+        if payload.get("quality_gate_retry_rounds") is None:
+            payload["quality_gate_retry_rounds"] = 1
+        if str(payload.get("remediate_mode") or "").strip() not in {"template", "llm"}:
+            payload["remediate_mode"] = "template"
+        else:
+            payload["remediate_mode"] = "template"
+        ap = _to_positive_int(payload.get("agent_parallelism")) or 2
+        payload["agent_parallelism"] = max(1, min(3, int(ap)))
+        if payload.get("compare_max_chars") is None:
+            payload["compare_max_chars"] = 1600
     else:
         payload["quality_strict"] = True
         payload["auto_remediate"] = True
@@ -1371,7 +1415,7 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
     # - hq_speed_500/speed_fast: keep auto density but add a sensible default total-image budget for speed stability
     style = payload.get("style") if isinstance(payload.get("style"), dict) else {}
     chart_policy = style.get("chart_policy") if isinstance(style.get("chart_policy"), dict) else {}
-    if mode_effective in {"quality_200", "pro_polish"}:
+    if mode_effective in {"quality_200", "pro_polish", "stable_delivery"}:
         chart_policy.setdefault("enabled", True)
         chart_policy.setdefault("mode", "page_density_auto")
         chart_policy.setdefault("position", "chapter")
@@ -1401,7 +1445,11 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
         "mode_effective": mode_effective,
         "auto_switched": bool(auto_switched),
         "planned_total_pages": int(pages),
+        "stable_output": mode_profile == "stable_delivery",
     }
+    if stable_variant_forced:
+        payload["_mode_policy"]["deterministic_variant_forced"] = True
+        payload["_mode_policy"]["deterministic_logic_template_id"] = deterministic_logic_template_id or "A"
     if degrade_plan.get("applied"):
         payload["_mode_policy"]["admission_degrade_applied"] = True
         payload["_mode_policy"]["admission_degrade_reason"] = str(degrade_plan.get("reason") or "").strip()
@@ -2520,6 +2568,8 @@ async def actions_job_status(
             next_action="check job_id or workspace scope",
         )
     trace_meta = _job_trace_meta(job)
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    mode_policy = payload.get("_mode_policy") if isinstance(payload.get("_mode_policy"), dict) else {}
     out = {
         "job_id": job.get("job_id"),
         "status": job.get("status"),
@@ -2534,6 +2584,13 @@ async def actions_job_status(
         "agent_runtime": job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {},
         "worker": job.get("worker") if isinstance(job.get("worker"), dict) else {},
         "sla": job.get("sla") if isinstance(job.get("sla"), dict) else {},
+        "generation_mode_summary": {
+            "profile": str(mode_policy.get("profile") or payload.get("generation_mode") or "").strip() or None,
+            "mode_effective": str(mode_policy.get("mode_effective") or payload.get("generation_mode") or "").strip() or None,
+            "stable_output": bool(mode_policy.get("stable_output", False)),
+            "deterministic_variant_forced": bool(mode_policy.get("deterministic_variant_forced", False)),
+            "deterministic_logic_template_id": str(mode_policy.get("deterministic_logic_template_id") or payload.get("logic_template_id") or "").strip() or None,
+        },
     }
     result = job.get("result") or {}
     if isinstance(result, dict):
@@ -2550,6 +2607,12 @@ async def actions_job_status(
                     for v in variants
                 ]
                 if variants and isinstance(variants[0], dict):
+                    out["logic_template_id"] = str(
+                        variants[0].get("logic_template_id") or ((variants[0].get("logic_template") or {}) if isinstance(variants[0].get("logic_template"), dict) else {}).get("id") or ""
+                    ).strip() or None
+                    out["logic_template_name"] = str(
+                        variants[0].get("logic_template_name") or ((variants[0].get("logic_template") or {}) if isinstance(variants[0].get("logic_template"), dict) else {}).get("name") or ""
+                    ).strip() or None
                     ma = variants[0].get("multi_agent")
                     if isinstance(ma, dict):
                         out["multi_agent"] = ma
@@ -2944,15 +3007,37 @@ async def actions_result(
         )
     v = max(1, int(variant or 1))
     rec = variants[v - 1] if v <= len(variants) else variants[0]
+    mode_policy = rec.get("mode_policy") if isinstance(rec.get("mode_policy"), dict) else {}
+    generation_trace = rec.get("generation_trace") if isinstance(rec.get("generation_trace"), dict) else {}
+    logic_template = rec.get("logic_template") if isinstance(rec.get("logic_template"), dict) else {}
+    logic_template_id = str(rec.get("logic_template_id") or logic_template.get("id") or "").strip() or None
+    logic_template_name = str(rec.get("logic_template_name") or logic_template.get("name") or "").strip() or None
     response = {
         "ok": True,
         "variant_id": rec.get("variant_id") or v,
+        "logic_template_id": logic_template_id,
+        "logic_template_name": logic_template_name,
         "topic": rec.get("topic"),
         "outline": rec.get("outline"),
         "boq_focus": rec.get("boq_focus"),
         "quality_checks": rec.get("quality_checks"),
         "request_id": trace_meta.get("request_id") or None,
         "trace_id": trace_meta.get("trace_id") or None,
+        "generation_mode_summary": {
+            "profile": str(mode_policy.get("profile") or generation_trace.get("generation_mode") or rec.get("generation_mode") or "").strip() or None,
+            "mode_effective": str(mode_policy.get("mode_effective") or generation_trace.get("mode_effective") or generation_trace.get("generation_mode") or rec.get("generation_mode") or "").strip() or None,
+            "stable_output": bool(mode_policy.get("stable_output", generation_trace.get("stable_output", False))),
+            "deterministic_variant_forced": bool(
+                mode_policy.get("deterministic_variant_forced", generation_trace.get("deterministic_variant_forced", False))
+            ),
+            "deterministic_logic_template_id": str(
+                mode_policy.get("deterministic_logic_template_id")
+                or generation_trace.get("deterministic_logic_template_id")
+                or logic_template_id
+                or ""
+            ).strip()
+            or None,
+        },
         "resource_usage_summary": rec.get("resource_usage_summary") if isinstance(rec.get("resource_usage_summary"), dict) else {},
         "job_resource_usage_summary": result.get("resource_usage_summary") if isinstance(result.get("resource_usage_summary"), dict) else {},
         "files": {

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from backend.app.routers.actions_bridge import (
     ActionsGenerateRequest,
+    _apply_generation_mode_policy,
     _build_variant_plan,
     _chief_agent_status_summary,
     _recent_job_agent_runtime_summary,
@@ -21,6 +22,7 @@ from backend.app.routers.actions_bridge import (
     _watcher_status_summary,
 )
 from backend.zhifei_autoplan import job_store
+from backend.zhifei_autoplan.job_worker import _payload_stage_summary
 
 
 def _fmt_ts(offset_seconds: int = 0) -> str:
@@ -640,3 +642,61 @@ def test_actions_generate_request_keeps_explicit_logic_template_id_for_variant_p
     plan = _build_variant_plan(payload)
     assert len(plan) == 1
     assert plan[0]["logic_template_id"] == "C"
+
+
+def test_actions_generate_request_stable_delivery_forces_default_template_when_single_variant():
+    req = ActionsGenerateRequest(
+        topic="稳定交付测试",
+        project_type="房建",
+        generation_mode="stable_delivery",
+        outline=["工程概况"],
+        variants=1,
+    )
+    payload = _apply_generation_mode_policy(req.model_dump())
+    plan = _build_variant_plan(payload)
+    assert payload["variant_id"] == 1
+    assert payload["logic_template_id"] == "A"
+    assert payload["_mode_policy"]["deterministic_variant_forced"] is True
+    assert len(plan) == 1
+    assert plan[0]["variant_id"] == 1
+    assert plan[0]["logic_template_id"] == "A"
+
+
+def test_actions_generate_request_stable_delivery_keeps_selected_templates():
+    req = ActionsGenerateRequest(
+        topic="稳定交付显式模板测试",
+        project_type="房建",
+        generation_mode="stable_delivery",
+        outline=["工程概况"],
+        variants=2,
+        selected_templates=["B", "D"],
+    )
+    payload = _apply_generation_mode_policy(req.model_dump())
+    plan = _build_variant_plan(payload)
+    assert payload["_mode_policy"]["stable_output"] is True
+    assert payload.get("logic_template_id") in {None, ""}
+    assert payload["_mode_policy"].get("deterministic_variant_forced") is None
+    assert [item["logic_template_id"] for item in plan] == ["B", "D"]
+
+
+def test_payload_stage_summary_exposes_stable_delivery_mode_fields():
+    out = _payload_stage_summary(
+        {
+            "topic": "稳定交付测试",
+            "generation_mode": "stable_delivery",
+            "variant_parallelism": 1,
+            "agent_parallelism": 2,
+            "_mode_policy": {
+                "profile": "stable_delivery",
+                "mode_effective": "stable_delivery",
+                "stable_output": True,
+                "deterministic_variant_forced": True,
+                "deterministic_logic_template_id": "A",
+            },
+        }
+    )
+    assert out["generation_mode"] == "stable_delivery"
+    assert out["mode_effective"] == "stable_delivery"
+    assert out["stable_output"] is True
+    assert out["deterministic_variant_forced"] is True
+    assert out["deterministic_logic_template_id"] == "A"

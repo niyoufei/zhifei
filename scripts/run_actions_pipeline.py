@@ -257,6 +257,12 @@ def main() -> int:
     ap.add_argument("--variants", type=int, default=1, help="Number of variants")
     ap.add_argument("--variant-id", type=int, default=0, help="Optional fixed variant_id for deterministic template selection")
     ap.add_argument("--logic-template-id", default="", help="Optional fixed logic template id (A/B/C/D/E)")
+    ap.add_argument(
+        "--generation-mode",
+        default="",
+        choices=["", "standard_auto", "speed_fast", "pro_polish", "stable_delivery", "quality_200", "hq_speed_500"],
+        help="Optional generation mode override",
+    )
     ap.add_argument("--quality-strict", action="store_true", default=True, help="Enable strict quality checks")
     ap.add_argument("--no-quality-strict", dest="quality_strict", action="store_false", help="Disable strict quality checks")
     ap.add_argument("--auto-remediate", action="store_true", default=True, help="Enable auto remediation")
@@ -343,6 +349,8 @@ def main() -> int:
         "generate_images": True,
         "dry_run": bool(args.dry_run),
     }
+    if args.generation_mode:
+        gen["generation_mode"] = args.generation_mode
     if args.provider:
         gen["provider"] = args.provider
     if args.model:

@@ -145,10 +145,16 @@ def _provider_chain_summary(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _payload_stage_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     front_matter = payload.get("front_matter_outline") if isinstance(payload.get("front_matter_outline"), dict) else {}
+    mode_policy = payload.get("_mode_policy") if isinstance(payload.get("_mode_policy"), dict) else {}
+    deterministic_logic_template_id = str(mode_policy.get("deterministic_logic_template_id") or "").strip() or None
     return {
         "project_id": str(payload.get("project_id") or "").strip(),
         "topic": str(payload.get("topic") or "").strip(),
-        "generation_mode": str(payload.get("generation_mode") or "").strip(),
+        "generation_mode": str(mode_policy.get("profile") or payload.get("generation_mode") or "").strip(),
+        "mode_effective": str(mode_policy.get("mode_effective") or payload.get("generation_mode") or "").strip(),
+        "stable_output": bool(mode_policy.get("stable_output", False)),
+        "deterministic_variant_forced": bool(mode_policy.get("deterministic_variant_forced", False)),
+        "deterministic_logic_template_id": deterministic_logic_template_id,
         "strict_tender_outline": bool(payload.get("strict_tender_outline", False)),
         "version_modes": [str(x).strip() for x in (payload.get("version_modes") or []) if str(x).strip()],
         "variant_parallelism": payload.get("variant_parallelism"),

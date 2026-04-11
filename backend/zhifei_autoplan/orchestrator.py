@@ -235,6 +235,14 @@ def _resolve_runtime_speed_profile(
             "llm_timeout_sec": 120,
             "chars_per_page_factor": 0.82,
         },
+        "stable_delivery": {
+            "kg_top_k": 3,
+            "doc_limit": 5,
+            "standard_limit": 2,
+            "section_retry_limit": 2,
+            "llm_timeout_sec": 120,
+            "chars_per_page_factor": 0.82,
+        },
         "hq_speed_500": {
             "kg_top_k": 2,
             "doc_limit": 4,
@@ -3917,6 +3925,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "project_name": str(project_name or ""),
         "project_code": str(project_code or ""),
         "generation_mode": str(payload.get("generation_mode") or ""),
+        "mode_effective": str(mode_effective or ""),
+        "stable_output": bool(mode_policy.get("stable_output", False)),
+        "deterministic_variant_forced": bool(mode_policy.get("deterministic_variant_forced", False)),
+        "deterministic_logic_template_id": str(mode_policy.get("deterministic_logic_template_id") or "").strip() or None,
         "strict_catalog_mode": bool(strict_tender_outline),
         "provider_chain": provider_chain_summary,
         "retrieval_cache": shared_cache_obj.get("stats") if isinstance(shared_cache_obj, dict) else {},
@@ -4099,6 +4111,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "branding": branding,
         # Keep the raw value for API backward-compatibility (some callers pass a string).
         "variant_id": raw_variant_id,
+        "logic_template_id": str((logic_template_general.as_dict() if logic_template_general else {}).get("id") or "").strip() or None,
+        "logic_template_name": str((logic_template_general.as_dict() if logic_template_general else {}).get("name") or "").strip() or None,
         "logic_template": logic_template_general.as_dict() if logic_template_general else None,
         "logic_templates": {
             "general": logic_template_general.as_dict() if logic_template_general else None,

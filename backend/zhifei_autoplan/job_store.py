@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import subprocess
 import time
 import uuid
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -30,6 +32,35 @@ def _archive_dir(workspace_dir: str | None = None) -> Path:
         return workspace_paths(workspace_dir)["jobs_archive"]
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     return ARCHIVE_DIR
+
+
+def _job_path(job_id: str, workspace_dir: str | None = None) -> Path:
+    return _job_dir(workspace_dir) / f"{job_id}.json"
+
+
+def _job_lock_path(job_id: str, workspace_dir: str | None = None) -> Path:
+    return _job_dir(workspace_dir) / f"{job_id}.lock"
+
+
+@contextmanager
+def _job_lock(job_id: str, workspace_dir: str | None = None):
+    lock_path = _job_lock_path(job_id, workspace_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lockf:
+        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
+
+
+def _read_job_from_path(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def _strip_archived_suffixes(stem: str) -> str:
@@ -149,29 +180,27 @@ def create_job(
 
 
 def update_job(job_id: str, workspace_dir: str | None = None, **kwargs: Any) -> Dict[str, Any]:
-    rec = get_job(job_id, workspace_dir=workspace_dir) or {"job_id": job_id}
-    rec.update(kwargs)
-    rec["updated_at"] = time.time()
-    if str(rec.get("status") or "").strip().lower() in {"queued", "running"}:
-        rec["heartbeat_at"] = rec.get("heartbeat_at") or rec["updated_at"]
-    if "heartbeat_at" in kwargs:
-        rec["heartbeat_at"] = kwargs.get("heartbeat_at")
-    resolved_workspace = str(
-        kwargs.get("workspace_dir") or rec.get("workspace_dir") or workspace_dir or ""
-    ).strip() or None
-    rec["workspace_dir"] = resolved_workspace
-    _write_job(rec, workspace_dir=resolved_workspace)
-    return rec
+    hinted_workspace = str(kwargs.get("workspace_dir") or workspace_dir or "").strip() or None
+    with _job_lock(job_id, workspace_dir=hinted_workspace):
+        rec = _read_job_from_path(_job_path(job_id, hinted_workspace)) or {"job_id": job_id}
+        resolved_workspace = str(
+            kwargs.get("workspace_dir") or rec.get("workspace_dir") or workspace_dir or ""
+        ).strip() or None
+        if resolved_workspace != hinted_workspace:
+            rec = _read_job_from_path(_job_path(job_id, resolved_workspace)) or rec
+        rec.update(kwargs)
+        rec["updated_at"] = time.time()
+        if str(rec.get("status") or "").strip().lower() in {"queued", "running"}:
+            rec["heartbeat_at"] = rec.get("heartbeat_at") or rec["updated_at"]
+        if "heartbeat_at" in kwargs:
+            rec["heartbeat_at"] = kwargs.get("heartbeat_at")
+        rec["workspace_dir"] = resolved_workspace
+        _write_job(rec, workspace_dir=resolved_workspace)
+        return rec
 
 
 def get_job(job_id: str, workspace_dir: str | None = None) -> Optional[Dict[str, Any]]:
-    path = _job_dir(workspace_dir) / f"{job_id}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    return _read_job_from_path(_job_path(job_id, workspace_dir))
 
 
 def _candidate_job_dirs(*, workspace_dir: str | None = None, include_all_workspaces: bool = False) -> list[Path]:
@@ -600,5 +629,8 @@ def _write_job(rec: Dict[str, Any], workspace_dir: str | None = None) -> None:
     if not job_id:
         return
     resolved_workspace = str(workspace_dir or rec.get("workspace_dir") or "").strip() or None
-    path = _job_dir(resolved_workspace) / f"{job_id}.json"
-    path.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = _job_path(str(job_id), resolved_workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)

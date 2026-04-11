@@ -113,6 +113,62 @@ def test_generation_mode_pro_polish_policy():
     assert out["agent_parallelism"] <= 4
 
 
+def test_generation_mode_stable_delivery_forces_single_template_when_unspecified():
+    payload = {
+        "generation_mode": "stable_delivery",
+        "total_pages_target": 80,
+        "variants": 1,
+        "quality_strict": False,
+        "auto_remediate": False,
+        "remediate_mode": "llm",
+    }
+    out = _apply_generation_mode_policy(payload)
+    assert out["generation_mode"] == "stable_delivery"
+    assert out["_mode_policy"]["profile"] == "stable_delivery"
+    assert out["_mode_policy"]["mode_effective"] == "stable_delivery"
+    assert out["_mode_policy"]["stable_output"] is True
+    assert out["_mode_policy"]["deterministic_variant_forced"] is True
+    assert out["_mode_policy"]["deterministic_logic_template_id"] == "A"
+    assert out["variant_id"] == 1
+    assert out["logic_template_id"] == "A"
+    assert out["quality_strict"] is True
+    assert out["auto_remediate"] is True
+    assert out["remediate_mode"] == "template"
+    assert out["variant_parallelism"] == 1
+    assert out["agent_parallelism"] <= 3
+
+
+def test_generation_mode_stable_delivery_preserves_explicit_template_selection():
+    payload = {
+        "generation_mode": "stable_delivery",
+        "total_pages_target": 80,
+        "variants": 1,
+        "logic_template_id": "D",
+        "variant_id": 4,
+    }
+    out = _apply_generation_mode_policy(payload)
+    assert out["logic_template_id"] == "D"
+    assert out["variant_id"] == 4
+    assert out["_mode_policy"]["stable_output"] is True
+    assert out["_mode_policy"].get("deterministic_variant_forced") is None
+
+
+def test_generation_mode_stable_delivery_preserves_forced_marker_on_reapply():
+    payload = {
+        "generation_mode": "stable_delivery",
+        "total_pages_target": 80,
+        "variants": 1,
+    }
+    first = _apply_generation_mode_policy(dict(payload))
+    second = _apply_generation_mode_policy(dict(first))
+    assert first["_mode_policy"]["deterministic_variant_forced"] is True
+    assert first["_mode_policy"]["deterministic_logic_template_id"] == "A"
+    assert second["_mode_policy"]["deterministic_variant_forced"] is True
+    assert second["_mode_policy"]["deterministic_logic_template_id"] == "A"
+    assert second["variant_id"] == 1
+    assert second["logic_template_id"] == "A"
+
+
 def test_merge_plan_defaults_ignores_legacy_scalar_plan():
     payload = {
         "topic": "测试项目",
