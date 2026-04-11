@@ -268,6 +268,7 @@ def main() -> int:
     ap.add_argument("--auto-remediate", action="store_true", default=True, help="Enable auto remediation")
     ap.add_argument("--no-auto-remediate", dest="auto_remediate", action="store_false", help="Disable auto remediation")
     ap.add_argument("--remediate-mode", default="template", choices=["template", "llm"], help="Remediation mode")
+    ap.add_argument("--compare-max-chars", type=int, default=0, help="Optional explicit compare max chars override")
     ap.add_argument("--dry-run", action="store_true", default=False, help="Do not call external LLMs (will use fallback template)")
     ap.add_argument("--no-gate", action="store_true", default=False, help="Do not fail the process even if quality gate fails")
     ap.add_argument("--timeout-sec", type=int, default=900, help="Polling timeout seconds")
@@ -345,10 +346,11 @@ def main() -> int:
         "auto_remediate": bool(args.auto_remediate),
         "remediate_mode": args.remediate_mode,
         "compare_mode": "summary",
-        "compare_max_chars": 1200,
         "generate_images": True,
         "dry_run": bool(args.dry_run),
     }
+    if int(args.compare_max_chars or 0) > 0:
+        gen["compare_max_chars"] = int(args.compare_max_chars)
     if args.generation_mode:
         gen["generation_mode"] = args.generation_mode
     if args.provider:

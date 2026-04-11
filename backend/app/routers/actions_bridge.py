@@ -856,7 +856,7 @@ class ActionsGenerateRequest(BaseModel):
     auto_remediate: bool = True
     remediate_mode: str = "template"
     compare_mode: str = "summary"
-    compare_max_chars: int = 1200
+    compare_max_chars: int | None = None
     compare_titles: list[str] | None = None
     api_key: str | None = None
     api_keys: dict | None = None
@@ -897,7 +897,7 @@ class ActionsPlanRequest(BaseModel):
     auto_remediate: bool = True
     remediate_mode: str = "template"
     compare_mode: str = "summary"
-    compare_max_chars: int = 1200
+    compare_max_chars: int | None = None
     compare_titles: list[str] | None = None
 
 
@@ -1493,7 +1493,9 @@ def _merge_plan_defaults(payload: dict) -> dict:
     if payload.get("compare_mode") is None:
         payload["compare_mode"] = plan.get("compare_mode", "summary")
     if payload.get("compare_max_chars") is None:
-        payload["compare_max_chars"] = plan.get("compare_max_chars", 1200)
+        plan_compare_max_chars = plan.get("compare_max_chars")
+        if plan_compare_max_chars is not None:
+            payload["compare_max_chars"] = plan_compare_max_chars
     if payload.get("compare_titles") is None:
         payload["compare_titles"] = plan.get("compare_titles")
     if payload.get("selected_templates") is None:

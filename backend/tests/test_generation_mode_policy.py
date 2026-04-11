@@ -1,6 +1,12 @@
 from unittest.mock import patch
 
-from backend.app.routers.actions_bridge import _apply_generation_mode_policy, _merge_plan_defaults, _planned_total_pages
+from backend.app.routers.actions_bridge import (
+    ActionsGenerateRequest,
+    ActionsPlanRequest,
+    _apply_generation_mode_policy,
+    _merge_plan_defaults,
+    _planned_total_pages,
+)
 
 
 def test_planned_total_pages_prefers_total_pages_target():
@@ -167,6 +173,37 @@ def test_generation_mode_stable_delivery_preserves_forced_marker_on_reapply():
     assert second["_mode_policy"]["deterministic_logic_template_id"] == "A"
     assert second["variant_id"] == 1
     assert second["logic_template_id"] == "A"
+
+
+def test_generate_request_compare_max_chars_defaults_to_none():
+    req = ActionsGenerateRequest(topic="稳定交付", generation_mode="stable_delivery", outline=["工程概况"])
+    assert req.compare_max_chars is None
+    payload = _apply_generation_mode_policy(req.model_dump())
+    assert payload["compare_max_chars"] == 1600
+
+
+def test_plan_request_compare_max_chars_defaults_to_none():
+    req = ActionsPlanRequest(outline=["工程概况"])
+    assert req.compare_max_chars is None
+
+
+def test_merge_plan_defaults_allows_mode_specific_compare_max_chars_when_plan_omits_override():
+    payload = {
+        "topic": "测试项目",
+        "outline": ["工程概况"],
+        "chapter_requirements": {},
+        "style": {},
+        "chapter_pages": {},
+        "generation_mode": None,
+        "compare_max_chars": None,
+    }
+    with patch(
+        "backend.app.routers.actions_bridge.load_plan",
+        return_value={"generation_mode": "stable_delivery"},
+    ), patch("backend.app.routers.actions_bridge.load_tender_matrix", return_value={}):
+        out = _merge_plan_defaults(dict(payload))
+    assert out["generation_mode"] == "stable_delivery"
+    assert out["compare_max_chars"] == 1600
 
 
 def test_merge_plan_defaults_ignores_legacy_scalar_plan():
