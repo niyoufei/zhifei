@@ -174,6 +174,7 @@ def collect_main_chain_config_status(
             "source": default_pair["source"],
         },
     }
+    checks["actions_dry_run_ready"] = bool(checks["kg_config"]["ready"] and checks["actions_api_auth"]["ready"])
     checks["actions_generation_ready"] = bool(checks["text_generation"]["ready"] and checks["kg_config"]["ready"])
     checks["release_ready"] = bool(
         checks["config_json"]["ready"]

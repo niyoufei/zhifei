@@ -61,6 +61,7 @@ def test_collect_main_chain_config_status_reports_release_ready(tmp_path):
     assert status["level"] == "ok"
     assert status["checks"]["release_ready"] is True
     assert status["checks"]["actions_generation_ready"] is True
+    assert status["checks"]["actions_dry_run_ready"] is True
     assert status["checks"]["actions_api_auth"]["secure"] is True
     assert status["sources"]["config_json"]["config_version"] == "2026-04-10"
     assert status["defaults"]["provider"] == "openai"
@@ -75,6 +76,7 @@ def test_collect_main_chain_config_status_flags_default_actions_key_and_missing_
 
     assert status["level"] == "error"
     assert status["checks"]["release_ready"] is False
+    assert status["checks"]["actions_dry_run_ready"] is True
     assert status["checks"]["actions_api_auth"]["secure"] is False
     assert status["checks"]["actions_api_auth"]["uses_builtin_default"] is True
     assert any("ZF_ACTIONS_KEY" in item for item in status["warnings"])
@@ -90,6 +92,7 @@ def test_health_exposes_runtime_config_summary(monkeypatch):
         "checks": {
             "release_ready": False,
             "actions_generation_ready": True,
+            "actions_dry_run_ready": True,
             "actions_api_auth": {"secure": False},
             "text_generation": {"ready": True},
             "kg_config": {"ready": True},
@@ -109,6 +112,7 @@ def test_health_exposes_runtime_config_summary(monkeypatch):
     assert out["config_version"] == "2026-04-10"
     assert out["config_status"]["level"] == "warn"
     assert out["config_status"]["release_ready"] is False
+    assert out["config_status"]["actions_dry_run_ready"] is True
     assert out["config_status"]["warnings"] == ["warn-a"]
 
 

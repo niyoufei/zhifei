@@ -59,10 +59,11 @@ async def _startup_warmup() -> None:
         runtime_cfg = collect_main_chain_config_status()
         log_method = logger.info if runtime_cfg.get("level") == "ok" else logger.warning
         log_method(
-            "main-chain config self-check: level=%s release_ready=%s generation_ready=%s warnings=%s blocking=%s",
+            "main-chain config self-check: level=%s release_ready=%s generation_ready=%s dry_run_ready=%s warnings=%s blocking=%s",
             runtime_cfg.get("level"),
             bool(((runtime_cfg.get("checks") or {}).get("release_ready"))),
             bool(((runtime_cfg.get("checks") or {}).get("actions_generation_ready"))),
+            bool(((runtime_cfg.get("checks") or {}).get("actions_dry_run_ready"))),
             len(runtime_cfg.get("warnings") or []),
             len(runtime_cfg.get("blocking") or []),
         )
@@ -146,6 +147,7 @@ def health():
             "level": runtime_cfg.get("level"),
             "release_ready": bool(checks.get("release_ready")),
             "actions_generation_ready": bool(checks.get("actions_generation_ready")),
+            "actions_dry_run_ready": bool(checks.get("actions_dry_run_ready")),
             "actions_api_secure": bool(((checks.get("actions_api_auth") or {}).get("secure"))),
             "text_generation_ready": bool(((checks.get("text_generation") or {}).get("ready"))),
             "kg_config_ready": bool(((checks.get("kg_config") or {}).get("ready"))),
