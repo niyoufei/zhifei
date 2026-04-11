@@ -29,6 +29,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_rows_match_filter",
         "_review_filter_counts",
         "_review_chapter_summaries",
+        "_review_chapter_status_label",
         "_review_chapter_shortcuts",
         "_review_shortcut_filter_key",
         "_review_next_pending_shortcut",
@@ -356,6 +357,7 @@ def test_review_chapter_summaries_group_counts_and_prioritize_high_risk_titles()
         "pending": 1,
         "pending_high": 1,
         "completion_rate": "0%",
+        "status_label": "待处理高优",
     }
     assert summaries[1] == {
         "title": "安全措施",
@@ -366,6 +368,7 @@ def test_review_chapter_summaries_group_counts_and_prioritize_high_risk_titles()
         "pending": 1,
         "pending_high": 0,
         "completion_rate": "50%",
+        "status_label": "待处理",
     }
     assert summaries[2]["all"] == 1
     assert summaries[2]["selected"] == 1
@@ -373,6 +376,18 @@ def test_review_chapter_summaries_group_counts_and_prioritize_high_risk_titles()
     assert summaries[2]["pending"] == 0
     assert summaries[2]["pending_high"] == 0
     assert summaries[2]["completion_rate"] == "100%"
+    assert summaries[2]["status_label"] == "处理中"
+
+
+def test_review_chapter_status_label_distinguishes_priority_and_completion_state():
+    helpers = _load_helpers()
+
+    assert helpers._review_chapter_status_label({"pending_high": 1, "pending": 1, "selected": 0, "replacement_ready": 0, "all": 2}) == "待处理高优"
+    assert helpers._review_chapter_status_label({"pending_high": 0, "pending": 2, "selected": 0, "replacement_ready": 0, "all": 2}) == "待处理"
+    assert helpers._review_chapter_status_label({"pending_high": 0, "pending": 0, "selected": 1, "replacement_ready": 0, "all": 2}) == "处理中"
+    assert helpers._review_chapter_status_label({"pending_high": 0, "pending": 0, "selected": 0, "replacement_ready": 1, "all": 2}) == "处理中"
+    assert helpers._review_chapter_status_label({"pending_high": 0, "pending": 0, "selected": 0, "replacement_ready": 0, "all": 2}) == "已完成"
+    assert helpers._review_chapter_status_label(None) == "未开始"
 
 
 def test_review_chapter_shortcuts_prioritize_pending_high_risk_titles():

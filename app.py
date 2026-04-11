@@ -6796,6 +6796,7 @@ def _review_chapter_summaries(rows: list[dict[str, Any]] | None) -> list[dict[st
         pending = max(0, int(item.get("pending") or 0))
         completed = max(0, total - pending)
         item["completion_rate"] = f"{round((completed / total) * 100):d}%" if total > 0 else "0%"
+        item["status_label"] = _review_chapter_status_label(item)
     return sorted(
         grouped.values(),
         key=lambda item: (
@@ -6807,6 +6808,20 @@ def _review_chapter_summaries(rows: list[dict[str, Any]] | None) -> list[dict[st
             str(item.get("title") or ""),
         ),
     )
+
+
+def _review_chapter_status_label(chapter_summary: dict[str, Any] | None) -> str:
+    if not isinstance(chapter_summary, dict):
+        return "未开始"
+    if int(chapter_summary.get("pending_high") or 0) > 0:
+        return "待处理高优"
+    if int(chapter_summary.get("pending") or 0) > 0:
+        return "待处理"
+    if int(chapter_summary.get("replacement_ready") or 0) > 0 or int(chapter_summary.get("selected") or 0) > 0:
+        return "处理中"
+    if int(chapter_summary.get("all") or 0) > 0:
+        return "已完成"
+    return "未开始"
 
 
 def _review_chapter_shortcuts(rows: list[dict[str, Any]] | None, limit: int = 3) -> list[dict[str, str]]:
@@ -8320,9 +8335,10 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             chapter_summaries,
             hide_index=True,
             width="stretch",
-            column_order=["title", "completion_rate", "pending_high", "pending", "all", "high", "selected", "replacement_ready"],
+            column_order=["title", "status_label", "completion_rate", "pending_high", "pending", "all", "high", "selected", "replacement_ready"],
             column_config={
                 "title": st.column_config.TextColumn("章节", width="medium"),
+                "status_label": st.column_config.TextColumn("状态", width="small"),
                 "completion_rate": st.column_config.TextColumn("完成率", width="small"),
                 "pending_high": st.column_config.NumberColumn("待处理高优", width="small"),
                 "pending": st.column_config.NumberColumn("待处理", width="small"),
