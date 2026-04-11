@@ -31,6 +31,11 @@ ENTRY_PATH_BOOSTS = {
     "backend/app/main.py": ("FastAPI主入口", 6),
     "devserver.py": ("历史兼容启动壳", 4),
 }
+PRIMARY_ENTRY_ORDER = {
+    "app.py": 0,
+    "backend/app/main.py": 1,
+    "devserver.py": 2,
+}
 NOISE_FILE_TOKENS = (
     ".bak",
     ".orig",
@@ -62,6 +67,12 @@ def is_noise_path(p: Path) -> bool:
     if any(token in rp_lower for token in NOISE_FILE_TOKENS):
         return True
     return False
+
+def is_test_like_path(p: Path) -> bool:
+    rp = rel(p).replace("\\", "/").lower()
+    if p.name.lower().startswith("test_"):
+        return True
+    return "/tests/" in f"/{rp}/"
 
 def walk_files(root: Path):
     for dp, dns, fns in os.walk(root):
@@ -123,6 +134,8 @@ entry_candidates = []
 for p in files:
     if p.suffix.lower() not in ENTRY_SUFFIXES:
         continue
+    if is_test_like_path(p):
+        continue
     txt = safe_read(p)
     score = 0
     reasons = []
@@ -152,12 +165,16 @@ for p in files:
         score += 3
         reasons.append("__main__")
     if score > 0:
+        normalized_rel = rel(p).replace("\\", "/")
         entry_candidates.append({
             "file": rel(p),
             "score": score,
-            "reason": "、".join(dict.fromkeys(reasons))
+            "reason": "、".join(dict.fromkeys(reasons)),
+            "_primary_rank": PRIMARY_ENTRY_ORDER.get(normalized_rel, 9),
         })
-entry_candidates = sorted(entry_candidates, key=lambda x: (-x["score"], x["file"]))[:15]
+entry_candidates = sorted(entry_candidates, key=lambda x: (x.get("_primary_rank", 9), -x["score"], x["file"]))[:15]
+for row in entry_candidates:
+    row.pop("_primary_rank", None)
 
 route_rows = []
 route_pat = re.compile(r'@(?:router|app)\.(get|post|put|delete|patch|options|head|websocket)\(\s*[rubfRUBF]*[\'"]([^\'"]+)')
