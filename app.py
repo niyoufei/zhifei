@@ -6913,6 +6913,29 @@ def _review_progress_overview(rows: list[dict[str, Any]] | None) -> dict[str, in
     }
 
 
+def _review_chapter_progress_detail(chapter_summary: dict[str, Any] | None) -> dict[str, int | str]:
+    if not isinstance(chapter_summary, dict):
+        return {
+            "issues_total": 0,
+            "issues_pending": 0,
+            "issues_completed": 0,
+            "issues_pending_high": 0,
+            "completion_rate": "0%",
+        }
+    issues_total = max(0, int(chapter_summary.get("all") or 0))
+    issues_pending = max(0, int(chapter_summary.get("pending") or 0))
+    issues_pending_high = max(0, int(chapter_summary.get("pending_high") or 0))
+    issues_completed = max(0, issues_total - issues_pending)
+    completion_rate = f"{round((issues_completed / issues_total) * 100):d}%" if issues_total > 0 else "0%"
+    return {
+        "issues_total": issues_total,
+        "issues_pending": issues_pending,
+        "issues_completed": issues_completed,
+        "issues_pending_high": issues_pending_high,
+        "completion_rate": completion_rate,
+    }
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -8334,11 +8357,17 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     if selected_chapter != "全部章节":
         chapter_summary = next((item for item in chapter_summaries if item.get("title") == selected_chapter), None)
         if chapter_summary:
+            chapter_progress = _review_chapter_progress_detail(chapter_summary)
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("当前章节待处理", int(chapter_summary.get("pending") or 0))
-            m2.metric("当前章节待处理高优", int(chapter_summary.get("pending_high") or 0))
-            m3.metric("当前章节已勾选", int(chapter_summary.get("selected") or 0))
-            m4.metric("当前章节已填替换", int(chapter_summary.get("replacement_ready") or 0))
+            m1.metric("当前章节问题", int(chapter_progress.get("issues_total") or 0))
+            m2.metric("当前章节剩余", int(chapter_progress.get("issues_pending") or 0))
+            m3.metric("当前章节完成率", str(chapter_progress.get("completion_rate") or "0%"))
+            m4.metric("当前章节待处理高优", int(chapter_progress.get("issues_pending_high") or 0))
+            st.caption(
+                f"本章已完成 {int(chapter_progress.get('issues_completed') or 0)} 项。"
+                f" 其中已勾选 {int(chapter_summary.get('selected') or 0)} 项，"
+                f"已填替换文本 {int(chapter_summary.get('replacement_ready') or 0)} 项。"
+            )
     filter_labels = {
         "all": f"全部（{filter_counts.get('all', 0)}）",
         "high": f"高优（{filter_counts.get('high', 0)}）",

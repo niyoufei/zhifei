@@ -35,6 +35,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_apply_followup_message",
         "_review_completion_progress_message",
         "_review_progress_overview",
+        "_review_chapter_progress_detail",
         "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
@@ -490,6 +491,34 @@ def test_review_progress_overview_summarizes_pending_and_completed_chapters():
         "chapters_completed": 1,
         "issues_pending": 2,
         "issues_pending_high": 1,
+    }
+
+
+def test_review_chapter_progress_detail_reports_total_remaining_and_completion_rate():
+    helpers = _load_helpers()
+
+    detail = helpers._review_chapter_progress_detail(
+        {
+            "all": 5,
+            "pending": 2,
+            "pending_high": 1,
+        }
+    )
+    empty_detail = helpers._review_chapter_progress_detail(None)
+
+    assert detail == {
+        "issues_total": 5,
+        "issues_pending": 2,
+        "issues_completed": 3,
+        "issues_pending_high": 1,
+        "completion_rate": "60%",
+    }
+    assert empty_detail == {
+        "issues_total": 0,
+        "issues_pending": 0,
+        "issues_completed": 0,
+        "issues_pending_high": 0,
+        "completion_rate": "0%",
     }
 
 
