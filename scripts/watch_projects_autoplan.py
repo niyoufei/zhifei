@@ -427,6 +427,84 @@ def _check_quality(qc: dict) -> tuple[bool, list[str]]:
     return (len(failed) == 0), failed
 
 
+def _build_plan_payload(cfg: dict, plan_payload: dict | None = None) -> dict | None:
+    payload = plan_payload if isinstance(plan_payload, dict) else None
+    if payload is None:
+        keys = (
+            "outline",
+            "style",
+            "variants",
+            "generation_mode",
+            "logic_template_id",
+            "selected_templates",
+            "strict_tender_outline",
+            "chapter_requirements",
+            "chapter_pages",
+            "quality_strict",
+            "auto_remediate",
+            "remediate_mode",
+            "compare_mode",
+            "compare_max_chars",
+            "compare_titles",
+        )
+        has_any = any(k in cfg for k in keys)
+        if has_any:
+            payload = {k: cfg.get(k) for k in keys if k in cfg}
+    if not isinstance(payload, dict) or not payload:
+        return None
+    payload = dict(payload)
+    payload.setdefault("outline", [])
+    payload.setdefault("style", {})
+    payload.setdefault("variants", int(cfg.get("variants") or payload.get("variants") or 1))
+    payload.setdefault("chapter_requirements", {})
+    payload.setdefault("chapter_pages", {})
+    payload.setdefault("quality_strict", True)
+    payload.setdefault("auto_remediate", True)
+    payload.setdefault("remediate_mode", str(payload.get("remediate_mode") or "template"))
+    payload.setdefault("compare_mode", str(payload.get("compare_mode") or "summary"))
+    if payload.get("compare_max_chars") is not None:
+        payload["compare_max_chars"] = int(payload.get("compare_max_chars") or 0) or None
+    return payload
+
+
+def _build_generate_payload(cfg: dict, topic: str, project_id: str) -> dict:
+    payload = {
+        "topic": topic,
+        "project_id": project_id,
+        "variants": int(cfg.get("variants") or 1),
+        "quality_strict": True,
+        "auto_remediate": True,
+        "remediate_mode": str(cfg.get("remediate_mode") or "template"),
+        "compare_mode": "summary",
+        "generate_images": bool(cfg.get("generate_images", True)),
+    }
+    if cfg.get("generation_mode"):
+        payload["generation_mode"] = str(cfg.get("generation_mode"))
+    if cfg.get("logic_template_id"):
+        payload["logic_template_id"] = str(cfg.get("logic_template_id")).strip().upper()
+    if isinstance(cfg.get("selected_templates"), list) and cfg.get("selected_templates"):
+        payload["selected_templates"] = [str(x).strip().upper() for x in cfg.get("selected_templates") if str(x).strip()]
+    if "strict_tender_outline" in cfg:
+        payload["strict_tender_outline"] = bool(cfg.get("strict_tender_outline"))
+    if cfg.get("compare_max_chars") is not None:
+        payload["compare_max_chars"] = int(cfg.get("compare_max_chars") or 0) or None
+        if payload.get("compare_max_chars") is None:
+            payload.pop("compare_max_chars", None)
+    if isinstance(cfg.get("requirements"), list) and cfg.get("requirements"):
+        payload["requirements"] = [str(x).strip() for x in cfg.get("requirements") if str(x).strip()]
+    if isinstance(cfg.get("params_override"), dict) and cfg.get("params_override"):
+        payload["params_override"] = cfg.get("params_override")
+    for k in ("provider", "model", "api_key", "base_url", "secret_key", "token_url"):
+        if cfg.get(k):
+            payload[k] = cfg.get(k)
+    if "dry_run" in cfg:
+        payload["dry_run"] = bool(cfg.get("dry_run"))
+    for k in ("image_provider", "image_model", "image_aspect_ratio", "image_api_key", "bidder_company", "bidder_domain", "logo_url"):
+        if cfg.get(k):
+            payload[k] = cfg.get(k)
+    return payload
+
+
 def _process_one_project(base_url: str, actions_key: str, work_dir: Path, out_dir: Path, project_id: str) -> dict:
     cfg = _read_project_config(work_dir)
     topic = str(cfg.get("topic") or work_dir.name).strip() or "未命名项目"
@@ -488,36 +566,8 @@ def _process_one_project(base_url: str, actions_key: str, work_dir: Path, out_di
     if plan_payload is None and isinstance(cfg.get("plan"), dict):
         plan_payload = cfg.get("plan")
     # Backward-compatible: allow plan fields at top-level of project.json
-    if plan_payload is None:
-        keys = (
-            "outline",
-            "style",
-            "variants",
-            "chapter_requirements",
-            "chapter_pages",
-            "quality_strict",
-            "auto_remediate",
-            "remediate_mode",
-            "compare_mode",
-            "compare_max_chars",
-            "compare_titles",
-        )
-        has_any = any(k in cfg for k in keys)
-        if has_any:
-            plan_payload = {k: cfg.get(k) for k in keys if k in cfg}
-
+    plan_payload = _build_plan_payload(cfg, plan_payload)
     if isinstance(plan_payload, dict) and plan_payload:
-        # Normalize required keys expected by /actions/plan/save
-        plan_payload.setdefault("outline", [])
-        plan_payload.setdefault("style", {})
-        plan_payload.setdefault("variants", int(cfg.get("variants") or plan_payload.get("variants") or 1))
-        plan_payload.setdefault("chapter_requirements", {})
-        plan_payload.setdefault("chapter_pages", {})
-        plan_payload.setdefault("quality_strict", True)
-        plan_payload.setdefault("auto_remediate", True)
-        plan_payload.setdefault("remediate_mode", str(plan_payload.get("remediate_mode") or "template"))
-        plan_payload.setdefault("compare_mode", str(plan_payload.get("compare_mode") or "summary"))
-        plan_payload.setdefault("compare_max_chars", int(plan_payload.get("compare_max_chars") or 1200))
         _log(f"[{project_id}] plan/save (overrides)")
         _post_json(
             base_url,
@@ -529,31 +579,7 @@ def _process_one_project(base_url: str, actions_key: str, work_dir: Path, out_di
         )
 
     # 4) generate async
-    gen = {
-        "topic": topic,
-        "project_id": project_id,
-        "variants": int(cfg.get("variants") or 1),
-        "quality_strict": True,
-        "auto_remediate": True,
-        "remediate_mode": str(cfg.get("remediate_mode") or "template"),
-        "compare_mode": "summary",
-        "compare_max_chars": 1200,
-        "generate_images": bool(cfg.get("generate_images", True)),
-    }
-    if isinstance(cfg.get("requirements"), list) and cfg.get("requirements"):
-        gen["requirements"] = [str(x).strip() for x in cfg.get("requirements") if str(x).strip()]
-    if isinstance(cfg.get("params_override"), dict) and cfg.get("params_override"):
-        gen["params_override"] = cfg.get("params_override")
-    # Optional overrides
-    for k in ("provider", "model", "api_key", "base_url", "secret_key", "token_url"):
-        if cfg.get(k):
-            gen[k] = cfg.get(k)
-    # Optional execution controls
-    if "dry_run" in cfg:
-        gen["dry_run"] = bool(cfg.get("dry_run"))
-    for k in ("image_provider", "image_model", "image_aspect_ratio", "image_api_key", "bidder_company", "bidder_domain", "logo_url"):
-        if cfg.get(k):
-            gen[k] = cfg.get(k)
+    gen = _build_generate_payload(cfg, topic, project_id)
 
     _log(f"[{project_id}] generate_async")
     ret = _post_json(base_url, "/actions/generate_async", actions_key, gen, timeout=120)

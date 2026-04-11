@@ -108,3 +108,50 @@ def test_main_skips_when_process_lock_held(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["watch_projects_autoplan.py"])
     assert watcher.main() == 0
     assert any("process lock already held" in item for item in seen)
+
+
+def test_build_generate_payload_allows_mode_specific_compare_default():
+    watcher = _load_module()
+    payload = watcher._build_generate_payload(
+        {
+            "generation_mode": "stable_delivery",
+            "variants": 1,
+            "strict_tender_outline": True,
+        },
+        "示例项目",
+        "project-001",
+    )
+    assert payload["generation_mode"] == "stable_delivery"
+    assert payload["strict_tender_outline"] is True
+    assert "compare_max_chars" not in payload
+
+
+def test_build_generate_payload_preserves_explicit_compare_and_template_overrides():
+    watcher = _load_module()
+    payload = watcher._build_generate_payload(
+        {
+            "generation_mode": "stable_delivery",
+            "logic_template_id": "d",
+            "selected_templates": ["b", "e"],
+            "compare_max_chars": 900,
+        },
+        "示例项目",
+        "project-002",
+    )
+    assert payload["logic_template_id"] == "D"
+    assert payload["selected_templates"] == ["B", "E"]
+    assert payload["compare_max_chars"] == 900
+
+
+def test_build_plan_payload_accepts_generation_mode_without_forcing_compare_max_chars():
+    watcher = _load_module()
+    payload = watcher._build_plan_payload(
+        {
+            "generation_mode": "stable_delivery",
+            "strict_tender_outline": True,
+        }
+    )
+    assert payload is not None
+    assert payload["generation_mode"] == "stable_delivery"
+    assert payload["strict_tender_outline"] is True
+    assert "compare_max_chars" not in payload
