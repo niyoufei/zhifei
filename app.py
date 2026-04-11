@@ -6730,13 +6730,22 @@ def _review_editor_focus_summary(rows: list[dict[str, Any]] | None) -> dict[str,
     return {"level": "warning", "message": message}
 
 
-def _review_rows_match_filter(rows: list[dict[str, Any]] | None, filter_key: str) -> list[dict[str, Any]]:
+def _review_rows_match_filter(
+    rows: list[dict[str, Any]] | None,
+    filter_key: str,
+    chapter_filter: str = "",
+) -> list[dict[str, Any]]:
     ordered = _review_rows_for_editor(rows)
     key = str(filter_key or "all").strip().lower()
+    selected_title = str(chapter_filter or "").strip()
     if key == "high":
-        return [row for row in ordered if _review_severity_priority(row.get("severity")) >= 3]
-    if key == "selected":
-        return [row for row in ordered if bool(row.get("apply"))]
+        ordered = [row for row in ordered if _review_severity_priority(row.get("severity")) >= 3]
+    elif key == "selected":
+        ordered = [row for row in ordered if bool(row.get("apply"))]
+    elif key == "replacement_ready":
+        ordered = [row for row in ordered if str(row.get("replacement") or "").strip()]
+    if selected_title:
+        ordered = [row for row in ordered if str(row.get("title") or "").strip() == selected_title]
     return ordered
 
 
@@ -6746,6 +6755,7 @@ def _review_filter_counts(rows: list[dict[str, Any]] | None) -> dict[str, int]:
         "all": len(ordered),
         "high": sum(1 for row in ordered if _review_severity_priority(row.get("severity")) >= 3),
         "selected": sum(1 for row in ordered if bool(row.get("apply"))),
+        "replacement_ready": sum(1 for row in ordered if str(row.get("replacement") or "").strip()),
     }
 
 
@@ -8109,10 +8119,26 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     if str(focus_summary.get("level") or "") == "warning":
         st.warning(str(focus_summary.get("message") or ""))
     filter_counts = _review_filter_counts(ordered_rows)
+    chapter_options = ["全部章节"]
+    chapter_options.extend(
+        sorted(
+            {
+                str(row.get("title") or "").strip()
+                for row in ordered_rows
+                if str(row.get("title") or "").strip()
+            }
+        )
+    )
+    selected_chapter = st.selectbox(
+        "章节筛选",
+        options=chapter_options,
+        key=f"review_chapter_filter_{job_id}_v{variant}",
+    )
     filter_labels = {
         "all": f"全部（{filter_counts.get('all', 0)}）",
         "high": f"高优（{filter_counts.get('high', 0)}）",
         "selected": f"已勾选（{filter_counts.get('selected', 0)}）",
+        "replacement_ready": f"已填替换文本（{filter_counts.get('replacement_ready', 0)}）",
     }
     selected_filter = st.radio(
         "审核筛选",
@@ -8121,7 +8147,11 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         horizontal=True,
         key=f"review_filter_{job_id}_v{variant}",
     )
-    filtered_rows = _review_rows_match_filter(ordered_rows, selected_filter)
+    filtered_rows = _review_rows_match_filter(
+        ordered_rows,
+        selected_filter,
+        "" if selected_chapter == "全部章节" else selected_chapter,
+    )
     if not filtered_rows:
         st.info("当前筛选下暂无问题。可切换到“全部”继续审核。")
         return
@@ -8130,7 +8160,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         filtered_rows,
         hide_index=True,
         width="stretch",
-        key=f"review_editor_{job_id}_v{variant}_{selected_filter}",
+        key=f"review_editor_{job_id}_v{variant}_{selected_filter}_{selected_chapter}",
         disabled=["issue_id", "title", "type", "severity", "problem", "suggestion", "section_excerpt"],
         column_config={
             "apply": st.column_config.CheckboxColumn("应用"),

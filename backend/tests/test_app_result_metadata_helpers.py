@@ -286,20 +286,44 @@ def test_review_editor_focus_summary_calls_out_high_priority_rows():
     assert "安全措施/risk_triplet_gap" in summary["message"]
 
 
-def test_review_rows_match_filter_and_counts_support_high_and_selected_views():
+def test_review_rows_match_filter_and_counts_support_high_selected_and_replacement_views():
     helpers = _load_helpers()
 
     rows = [
-        {"issue_id": "I0001", "title": "主要施工方法", "type": "quantitative_gap", "severity": "high", "apply": True},
-        {"issue_id": "I0002", "title": "安全措施", "type": "risk_triplet_gap", "severity": "high", "apply": False},
-        {"issue_id": "R0003", "title": "质量保证措施", "type": "consistency_gap", "severity": "medium", "apply": True},
+        {
+            "issue_id": "I0001",
+            "title": "主要施工方法",
+            "type": "quantitative_gap",
+            "severity": "high",
+            "apply": True,
+            "replacement": "补充替换文本",
+        },
+        {
+            "issue_id": "I0002",
+            "title": "安全措施",
+            "type": "risk_triplet_gap",
+            "severity": "high",
+            "apply": False,
+            "replacement": "",
+        },
+        {
+            "issue_id": "R0003",
+            "title": "质量保证措施",
+            "type": "consistency_gap",
+            "severity": "medium",
+            "apply": True,
+            "replacement": "  ",
+        },
     ]
 
     counts = helpers._review_filter_counts(rows)
-    assert counts == {"all": 3, "high": 2, "selected": 2}
+    assert counts == {"all": 3, "high": 2, "selected": 2, "replacement_ready": 1}
     assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "all")] == ["I0001", "I0002", "R0003"]
     assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "high")] == ["I0001", "I0002"]
     assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "selected")] == ["I0001", "R0003"]
+    assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "replacement_ready")] == ["I0001"]
+    assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "all", "安全措施")] == ["I0002"]
+    assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "selected", "质量保证措施")] == ["R0003"]
 
 
 def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():
