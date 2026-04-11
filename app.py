@@ -5744,6 +5744,7 @@ def _init_state() -> None:
         "sample_library_note": "",
         "template_library_flash": "",
         "recent_job_flash": "",
+        "review_apply_flash": None,
         "review_focus_job_id": "",
         "review_focus_variant": 1,
         "latest_admission": None,
@@ -6544,6 +6545,85 @@ def _review_priority_summary(result: dict[str, Any]) -> str:
     if brief:
         parts.append(brief)
     return "；".join(parts)
+
+
+def _quality_variant_snapshot(result: dict[str, Any], variant: int) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    idx = max(1, int(variant))
+    quality_map = result.get("quality_by_variant") if isinstance(result.get("quality_by_variant"), dict) else {}
+    info = quality_map.get(idx) if isinstance(quality_map.get(idx), dict) else {}
+    if not info:
+        return {}
+    return {
+        "quality_score": info.get("quality_score"),
+        "quality_gate_ok": info.get("quality_gate_ok"),
+        "quality_gate_failed_count": info.get("quality_gate_failed_count"),
+        "failure_brief": _quality_failure_brief(info),
+    }
+
+
+def _review_apply_feedback(before: dict[str, Any], after: dict[str, Any], *, variant: int, applied_count: int) -> dict[str, str]:
+    def _gate_label(value: Any) -> str:
+        if value is True:
+            return "通过"
+        if value is False:
+            return "未通过"
+        return "未记录"
+
+    before_score = before.get("quality_score")
+    after_score = after.get("quality_score")
+    before_failed = before.get("quality_gate_failed_count")
+    after_failed = after.get("quality_gate_failed_count")
+    before_gate = before.get("quality_gate_ok")
+    after_gate = after.get("quality_gate_ok")
+    before_brief = str(before.get("failure_brief") or "").strip()
+    after_brief = str(after.get("failure_brief") or "").strip()
+
+    parts = [f"v{max(1, int(variant))} 已回写 {max(0, int(applied_count))} 项"]
+    improved = False
+    regressed = False
+
+    if before_score is not None and after_score is not None:
+        parts.append(f"质量分 {before_score}->{after_score}")
+        if after_score > before_score:
+            improved = True
+        elif after_score < before_score:
+            regressed = True
+    elif after_score is not None:
+        parts.append(f"质量分={after_score}")
+
+    if before_failed is not None and after_failed is not None:
+        parts.append(f"未通过项 {before_failed}->{after_failed}")
+        if after_failed < before_failed:
+            improved = True
+        elif after_failed > before_failed:
+            regressed = True
+    elif after_failed is not None:
+        parts.append(f"未通过项={after_failed}")
+
+    parts.append(f"质量闸门 {_gate_label(before_gate)}->{_gate_label(after_gate)}")
+    if before_gate is False and after_gate is True:
+        improved = True
+    elif before_gate is True and after_gate is False:
+        regressed = True
+
+    if after_brief and after_brief != before_brief:
+        parts.append(f"当前问题={after_brief}")
+    elif after_brief and not before_brief:
+        parts.append(f"当前问题={after_brief}")
+
+    if after_gate is True and improved and not regressed:
+        level = "success"
+    elif regressed:
+        level = "warning"
+    elif improved:
+        level = "info"
+    elif after_gate is False:
+        level = "warning"
+    else:
+        level = "info"
+    return {"level": level, "message": "；".join(parts)}
 
 
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
@@ -7902,6 +7982,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         try:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
+            before_snapshot = _quality_variant_snapshot(result, int(variant))
             decisions = []
             for r in edited or []:
                 if not isinstance(r, dict):
@@ -7922,7 +8003,25 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             )
             applied = int(resp.get("applied_count") or 0)
             st.success(f"已回写 {applied} 项，正在刷新产物")
-            st.session_state["run_result"] = _collect_job_result(base_url, actions_key, job_id)
+            refreshed = _collect_job_result(base_url, actions_key, job_id)
+            st.session_state["run_result"] = refreshed
+            after_snapshot = _quality_variant_snapshot(refreshed, int(variant))
+            st.session_state["review_apply_flash"] = _review_apply_feedback(
+                before_snapshot,
+                after_snapshot,
+                variant=int(variant),
+                applied_count=applied,
+            )
+            focus_variant = _first_failed_variant_index(
+                refreshed.get("quality_by_variant") if isinstance(refreshed.get("quality_by_variant"), dict) else {}
+            )
+            if focus_variant is not None:
+                st.session_state["review_focus_job_id"] = job_id
+                st.session_state["review_focus_variant"] = focus_variant
+                st.session_state[f"review_variant_{job_id}"] = focus_variant
+            else:
+                st.session_state["review_focus_job_id"] = ""
+                st.session_state["review_focus_variant"] = 1
             _load_review_items(base_url, actions_key, job_id, int(variant))
             st.rerun()
         except Exception as e:
@@ -7932,6 +8031,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         try:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
+            before_snapshot = _quality_variant_snapshot(result, int(variant))
             resp = _post_json(
                 base_url,
                 "/actions/review/apply",
@@ -7941,7 +8041,25 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             )
             applied = int(resp.get("applied_count") or 0)
             st.success(f"已自动回写 {applied} 项，正在刷新产物")
-            st.session_state["run_result"] = _collect_job_result(base_url, actions_key, job_id)
+            refreshed = _collect_job_result(base_url, actions_key, job_id)
+            st.session_state["run_result"] = refreshed
+            after_snapshot = _quality_variant_snapshot(refreshed, int(variant))
+            st.session_state["review_apply_flash"] = _review_apply_feedback(
+                before_snapshot,
+                after_snapshot,
+                variant=int(variant),
+                applied_count=applied,
+            )
+            focus_variant = _first_failed_variant_index(
+                refreshed.get("quality_by_variant") if isinstance(refreshed.get("quality_by_variant"), dict) else {}
+            )
+            if focus_variant is not None:
+                st.session_state["review_focus_job_id"] = job_id
+                st.session_state["review_focus_variant"] = focus_variant
+                st.session_state[f"review_variant_{job_id}"] = focus_variant
+            else:
+                st.session_state["review_focus_job_id"] = ""
+                st.session_state["review_focus_variant"] = 1
             _load_review_items(base_url, actions_key, job_id, int(variant))
             st.rerun()
         except Exception as e:
@@ -8171,6 +8289,17 @@ st.markdown('</div>', unsafe_allow_html=True)
 recent_job_flash = str(st.session_state.pop("recent_job_flash", "") or "").strip()
 if recent_job_flash:
     st.info(recent_job_flash)
+review_apply_flash = st.session_state.pop("review_apply_flash", None)
+if isinstance(review_apply_flash, dict):
+    review_apply_level = str(review_apply_flash.get("level") or "").strip()
+    review_apply_message = str(review_apply_flash.get("message") or "").strip()
+    if review_apply_message:
+        if review_apply_level == "success":
+            st.success(review_apply_message)
+        elif review_apply_level == "warning":
+            st.warning(review_apply_message)
+        else:
+            st.info(review_apply_message)
 _render_admission_status(st.session_state.get("latest_admission"))
 _render_quota_status_panel(base_url, actions_key)
 _render_recent_job_recovery(base_url, actions_key, recent_jobs_for_recovery, recent_jobs_sla_summary)

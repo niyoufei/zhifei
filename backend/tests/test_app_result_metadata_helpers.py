@@ -19,6 +19,8 @@ def _load_helpers() -> SimpleNamespace:
         "_failed_variant_count",
         "_first_failed_variant_index",
         "_quality_failure_brief",
+        "_quality_variant_snapshot",
+        "_review_apply_feedback",
         "_review_priority_summary",
         "_recent_job_quality_signal",
         "_review_workspace_focus_notice",
@@ -179,6 +181,47 @@ def test_quality_failure_brief_and_priority_summary_render_indicator_and_action_
     assert "未通过项=3" in summary
     assert "问题=缺量化×2 / 缺闭环×1" in summary
     assert "动作=补量化数值×2 / 补验收记录×1" in summary
+
+
+def test_quality_variant_snapshot_and_review_apply_feedback_capture_delta():
+    helpers = _load_helpers()
+
+    before_result = {
+        "quality_by_variant": {
+            2: {
+                "quality_score": 88,
+                "quality_gate_ok": False,
+                "quality_gate_failed_count": 3,
+                "remediation_strategy_audit": {"indicator_groups": [{"indicator_group": "缺量化", "count": 2}]},
+                "remediation_execution_audit": {"action_tags": [{"label": "补量化数值", "count": 2}]},
+            }
+        }
+    }
+    after_result = {
+        "quality_by_variant": {
+            2: {
+                "quality_score": 94,
+                "quality_gate_ok": True,
+                "quality_gate_failed_count": 0,
+                "remediation_strategy_audit": {"indicator_groups": [{"indicator_group": "缺闭环", "count": 1}]},
+                "remediation_execution_audit": {"action_tags": [{"label": "补验收记录", "count": 1}]},
+            }
+        }
+    }
+
+    before_snapshot = helpers._quality_variant_snapshot(before_result, 2)
+    after_snapshot = helpers._quality_variant_snapshot(after_result, 2)
+    feedback = helpers._review_apply_feedback(before_snapshot, after_snapshot, variant=2, applied_count=3)
+
+    assert before_snapshot["quality_score"] == 88
+    assert before_snapshot["failure_brief"] == "问题=缺量化×2；动作=补量化数值×2"
+    assert after_snapshot["quality_gate_ok"] is True
+    assert feedback["level"] == "success"
+    assert "v2 已回写 3 项" in feedback["message"]
+    assert "质量分 88->94" in feedback["message"]
+    assert "未通过项 3->0" in feedback["message"]
+    assert "质量闸门 未通过->通过" in feedback["message"]
+    assert "当前问题=问题=缺闭环×1；动作=补验收记录×1" in feedback["message"]
 
 
 def test_review_workspace_focus_notice_only_for_review_needed_current_job():
