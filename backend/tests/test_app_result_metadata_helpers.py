@@ -15,6 +15,7 @@ def _load_helpers() -> SimpleNamespace:
         "_normalize_variant_dict_map",
         "_recent_job_mode_quality_caption",
         "_recent_job_quality_signal",
+        "_recent_job_sort_key",
     }
     wanted_assigns = {
         "GENERATION_MODE_CATALOG",
@@ -116,3 +117,20 @@ def test_recent_job_quality_signal_marks_warning_and_success_cases():
     assert success_signal["level"] == "success"
     assert "质量闸门已通过" in success_signal["message"]
     assert "质量分=100" in success_signal["message"]
+
+
+def test_recent_job_sort_key_prioritizes_running_then_review_needed_done():
+    helpers = _load_helpers()
+
+    running = {"status": "running", "updated_at": 100}
+    queued = {"status": "queued", "updated_at": 110}
+    review_needed_done = {"status": "done", "quality_gate_ok": False, "updated_at": 90}
+    failed = {"status": "failed", "updated_at": 120}
+    clean_done = {"status": "done", "quality_gate_ok": True, "updated_at": 130}
+
+    ordered = sorted(
+        [clean_done, failed, review_needed_done, queued, running],
+        key=helpers._recent_job_sort_key,
+    )
+
+    assert ordered == [running, queued, review_needed_done, failed, clean_done]

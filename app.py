@@ -6440,6 +6440,32 @@ def _recent_job_quality_signal(item: dict[str, Any]) -> dict[str, str]:
     return {"level": "warning", "message": message}
 
 
+def _recent_job_sort_key(item: dict[str, Any]) -> tuple[int, float]:
+    if not isinstance(item, dict):
+        return (99, 0.0)
+    status = str(item.get("status") or "").strip().lower()
+    quality_gate_ok = item.get("quality_gate_ok")
+    try:
+        ts = float(item.get("updated_at") or item.get("created_at") or 0.0)
+    except Exception:
+        ts = 0.0
+    if status == "running":
+        priority = 0
+    elif status == "queued":
+        priority = 1
+    elif status == "done" and quality_gate_ok is False:
+        priority = 2
+    elif status == "failed":
+        priority = 3
+    elif status == "cancelled":
+        priority = 4
+    elif status == "done":
+        priority = 5
+    else:
+        priority = 6
+    return (priority, -ts)
+
+
 def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[str, Any]:
     raw_json = _download_bytes(base_url, actions_key, job_id, "json", 1, timeout=600)
     data = json.loads(raw_json.decode("utf-8", errors="ignore"))
@@ -7296,6 +7322,12 @@ def _render_recent_job_recovery(
         status = str(item.get("status") or "").strip().lower()
         if status in counts:
             counts[status] += 1
+    review_needed_count = sum(
+        1
+        for item in display_items
+        if str(item.get("status") or "").strip().lower() == "done" and item.get("quality_gate_ok") is False
+    )
+    display_items = sorted(display_items, key=_recent_job_sort_key)
     sla_payload = sla_summary if isinstance(sla_summary, dict) else {}
     total_latency = sla_payload.get("total_latency") if isinstance(sla_payload.get("total_latency"), dict) else {}
     stage_latency = sla_payload.get("stage_latency") if isinstance(sla_payload.get("stage_latency"), dict) else {}
@@ -7307,6 +7339,8 @@ def _render_recent_job_recovery(
 
     with st.expander("任务中心（后台任务 / 成品 / 异常）", expanded=has_running):
         st.caption("用于查看后台任务、最近成品和异常任务。在途任务可直接接回，已完成成品可直接载入。")
+        if review_needed_count > 0:
+            st.caption(f"待复核成品 {review_needed_count} 个，已自动前置展示。")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("在途任务", counts["queued"] + counts["running"])
         m2.metric("最近成品", counts["done"])
