@@ -6149,6 +6149,9 @@ def _render_downloads() -> None:
         "<div class='zf-notice zf-notice-running'>结果区已加载：可下载DOCX/XLSX并进行问题清单回写。</div>",
         unsafe_allow_html=True,
     )
+    review_priority = _review_priority_summary(result)
+    if review_priority:
+        st.warning(f"当前成品仍需复核。{review_priority}")
     job_id = result.get("job_id", "")
     variants = int(result.get("variants") or 1)
     st.write(f"job_id: `{job_id}`")
@@ -6460,6 +6463,89 @@ def _recent_job_action_label(item: dict[str, Any]) -> str:
     return "载入结果"
 
 
+def _failed_variant_count(quality_map: dict[Any, Any] | None) -> int:
+    if not isinstance(quality_map, dict):
+        return 0
+    return sum(
+        1
+        for info in quality_map.values()
+        if isinstance(info, dict) and info.get("quality_gate_ok") is False
+    )
+
+
+def _first_failed_variant_index(quality_map: dict[Any, Any] | None) -> int | None:
+    if not isinstance(quality_map, dict):
+        return None
+    for variant in sorted(quality_map.keys()):
+        info = quality_map.get(variant)
+        if isinstance(info, dict) and info.get("quality_gate_ok") is False:
+            try:
+                return max(1, int(variant))
+            except Exception:
+                continue
+    return None
+
+
+def _quality_failure_brief(info: dict[str, Any], *, limit: int = 2) -> str:
+    if not isinstance(info, dict):
+        return ""
+
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return 0
+
+    parts: list[str] = []
+    strategy_audit = info.get("remediation_strategy_audit") if isinstance(info.get("remediation_strategy_audit"), dict) else {}
+    indicator_rows = strategy_audit.get("indicator_groups") if isinstance(strategy_audit.get("indicator_groups"), list) else []
+    issue_parts: list[str] = []
+    for row in indicator_rows[: max(1, int(limit))]:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("indicator_group") or "").strip()
+        count = _as_int(row.get("count") or 0)
+        if name:
+            issue_parts.append(f"{name}×{count}" if count > 0 else name)
+    if issue_parts:
+        parts.append("问题=" + " / ".join(issue_parts))
+
+    execution_audit = info.get("remediation_execution_audit") if isinstance(info.get("remediation_execution_audit"), dict) else {}
+    action_rows = execution_audit.get("action_tags") if isinstance(execution_audit.get("action_tags"), list) else []
+    action_parts: list[str] = []
+    for row in action_rows[: max(1, int(limit))]:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or row.get("action_tag") or "").strip()
+        count = _as_int(row.get("count") or 0)
+        if label:
+            action_parts.append(f"{label}×{count}" if count > 0 else label)
+    if action_parts:
+        parts.append("动作=" + " / ".join(action_parts))
+    return "；".join(parts)
+
+
+def _review_priority_summary(result: dict[str, Any]) -> str:
+    if not isinstance(result, dict):
+        return ""
+    quality_map = result.get("quality_by_variant") if isinstance(result.get("quality_by_variant"), dict) else {}
+    failed_variant = _first_failed_variant_index(quality_map)
+    if failed_variant is None:
+        return ""
+    info = quality_map.get(failed_variant) if isinstance(quality_map.get(failed_variant), dict) else {}
+    parts = [f"优先复核 v{failed_variant}"]
+    quality_score = info.get("quality_score")
+    if quality_score is not None:
+        parts.append(f"质量分={quality_score}")
+    failed_count = info.get("quality_gate_failed_count")
+    if failed_count is not None:
+        parts.append(f"未通过项={failed_count}")
+    brief = _quality_failure_brief(info)
+    if brief:
+        parts.append(brief)
+    return "；".join(parts)
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -6467,17 +6553,17 @@ def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) ->
     if not job_id or job_id != str(focus_job_id or "").strip():
         return ""
     quality_map = result.get("quality_by_variant") if isinstance(result.get("quality_by_variant"), dict) else {}
-    failed_variants = sum(
-        1
-        for info in quality_map.values()
-        if isinstance(info, dict) and info.get("quality_gate_ok") is False
-    )
+    failed_variants = _failed_variant_count(quality_map)
     if failed_variants <= 0:
         return ""
-    return (
+    summary = _review_priority_summary(result)
+    message = (
         f"当前载入的是待复核成品，共 {failed_variants} 个方案未通过质量闸门。"
         "建议先载入问题清单并完成回写后再交付。"
     )
+    if summary:
+        message += f" {summary}"
+    return message
 
 
 def _recent_job_sort_key(item: dict[str, Any]) -> tuple[int, float]:
@@ -7324,14 +7410,15 @@ def _restore_recent_job(base_url: str, actions_key: str, item: dict[str, Any]) -
         review_needed = any(
             isinstance(info, dict) and info.get("quality_gate_ok") is False for info in quality_map.values()
         ) or _recent_job_needs_review(item)
+        focus_variant = _first_failed_variant_index(quality_map) or 1
         st.session_state["active_job"] = None
         st.session_state["run_result"] = bundle
         if review_needed:
             st.session_state["review_focus_job_id"] = job_id
-            st.session_state["review_focus_variant"] = 1
-            st.session_state[f"review_variant_{job_id}"] = 1
-            _append_log(f"已载入待复核成品：{job_id}")
-            st.session_state["recent_job_flash"] = f"已载入待复核成品：{job_id}，请优先查看问题清单审核区"
+            st.session_state["review_focus_variant"] = focus_variant
+            st.session_state[f"review_variant_{job_id}"] = focus_variant
+            _append_log(f"已载入待复核成品：{job_id}（优先复核 v{focus_variant}）")
+            st.session_state["recent_job_flash"] = f"已载入待复核成品：{job_id}，请优先查看 v{focus_variant} 问题清单审核区"
         else:
             _append_log(f"已载入最近成品：{job_id}")
             st.session_state["recent_job_flash"] = f"已载入最近成品：{job_id}"
@@ -7708,6 +7795,15 @@ def _poll_active_job(
     _append_log("任务完成，开始下载结果")
     bundle = _collect_job_result(base_url, actions_key, job_id)
     bundle["project_id"] = active.get("project_id")
+    quality_map = bundle.get("quality_by_variant") if isinstance(bundle.get("quality_by_variant"), dict) else {}
+    focus_variant = _first_failed_variant_index(quality_map)
+    if focus_variant is not None:
+        st.session_state["review_focus_job_id"] = job_id
+        st.session_state["review_focus_variant"] = focus_variant
+        st.session_state[f"review_variant_{job_id}"] = focus_variant
+    else:
+        st.session_state["review_focus_job_id"] = ""
+        st.session_state["review_focus_variant"] = 1
     st.session_state["run_result"] = bundle
     _append_log("结果下载完成")
     st.session_state["active_job"] = None
@@ -7761,6 +7857,11 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     focus_notice = _review_workspace_focus_notice(result, focus_job_id)
     if focus_notice:
         st.warning(focus_notice)
+    preferred_variant = _first_failed_variant_index(
+        result.get("quality_by_variant") if isinstance(result.get("quality_by_variant"), dict) else {}
+    )
+    if focus_job_id == job_id and preferred_variant is not None and f"review_variant_{job_id}" not in st.session_state:
+        st.session_state[f"review_variant_{job_id}"] = preferred_variant
     c1, c2, c3 = st.columns([1, 1, 2])
     variant = c1.selectbox("审核方案", options=list(range(1, variants + 1)), format_func=lambda x: f"v{x}", key=f"review_variant_{job_id}")
     if c2.button("载入问题清单", key=f"load_review_{job_id}", width="stretch"):

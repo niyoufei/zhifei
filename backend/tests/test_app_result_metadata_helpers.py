@@ -16,6 +16,10 @@ def _load_helpers() -> SimpleNamespace:
         "_recent_job_mode_quality_caption",
         "_recent_job_needs_review",
         "_recent_job_action_label",
+        "_failed_variant_count",
+        "_first_failed_variant_index",
+        "_quality_failure_brief",
+        "_review_priority_summary",
         "_recent_job_quality_signal",
         "_review_workspace_focus_notice",
         "_recent_job_sort_key",
@@ -131,6 +135,52 @@ def test_recent_job_action_label_marks_review_needed_done_jobs():
     assert helpers._recent_job_action_label({"status": "done", "quality_gate_ok": True}) == "载入结果"
 
 
+def test_first_failed_variant_index_finds_smallest_failed_variant():
+    helpers = _load_helpers()
+
+    quality_map = {
+        3: {"quality_gate_ok": False},
+        1: {"quality_gate_ok": True},
+        2: {"quality_gate_ok": False},
+    }
+
+    assert helpers._failed_variant_count(quality_map) == 2
+    assert helpers._first_failed_variant_index(quality_map) == 2
+    assert helpers._first_failed_variant_index({1: {"quality_gate_ok": True}}) is None
+
+
+def test_quality_failure_brief_and_priority_summary_render_indicator_and_action_hints():
+    helpers = _load_helpers()
+
+    quality_info = {
+        "quality_score": 91,
+        "quality_gate_ok": False,
+        "quality_gate_failed_count": 3,
+        "remediation_strategy_audit": {
+            "indicator_groups": [
+                {"indicator_group": "缺量化", "count": 2},
+                {"indicator_group": "缺闭环", "count": 1},
+            ]
+        },
+        "remediation_execution_audit": {
+            "action_tags": [
+                {"label": "补量化数值", "count": 2},
+                {"label": "补验收记录", "count": 1},
+            ]
+        },
+    }
+
+    brief = helpers._quality_failure_brief(quality_info)
+    assert brief == "问题=缺量化×2 / 缺闭环×1；动作=补量化数值×2 / 补验收记录×1"
+
+    summary = helpers._review_priority_summary({"quality_by_variant": {1: {"quality_gate_ok": True}, 2: quality_info}})
+    assert "优先复核 v2" in summary
+    assert "质量分=91" in summary
+    assert "未通过项=3" in summary
+    assert "问题=缺量化×2 / 缺闭环×1" in summary
+    assert "动作=补量化数值×2 / 补验收记录×1" in summary
+
+
 def test_review_workspace_focus_notice_only_for_review_needed_current_job():
     helpers = _load_helpers()
 
@@ -138,16 +188,24 @@ def test_review_workspace_focus_notice_only_for_review_needed_current_job():
         {
             "job_id": "job-1",
             "quality_by_variant": {
-                1: {"quality_gate_ok": False},
+                1: {"quality_gate_ok": True},
                 2: {"quality_gate_ok": True},
-                3: {"quality_gate_ok": False},
+                3: {
+                    "quality_gate_ok": False,
+                    "quality_score": 88,
+                    "quality_gate_failed_count": 2,
+                    "remediation_strategy_audit": {"indicator_groups": [{"indicator_group": "缺量化", "count": 2}]},
+                    "remediation_execution_audit": {"action_tags": [{"label": "补量化数值", "count": 2}]},
+                },
             },
         },
         "job-1",
     )
 
     assert "待复核成品" in message
-    assert "2 个方案未通过质量闸门" in message
+    assert "1 个方案未通过质量闸门" in message
+    assert "优先复核 v3" in message
+    assert "问题=缺量化×2" in message
     assert helpers._review_workspace_focus_notice({"job_id": "job-1", "quality_by_variant": {}}, "job-1") == ""
     assert helpers._review_workspace_focus_notice({"job_id": "job-2", "quality_by_variant": {1: {"quality_gate_ok": False}}}, "job-1") == ""
 
