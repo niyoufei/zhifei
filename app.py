@@ -6418,6 +6418,28 @@ def _recent_job_mode_quality_caption(item: dict[str, Any]) -> str:
     return "；".join(parts)
 
 
+def _recent_job_quality_signal(item: dict[str, Any]) -> dict[str, str]:
+    if not isinstance(item, dict):
+        return {}
+    gate_ok = item.get("quality_gate_ok")
+    if gate_ok is None:
+        return {}
+    quality_score = item.get("quality_score")
+    failed_count = item.get("quality_gate_failed_count")
+    if bool(gate_ok):
+        message = "质量提示：当前成品质量闸门已通过"
+        if quality_score is not None:
+            message += f"，质量分={quality_score}"
+        return {"level": "success", "message": message}
+    message = "质量提示：当前成品质量闸门未通过"
+    if failed_count is not None:
+        message += f"，未通过项={failed_count}"
+    if quality_score is not None:
+        message += f"，质量分={quality_score}"
+    message += "。建议先载入结果复核后再交付。"
+    return {"level": "warning", "message": message}
+
+
 def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[str, Any]:
     raw_json = _download_bytes(base_url, actions_key, job_id, "json", 1, timeout=600)
     data = json.loads(raw_json.decode("utf-8", errors="ignore"))
@@ -7340,6 +7362,11 @@ def _render_recent_job_recovery(
                     summary_line = _recent_job_mode_quality_caption(item)
                     if summary_line:
                         st.caption(summary_line)
+                    quality_signal = _recent_job_quality_signal(item) if status == "done" else {}
+                    if str(quality_signal.get("level") or "") == "success":
+                        st.success(str(quality_signal.get("message") or ""))
+                    elif str(quality_signal.get("level") or "") == "warning":
+                        st.warning(str(quality_signal.get("message") or ""))
                     if stage and status in {"queued", "running"}:
                         detail = str(sla_snapshot.get("current_stage_detail") or "").strip()
                         if detail and detail != stage_label:

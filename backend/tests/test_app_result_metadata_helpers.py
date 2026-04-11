@@ -14,6 +14,7 @@ def _load_helpers() -> SimpleNamespace:
         "_coerce_variant_position",
         "_normalize_variant_dict_map",
         "_recent_job_mode_quality_caption",
+        "_recent_job_quality_signal",
     }
     wanted_assigns = {
         "GENERATION_MODE_CATALOG",
@@ -88,3 +89,30 @@ def test_recent_job_mode_quality_caption_renders_stable_delivery_summary():
     assert "质量分=98" in line
     assert "质量闸门=未通过" in line
     assert "未通过项=1" in line
+
+
+def test_recent_job_quality_signal_marks_warning_and_success_cases():
+    helpers = _load_helpers()
+
+    warning_signal = helpers._recent_job_quality_signal(
+        {
+            "quality_score": 98,
+            "quality_gate_ok": False,
+            "quality_gate_failed_count": 1,
+        }
+    )
+    assert warning_signal["level"] == "warning"
+    assert "质量闸门未通过" in warning_signal["message"]
+    assert "未通过项=1" in warning_signal["message"]
+    assert "质量分=98" in warning_signal["message"]
+
+    success_signal = helpers._recent_job_quality_signal(
+        {
+            "quality_score": 100,
+            "quality_gate_ok": True,
+            "quality_gate_failed_count": 0,
+        }
+    )
+    assert success_signal["level"] == "success"
+    assert "质量闸门已通过" in success_signal["message"]
+    assert "质量分=100" in success_signal["message"]
