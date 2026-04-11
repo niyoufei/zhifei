@@ -6866,6 +6866,38 @@ def _review_apply_followup_message(rows: list[dict[str, Any]] | None) -> str:
     return "当前方案已无待处理问题，可复核最新质量结果。"
 
 
+def _review_completion_progress_message(
+    before_rows: list[dict[str, Any]] | None,
+    after_rows: list[dict[str, Any]] | None,
+) -> str:
+    before_summaries = _review_chapter_summaries(before_rows)
+    after_summaries = _review_chapter_summaries(after_rows)
+    before_pending = {
+        str(item.get("title") or "").strip(): int(item.get("pending") or 0)
+        for item in before_summaries
+        if str(item.get("title") or "").strip()
+    }
+    after_pending = {
+        str(item.get("title") or "").strip(): int(item.get("pending") or 0)
+        for item in after_summaries
+        if str(item.get("title") or "").strip()
+    }
+    completed_titles = [
+        title
+        for title, pending_count in before_pending.items()
+        if pending_count > 0 and after_pending.get(title, 0) <= 0
+    ]
+    remaining_chapters = sum(1 for pending_count in after_pending.values() if pending_count > 0)
+    parts: list[str] = []
+    if completed_titles:
+        parts.append("本轮已完成章节：" + " / ".join(completed_titles[:3]))
+    if remaining_chapters > 0:
+        parts.append(f"剩余待处理章节 {remaining_chapters} 个")
+    elif before_pending:
+        parts.append("待处理章节已全部清空")
+    return "；".join(parts)
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -8367,12 +8399,14 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             final_level = quality_feedback.get("level") or "info"
             if level_priority.get(str(issue_feedback.get("level") or ""), 0) > level_priority.get(str(final_level), 0):
                 final_level = str(issue_feedback.get("level") or "info")
+            completion_message = _review_completion_progress_message(before_rows, after_rows)
             followup_message = _review_apply_followup_message(after_rows)
             st.session_state["review_apply_flash"] = {
                 "level": final_level,
                 "message": (
                     f"{quality_feedback.get('message') or ''}；"
                     f"{issue_feedback.get('message') or ''}；"
+                    f"{completion_message}；"
                     f"{followup_message}"
                 ).strip("；"),
             }
@@ -8426,12 +8460,14 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             final_level = quality_feedback.get("level") or "info"
             if level_priority.get(str(issue_feedback.get("level") or ""), 0) > level_priority.get(str(final_level), 0):
                 final_level = str(issue_feedback.get("level") or "info")
+            completion_message = _review_completion_progress_message(before_rows, after_rows)
             followup_message = _review_apply_followup_message(after_rows)
             st.session_state["review_apply_flash"] = {
                 "level": final_level,
                 "message": (
                     f"{quality_feedback.get('message') or ''}；"
                     f"{issue_feedback.get('message') or ''}；"
+                    f"{completion_message}；"
                     f"{followup_message}"
                 ).strip("；"),
             }

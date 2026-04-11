@@ -33,6 +33,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_shortcut_filter_key",
         "_review_next_pending_shortcut",
         "_review_apply_followup_message",
+        "_review_completion_progress_message",
         "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
@@ -445,6 +446,29 @@ def test_review_apply_followup_message_calls_out_next_pending_target_or_completi
 
     assert next_message == "下一步建议处理：主要施工方法（待处理高优1 / 待处理1 / 问题1）"
     assert done_message == "当前方案已无待处理问题，可复核最新质量结果。"
+
+
+def test_review_completion_progress_message_reports_closed_and_remaining_chapters():
+    helpers = _load_helpers()
+
+    before_rows = [
+        {"issue_id": "I0001", "title": "主要施工方法", "severity": "high", "apply": False, "replacement": ""},
+        {"issue_id": "I0002", "title": "安全措施", "severity": "medium", "apply": False, "replacement": ""},
+        {"issue_id": "I0003", "title": "安全措施", "severity": "medium", "apply": False, "replacement": ""},
+    ]
+    after_rows = [
+        {"issue_id": "I0002", "title": "安全措施", "severity": "medium", "apply": False, "replacement": ""},
+    ]
+    done_rows = [
+        {"issue_id": "I0001", "title": "主要施工方法", "severity": "high", "apply": True, "replacement": ""},
+        {"issue_id": "I0002", "title": "安全措施", "severity": "medium", "apply": False, "replacement": "已补全文本"},
+    ]
+
+    progress_message = helpers._review_completion_progress_message(before_rows, after_rows)
+    done_message = helpers._review_completion_progress_message(before_rows, done_rows)
+
+    assert progress_message == "本轮已完成章节：主要施工方法；剩余待处理章节 1 个"
+    assert done_message == "本轮已完成章节：主要施工方法 / 安全措施；待处理章节已全部清空"
 
 
 def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():
