@@ -26,6 +26,9 @@ def _load_helpers() -> SimpleNamespace:
         "_review_severity_priority",
         "_review_rows_for_editor",
         "_review_editor_focus_summary",
+        "_review_rows_match_filter",
+        "_review_filter_counts",
+        "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
         "_review_workspace_focus_notice",
@@ -281,6 +284,43 @@ def test_review_editor_focus_summary_calls_out_high_priority_rows():
     assert "当前高优问题 2 项" in summary["message"]
     assert "主要施工方法/quantitative_gap" in summary["message"]
     assert "安全措施/risk_triplet_gap" in summary["message"]
+
+
+def test_review_rows_match_filter_and_counts_support_high_and_selected_views():
+    helpers = _load_helpers()
+
+    rows = [
+        {"issue_id": "I0001", "title": "主要施工方法", "type": "quantitative_gap", "severity": "high", "apply": True},
+        {"issue_id": "I0002", "title": "安全措施", "type": "risk_triplet_gap", "severity": "high", "apply": False},
+        {"issue_id": "R0003", "title": "质量保证措施", "type": "consistency_gap", "severity": "medium", "apply": True},
+    ]
+
+    counts = helpers._review_filter_counts(rows)
+    assert counts == {"all": 3, "high": 2, "selected": 2}
+    assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "all")] == ["I0001", "I0002", "R0003"]
+    assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "high")] == ["I0001", "I0002"]
+    assert [row["issue_id"] for row in helpers._review_rows_match_filter(rows, "selected")] == ["I0001", "R0003"]
+
+
+def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():
+    helpers = _load_helpers()
+
+    current_rows = [
+        {"issue_id": "I0001", "apply": True, "replacement": "", "title": "主要施工方法"},
+        {"issue_id": "I0002", "apply": False, "replacement": "", "title": "安全措施"},
+        {"issue_id": "R0003", "apply": True, "replacement": "", "title": "质量保证措施"},
+    ]
+    updated_rows = [
+        {"issue_id": "I0001", "apply": False, "replacement": "替换后段落", "title": "主要施工方法"},
+        {"issue_id": "R0003", "apply": True, "replacement": "", "title": "质量保证措施"},
+    ]
+
+    merged = helpers._merge_review_rows(current_rows, updated_rows)
+    assert [row["issue_id"] for row in merged] == ["I0001", "I0002", "R0003"]
+    assert merged[0]["apply"] is False
+    assert merged[0]["replacement"] == "替换后段落"
+    assert merged[1]["apply"] is False
+    assert merged[2]["apply"] is True
 
 
 def test_review_workspace_focus_notice_only_for_review_needed_current_job():

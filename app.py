@@ -6730,6 +6730,25 @@ def _review_editor_focus_summary(rows: list[dict[str, Any]] | None) -> dict[str,
     return {"level": "warning", "message": message}
 
 
+def _review_rows_match_filter(rows: list[dict[str, Any]] | None, filter_key: str) -> list[dict[str, Any]]:
+    ordered = _review_rows_for_editor(rows)
+    key = str(filter_key or "all").strip().lower()
+    if key == "high":
+        return [row for row in ordered if _review_severity_priority(row.get("severity")) >= 3]
+    if key == "selected":
+        return [row for row in ordered if bool(row.get("apply"))]
+    return ordered
+
+
+def _review_filter_counts(rows: list[dict[str, Any]] | None) -> dict[str, int]:
+    ordered = _review_rows_for_editor(rows)
+    return {
+        "all": len(ordered),
+        "high": sum(1 for row in ordered if _review_severity_priority(row.get("severity")) >= 3),
+        "selected": sum(1 for row in ordered if bool(row.get("apply"))),
+    }
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -7997,6 +8016,27 @@ def _review_cache_key(job_id: str, variant: int) -> str:
     return f"review_items_{job_id}_v{variant}"
 
 
+def _review_editor_state_key(job_id: str, variant: int) -> str:
+    return f"review_editor_state_{job_id}_v{variant}"
+
+
+def _merge_review_rows(
+    current_rows: list[dict[str, Any]] | None,
+    updated_rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    base = [dict(row) for row in (current_rows or []) if isinstance(row, dict)]
+    updates = {
+        str(row.get("issue_id") or ""): dict(row)
+        for row in (updated_rows or [])
+        if isinstance(row, dict) and str(row.get("issue_id") or "").strip()
+    }
+    merged: list[dict[str, Any]] = []
+    for row in base:
+        issue_id = str(row.get("issue_id") or "").strip()
+        merged.append(dict(updates.get(issue_id) or row))
+    return merged
+
+
 def _load_review_items(base_url: str, actions_key: str, job_id: str, variant: int) -> list[dict[str, Any]]:
     resp = _get_json(
         base_url,
@@ -8024,6 +8064,7 @@ def _load_review_items(base_url: str, actions_key: str, job_id: str, variant: in
             }
         )
     st.session_state[_review_cache_key(job_id, variant)] = cleaned
+    st.session_state[_review_editor_state_key(job_id, variant)] = [dict(row) for row in cleaned]
     return cleaned
 
 
@@ -8061,16 +8102,35 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     if not rows:
         st.info("点击“载入问题清单”后可进行审核回写。")
         return
-    ordered_rows = _review_rows_for_editor(rows)
+    state_key = _review_editor_state_key(job_id, int(variant))
+    state_rows = st.session_state.get(state_key) if isinstance(st.session_state.get(state_key), list) else rows
+    ordered_rows = _review_rows_for_editor(state_rows)
     focus_summary = _review_editor_focus_summary(ordered_rows)
     if str(focus_summary.get("level") or "") == "warning":
         st.warning(str(focus_summary.get("message") or ""))
+    filter_counts = _review_filter_counts(ordered_rows)
+    filter_labels = {
+        "all": f"全部（{filter_counts.get('all', 0)}）",
+        "high": f"高优（{filter_counts.get('high', 0)}）",
+        "selected": f"已勾选（{filter_counts.get('selected', 0)}）",
+    }
+    selected_filter = st.radio(
+        "审核筛选",
+        options=list(filter_labels.keys()),
+        format_func=lambda key: filter_labels.get(key, key),
+        horizontal=True,
+        key=f"review_filter_{job_id}_v{variant}",
+    )
+    filtered_rows = _review_rows_match_filter(ordered_rows, selected_filter)
+    if not filtered_rows:
+        st.info("当前筛选下暂无问题。可切换到“全部”继续审核。")
+        return
 
     edited = st.data_editor(
-        ordered_rows,
+        filtered_rows,
         hide_index=True,
         width="stretch",
-        key=f"review_editor_{job_id}_v{variant}",
+        key=f"review_editor_{job_id}_v{variant}_{selected_filter}",
         disabled=["issue_id", "title", "type", "severity", "problem", "suggestion", "section_excerpt"],
         column_config={
             "apply": st.column_config.CheckboxColumn("应用"),
@@ -8084,6 +8144,8 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             "replacement": st.column_config.TextColumn("替换文本（可选）", width="large"),
         },
     )
+    state_rows = _merge_review_rows(state_rows, edited if isinstance(edited, list) else [])
+    st.session_state[state_key] = state_rows
 
     b1, b2 = st.columns([1, 1])
     if b1.button("应用勾选项并重写文档", key=f"apply_review_{job_id}_v{variant}", type="secondary", width="stretch"):
@@ -8091,9 +8153,9 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
             before_snapshot = _quality_variant_snapshot(result, int(variant))
-            before_rows = [dict(r) for r in (rows or []) if isinstance(r, dict)]
+            before_rows = [dict(r) for r in (state_rows or []) if isinstance(r, dict)]
             decisions = []
-            for r in edited or []:
+            for r in state_rows or []:
                 if not isinstance(r, dict):
                     continue
                 decisions.append(
@@ -8150,7 +8212,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
             before_snapshot = _quality_variant_snapshot(result, int(variant))
-            before_rows = [dict(r) for r in (rows or []) if isinstance(r, dict)]
+            before_rows = [dict(r) for r in (state_rows or []) if isinstance(r, dict)]
             resp = _post_json(
                 base_url,
                 "/actions/review/apply",
