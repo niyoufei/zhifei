@@ -108,20 +108,80 @@ LATEST_TEXT_MODELS = {
     "openai": "ChatGPT-5.4",
     "grok": "grok-4-1-fast-reasoning",
 }
-GENERATION_MODE_OPTIONS = ["speed_fast", "standard_auto", "pro_polish"]
-GENERATION_MODE_LABELS = {
-    "speed_fast": "极速：优先出稿速度",
-    "standard_auto": "标准：平衡质量与速度",
-    "pro_polish": "精编：优先修订与润色",
-    "quality_200": "标准：平衡质量与速度",
-    "hq_speed_500": "标准：平衡质量与速度",
-}
-GENERATION_ENGINE_LABELS = {
-    "speed_fast": "极速执行",
-    "quality_200": "标准执行（≤200页）",
-    "hq_speed_500": "标准执行（>200页加速）",
-    "pro_polish": "精编执行",
-}
+
+def _load_generation_mode_catalog() -> list[dict[str, Any]]:
+    ui_meta = {
+        "speed_fast": {
+            "ui_label": "极速：优先出稿速度",
+            "engine_label": "极速执行",
+            "legacy": False,
+            "stable_output": False,
+        },
+        "standard_auto": {
+            "ui_label": "标准：平衡质量与速度",
+            "engine_label": "标准执行（自动按篇幅切换）",
+            "legacy": False,
+            "stable_output": False,
+        },
+        "stable_delivery": {
+            "ui_label": "稳交：优先结果一致性",
+            "engine_label": "稳定交付执行",
+            "legacy": False,
+            "stable_output": True,
+        },
+        "pro_polish": {
+            "ui_label": "精编：优先修订与润色",
+            "engine_label": "精编执行",
+            "legacy": False,
+            "stable_output": False,
+        },
+        "quality_200": {
+            "ui_label": "标准：平衡质量与速度",
+            "engine_label": "标准执行（≤200页）",
+            "legacy": True,
+            "stable_output": False,
+        },
+        "hq_speed_500": {
+            "ui_label": "标准：平衡质量与速度",
+            "engine_label": "标准执行（>200页加速）",
+            "legacy": True,
+            "stable_output": False,
+        },
+    }
+    ordered_ids = [
+        "speed_fast",
+        "standard_auto",
+        "stable_delivery",
+        "pro_polish",
+        "quality_200",
+        "hq_speed_500",
+    ]
+    backend_catalog: dict[str, dict[str, Any]] = {}
+    try:
+        from backend.app.routers.actions_bridge import generation_mode_catalog as _backend_generation_mode_catalog
+
+        for item in _backend_generation_mode_catalog():
+            if isinstance(item, dict) and str(item.get("id") or "").strip():
+                backend_catalog[str(item["id"]).strip()] = dict(item)
+    except Exception:
+        backend_catalog = {}
+
+    out: list[dict[str, Any]] = []
+    for mode_id in ordered_ids:
+        merged = dict(backend_catalog.get(mode_id) or {"id": mode_id, "profile": mode_id})
+        meta = ui_meta[mode_id]
+        merged["legacy"] = bool(meta["legacy"] or merged.get("legacy"))
+        merged["stable_output"] = bool(meta["stable_output"] or merged.get("stable_output"))
+        merged["ui_label"] = meta["ui_label"]
+        merged["engine_label"] = meta["engine_label"]
+        out.append(merged)
+    return out
+
+
+GENERATION_MODE_CATALOG = _load_generation_mode_catalog()
+GENERATION_MODE_OPTIONS = [str(item["id"]) for item in GENERATION_MODE_CATALOG if not bool(item.get("legacy"))]
+GENERATION_MODE_LABELS = {str(item["id"]): str(item.get("ui_label") or item.get("label") or item["id"]) for item in GENERATION_MODE_CATALOG}
+GENERATION_ENGINE_LABELS = {str(item["id"]): str(item.get("engine_label") or item.get("label") or item["id"]) for item in GENERATION_MODE_CATALOG}
 FIXED_COVER_PAGES = 1
 DEFAULT_FULL_INDEX_PAGES = 1
 FRONT_MATTER_PAGE_MODE_OPTIONS = ["include", "exclude"]
@@ -339,6 +399,14 @@ def _resolve_generation_mode_params(
         gi = False
         compare_max_chars = 600
         mode_effective = "speed_fast"
+    elif mode == "stable_delivery":
+        qs = True
+        ar = True
+        rm = "template"
+        vp = 1
+        ap = min(3, max(1, ap or 2))
+        compare_max_chars = 1600
+        mode_effective = "stable_delivery"
     elif mode == "pro_polish":
         qs = True
         ar = True
@@ -1227,7 +1295,7 @@ def _render_self_evolution_panel(base_url: str, actions_key: str) -> None:
             metric_action_effects = row.get("top_metric_action_effects") if isinstance(row.get("top_metric_action_effects"), list) else []
             with st.container(border=True):
                 st.markdown(f"**{idx}. {title}**")
-                st.caption(f"{project_type or '通用'} / {generation_mode or 'quality_200'}")
+                st.caption(f"{project_type or '通用'} / {generation_mode or 'standard_auto'}")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("历史运行", runs)
                 m2.metric("成功率", f"{success_rate:.0%}")
@@ -8002,7 +8070,7 @@ with col_right:
         st.number_input("总页数目标（0=按招标）", min_value=0, max_value=2000, key="total_pages_target")
         st.caption("封面 / 索引 / 目录页数，以及是否计入总页数，已移到左侧“04 目录编辑器”中统一设置。")
         st.checkbox("目录严格对标评审标准（运行时覆盖当前目录）", key="strict_tender_outline")
-        st.caption("极速：更快出稿并默认关闭图片；标准：自动按篇幅切换执行策略；精编：加强修订与润色，适合最终成品。")
+        st.caption("极速：更快出稿并默认关闭图片；标准：自动按篇幅切换执行策略；稳交：优先锁定结果一致性；精编：加强修订与润色。")
 
     with st.expander("版式设置（默认自动）", expanded=False):
         with st.container(border=True):
