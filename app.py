@@ -6845,6 +6845,20 @@ def _review_shortcut_filter_key(chapter_summary: dict[str, Any] | None) -> str:
     return "all"
 
 
+def _review_next_pending_shortcut(rows: list[dict[str, Any]] | None) -> dict[str, str]:
+    shortcuts = _review_chapter_shortcuts(rows, limit=1)
+    if not shortcuts:
+        return {}
+    first = shortcuts[0]
+    if int((_review_chapter_summaries(rows) or [{}])[0].get("pending") or 0) <= 0:
+        return {}
+    return {
+        "title": str(first.get("title") or "").strip(),
+        "label": str(first.get("label") or "").strip(),
+        "filter_key": str(first.get("filter_key") or "all").strip() or "all",
+    }
+
+
 def _review_workspace_focus_notice(result: dict[str, Any], focus_job_id: str) -> str:
     if not isinstance(result, dict):
         return ""
@@ -8225,6 +8239,16 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
                 "replacement_ready": st.column_config.NumberColumn("已填替换文本", width="small"),
             },
         )
+        next_pending = _review_next_pending_shortcut(ordered_rows)
+        if next_pending:
+            if st.button(
+                f"进入下一待处理章节：{next_pending.get('label') or next_pending.get('title')}",
+                key=f"review_next_pending_{job_id}_v{variant}",
+                type="primary",
+                width="stretch",
+            ):
+                st.session_state[chapter_filter_key] = next_pending.get("title") or "全部章节"
+                st.session_state[review_filter_key] = next_pending.get("filter_key") or "all"
         shortcut_items = _review_chapter_shortcuts(ordered_rows)
         if shortcut_items:
             st.caption("快捷定位：")

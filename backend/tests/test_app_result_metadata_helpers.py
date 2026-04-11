@@ -31,6 +31,7 @@ def _load_helpers() -> SimpleNamespace:
         "_review_chapter_summaries",
         "_review_chapter_shortcuts",
         "_review_shortcut_filter_key",
+        "_review_next_pending_shortcut",
         "_merge_review_rows",
         "_review_priority_summary",
         "_recent_job_quality_signal",
@@ -395,6 +396,35 @@ def test_review_shortcut_filter_key_prefers_high_then_replacement_then_selected(
     assert helpers._review_shortcut_filter_key({"pending_high": 0, "pending": 0, "replacement_ready": 2, "selected": 1}) == "replacement_ready"
     assert helpers._review_shortcut_filter_key({"pending_high": 0, "pending": 0, "replacement_ready": 0, "selected": 1}) == "selected"
     assert helpers._review_shortcut_filter_key({}) == "all"
+
+
+def test_review_next_pending_shortcut_returns_first_pending_focus_target():
+    helpers = _load_helpers()
+
+    rows = [
+        {"issue_id": "I0001", "title": "安全措施", "severity": "high", "apply": True, "replacement": "修订段落 A"},
+        {"issue_id": "I0002", "title": "主要施工方法", "severity": "high", "apply": False, "replacement": ""},
+        {"issue_id": "I0003", "title": "安全措施", "severity": "medium", "apply": False, "replacement": ""},
+    ]
+
+    shortcut = helpers._review_next_pending_shortcut(rows)
+
+    assert shortcut == {
+        "title": "主要施工方法",
+        "label": "主要施工方法（待处理高优1 / 待处理1 / 问题1）",
+        "filter_key": "high",
+    }
+
+
+def test_review_next_pending_shortcut_returns_empty_when_everything_is_already_in_progress():
+    helpers = _load_helpers()
+
+    rows = [
+        {"issue_id": "I0001", "title": "安全措施", "severity": "high", "apply": True, "replacement": ""},
+        {"issue_id": "I0002", "title": "主要施工方法", "severity": "medium", "apply": False, "replacement": "已补全文本"},
+    ]
+
+    assert helpers._review_next_pending_shortcut(rows) == {}
 
 
 def test_merge_review_rows_preserves_hidden_rows_and_applies_visible_edits():
