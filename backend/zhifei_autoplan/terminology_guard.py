@@ -393,12 +393,15 @@ async def normalize_text_terminology_async(
         return src, {"changed": False, "replacement_count": 0, "details": [], "llm_invoked": False}
 
     seed_mapping = {t: alias_map[t] for t in terms if t in alias_map}
+    seed_out, seed_details = _apply_mapping(src, seed_mapping)
+    seed_replaced_terms = {str(d.get("from") or "") for d in seed_details}
+    unresolved_terms = [t for t in terms if t and t not in seed_replaced_terms]
     llm_mapping: Dict[str, str] = {}
     llm_invoked = False
-    if use_llm:
+    if use_llm and unresolved_terms:
         try:
             llm_mapping = await _llm_correct_terms(
-                terms=terms,
+                terms=unresolved_terms,
                 context=src,
                 whitelist=whitelist,
                 glossary=glossary,
@@ -414,7 +417,11 @@ async def normalize_text_terminology_async(
     final_mapping = dict(seed_mapping)
     final_mapping.update(llm_mapping)
 
-    out, details = _apply_mapping(src, final_mapping)
+    out = seed_out
+    details = list(seed_details)
+    if llm_mapping:
+        out, llm_details = _apply_mapping(seed_out, llm_mapping)
+        details.extend(llm_details)
     replaced_terms = {str(d.get("from") or "") for d in details}
     unresolved = [t for t in terms if t and t not in replaced_terms]
     replacement_count = int(sum(int(d.get("count") or 0) for d in details))

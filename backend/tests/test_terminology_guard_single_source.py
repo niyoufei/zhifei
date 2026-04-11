@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+import backend.zhifei_autoplan.terminology_guard as terminology_guard
 from backend.zhifei_autoplan.terminology_guard import (
     ENGINEERING_RULES_PATH,
     get_labor_ratio_by_condition,
     load_engineering_rules,
+    normalize_text_terminology_async,
     suggest_labor_ratio_for_chapter,
     validate_engineering_rules,
 )
@@ -65,3 +69,48 @@ def test_suggest_labor_ratio_for_chapter_returns_domain_and_trade_ratio():
     assert hint.get("trade_domain") == "市政道路工程"
     trade_ratio = hint.get("trade_ratio") or {}
     assert isinstance(trade_ratio, dict) and trade_ratio
+
+
+@pytest.mark.asyncio
+async def test_async_terminology_normalization_skips_llm_when_alias_map_fully_resolves(monkeypatch):
+    async def _should_not_run(**kwargs):
+        raise AssertionError("llm correction should not run when deterministic aliases fully resolve terms")
+
+    monkeypatch.setattr(terminology_guard, "_llm_correct_terms", _should_not_run)
+
+    out, receipt = await normalize_text_terminology_async(
+        "本班组安排吊车司机和信号工各1人。",
+        rules_path=ENGINEERING_RULES_PATH,
+        use_llm=True,
+    )
+
+    assert "建筑起重机械司机" in out
+    assert "建筑起重信号司索工" in out
+    assert receipt["changed"] is True
+    assert receipt["llm_invoked"] is False
+    assert receipt["llm_corrected_count"] == 0
+    assert receipt["unresolved_terms"] == []
+
+
+@pytest.mark.asyncio
+async def test_async_terminology_normalization_only_sends_unresolved_terms_to_llm(monkeypatch):
+    seen: dict[str, object] = {}
+
+    async def _fake_llm_correct_terms(**kwargs):
+        seen["terms"] = kwargs.get("terms")
+        return {"架子匠": "架子工"}
+
+    monkeypatch.setattr(terminology_guard, "_llm_correct_terms", _fake_llm_correct_terms)
+
+    out, receipt = await normalize_text_terminology_async(
+        "本班组安排吊车司机、架子匠各1人。",
+        rules_path=ENGINEERING_RULES_PATH,
+        use_llm=True,
+    )
+
+    assert seen["terms"] == ["架子匠"]
+    assert "建筑起重机械司机" in out
+    assert "架子工" in out
+    assert receipt["llm_invoked"] is True
+    assert receipt["llm_corrected_count"] == 1
+    assert receipt["unresolved_terms"] == []
