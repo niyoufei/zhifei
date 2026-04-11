@@ -6391,6 +6391,33 @@ def _normalize_variant_dict_map(raw: Any) -> dict[int, dict[str, Any]]:
     return out
 
 
+def _recent_job_mode_quality_caption(item: dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+    generation_mode_summary = item.get("generation_mode_summary") if isinstance(item.get("generation_mode_summary"), dict) else {}
+    parts: list[str] = []
+    profile = str(generation_mode_summary.get("profile") or item.get("generation_mode") or "").strip()
+    mode_effective = str(generation_mode_summary.get("mode_effective") or item.get("mode_effective") or "").strip()
+    if profile:
+        parts.append(f"档位={GENERATION_MODE_LABELS.get(profile, profile)}")
+    if mode_effective:
+        parts.append(f"执行={GENERATION_ENGINE_LABELS.get(mode_effective, mode_effective)}")
+    if generation_mode_summary.get("stable_output"):
+        parts.append("稳定交付")
+    template_name = str(item.get("logic_template_name") or item.get("logic_template_id") or "").strip()
+    if template_name:
+        parts.append(f"模板={template_name}")
+    quality_score = item.get("quality_score")
+    if quality_score is not None:
+        parts.append(f"质量分={quality_score}")
+    if item.get("quality_gate_ok") is not None:
+        parts.append(f"质量闸门={'通过' if bool(item.get('quality_gate_ok')) else '未通过'}")
+    failed_count = item.get("quality_gate_failed_count")
+    if failed_count is not None:
+        parts.append(f"未通过项={failed_count}")
+    return "；".join(parts)
+
+
 def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[str, Any]:
     raw_json = _download_bytes(base_url, actions_key, job_id, "json", 1, timeout=600)
     data = json.loads(raw_json.decode("utf-8", errors="ignore"))
@@ -7310,6 +7337,9 @@ def _render_recent_job_recovery(
                 with left:
                     st.markdown(f"**{html.escape(title)}**")
                     st.caption(" · ".join(meta_parts))
+                    summary_line = _recent_job_mode_quality_caption(item)
+                    if summary_line:
+                        st.caption(summary_line)
                     if stage and status in {"queued", "running"}:
                         detail = str(sla_snapshot.get("current_stage_detail") or "").strip()
                         if detail and detail != stage_label:

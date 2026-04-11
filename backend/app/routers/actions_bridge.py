@@ -186,6 +186,62 @@ def _recent_job_automation_summary(result: dict | None) -> dict[str, Any]:
     }
 
 
+def _recent_job_first_variant_summary(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    rows = [item for item in raw.values() if isinstance(item, dict)]
+    if not rows:
+        return {}
+    rows.sort(
+        key=lambda item: (
+            int(item.get("variant_index") or 0),
+            str(item.get("variant_id") or ""),
+        )
+    )
+    return rows[0]
+
+
+def _recent_job_generation_mode_summary(payload: dict | None, result: dict | None) -> dict[str, Any]:
+    mode_policy = payload.get("_mode_policy") if isinstance(payload, dict) and isinstance(payload.get("_mode_policy"), dict) else {}
+    result_summary = result.get("generation_mode_summary") if isinstance(result, dict) and isinstance(result.get("generation_mode_summary"), dict) else {}
+    return {
+        "profile": str(result_summary.get("profile") or mode_policy.get("profile") or (payload or {}).get("generation_mode") or "").strip() or None,
+        "mode_effective": str(
+            result_summary.get("mode_effective")
+            or mode_policy.get("mode_effective")
+            or (payload or {}).get("generation_mode")
+            or ""
+        ).strip()
+        or None,
+        "stable_output": bool(result_summary.get("stable_output", mode_policy.get("stable_output", False))),
+        "deterministic_variant_forced": bool(
+            result_summary.get("deterministic_variant_forced", mode_policy.get("deterministic_variant_forced", False))
+        ),
+        "deterministic_logic_template_id": str(
+            result_summary.get("deterministic_logic_template_id")
+            or mode_policy.get("deterministic_logic_template_id")
+            or (payload or {}).get("logic_template_id")
+            or ""
+        ).strip()
+        or None,
+    }
+
+
+def _recent_job_quality_overview(result: dict | None) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    first = _recent_job_first_variant_summary(result.get("quality_by_variant"))
+    if not first:
+        return {}
+    return {
+        "logic_template_id": str(first.get("logic_template_id") or "").strip() or None,
+        "logic_template_name": str(first.get("logic_template_name") or "").strip() or None,
+        "quality_score": first.get("quality_score"),
+        "quality_gate_ok": bool(first.get("quality_gate_ok", False)),
+        "quality_gate_failed_count": int(first.get("quality_gate_failed_count") or 0),
+    }
+
+
 def _recent_job_agent_runtime_summary(agent_runtime: dict | None) -> dict[str, Any]:
     if not isinstance(agent_runtime, dict):
         return {}
@@ -2802,6 +2858,8 @@ async def actions_jobs_recent(
         sla = rec.get("sla") if isinstance(rec.get("sla"), dict) else {}
         agent_runtime = rec.get("agent_runtime") if isinstance(rec.get("agent_runtime"), dict) else {}
         mode_policy = payload.get("_mode_policy") if isinstance(payload.get("_mode_policy"), dict) else {}
+        generation_mode_summary = _recent_job_generation_mode_summary(payload, result)
+        quality_overview = _recent_job_quality_overview(result)
         automation_summary = _recent_job_automation_summary(result) if has_result_artifacts(result) else {}
         runtime_budget_summary = _recent_job_runtime_budget_summary(result) if has_result_artifacts(result) else []
         remediation_strategy_summary = _recent_job_remediation_strategy_summary(result) if has_result_artifacts(result) else {}
@@ -2819,9 +2877,15 @@ async def actions_jobs_recent(
                 "project_id": payload.get("project_id"),
                 "project_type": payload.get("project_type"),
                 "variants": payload.get("variants"),
-                "generation_mode": mode_policy.get("profile") or payload.get("generation_mode"),
-                "mode_effective": mode_policy.get("mode_effective"),
+                "generation_mode": generation_mode_summary.get("profile") or mode_policy.get("profile") or payload.get("generation_mode"),
+                "mode_effective": generation_mode_summary.get("mode_effective") or mode_policy.get("mode_effective"),
+                "generation_mode_summary": generation_mode_summary,
                 "planned_total_pages": mode_policy.get("planned_total_pages") or payload.get("total_pages_target"),
+                "logic_template_id": quality_overview.get("logic_template_id"),
+                "logic_template_name": quality_overview.get("logic_template_name"),
+                "quality_score": quality_overview.get("quality_score"),
+                "quality_gate_ok": quality_overview.get("quality_gate_ok"),
+                "quality_gate_failed_count": quality_overview.get("quality_gate_failed_count"),
                 "progress_stage": progress.get("stage"),
                 "progress_percent": progress.get("percent"),
                 "sla_summary": _recent_job_sla_summary(sla),

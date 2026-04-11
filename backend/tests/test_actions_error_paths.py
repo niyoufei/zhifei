@@ -407,3 +407,85 @@ async def test_actions_job_status_uses_persisted_result_metadata_without_json(tm
     assert job["generation_mode_summary"]["deterministic_logic_template_id"] == "A"
     assert job["runtime_by_variant"]["1"]["pipeline_stages"][0]["stage"] == "draft_generation"
     assert job["quality_by_variant"]["1"]["quality_score"] == 98
+
+
+@pytest.mark.asyncio
+async def test_actions_jobs_recent_exposes_persisted_generation_and_quality_metadata(tmp_path):
+    from backend.app.routers.actions_bridge import actions_jobs_recent
+    from backend.zhifei_autoplan import job_store
+    from backend.zhifei_autoplan import workspace as ws
+
+    workspaces = tmp_path / "workspaces"
+    with patch.object(ws, "WORKSPACE_ROOT", workspaces), patch.dict(
+        os.environ,
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ):
+        workspace_dir = str(ws.resolve_workspace_dir(session_id="recent-metadata"))
+        docx_path = tmp_path / "recent-result.docx"
+        docx_path.write_bytes(b"docx")
+        job_id = job_store.create_job(
+            {
+                "topic": "稳定交付最近任务探针",
+                "workspace_dir": workspace_dir,
+                "project_id": "recent-metadata-case",
+                "project_type": "房建",
+                "generation_mode": "stable_delivery",
+                "logic_template_id": "A",
+                "_mode_policy": {
+                    "profile": "stable_delivery",
+                    "mode_effective": "stable_delivery",
+                    "stable_output": True,
+                    "deterministic_variant_forced": True,
+                    "deterministic_logic_template_id": "A",
+                },
+            },
+            workspace_dir=workspace_dir,
+        )
+        job_store.update_job(
+            job_id,
+            workspace_dir=workspace_dir,
+            status="done",
+            result={
+                "docx": str(docx_path),
+                "generation_mode_summary": {
+                    "profile": "stable_delivery",
+                    "mode_effective": "stable_delivery",
+                    "stable_output": True,
+                    "deterministic_variant_forced": True,
+                    "deterministic_logic_template_id": "A",
+                },
+                "quality_by_variant": {
+                    "1": {
+                        "variant_index": 1,
+                        "variant_id": 1,
+                        "logic_template_id": "A",
+                        "logic_template_name": "交付清单驱动",
+                        "quality_score": 98,
+                        "quality_gate_ok": False,
+                        "quality_gate_failed_count": 1,
+                    }
+                },
+            },
+        )
+
+        response = await actions_jobs_recent(
+            limit=8,
+            statuses="done",
+            max_age_hours=24,
+            session_id="recent-metadata",
+            x_actions_key="test-actions-key",
+        )
+
+    assert response["ok"] is True
+    item = response["items"][0]
+    assert item["job_id"] == job_id
+    assert item["generation_mode"] == "stable_delivery"
+    assert item["mode_effective"] == "stable_delivery"
+    assert item["generation_mode_summary"]["profile"] == "stable_delivery"
+    assert item["generation_mode_summary"]["stable_output"] is True
+    assert item["logic_template_id"] == "A"
+    assert item["logic_template_name"] == "交付清单驱动"
+    assert item["quality_score"] == 98
+    assert item["quality_gate_ok"] is False
+    assert item["quality_gate_failed_count"] == 1
