@@ -1280,12 +1280,71 @@ def _planned_total_pages(payload: dict) -> int:
     return int(s)
 
 
+_GENERATION_MODE_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "id": "standard_auto",
+        "profile": "standard_auto",
+        "label": "Standard Auto",
+        "legacy": False,
+        "stable_output": False,
+        "description": "Default mode that uses quality_200 or hq_speed_500 based on planned total pages.",
+    },
+    {
+        "id": "quality_200",
+        "profile": "standard_auto",
+        "label": "Quality 200",
+        "legacy": True,
+        "stable_output": False,
+        "description": "Legacy alias that prefers high quality under 200 planned pages and auto-switches above that.",
+    },
+    {
+        "id": "hq_speed_500",
+        "profile": "standard_auto",
+        "label": "HQ Speed 500",
+        "legacy": True,
+        "stable_output": False,
+        "description": "Legacy alias for the large-document speed profile with stricter template remediation defaults.",
+    },
+    {
+        "id": "speed_fast",
+        "profile": "speed_fast",
+        "label": "Speed Fast",
+        "legacy": False,
+        "stable_output": False,
+        "description": "Fastest deterministic template-first mode with lower compare budget and no image generation.",
+    },
+    {
+        "id": "pro_polish",
+        "profile": "pro_polish",
+        "label": "Pro Polish",
+        "legacy": False,
+        "stable_output": False,
+        "description": "Higher-polish mode with stricter review retries and LLM remediation enabled.",
+    },
+    {
+        "id": "stable_delivery",
+        "profile": "stable_delivery",
+        "label": "Stable Delivery",
+        "legacy": False,
+        "stable_output": True,
+        "description": "Deterministic delivery mode that fixes variant/template selection when the request leaves them unspecified.",
+    },
+)
+
+
+def generation_mode_catalog() -> List[Dict[str, Any]]:
+    return [dict(item) for item in _GENERATION_MODE_CATALOG]
+
+
 def _normalize_generation_mode_profile(raw: str | None) -> tuple[str, str | None]:
     mode = str(raw or "").strip()
-    if mode in {"quality_200", "hq_speed_500"}:
-        return "standard_auto", mode
-    if mode in {"speed_fast", "standard_auto", "pro_polish", "stable_delivery"}:
-        return mode, None
+    for item in _GENERATION_MODE_CATALOG:
+        if mode != item["id"]:
+            continue
+        profile = str(item.get("profile") or "standard_auto").strip() or "standard_auto"
+        if bool(item.get("legacy")):
+            return profile, str(item["id"])
+        return profile, None
     return "standard_auto", None
 
 

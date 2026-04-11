@@ -116,6 +116,55 @@ def test_health_exposes_runtime_config_summary(monkeypatch):
     assert out["config_status"]["warnings"] == ["warn-a"]
 
 
+def test_capabilities_and_config_expose_generation_modes(monkeypatch):
+    from backend.zhifei_autoplan import boq_store, kg_store, tender_store
+    from backend.app.routers import zhifei_autoplan as compat_router
+    from backend.zhifei_autoplan.utils.llm_client import LLMClient
+
+    canned = {
+        "level": "ok",
+        "warnings": [],
+        "blocking": [],
+        "checks": {
+            "release_ready": True,
+            "actions_generation_ready": True,
+            "actions_dry_run_ready": True,
+            "actions_api_auth": {"secure": True},
+            "text_generation": {"ready": True},
+            "kg_config": {"ready": True},
+            "agent_roles": {"ready": True},
+        },
+        "providers": {"status": {"text_chain_ready": True}},
+        "defaults": {"provider": "openai", "model": "gpt-5.4"},
+        "sources": {
+            "config_json": {
+                "mtime": 123.0,
+                "config_version": "2026-04-11",
+                "mtime_human": "2026-04-11 09:00",
+            }
+        },
+    }
+    monkeypatch.setattr(main_module, "collect_main_chain_config_status", lambda: canned)
+    monkeypatch.setattr(kg_store, "get_active_kg", lambda: {"kg_id": "kgpack-test"})
+    monkeypatch.setattr(tender_store, "load_tender_matrix", lambda: {"项目名称": "测试项目"})
+    monkeypatch.setattr(boq_store, "load_boq_data", lambda: {"items": [1]})
+    monkeypatch.setattr(compat_router, "_job_list_default_fields", lambda: {"job_id", "status"})
+    monkeypatch.setattr(compat_router, "_job_list_field_alias", lambda: {"status": {"state"}})
+    monkeypatch.setattr(LLMClient, "load_defaults", staticmethod(lambda: {"default_provider": "openai", "default_model": "gpt-5.4"}))
+
+    caps = main_module.capabilities()
+    cfg = main_module.config()
+
+    assert [item["id"] for item in caps["generation_modes"]][:3] == [
+        "standard_auto",
+        "quality_200",
+        "hq_speed_500",
+    ]
+    assert any(item["id"] == "stable_delivery" and item["stable_output"] is True for item in caps["generation_modes"])
+    assert any(item["id"] == "stable_delivery" for item in cfg["generation_modes"])
+    assert cfg["runtime_config"]["checks"]["release_ready"] is True
+
+
 @pytest.mark.asyncio
 async def test_lifespan_runs_startup_warmup(monkeypatch):
     seen = []

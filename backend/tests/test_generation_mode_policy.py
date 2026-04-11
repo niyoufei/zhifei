@@ -5,6 +5,7 @@ from backend.app.routers.actions_bridge import (
     ActionsPlanRequest,
     _apply_generation_mode_policy,
     _merge_plan_defaults,
+    generation_mode_catalog,
     _planned_total_pages,
 )
 
@@ -87,6 +88,25 @@ def test_generation_mode_standard_auto_tracks_profile_and_effective_mode():
     assert out["_mode_policy"]["profile"] == "standard_auto"
     assert out["_mode_policy"]["mode_effective"] == "hq_speed_500"
     assert out["_mode_policy"]["auto_switched"] is True
+
+
+def test_generation_mode_catalog_exposes_stable_delivery_and_legacy_aliases():
+    modes = generation_mode_catalog()
+    ids = [item["id"] for item in modes]
+    assert ids == [
+        "standard_auto",
+        "quality_200",
+        "hq_speed_500",
+        "speed_fast",
+        "pro_polish",
+        "stable_delivery",
+    ]
+    stable_delivery = next(item for item in modes if item["id"] == "stable_delivery")
+    quality_200 = next(item for item in modes if item["id"] == "quality_200")
+    assert stable_delivery["stable_output"] is True
+    assert stable_delivery["profile"] == "stable_delivery"
+    assert quality_200["legacy"] is True
+    assert quality_200["profile"] == "standard_auto"
 
 
 def test_generation_mode_speed_fast_policy():

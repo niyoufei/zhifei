@@ -159,6 +159,7 @@ def health():
 
 @app.get("/capabilities")
 def capabilities():
+    from backend.app.routers.actions_bridge import generation_mode_catalog
     from backend.zhifei_autoplan.kg_store import get_active_kg
     from backend.zhifei_autoplan.tender_store import load_tender_matrix
     from backend.zhifei_autoplan.boq_store import load_boq_data
@@ -186,6 +187,7 @@ def capabilities():
         "agent_roles_configured": bool(((runtime_cfg.get("checks") or {}).get("agent_roles") or {}).get("ready")),
         "provider_status": ((runtime_cfg.get("providers") or {}).get("status") or {}),
         "runtime_config": runtime_cfg,
+        "generation_modes": generation_mode_catalog(),
         "modules": {
             "tender_parser": True,
             "boq_parser": True,
@@ -213,6 +215,7 @@ def capabilities():
 @app.get("/config")
 def config():
     # 仅输出非敏感配置（不返回密钥）
+    from backend.app.routers.actions_bridge import generation_mode_catalog
     from backend.zhifei_autoplan.utils.llm_client import LLMClient
     from backend.app.routers.zhifei_autoplan import _job_list_default_fields, _job_list_field_alias
     runtime_cfg = collect_main_chain_config_status()
@@ -229,6 +232,7 @@ def config():
         "config_version": config_meta.get("config_version"),
         "config_version_auto": config_meta.get("mtime_human"),
         "runtime_config": runtime_cfg,
+        "generation_modes": generation_mode_catalog(),
         "job_list": {
             "default_fields": sorted(_job_list_default_fields()),
             "field_alias": {k: sorted(list(v)) for k, v in _job_list_field_alias().items()},
