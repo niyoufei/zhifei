@@ -519,6 +519,24 @@ class TestJobSignature:
 
         assert job_store.compute_job_signature(payload_a) == job_store.compute_job_signature(payload_b)
 
+    def test_compute_job_signature_changes_when_contract_stamp_changes(self):
+        from backend.zhifei_autoplan import job_store
+
+        payload_a = {
+            "topic": "施工组织设计",
+            "project_id": "p1",
+            "outline": ["第1章", "第2章"],
+            "_contract_stamp": {"request_contract_version": "actions-generate-contract-v1"},
+        }
+        payload_b = {
+            "topic": "施工组织设计",
+            "project_id": "p1",
+            "outline": ["第1章", "第2章"],
+            "_contract_stamp": {"request_contract_version": "actions-generate-contract-v2"},
+        }
+
+        assert job_store.compute_job_signature(payload_a) != job_store.compute_job_signature(payload_b)
+
     def test_find_reusable_job_prefers_recent_matching_record(self, tmp_path):
         from backend.zhifei_autoplan import job_store
 

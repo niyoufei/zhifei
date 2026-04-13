@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -9,22 +10,35 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-from backend.app.routers.actions_bridge import (
-    _apply_generation_mode_policy,
-    _normalize_logic_template_id,
-    _rebuild_postprocessed_artifacts,
-    _save_outputs,
+from backend.zhifei_autoplan.generation_mode_policy import (
+    apply_generation_mode_policy,
+    normalize_logic_template_id,
 )
+from backend.zhifei_autoplan.output_artifacts import save_outputs
+from backend.zhifei_autoplan.postprocessed_artifacts import rebuild_postprocessed_artifacts
+from backend.zhifei_autoplan import result_persistence
+from backend.zhifei_autoplan import result_metadata_builder as metadata_core
+from backend.zhifei_autoplan import result_variant_summary_builder as summary_core
 from backend.zhifei_autoplan.job_store import get_job, update_job
 from backend.zhifei_autoplan.orchestrator import run_autoplan
 from backend.zhifei_autoplan.params_runtime import load_params
 from backend.zhifei_autoplan.resource_audit import append_resource_event, summarize_variants
+from backend.zhifei_autoplan.run_contract import (
+    build_stage_artifact_envelope,
+    contract_fingerprint,
+    extract_outputs_from_result_bundle,
+    load_result_bundle,
+    resolve_contract_stamp,
+    result_bundle_artifacts_complete,
+)
 from backend.zhifei_autoplan.self_evolution import (
     build_task_parallelism_hint,
     load_task_parallelism_profile,
     record_runtime_learning,
     record_task_parallelism_learning,
 )
+from backend.zhifei_autoplan.case_library_service import summarize_case_reference_pack
+from backend.zhifei_autoplan.image_library import summarize_image_selection_pack
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
 from backend.zhifei_autoplan.workspace import resolve_workspace_dir, workspace_paths
 
@@ -33,6 +47,10 @@ WORKER_LOG_DIR = Path("logs/job_workers")
 WORKER_LOG_DIR.mkdir(parents=True, exist_ok=True)
 STAGE_RUN_DIR = Path("build/_stage_runs")
 STAGE_RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+# Compatibility seam for existing tests and monkeypatch points.
+_save_outputs = save_outputs
+_rebuild_postprocessed_artifacts = rebuild_postprocessed_artifacts
 
 
 def _worker_log(job_id: str, message: str, *, workspace_dir: str | None = None) -> None:
@@ -122,8 +140,103 @@ def _json_safe(value: Any) -> Any:
 
 def _write_stage_artifact(job_id: str, filename: str, payload: Dict[str, Any], *, workspace_dir: str | None = None) -> str:
     out = _stage_run_dir(job_id, workspace_dir=workspace_dir) / str(filename or "artifact.json").strip()
-    out.write_text(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+    job_record = _get_job_record(job_id, workspace_dir=workspace_dir)
+    job_payload = job_record.get("payload") if isinstance(job_record, dict) and isinstance(job_record.get("payload"), dict) else {}
+    request_signature = str(job_record.get("request_signature") or "").strip() if isinstance(job_record, dict) else ""
+    safe_payload = _json_safe(payload)
+    envelope = build_stage_artifact_envelope(
+        filename=filename,
+        job_id=job_id,
+        payload=safe_payload,
+        request_signature=request_signature or None,
+        contract_stamp=resolve_contract_stamp(job_payload),
+    )
+    out.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(out)
+
+
+def _result_digest(result: Dict[str, Any] | None) -> str:
+    raw = json.dumps(_json_safe(result if isinstance(result, dict) else {}), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _variant_result_artifact_name(variant_id: int) -> str:
+    return f"03_variant_result_v{max(1, int(variant_id or 1))}.json"
+
+
+def _write_variant_result_artifact(
+    job_id: str,
+    *,
+    variant_id: int,
+    logic_template_id: str | None,
+    result: Dict[str, Any],
+    workspace_dir: str | None = None,
+) -> str:
+    payload = {
+        "job_id": job_id,
+        "variant_id": int(variant_id or 1),
+        "logic_template_id": str(logic_template_id or "").strip() or None,
+        "result_sha1": _result_digest(result),
+        "result": result,
+    }
+    return _write_stage_artifact(
+        job_id,
+        _variant_result_artifact_name(int(variant_id or 1)),
+        payload,
+        workspace_dir=workspace_dir,
+    )
+
+
+def _load_resumable_variant_results(
+    job_id: str,
+    *,
+    payload: Dict[str, Any] | None,
+    variant_plan: List[Dict[str, Any]],
+    request_signature: str | None = None,
+    workspace_dir: str | None = None,
+) -> Dict[int, Dict[str, Any]]:
+    resumed: Dict[int, Dict[str, Any]] = {}
+    expected_contract_fp = contract_fingerprint(resolve_contract_stamp(payload if isinstance(payload, dict) else {}))
+    expected_signature = str(request_signature or "").strip()
+    for pos, item in enumerate(variant_plan or []):
+        try:
+            variant_id = int(item.get("variant_id") or 0)
+        except Exception:
+            variant_id = 0
+        if variant_id <= 0:
+            continue
+        path = _stage_run_dir(job_id, workspace_dir=workspace_dir) / _variant_result_artifact_name(variant_id)
+        if not path.exists():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        artifact_meta = raw.get("_artifact") if isinstance(raw.get("_artifact"), dict) else {}
+        artifact_contract = artifact_meta.get("contract") if isinstance(artifact_meta.get("contract"), dict) else {}
+        artifact_signature = str(artifact_meta.get("request_signature") or "").strip()
+        if expected_signature and artifact_signature and artifact_signature != expected_signature:
+            continue
+        if artifact_contract and contract_fingerprint(artifact_contract) != expected_contract_fp:
+            continue
+        result = raw.get("result") if isinstance(raw.get("result"), dict) else None
+        if not isinstance(result, dict):
+            continue
+        stored_digest = str(raw.get("result_sha1") or "").strip()
+        if stored_digest and stored_digest != _result_digest(result):
+            continue
+        sections = result.get("sections") if isinstance(result.get("sections"), list) else []
+        if not sections:
+            continue
+        stored_variant_id = int(result.get("variant_id") or raw.get("variant_id") or variant_id)
+        if stored_variant_id != variant_id:
+            continue
+        expected_template = normalize_logic_template_id(item.get("logic_template_id"))
+        actual_template = normalize_logic_template_id(result.get("logic_template_id") or raw.get("logic_template_id"))
+        if expected_template and actual_template and expected_template != actual_template:
+            continue
+        resumed[pos] = result
+    return resumed
 
 
 def _provider_chain_summary(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -187,7 +300,7 @@ def _variant_result_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         quality_gate = item.get("quality_gate") if isinstance(item.get("quality_gate"), dict) else {}
         generation_trace = item.get("generation_trace") if isinstance(item.get("generation_trace"), dict) else {}
         logic_template = item.get("logic_template") if isinstance(item.get("logic_template"), dict) else {}
-        logic_template_id = _normalize_logic_template_id(item.get("logic_template_id") or logic_template.get("id"))
+        logic_template_id = normalize_logic_template_id(item.get("logic_template_id") or logic_template.get("id"))
         logic_template_name = str(item.get("logic_template_name") or logic_template.get("name") or "").strip() or None
         remediation_strategy_audit = quality.get("remediation_strategy_audit") if isinstance(quality.get("remediation_strategy_audit"), dict) else {}
         remediation_execution_audit = quality.get("remediation_execution_audit") if isinstance(quality.get("remediation_execution_audit"), dict) else {}
@@ -209,117 +322,149 @@ def _variant_result_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
                 }
             )
         rows.append(
-            {
-                "variant_index": idx,
-                "variant_id": item.get("variant_id"),
-                "topic": str(item.get("topic") or "").strip(),
-                "generation_mode": str(generation_trace.get("generation_mode") or item.get("generation_mode") or "").strip() or None,
-                "mode_effective": str(
-                    generation_trace.get("mode_effective")
-                    or generation_trace.get("generation_mode")
-                    or item.get("generation_mode")
-                    or ""
-                ).strip()
-                or None,
-                "stable_output": bool(generation_trace.get("stable_output", False)),
-                "deterministic_variant_forced": bool(generation_trace.get("deterministic_variant_forced", False)),
-                "deterministic_logic_template_id": str(
-                    generation_trace.get("deterministic_logic_template_id") or logic_template_id or ""
-                ).strip()
-                or None,
-                "logic_template_id": logic_template_id,
-                "logic_template_name": logic_template_name,
-                "section_count": len(sections),
-                "section_titles": [str(sec.get("title") or "").strip() for sec in sections if isinstance(sec, dict)],
-                "quality_score": quality.get("score"),
-                "quality_gate_ok": bool(quality_gate.get("ok", False)),
-                "quality_gate_failed_count": len(quality_gate.get("failed") or []) if isinstance(quality_gate.get("failed"), list) else 0,
-                "pipeline_stages": generation_trace.get("pipeline_stages") if isinstance(generation_trace.get("pipeline_stages"), list) else item.get("pipeline_stages"),
-                "retrieval_cache": generation_trace.get("retrieval_cache") if isinstance(generation_trace.get("retrieval_cache"), dict) else item.get("retrieval_cache"),
-                "self_evolution": generation_trace.get("self_evolution") if isinstance(generation_trace.get("self_evolution"), dict) else {},
-                "remediation_strategy_audit": remediation_strategy_audit,
-                "remediation_execution_audit": remediation_execution_audit,
-                "section_runtime_budget_preview": section_runtime_budget_preview,
-                "resource_usage_summary": item.get("resource_usage_summary") if isinstance(item.get("resource_usage_summary"), dict) else {},
-            }
+            summary_core.build_variant_summary_row(
+                item=item,
+                variant_index=idx,
+                logic_template_id=logic_template_id,
+                logic_template_name=logic_template_name,
+                section_count=len(sections),
+                section_runtime_budget_preview=section_runtime_budget_preview,
+                remediation_strategy_audit=remediation_strategy_audit,
+                remediation_execution_audit=remediation_execution_audit,
+                extra_fields={
+                    "section_titles": [str(sec.get("title") or "").strip() for sec in sections if isinstance(sec, dict)],
+                    "case_library_summary": summarize_case_reference_pack(item.get("case_reference_pack")),
+                    "image_library_summary": summarize_image_selection_pack(item.get("image_selection_pack")),
+                },
+            )
         )
     return {"variant_count": len(rows), "variants": rows}
 
 
 def _variant_result_key(row: Dict[str, Any]) -> str:
-    variant_id = str(row.get("variant_id") or "").strip()
-    if variant_id:
-        return variant_id
-    return f"v{max(1, int(row.get('variant_index') or 1))}"
+    return metadata_core.variant_result_key(row)
+
+
+def _build_blocking_issue_summary(
+    *,
+    quality_checks: Dict[str, Any] | None,
+    quality_gate: Dict[str, Any] | None,
+    limit: int = 8,
+) -> Dict[str, Any]:
+    return metadata_core.build_blocking_issue_summary(
+        quality_checks=quality_checks,
+        quality_gate=quality_gate,
+        limit=limit,
+    )
+
+
+def _build_variant_resume_index(
+    variant_plan: List[Dict[str, Any]],
+    *,
+    resumed_positions: set[int] | None = None,
+    generated_positions: set[int] | None = None,
+) -> Dict[str, Any]:
+    resumed_pos = resumed_positions if isinstance(resumed_positions, set) else set()
+    generated_pos = generated_positions if isinstance(generated_positions, set) else set()
+    resumed_variant_ids: List[int] = []
+    generated_variant_ids: List[int] = []
+    for pos, item in enumerate(variant_plan or []):
+        try:
+            variant_id = int(item.get("variant_id") or 0)
+        except Exception:
+            variant_id = 0
+        if variant_id <= 0:
+            continue
+        if pos in resumed_pos:
+            resumed_variant_ids.append(variant_id)
+        elif pos in generated_pos:
+            generated_variant_ids.append(variant_id)
+    return {
+        "resume_applied": bool(resumed_variant_ids),
+        "variants_total": len([it for it in (variant_plan or []) if isinstance(it, dict)]),
+        "resumed_count": len(resumed_variant_ids),
+        "generated_count": len(generated_variant_ids),
+        "resumed_variant_ids": resumed_variant_ids,
+        "generated_variant_ids": generated_variant_ids,
+    }
 
 
 def _persisted_job_result_metadata(results: List[Dict[str, Any]], payload: Dict[str, Any]) -> Dict[str, Any]:
     summary = _variant_result_summary(results)
     rows = summary.get("variants") if isinstance(summary.get("variants"), list) else []
-    mode_policy = payload.get("_mode_policy") if isinstance(payload.get("_mode_policy"), dict) else {}
-    first = rows[0] if rows else {}
-    metadata: Dict[str, Any] = {
-        "generation_mode_summary": {
-            "profile": str(mode_policy.get("profile") or first.get("generation_mode") or payload.get("generation_mode") or "").strip() or None,
-            "mode_effective": str(
-                mode_policy.get("mode_effective")
-                or first.get("mode_effective")
-                or first.get("generation_mode")
-                or payload.get("generation_mode")
-                or ""
-            ).strip()
-            or None,
-            "stable_output": bool(mode_policy.get("stable_output", first.get("stable_output", False))),
-            "deterministic_variant_forced": bool(
-                mode_policy.get("deterministic_variant_forced", first.get("deterministic_variant_forced", False))
-            ),
-            "deterministic_logic_template_id": str(
-                mode_policy.get("deterministic_logic_template_id")
-                or first.get("deterministic_logic_template_id")
-                or first.get("logic_template_id")
-                or payload.get("logic_template_id")
-                or ""
-            ).strip()
-            or None,
-        },
-        "runtime_by_variant": {},
-        "quality_by_variant": {},
-    }
-    for row in rows:
-        if not isinstance(row, dict):
+    return metadata_core.build_result_metadata_from_rows(
+        results=results,
+        payload=payload,
+        rows=rows,
+        blocking_summary_builder=_build_blocking_issue_summary,
+    )
+
+
+def _write_result_bundle(
+    job_id: str,
+    *,
+    payload: Dict[str, Any],
+    outputs: Dict[str, Any],
+    result_metadata: Dict[str, Any],
+    resource_usage_summary: Dict[str, Any],
+    variant_summary: Dict[str, Any],
+    workspace_dir: str | None = None,
+) -> str:
+    build_dir = workspace_paths(workspace_dir)["build"] if workspace_dir else Path("build")
+    build_dir.mkdir(parents=True, exist_ok=True)
+    return result_persistence.write_result_bundle_file(
+        job_id=job_id,
+        payload=payload,
+        outputs=outputs,
+        result_metadata=result_metadata,
+        resource_usage_summary=resource_usage_summary,
+        variant_summary=variant_summary,
+        fallback_build_dir=build_dir,
+        normalizer=_json_safe,
+    )
+
+
+def _default_result_bundle_path(job_id: str, *, workspace_dir: str | None = None) -> Path:
+    build_dir = workspace_paths(workspace_dir)["build"] if workspace_dir else Path("build")
+    build_dir.mkdir(parents=True, exist_ok=True)
+    return build_dir / f"actions_{str(job_id or '').strip() or 'unknown'}_result_bundle.json"
+
+
+def _load_reusable_result_bundle(
+    job_id: str,
+    *,
+    job_result: Dict[str, Any] | None,
+    workspace_dir: str | None = None,
+) -> Dict[str, Any] | None:
+    result = job_result if isinstance(job_result, dict) else {}
+    candidates: List[Path] = []
+    explicit = str(result.get("result_bundle_json") or "").strip()
+    if explicit:
+        candidates.append(Path(explicit))
+    legacy_json = str(result.get("json") or "").strip()
+    if legacy_json:
+        candidates.append(Path(legacy_json).with_name(f"{Path(legacy_json).stem}_result_bundle.json"))
+    candidates.append(_default_result_bundle_path(job_id, workspace_dir=workspace_dir))
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
             continue
-        variant_key = _variant_result_key(row)
-        metadata["runtime_by_variant"][variant_key] = {
-            "variant_index": row.get("variant_index"),
-            "variant_id": row.get("variant_id"),
-            "generation_mode": row.get("generation_mode"),
-            "mode_effective": row.get("mode_effective"),
-            "section_count": row.get("section_count"),
-            "pipeline_stages": row.get("pipeline_stages"),
-            "retrieval_cache": row.get("retrieval_cache"),
-            "self_evolution": row.get("self_evolution"),
-            "section_runtime_budget_preview": row.get("section_runtime_budget_preview"),
-            "resource_usage_summary": row.get("resource_usage_summary"),
+        seen.add(key)
+        bundle = load_result_bundle(path)
+        if not bundle or not result_bundle_artifacts_complete(bundle):
+            continue
+        outputs = extract_outputs_from_result_bundle(bundle)
+        if not outputs:
+            continue
+        return {
+            "bundle_path": str(path),
+            "outputs": outputs,
+            "result_metadata": bundle.get("result_metadata") if isinstance(bundle.get("result_metadata"), dict) else {},
+            "resource_usage_summary": bundle.get("resource_usage_summary") if isinstance(bundle.get("resource_usage_summary"), dict) else {},
+            "variant_summary": bundle.get("variant_summary") if isinstance(bundle.get("variant_summary"), dict) else {},
         }
-        metadata["quality_by_variant"][variant_key] = {
-            "variant_index": row.get("variant_index"),
-            "variant_id": row.get("variant_id"),
-            "logic_template_id": row.get("logic_template_id"),
-            "logic_template_name": row.get("logic_template_name"),
-            "quality_score": row.get("quality_score"),
-            "quality_gate_ok": row.get("quality_gate_ok"),
-            "quality_gate_failed_count": row.get("quality_gate_failed_count"),
-            "remediation_strategy_audit": row.get("remediation_strategy_audit"),
-            "remediation_execution_audit": row.get("remediation_execution_audit"),
-        }
-    if len(rows) == 1 and isinstance(first, dict):
-        logic_template_id = str(first.get("logic_template_id") or "").strip() or None
-        logic_template_name = str(first.get("logic_template_name") or "").strip() or None
-        if logic_template_id:
-            metadata["logic_template_id"] = logic_template_id
-        if logic_template_name:
-            metadata["logic_template_name"] = logic_template_name
-    return metadata
+    return None
 
 
 def _clamp_int(v: Any, default: int, lo: int, hi: int) -> int:
@@ -616,7 +761,7 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
             project_id=payload.get("project_id"),
             topic=payload.get("topic"),
         )
-        local_payload = _apply_generation_mode_policy(json.loads(json.dumps(payload)))
+        local_payload = apply_generation_mode_policy(json.loads(json.dumps(payload)))
         local_payload["_job_id"] = job_id
         if resolved_workspace:
             local_payload["workspace_dir"] = resolved_workspace
@@ -787,7 +932,7 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
                 if vid <= 0:
                     continue
                 rec: Dict[str, Any] = {"variant_id": vid}
-                tid = _normalize_logic_template_id(it.get("logic_template_id"))
+                tid = normalize_logic_template_id(it.get("logic_template_id"))
                 if tid:
                     rec["logic_template_id"] = tid
                 normalized_plan.append(rec)
@@ -847,8 +992,33 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
         async def _run_variants_parallel() -> list[dict]:
             sem = asyncio.Semaphore(max(1, int(variant_parallelism)))
             lock = asyncio.Lock()
-            done_count = 0
             ordered: list[dict | None] = [None for _ in range(len(variant_plan))]
+            resumed = _load_resumable_variant_results(
+                job_id,
+                payload=local_payload,
+                variant_plan=variant_plan,
+                request_signature=str(job.get("request_signature") or "").strip() or None,
+                workspace_dir=resolved_workspace,
+            )
+            resumed_positions = set(resumed.keys())
+            generated_positions: set[int] = set()
+            for pos, result in resumed.items():
+                ordered[pos] = result
+            done_count = len(resumed)
+            if done_count > 0:
+                agent_runtime["variants_done"] = int(done_count)
+                agent_runtime["resumed_variant_count"] = int(done_count)
+                _update_progress(
+                    job_id,
+                    agent_runtime,
+                    variants_total,
+                    15 + int((done_count / max(1, variants_total)) * 65),
+                    "variant_resume",
+                    f"已恢复方案进度：{done_count}/{variants_total}",
+                    progress_state=progress_state,
+                    sla_state=sla_state,
+                    workspace_dir=resolved_workspace,
+                )
             heartbeat_interval = max(10, int(local_payload.get("heartbeat_interval") or os.getenv("ZF_JOB_HEARTBEAT_SECONDS") or 20))
             stop_hb = asyncio.Event()
 
@@ -881,7 +1051,7 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
                 if _is_cancelled(job_id, workspace_dir=resolved_workspace):
                     return
                 vid = int(item.get("variant_id") or 1)
-                tid = _normalize_logic_template_id(item.get("logic_template_id"))
+                tid = normalize_logic_template_id(item.get("logic_template_id"))
                 lp = json.loads(json.dumps(local_payload))
                 lp["variant_id"] = int(vid)
                 if tid:
@@ -909,6 +1079,40 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
                     )
                     res = await run_autoplan(lp)
                     ordered[pos] = res
+                    generated_positions.add(pos)
+                    _write_variant_result_artifact(
+                        job_id,
+                        variant_id=vid,
+                        logic_template_id=tid,
+                        result=res,
+                        workspace_dir=resolved_workspace,
+                    )
+                    case_reference_pack = res.get("case_reference_pack") if isinstance(res.get("case_reference_pack"), dict) else {}
+                    if case_reference_pack:
+                        _write_stage_artifact(
+                            job_id,
+                            f"03_case_reference_pack_v{int(vid)}.json",
+                            {
+                                "job_id": job_id,
+                                "variant_id": int(vid),
+                                "logic_template_id": tid,
+                                "case_reference_pack": case_reference_pack,
+                            },
+                            workspace_dir=resolved_workspace,
+                        )
+                    image_selection_pack = res.get("image_selection_pack") if isinstance(res.get("image_selection_pack"), dict) else {}
+                    if image_selection_pack:
+                        _write_stage_artifact(
+                            job_id,
+                            f"03_image_selection_pack_v{int(vid)}.json",
+                            {
+                                "job_id": job_id,
+                                "variant_id": int(vid),
+                                "logic_template_id": tid,
+                                "image_selection_pack": image_selection_pack,
+                            },
+                            workspace_dir=resolved_workspace,
+                        )
                     _worker_log(job_id, f"variant_finished variant=v{int(vid)} template={tid or 'default'}", workspace_dir=resolved_workspace)
                 async with lock:
                     done_count += 1
@@ -927,13 +1131,22 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
 
             hb_task = asyncio.create_task(_heartbeat_loop())
             try:
-                await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(variant_plan)])
+                pending_tasks = [_run_one(i, item) for i, item in enumerate(variant_plan) if not isinstance(ordered[i], dict)]
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks)
             finally:
                 stop_hb.set()
                 try:
                     await hb_task
                 except Exception:
                     pass
+            agent_runtime["generated_variant_count"] = int(len(generated_positions))
+            agent_runtime["resumed_variant_count"] = int(len(resumed_positions))
+            agent_runtime["variant_resume_index"] = _build_variant_resume_index(
+                variant_plan,
+                resumed_positions=resumed_positions,
+                generated_positions=generated_positions,
+            )
             return [x for x in ordered if isinstance(x, dict)]
 
         results = asyncio.run(_run_variants_parallel())
@@ -943,6 +1156,7 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
             {
                 "job_id": job_id,
                 "result_summary": _variant_result_summary(results),
+                "resume_index": dict(agent_runtime.get("variant_resume_index") or {}),
             },
             workspace_dir=resolved_workspace,
         )
@@ -1146,21 +1360,61 @@ def execute_job(job_id: str, workspace_dir: str | None = None) -> None:
             sla_state=sla_state,
             workspace_dir=resolved_workspace,
         )
-        outputs = _save_outputs_compat(f"actions_{job_id}", results, workspace_dir=resolved_workspace)
-        resource_usage_summary = summarize_variants(results)
-        result_metadata = _persisted_job_result_metadata(results, local_payload)
-        job_result = {
-            **outputs,
-            "resource_usage_summary": resource_usage_summary,
-            **result_metadata,
-        }
+        reusable_bundle = _load_reusable_result_bundle(
+            job_id,
+            job_result=job.get("result") if isinstance(job.get("result"), dict) else {},
+            workspace_dir=resolved_workspace,
+        )
+        if reusable_bundle:
+            outputs = reusable_bundle.get("outputs") if isinstance(reusable_bundle.get("outputs"), dict) else {}
+            resource_usage_summary = reusable_bundle.get("resource_usage_summary") if isinstance(reusable_bundle.get("resource_usage_summary"), dict) else {}
+            result_metadata = reusable_bundle.get("result_metadata") if isinstance(reusable_bundle.get("result_metadata"), dict) else {}
+            variant_summary = reusable_bundle.get("variant_summary") if isinstance(reusable_bundle.get("variant_summary"), dict) else {}
+            result_bundle_json = str(reusable_bundle.get("bundle_path") or "").strip()
+            if not resource_usage_summary:
+                resource_usage_summary = summarize_variants(results)
+            if not result_metadata:
+                result_metadata = _persisted_job_result_metadata(results, local_payload)
+            if not variant_summary:
+                variant_summary = _variant_result_summary(results)
+            _update_progress(
+                job_id,
+                agent_runtime,
+                variants_total,
+                96,
+                "export_reused",
+                "检测到已完成导出结果，复用现有产物",
+                progress_state=progress_state,
+                sla_state=sla_state,
+                workspace_dir=resolved_workspace,
+            )
+        else:
+            outputs = _save_outputs_compat(f"actions_{job_id}", results, workspace_dir=resolved_workspace)
+            resource_usage_summary = summarize_variants(results)
+            result_metadata = _persisted_job_result_metadata(results, local_payload)
+            variant_summary = _variant_result_summary(results)
+            result_bundle_json = _write_result_bundle(
+                job_id,
+                payload=local_payload,
+                outputs=outputs,
+                result_metadata=result_metadata,
+                resource_usage_summary=resource_usage_summary,
+                variant_summary=variant_summary,
+                workspace_dir=resolved_workspace,
+            )
+        job_result = result_persistence.build_job_result_payload(
+            outputs=outputs,
+            resource_usage_summary=resource_usage_summary,
+            result_bundle_json=result_bundle_json,
+            result_metadata=result_metadata,
+        )
         _write_stage_artifact(
             job_id,
             "04_outputs.json",
             {
                 "job_id": job_id,
                 "outputs": job_result,
-                "result_summary": _variant_result_summary(results),
+                "result_summary": variant_summary,
             },
             workspace_dir=resolved_workspace,
         )

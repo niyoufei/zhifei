@@ -66,13 +66,13 @@ RUNTIME_DIR="${ZF_RUNTIME_DIR:-$ROOT/.runtime/docgen}"
 PID_BACKEND="$RUNTIME_DIR/webui_backend.pid"
 PID_STREAMLIT="$RUNTIME_DIR/streamlit.pid"
 PID_WATCHDOG="$RUNTIME_DIR/webui_watchdog.pid"
-CONTROL_LOG="logs/webui_control.log"
+CONTROL_LOG="${ZF_WEB_UI_CONTROL_LOG:-logs/webui_control.log}"
 
 control_log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$1" >> "$CONTROL_LOG"
 }
 
-mkdir -p logs "$RUNTIME_DIR"
+mkdir -p "$(dirname "$CONTROL_LOG")" "$RUNTIME_DIR" logs
 control_log "start requested background=$BACKGROUND backend_port=$BACKEND_PORT web_port=$WEB_PORT"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export ZF_SYSTEM_ID="$SYSTEM_ID"
@@ -236,6 +236,30 @@ is_our_streamlit_cmd() {
   return 0
 }
 
+ensure_existing_web_listener_ready() {
+  local owner_pid owner_cmd
+  owner_pid="$(port_owner_pid "$WEB_PORT")"
+  owner_cmd="$(pid_cmdline "${owner_pid:-}")"
+  if ! is_our_streamlit_cmd "$owner_cmd"; then
+    echo "[ERROR] 端口 ${WEB_PORT} 已被其他应用占用，为防止互相影响已停止启动。"
+    echo "        占用进程: pid=${owner_pid:-unknown}"
+    echo "        命令: ${owner_cmd:-unknown}"
+    control_log "start failed web_port_conflict owner_pid=${owner_pid:-unknown}"
+    return 1
+  fi
+  if ! streamlit_health_ok; then
+    echo "[ERROR] 已发现 Web UI 监听端口 ${WEB_PORT}，但健康检查失败，请检查 logs/streamlit.err.log"
+    echo "        占用进程: pid=${owner_pid:-unknown}"
+    echo "        命令: ${owner_cmd:-unknown}"
+    control_log "start failed web_reused_listener_unhealthy owner_pid=${owner_pid:-unknown}"
+    return 1
+  fi
+  if [ -n "${owner_pid:-}" ]; then
+    echo "$owner_pid" > "$PID_STREAMLIT"
+  fi
+  return 0
+}
+
 open_browser_if_allowed() {
   local open_url=""
   if [ "${ZF_SKIP_OPEN:-0}" = "1" ]; then
@@ -346,17 +370,8 @@ fi
 if [ "$BACKGROUND" = true ]; then
   web_reused=false
   if lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    owner_pid="$(port_owner_pid "$WEB_PORT")"
-    owner_cmd="$(pid_cmdline "${owner_pid:-}")"
-    if ! is_our_streamlit_cmd "$owner_cmd"; then
-      echo "[ERROR] 端口 ${WEB_PORT} 已被其他应用占用，为防止互相影响已停止启动。"
-      echo "        占用进程: pid=${owner_pid:-unknown}"
-      echo "        命令: ${owner_cmd:-unknown}"
-      control_log "start failed web_port_conflict owner_pid=${owner_pid:-unknown}"
+    if ! ensure_existing_web_listener_ready; then
       exit 1
-    fi
-    if [ -n "${owner_pid:-}" ]; then
-      echo "$owner_pid" > "$PID_STREAMLIT"
     fi
     web_reused=true
   else
@@ -435,7 +450,10 @@ if [ "$BACKGROUND" = true ]; then
 fi
 
 if lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  owner_pid="$(port_owner_pid "$WEB_PORT")"
+  if ! ensure_existing_web_listener_ready; then
+    exit 1
+  fi
+  owner_pid="$(cat "$PID_STREAMLIT" 2>/dev/null || port_owner_pid "$WEB_PORT")"
   control_log "start finished backend_pid=$(cat "$PID_BACKEND" 2>/dev/null || echo unknown) web_pid=${owner_pid:-unknown} foreground_reused_web=true"
   open_browser_if_allowed
   echo "文档生成系统已就绪，请访问 ${PUBLIC_WEB_URL:-http://${WEB_CONNECT_HOST}:${WEB_PORT}}"

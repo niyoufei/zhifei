@@ -6,8 +6,11 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from backend.app.routers.actions_bridge import (
     ActionsGenerateRequest,
+    ActionsReviewApplyRequest,
     _apply_generation_mode_policy,
     _build_variant_plan,
     _chief_agent_status_summary,
@@ -18,11 +21,15 @@ from backend.app.routers.actions_bridge import (
     _recent_job_remediation_strategy_summary,
     _recent_job_runtime_budget_summary,
     _review_items_for_variant,
+    actions_review_issues,
+    actions_review_apply,
+    actions_result,
     actions_generate_async,
     _watcher_status_summary,
 )
 from backend.zhifei_autoplan import job_store
 from backend.zhifei_autoplan.job_worker import _payload_stage_summary
+from backend.zhifei_autoplan.run_contract import load_result_bundle
 
 
 def _fmt_ts(offset_seconds: int = 0) -> str:
@@ -67,6 +74,510 @@ def test_review_items_merge_issue_and_suggestion():
     assert any(r.get("issue_id", "").startswith("R") for r in rows)
     # High severity should rank first
     assert rows[0].get("severity") == "high"
+
+
+def test_review_items_keep_reference_case_context():
+    variant = {
+        "sections": [
+            {
+                "title": "施工部署",
+                "content": "内容A",
+                "case_reference_pack": {
+                    "match_reason": "selected_case_ids",
+                    "non_fact_reference_notice": "案例仅用于结构与表达参考",
+                    "hits": [
+                        {
+                            "case_id": "case-1",
+                            "title": "养老院改造样板",
+                        }
+                    ],
+                },
+            },
+        ],
+        "quality_checks": {
+            "issue_list": [
+                {
+                    "title": "施工部署",
+                    "type": "case_reference_copy_risk",
+                    "severity": "high",
+                    "problem": "与案例相似度过高",
+                    "suggestion": "重写本章",
+                    "reference_case_id": "case-1",
+                }
+            ],
+            "auto_revision_suggestions": [],
+        },
+    }
+    rows = _review_items_for_variant(variant)
+    assert len(rows) == 1
+    assert rows[0]["reference_case_id"] == "case-1"
+    assert rows[0]["reference_context"] == {
+        "reference_case_id": "case-1",
+        "reference_case_title": "养老院改造样板",
+        "match_reason": "selected_case_ids",
+        "non_fact_reference_notice": "案例仅用于结构与表达参考",
+    }
+
+
+@pytest.mark.asyncio
+async def test_actions_review_issues_falls_back_to_first_variant_when_requested_out_of_range(tmp_path):
+    from backend.zhifei_autoplan import workspace as ws
+
+    workspaces = tmp_path / "workspaces"
+    with patch.object(ws, "WORKSPACE_ROOT", workspaces), patch.dict(
+        os.environ,
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ):
+        workspace_dir = str(ws.resolve_workspace_dir(session_id="review-issues-variants"))
+        source_json = tmp_path / "review-issues-variants.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "variants": [
+                        {
+                            "variant_id": 1,
+                            "sections": [{"title": "施工部署", "content": "第一版"}],
+                            "quality_checks": {
+                                "issue_list": [
+                                    {
+                                        "title": "施工部署",
+                                        "type": "engineering_gap",
+                                        "severity": "high",
+                                        "problem": "缺少责任",
+                                        "suggestion": "补齐责任",
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "variant_id": 2,
+                            "sections": [{"title": "安全措施", "content": "第二版"}],
+                            "quality_checks": {
+                                "issue_list": [
+                                    {
+                                        "title": "安全措施",
+                                        "type": "risk_triplet_gap",
+                                        "severity": "medium",
+                                        "problem": "缺少验证",
+                                        "suggestion": "补齐验证",
+                                    }
+                                ]
+                            },
+                        },
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        job_id = job_store.create_job(
+            {
+                "topic": "review-issues-variants",
+                "workspace_dir": workspace_dir,
+                "request_id": "req-review-issues-variants",
+                "trace_id": "trace-review-issues-variants",
+            },
+            workspace_dir=workspace_dir,
+        )
+        job_store.update_job(
+            job_id,
+            workspace_dir=workspace_dir,
+            status="done",
+            result={"json": str(source_json)},
+        )
+
+        response = await actions_review_issues(
+            job_id=job_id,
+            variant=9,
+            session_id="review-issues-variants",
+            x_actions_key="test-actions-key",
+        )
+
+    assert response["ok"] is True
+    assert response["job_id"] == job_id
+    assert response["variant"] == 1
+    assert response["count"] == 1
+    assert response["items"][0]["title"] == "施工部署"
+    assert response["items"][0]["issue_id"].startswith("I")
+
+
+@pytest.mark.asyncio
+async def test_actions_review_issues_keeps_reference_case_context(tmp_path):
+    from backend.zhifei_autoplan import workspace as ws
+
+    workspaces = tmp_path / "workspaces"
+    with patch.object(ws, "WORKSPACE_ROOT", workspaces), patch.dict(
+        os.environ,
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ):
+        workspace_dir = str(ws.resolve_workspace_dir(session_id="review-issues-reference"))
+        source_json = tmp_path / "review-issues-reference.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "variants": [
+                        {
+                            "variant_id": 1,
+                            "sections": [
+                                {
+                                    "title": "施工部署",
+                                    "content": "第一版",
+                                    "case_reference_pack": {
+                                        "match_reason": "selected_case_ids",
+                                        "non_fact_reference_notice": "案例仅用于结构与表达参考",
+                                        "hits": [
+                                            {
+                                                "case_id": "case-1",
+                                                "title": "养老院改造样板",
+                                            }
+                                        ],
+                                    },
+                                }
+                            ],
+                            "quality_checks": {
+                                "issue_list": [
+                                    {
+                                        "title": "施工部署",
+                                        "type": "case_reference_copy_risk",
+                                        "severity": "high",
+                                        "problem": "与案例相似度过高",
+                                        "suggestion": "重写本章",
+                                        "reference_case_id": "case-1",
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        job_id = job_store.create_job(
+            {
+                "topic": "review-issues-reference",
+                "workspace_dir": workspace_dir,
+                "request_id": "req-review-issues-reference",
+                "trace_id": "trace-review-issues-reference",
+            },
+            workspace_dir=workspace_dir,
+        )
+        job_store.update_job(
+            job_id,
+            workspace_dir=workspace_dir,
+            status="done",
+            result={"json": str(source_json)},
+        )
+
+        response = await actions_review_issues(
+            job_id=job_id,
+            variant=1,
+            session_id="review-issues-reference",
+            x_actions_key="test-actions-key",
+        )
+
+    assert response["ok"] is True
+    assert response["count"] == 1
+    assert response["items"][0]["type"] == "case_reference_copy_risk"
+    assert response["items"][0]["reference_case_id"] == "case-1"
+    assert response["items"][0]["reference_context"] == {
+        "reference_case_id": "case-1",
+        "reference_case_title": "养老院改造样板",
+        "match_reason": "selected_case_ids",
+        "non_fact_reference_notice": "案例仅用于结构与表达参考",
+    }
+
+
+@pytest.mark.asyncio
+async def test_actions_review_apply_refreshes_result_bundle_and_blocking_summary(tmp_path):
+    from backend.zhifei_autoplan import workspace as ws
+
+    workspaces = tmp_path / "workspaces"
+    with patch.object(ws, "WORKSPACE_ROOT", workspaces), patch.dict(
+        os.environ,
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ):
+        workspace_dir = str(ws.resolve_workspace_dir(session_id="review-apply-bundle"))
+        source_json = tmp_path / "review-source.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "variants": [
+                        {
+                            "variant_id": 1,
+                            "topic": "复核回写测试",
+                            "generation_mode": "stable_delivery",
+                            "generation_trace": {
+                                "generation_mode": "stable_delivery",
+                                "mode_effective": "stable_delivery",
+                                "stable_output": True,
+                                "deterministic_variant_forced": True,
+                                "deterministic_logic_template_id": "A",
+                            },
+                            "logic_template_id": "A",
+                            "logic_template_name": "交付清单驱动",
+                            "sections": [
+                                {"title": "施工部署", "content": "原始内容"}
+                            ],
+                            "quality_checks": {
+                                "score": 96,
+                                "issue_list": [
+                                    {
+                                        "title": "施工部署",
+                                        "type": "engineering_gap",
+                                        "severity": "high",
+                                        "problem": "缺少责任人与验收记录",
+                                        "suggestion": "补齐责任/频次/记录",
+                                    }
+                                ],
+                            },
+                            "quality_gate": {
+                                "ok": False,
+                                "failed": [{"metric": "engineering_ok_rate"}],
+                            },
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        job_id = job_store.create_job(
+            {
+                "topic": "复核回写测试",
+                "workspace_dir": workspace_dir,
+                "request_id": "req-review-apply-bundle",
+                "trace_id": "trace-review-apply-bundle",
+                "generation_mode": "stable_delivery",
+                "logic_template_id": "A",
+                "_mode_policy": {
+                    "profile": "stable_delivery",
+                    "mode_effective": "stable_delivery",
+                    "stable_output": True,
+                    "deterministic_variant_forced": True,
+                    "deterministic_logic_template_id": "A",
+                },
+            },
+            workspace_dir=workspace_dir,
+        )
+        job_store.update_job(
+            job_id,
+            workspace_dir=workspace_dir,
+            status="done",
+            result={"json": str(source_json)},
+        )
+
+        def _fake_save_outputs(base_name: str, results: list[dict], *, workspace_dir: str | None = None):
+            out_json = tmp_path / f"{base_name}.json"
+            out_docx = tmp_path / f"{base_name}.docx"
+            out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+            out_docx.write_bytes(b"docx")
+            return {"json": str(out_json), "docx": [str(out_docx)]}
+
+        with patch("backend.app.routers.actions_bridge._save_outputs", side_effect=_fake_save_outputs), \
+             patch("backend.app.routers.actions_bridge._rebuild_postprocessed_artifacts", return_value=None), \
+             patch("backend.app.routers.actions_bridge.apply_remediation", return_value=None):
+            response = await actions_review_apply(
+                ActionsReviewApplyRequest(job_id=job_id, variant=1, apply_all=True),
+                session_id="review-apply-bundle",
+                x_actions_key="test-actions-key",
+            )
+
+        stored = job_store.get_job(job_id, workspace_dir=workspace_dir)
+        result_view = await actions_result(
+            job_id=job_id,
+            variant=1,
+            session_id="review-apply-bundle",
+            x_actions_key="test-actions-key",
+        )
+
+    assert response["ok"] is True
+    assert Path(response["files"]["result_bundle_json"]).exists()
+    assert response["result_bundle_json"] == response["files"]["result_bundle_json"]
+    assert response["result_bundle_summary"]["complete"] is True
+    assert response["result_bundle_request"]["project_id"] is None
+    assert response["result_bundle_artifact_count"] == 2
+    assert response["result_bundle_artifacts"][0]["kind"] in {"json", "docx"}
+    assert response["download_index"]["docx"]["exists"] is True
+    assert response["download_ready_count"] == 3
+    assert response["download_ready_kinds"] == ["docx", "json", "result_bundle_json"]
+    assert response["primary_download_kind"] == "docx"
+    assert response["has_blocking_issues"] is True
+    assert response["blocking_issue_count"] == 1
+    assert response["applied_items_summary"][0]["title"] == "施工部署"
+    assert response["applied_items_summary"][0]["apply_mode"] == "remediation"
+    assert response["applied_reference_case_ids"] == []
+    assert response["latest_review_apply_summary"]["applied_count"] == 1
+    assert response["latest_review_apply_summary"]["issue_types"] == ["engineering_gap"]
+    assert response["review_apply_history_count"] == 1
+    assert response["review_apply_history"][-1]["applied_count"] == 1
+    assert response["review_apply_last_applied_at"]
+    assert stored["result"]["result_bundle_json"] == response["files"]["result_bundle_json"]
+    assert stored["result"]["blocking_issue_summary"]["has_blocking_issues"] is True
+    assert stored["result"]["blocking_issue_summary"]["failed_gate_metric_count"] == 1
+    assert stored["result"]["latest_review_apply_summary"]["applied_count"] == 1
+    assert stored["result"]["review_apply_history"][-1]["applied_count"] == 1
+    bundle = load_result_bundle(stored["result"]["result_bundle_json"])
+    assert bundle is not None
+    assert bundle["result_metadata"]["blocking_issue_summary"]["blocking_issue_count"] == 1
+    assert bundle["result_metadata"]["latest_review_apply_summary"]["applied_count"] == 1
+    assert bundle["result_metadata"]["review_apply_history"][-1]["applied_count"] == 1
+    assert bundle["result_metadata"]["generation_mode_summary"]["profile"] == "stable_delivery"
+    assert result_view["result_bundle_summary"]["path"] == stored["result"]["result_bundle_json"]
+    assert result_view["result_bundle_artifact_count"] == 2
+    assert result_view["download_index"]["result_bundle_json"]["exists"] is True
+    assert result_view["blocking_issue_count"] == 1
+    assert result_view["review_apply_history_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_actions_review_apply_returns_reference_risk_applied_summary(tmp_path):
+    from backend.zhifei_autoplan import workspace as ws
+
+    workspaces = tmp_path / "workspaces"
+    audit_events: list[dict] = []
+    with patch.object(ws, "WORKSPACE_ROOT", workspaces), patch.dict(
+        os.environ,
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ):
+        workspace_dir = str(ws.resolve_workspace_dir(session_id="review-apply-reference"))
+        source_json = tmp_path / "review-reference-source.json"
+        source_json.write_text(
+            json.dumps(
+                {
+                    "variants": [
+                        {
+                            "variant_id": 1,
+                            "topic": "复核引用风险回执",
+                            "generation_mode": "stable_delivery",
+                            "generation_trace": {
+                                "generation_mode": "stable_delivery",
+                                "mode_effective": "stable_delivery",
+                                "stable_output": True,
+                                "deterministic_variant_forced": True,
+                                "deterministic_logic_template_id": "A",
+                            },
+                            "logic_template_id": "A",
+                            "logic_template_name": "交付清单驱动",
+                            "sections": [
+                                {
+                                    "title": "施工部署",
+                                    "content": "原始内容",
+                                    "case_reference_pack": {
+                                        "match_reason": "selected_case_ids",
+                                        "non_fact_reference_notice": "案例仅用于结构与表达参考",
+                                        "hits": [
+                                            {
+                                                "case_id": "case-1",
+                                                "title": "养老院改造样板",
+                                            }
+                                        ],
+                                    },
+                                }
+                            ],
+                            "quality_checks": {
+                                "score": 96,
+                                "issue_list": [
+                                    {
+                                        "title": "施工部署",
+                                        "type": "case_reference_copy_risk",
+                                        "severity": "high",
+                                        "problem": "与案例相似度过高",
+                                        "suggestion": "重写本章",
+                                        "reference_case_id": "case-1",
+                                    }
+                                ],
+                            },
+                            "quality_gate": {
+                                "ok": True,
+                                "failed": [],
+                            },
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        job_id = job_store.create_job(
+            {
+                "topic": "review-apply-reference",
+                "workspace_dir": workspace_dir,
+                "request_id": "req-review-apply-reference",
+                "trace_id": "trace-review-apply-reference",
+                "generation_mode": "stable_delivery",
+                "logic_template_id": "A",
+                "_mode_policy": {
+                    "profile": "stable_delivery",
+                    "mode_effective": "stable_delivery",
+                    "stable_output": True,
+                    "deterministic_variant_forced": True,
+                    "deterministic_logic_template_id": "A",
+                },
+            },
+            workspace_dir=workspace_dir,
+        )
+        job_store.update_job(
+            job_id,
+            workspace_dir=workspace_dir,
+            status="done",
+            result={"json": str(source_json)},
+        )
+
+        def _fake_save_outputs(base_name: str, results: list[dict], *, workspace_dir: str | None = None):
+            out_json = tmp_path / f"{base_name}.json"
+            out_docx = tmp_path / f"{base_name}.docx"
+            out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+            out_docx.write_bytes(b"docx")
+            return {"json": str(out_json), "docx": [str(out_docx)]}
+
+        with patch("backend.app.routers.actions_bridge._save_outputs", side_effect=_fake_save_outputs), patch(
+            "backend.app.routers.actions_bridge._rebuild_postprocessed_artifacts",
+            return_value=None,
+        ), patch("backend.app.routers.actions_bridge.apply_remediation", return_value=None), patch(
+            "backend.app.routers.actions_bridge.append_resource_event",
+            side_effect=lambda event, **fields: audit_events.append({"event": event, **fields}) or str(tmp_path / "resource.jsonl"),
+        ):
+            response = await actions_review_apply(
+                ActionsReviewApplyRequest(job_id=job_id, variant=1, apply_all=True),
+                session_id="review-apply-reference",
+                x_actions_key="test-actions-key",
+            )
+
+    assert response["ok"] is True
+    assert response["applied_count"] == 1
+    assert response["applied_reference_case_ids"] == ["case-1"]
+    assert response["latest_review_apply_summary"]["reference_case_ids"] == ["case-1"]
+    assert response["review_apply_history_count"] == 1
+    assert response["review_apply_history"][-1]["reference_case_ids"] == ["case-1"]
+    assert response["applied_items_summary"] == [
+        {
+            "issue_id": "I0001",
+            "source": "issue_list",
+            "title": "施工部署",
+            "type": "case_reference_copy_risk",
+            "apply_mode": "remediation",
+            "reference_case_id": "case-1",
+            "reference_context": {
+                "reference_case_id": "case-1",
+                "reference_case_title": "养老院改造样板",
+                "match_reason": "selected_case_ids",
+                "non_fact_reference_notice": "案例仅用于结构与表达参考",
+            },
+        }
+    ]
+    assert audit_events[-1]["event"] == "review_apply"
+    assert audit_events[-1]["job_id"] == job_id
+    assert audit_events[-1]["applied_reference_case_ids"] == ["case-1"]
+    assert audit_events[-1]["applied_types"] == ["case_reference_copy_risk"]
 
 
 def test_recent_job_agent_runtime_summary_keeps_parallelism_fields():
@@ -355,7 +866,13 @@ async def test_actions_generate_async_reuses_same_payload_with_new_trace_ids(tmp
     assert first["admission"]["requested_jobs"] == 1
     assert second["admission"]["scope"] == "session"
     job_dir = Path(first["workspace_dir"]) / "jobs"
-    assert len(list(job_dir.glob("*.json"))) == 1
+    job_files = list(job_dir.glob("*.json"))
+    assert len(job_files) == 1
+    stored_job = json.loads(job_files[0].read_text(encoding="utf-8"))
+    contract = stored_job["payload"].get("_contract_stamp") if isinstance(stored_job.get("payload"), dict) else {}
+    assert contract["request_contract_version"] == "actions-generate-contract-v1"
+    assert contract["prompt_prefix_version"]
+    assert contract["engineering_rules"]["path"]
     assert len(audit_events) == 1
     assert audit_events[0]["event"] == "job_queued"
     assert audit_events[0]["workspace_dir"] == first["workspace_dir"]

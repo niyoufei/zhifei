@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from pypdf import PdfReader
 
 from backend.zhifei_autoplan.project_types import normalize_project_type
+from backend.zhifei_autoplan.image_library import IMAGE_LIBRARY_SCOPE, normalize_text_list
 from backend.zhifei_autoplan.workspace import maybe_cleanup_expired_workspaces, resolve_workspace_dir, workspace_paths
 from backend.zhifei_autoplan.template_library import (
     TEMPLATE_BENCHMARK_TAG,
@@ -156,6 +157,9 @@ def _normalize_source_hint(source_hint: str | None) -> str:
         "样板": "template_library",
         "案例库": "template_library",
         "优秀案例": "template_library",
+        "image_library": "image_library",
+        "图片库": "image_library",
+        "图库": "image_library",
     }
     return aliases.get(raw, raw)
 
@@ -172,6 +176,9 @@ def _normalize_library_scope(library_scope: str | None, source_hint: str | None 
         "样板库": TEMPLATE_LIBRARY_SCOPE,
         "样板": TEMPLATE_LIBRARY_SCOPE,
         "案例库": TEMPLATE_LIBRARY_SCOPE,
+        "image_library": IMAGE_LIBRARY_SCOPE,
+        "图片库": IMAGE_LIBRARY_SCOPE,
+        "图库": IMAGE_LIBRARY_SCOPE,
     }
     return aliases.get(raw, "")
 
@@ -322,13 +329,22 @@ async def _handle_upload(
     template_feedback_origin: str | None = None,
     source_job_id: str | None = None,
     source_variant: int | None = None,
+    library_tags: str | None = None,
+    chapter_scope: str | None = None,
+    process_scope: str | None = None,
+    library_title: str | None = None,
+    library_summary: str | None = None,
+    library_style_profile: str | None = None,
+    library_caption: str | None = None,
+    library_description: str | None = None,
+    library_enabled: bool | None = None,
 ):
     if not files:
         raise HTTPException(status_code=400, detail="no files uploaded")
 
     workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
     ws_paths = workspace_paths(workspace["workspace_dir"])
-    day = datetime.utcnow().strftime("%Y%m%d")
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
     target_dir = ws_paths["uploads"] / day
     target_dir.mkdir(parents=True, exist_ok=True)
     extract_dir = ws_paths["extracts"]
@@ -354,11 +370,22 @@ async def _handle_upload(
         normalized_feedback_score = 0
     normalized_feedback_score = max(0, min(normalized_feedback_score, 100))
     normalized_source_job_id = str(source_job_id or "").strip()[:64] or None
+    normalized_library_tags = normalize_text_list(library_tags)
+    normalized_chapter_scope = normalize_text_list(chapter_scope)
+    normalized_process_scope = normalize_text_list(process_scope)
+    normalized_library_title = str(library_title or "").strip()[:240] or None
+    normalized_library_summary = str(library_summary or "").strip()[:800] or None
+    normalized_library_style_profile = str(library_style_profile or "").strip()[:800] or None
+    normalized_library_caption = str(library_caption or "").strip()[:240] or None
+    normalized_library_description = str(library_description or "").strip()[:800] or None
+    normalized_library_enabled = True if library_enabled is None else bool(library_enabled)
     try:
         normalized_source_variant = int(source_variant) if source_variant is not None else None
     except Exception:
         normalized_source_variant = None
-    if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE and not normalized_project_type:
+    if normalized_library_scope in {TEMPLATE_LIBRARY_SCOPE, IMAGE_LIBRARY_SCOPE} and not normalized_project_type:
+        if normalized_library_scope == IMAGE_LIBRARY_SCOPE:
+            raise HTTPException(status_code=400, detail="image library upload requires valid project_type")
         raise HTTPException(status_code=400, detail="template library upload requires valid project_type")
     for uf in files:
         content = await uf.read()
@@ -366,6 +393,8 @@ async def _handle_upload(
             continue
         digest = _sha256(content)
         ext = _ext(uf.filename or "")
+        if normalized_library_scope == IMAGE_LIBRARY_SCOPE and ext not in {"png", "jpg", "jpeg", "webp", "gif"}:
+            raise HTTPException(status_code=400, detail="image library upload requires image files")
 
         saved_name = f"{digest[:8]}_{uf.filename}"
         out_path = target_dir / saved_name
@@ -438,7 +467,7 @@ async def _handle_upload(
         merged_scene_tags = normalize_template_scene_tags(normalized_scene_tags + inferred_scene_tags)
 
         rec = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "module": "ingest",
             "project_id": pid,
             "session_id": workspace["session_id"],
@@ -456,6 +485,16 @@ async def _handle_upload(
             "project_type": normalized_project_type or None,
             "library_scope": normalized_library_scope or None,
             "library_note": normalized_library_note or None,
+            "library_title": normalized_library_title,
+            "library_tags": normalized_library_tags,
+            "chapter_scope": normalized_chapter_scope,
+            "process_scope": normalized_process_scope,
+            "library_summary": normalized_library_summary,
+            "library_style_profile": normalized_library_style_profile,
+            "library_caption": normalized_library_caption,
+            "library_description": normalized_library_description,
+            "enabled": normalized_library_enabled,
+            "usable": normalized_library_enabled,
             "template_scene_tags": merged_scene_tags if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else [],
             "template_feedback_score": normalized_feedback_score if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else 0,
             "template_feedback_origin": normalized_feedback_origin if normalized_library_scope == TEMPLATE_LIBRARY_SCOPE else None,
@@ -513,6 +552,15 @@ async def upload(
     template_feedback_origin: str | None = None,
     source_job_id: str | None = None,
     source_variant: int | None = None,
+    library_tags: str | None = None,
+    chapter_scope: str | None = None,
+    process_scope: str | None = None,
+    library_title: str | None = None,
+    library_summary: str | None = None,
+    library_style_profile: str | None = None,
+    library_caption: str | None = None,
+    library_description: str | None = None,
+    library_enabled: bool | None = None,
 ):
     return await _handle_upload(
         files,
@@ -529,6 +577,15 @@ async def upload(
         template_feedback_origin=template_feedback_origin,
         source_job_id=source_job_id,
         source_variant=source_variant,
+        library_tags=library_tags,
+        chapter_scope=chapter_scope,
+        process_scope=process_scope,
+        library_title=library_title,
+        library_summary=library_summary,
+        library_style_profile=library_style_profile,
+        library_caption=library_caption,
+        library_description=library_description,
+        library_enabled=library_enabled,
     )
 
 
@@ -548,6 +605,15 @@ async def ingest(
     template_feedback_origin: str | None = None,
     source_job_id: str | None = None,
     source_variant: int | None = None,
+    library_tags: str | None = None,
+    chapter_scope: str | None = None,
+    process_scope: str | None = None,
+    library_title: str | None = None,
+    library_summary: str | None = None,
+    library_style_profile: str | None = None,
+    library_caption: str | None = None,
+    library_description: str | None = None,
+    library_enabled: bool | None = None,
 ):
     return await _handle_upload(
         files,
@@ -564,6 +630,15 @@ async def ingest(
         template_feedback_origin=template_feedback_origin,
         source_job_id=source_job_id,
         source_variant=source_variant,
+        library_tags=library_tags,
+        chapter_scope=chapter_scope,
+        process_scope=process_scope,
+        library_title=library_title,
+        library_summary=library_summary,
+        library_style_profile=library_style_profile,
+        library_caption=library_caption,
+        library_description=library_description,
+        library_enabled=library_enabled,
     )
 
 

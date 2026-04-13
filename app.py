@@ -3369,6 +3369,991 @@ def _job_failure_hint(status: Any, error_text: Any, stage_artifacts_dir: Any = "
     return ""
 
 
+def _normalize_reference_text_list_ui(raw: Any) -> list[str]:
+    try:
+        from backend.zhifei_autoplan.image_library import normalize_text_list as _normalize_text_list
+
+        return _normalize_text_list(raw)
+    except Exception:
+        return _normalize_scene_tags_ui(raw)
+
+
+def _safe_local_preview_path(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        try:
+            path = Path(text)
+        except Exception:
+            continue
+        if path.exists() and path.is_file():
+            return str(path)
+    return ""
+
+
+def _build_reference_library_summary_html(
+    *,
+    label: str,
+    summary: dict[str, Any],
+    current_project_type: str,
+    latest_label_fallback: str,
+) -> str:
+    by_project_type = summary.get("by_project_type") if isinstance(summary.get("by_project_type"), dict) else {}
+    total_count = int(summary.get("total_count") or 0)
+    current_count = int(by_project_type.get(current_project_type) or 0) if current_project_type else 0
+    latest_item = summary.get("latest_item") if isinstance(summary.get("latest_item"), dict) else {}
+    latest_label = str(
+        latest_item.get("title")
+        or latest_item.get("name")
+        or latest_item.get("filename")
+        or latest_label_fallback
+    ).strip() or latest_label_fallback
+    latest_meta_parts = []
+    latest_ts = _format_iso_ts_short(latest_item.get("updated_at") or latest_item.get("created_at") or latest_item.get("ts"))
+    if latest_ts:
+        latest_meta_parts.append(latest_ts)
+    latest_project_type = str(latest_item.get("project_type") or "").strip()
+    if latest_project_type:
+        latest_meta_parts.append(latest_project_type)
+    latest_meta = " · ".join(latest_meta_parts) if latest_meta_parts else "等待入库"
+    return "".join(
+        [
+            "<div class='zf-library-summary'>",
+            (
+                "<div class='zf-library-stat'>"
+                f"<span>{html.escape(label)}总量</span><strong>{total_count}</strong>"
+                "<em>仅作为增强参考源，默认关闭</em></div>"
+            ),
+            (
+                "<div class='zf-library-stat'>"
+                f"<span>{html.escape(current_project_type or '当前项目类型')}</span><strong>{current_count}</strong>"
+                "<em>列表按当前生成项目类型自动切换</em></div>"
+            ),
+            (
+                "<div class='zf-library-stat'>"
+                f"<span>最近入库</span><strong>{html.escape(latest_label)}</strong>"
+                f"<em>{html.escape(latest_meta)}</em></div>"
+            ),
+            "</div>",
+        ]
+    )
+
+
+def _reference_library_card_html(
+    *,
+    title: str,
+    meta_parts: list[str],
+    body_lines: list[str],
+) -> str:
+    parts = ["<div class='zf-library-item'>", f"<strong>{html.escape(title)}</strong>"]
+    if meta_parts:
+        parts.append(f"<span>{html.escape(' · '.join([x for x in meta_parts if str(x).strip()]))}</span>")
+    for line in body_lines:
+        text = str(line or "").strip()
+        if not text:
+            continue
+        parts.append(f"<p>{html.escape(text)}</p>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_reference_library_items(
+    items: list[dict[str, Any]],
+    *,
+    kind: str,
+    empty_text: str,
+    selected_ids: list[str] | None = None,
+) -> None:
+    if not items:
+        st.caption(empty_text)
+        return
+    selected_set = {str(x).strip() for x in (selected_ids or []) if str(x).strip()}
+    for item in items:
+        title = str(item.get("title") or item.get("name") or item.get("filename") or "未命名参考").strip() or "未命名参考"
+        project_type = str(item.get("project_type") or "").strip()
+        meta_parts = []
+        if project_type:
+            meta_parts.append(project_type)
+        updated_at = _format_iso_ts_short(item.get("updated_at") or item.get("created_at"))
+        if updated_at:
+            meta_parts.append(updated_at)
+        if kind == "case":
+            template_page_bucket = str(item.get("template_page_bucket") or "").strip()
+            if template_page_bucket:
+                meta_parts.append(_template_page_bucket_label(template_page_bucket))
+            if str(item.get("case_id") or "").strip() in selected_set:
+                meta_parts.append("已指定优先参考")
+            summary = str(item.get("summary") or "").strip()
+            style_profile = str(item.get("style_profile") or "").strip()
+            chapter_scope = [str(x).strip() for x in (item.get("chapter_scope") or []) if str(x).strip()]
+            body_lines = [
+                summary or "仅用于格式、结构与表达方式参考，不覆盖项目事实。",
+                f"风格画像：{style_profile}" if style_profile else "",
+                f"适用章节：{' / '.join(chapter_scope[:4])}" if chapter_scope else "",
+            ]
+        else:
+            if str(item.get("image_id") or "").strip() in selected_set:
+                meta_parts.append("已指定优先插图")
+            chapter_scope = [str(x).strip() for x in (item.get("chapter_scope") or []) if str(x).strip()]
+            process_scope = [str(x).strip() for x in (item.get("process_scope") or []) if str(x).strip()]
+            caption = str(item.get("caption") or "").strip()
+            description = str(item.get("description") or "").strip()
+            body_lines = [
+                caption or description or "生成时按项目类型、章节主题和标签进行匹配；未命中时不强插图。",
+                f"章节范围：{' / '.join(chapter_scope[:4])}" if chapter_scope else "",
+                f"工序范围：{' / '.join(process_scope[:4])}" if process_scope else "",
+            ]
+        tags = _normalize_reference_text_list_ui(item.get("tags") or [])
+        card_html = _reference_library_card_html(title=title, meta_parts=meta_parts, body_lines=body_lines)
+        if kind == "image":
+            preview_path = _safe_local_preview_path(
+                item.get("preview_saved_as"),
+                item.get("source_path"),
+                item.get("storage_path"),
+            )
+            if preview_path:
+                cols = st.columns([0.28, 0.72], gap="medium")
+                with cols[0]:
+                    try:
+                        st.image(preview_path, use_container_width=True)
+                    except Exception:
+                        st.caption("图片预览暂不可用")
+                with cols[1]:
+                    st.markdown(card_html, unsafe_allow_html=True)
+                    if tags:
+                        st.markdown(
+                            "<div class='zf-chip-row'>"
+                            + "".join(f"<span class='zf-chip'>{html.escape(tag)}</span>" for tag in tags[:6])
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
+                continue
+        st.markdown(card_html, unsafe_allow_html=True)
+        if tags:
+            st.markdown(
+                "<div class='zf-chip-row'>"
+                + "".join(f"<span class='zf-chip'>{html.escape(tag)}</span>" for tag in tags[:6])
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+
+
+def _build_case_library_request_options() -> dict[str, Any] | None:
+    enabled = bool(st.session_state.get("case_library_enabled"))
+    if not enabled:
+        return None
+    selected_case_ids = [
+        str(x).strip()
+        for x in (st.session_state.get("case_library_selected_ids") or [])
+        if str(x).strip()
+    ]
+    try:
+        top_k = int(st.session_state.get("case_library_top_k") or 3)
+    except Exception:
+        top_k = 3
+    top_k = max(1, min(8, top_k))
+    return {
+        "enabled": enabled,
+        "selected_case_ids": selected_case_ids,
+        "top_k": top_k,
+    }
+
+
+def _build_image_library_request_options() -> dict[str, Any] | None:
+    enabled = bool(st.session_state.get("image_library_enabled"))
+    if not enabled:
+        return None
+    selected_image_ids = [
+        str(x).strip()
+        for x in (st.session_state.get("image_library_selected_ids") or [])
+        if str(x).strip()
+    ]
+    try:
+        top_k = int(st.session_state.get("image_library_top_k") or 3)
+    except Exception:
+        top_k = 3
+    top_k = max(1, min(8, top_k))
+    return {
+        "enabled": enabled,
+        "selected_image_ids": selected_image_ids,
+        "top_k": top_k,
+    }
+
+
+def _normalize_reference_library_summary_ui(summary: dict[str, Any] | None, *, id_key: str) -> dict[str, Any]:
+    data = summary if isinstance(summary, dict) else {}
+    selected_ids = [
+        str(item).strip()
+        for item in (data.get(id_key) or [])
+        if str(item).strip()
+    ]
+    warning_list = [
+        str(item).strip()
+        for item in (data.get("warning_list") or [])
+        if str(item).strip()
+    ]
+    matched_chapters = [
+        str(item).strip()
+        for item in (data.get("matched_chapters") or [])
+        if str(item).strip()
+    ]
+    if not matched_chapters:
+        matched_chapter = str(data.get("matched_chapter") or "").strip()
+        if matched_chapter:
+            matched_chapters = [matched_chapter]
+    match_reasons = [
+        str(item).strip()
+        for item in (data.get("match_reasons") or [])
+        if str(item).strip()
+    ]
+    if not match_reasons:
+        match_reason = str(data.get("match_reason") or "").strip()
+        if match_reason:
+            match_reasons = [match_reason]
+    variant_ids = [
+        str(item).strip()
+        for item in (data.get("variant_ids") or [])
+        if str(item).strip()
+    ]
+    hit_count = int(data.get("hit_count") or len(selected_ids) or 0)
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        id_key: selected_ids,
+        "matched_project_type": str(data.get("matched_project_type") or "").strip() or None,
+        "matched_chapters": matched_chapters,
+        "matched_chapter": matched_chapters[0] if matched_chapters else None,
+        "match_reasons": match_reasons,
+        "match_reason": match_reasons[0] if match_reasons else None,
+        "hit_count": hit_count,
+        "warning_list": warning_list,
+        "variant_ids": variant_ids,
+    }
+
+
+def _reference_library_summary_has_content(summary: dict[str, Any] | None, *, id_key: str) -> bool:
+    normalized = _normalize_reference_library_summary_ui(summary, id_key=id_key)
+    return any(
+        [
+            bool(normalized.get("enabled")),
+            bool(normalized.get(id_key)),
+            bool(normalized.get("matched_project_type")),
+            bool(normalized.get("matched_chapters")),
+            bool(normalized.get("match_reasons")),
+            bool(normalized.get("warning_list")),
+            bool(normalized.get("variant_ids")),
+            int(normalized.get("hit_count") or 0) > 0,
+        ]
+    )
+
+
+def _aggregate_reference_library_summary_ui(
+    runtime_by_variant: dict[str, Any] | None,
+    *,
+    summary_key: str,
+    id_key: str,
+) -> dict[str, Any]:
+    rows = runtime_by_variant if isinstance(runtime_by_variant, dict) else {}
+    enabled = False
+    selected_ids: list[str] = []
+    seen_ids: set[str] = set()
+    matched_project_types: list[str] = []
+    seen_project_types: set[str] = set()
+    matched_chapters: list[str] = []
+    seen_chapters: set[str] = set()
+    match_reasons: list[str] = []
+    seen_reasons: set[str] = set()
+    warning_list: list[str] = []
+    seen_warnings: set[str] = set()
+    variant_ids: list[str] = []
+    seen_variant_ids: set[str] = set()
+    hit_count = 0
+    for raw_variant, runtime in rows.items():
+        if not isinstance(runtime, dict):
+            continue
+        summary = runtime.get(summary_key) if isinstance(runtime.get(summary_key), dict) else {}
+        item = _normalize_reference_library_summary_ui(summary, id_key=id_key)
+        if not _reference_library_summary_has_content(item, id_key=id_key):
+            continue
+        enabled = enabled or bool(item.get("enabled"))
+        hit_count += int(item.get("hit_count") or 0)
+        for value in item.get(id_key) or []:
+            if value not in seen_ids:
+                seen_ids.add(value)
+                selected_ids.append(value)
+        project_type = str(item.get("matched_project_type") or "").strip()
+        if project_type and project_type not in seen_project_types:
+            seen_project_types.add(project_type)
+            matched_project_types.append(project_type)
+        for chapter in item.get("matched_chapters") or []:
+            chapter_text = str(chapter).strip()
+            if chapter_text and chapter_text not in seen_chapters:
+                seen_chapters.add(chapter_text)
+                matched_chapters.append(chapter_text)
+        for reason in item.get("match_reasons") or []:
+            reason_text = str(reason).strip()
+            if reason_text and reason_text not in seen_reasons:
+                seen_reasons.add(reason_text)
+                match_reasons.append(reason_text)
+        for warning in item.get("warning_list") or []:
+            warning_text = str(warning).strip()
+            if warning_text and warning_text not in seen_warnings:
+                seen_warnings.add(warning_text)
+                warning_list.append(warning_text)
+        variant_candidate = runtime.get("variant_index")
+        if variant_candidate is None or variant_candidate == "" or variant_candidate == 0:
+            variant_candidate = runtime.get("variant_id")
+        if variant_candidate is None or variant_candidate == "" or variant_candidate == 0:
+            variant_candidate = raw_variant
+        variant_text = str(variant_candidate or "").strip()
+        if variant_text:
+            normalized_variant = variant_text[1:] if variant_text[:1].lower() == "v" else variant_text
+            try:
+                variant_label = f"v{int(normalized_variant)}"
+            except Exception:
+                variant_label = variant_text
+            if variant_label not in seen_variant_ids:
+                seen_variant_ids.add(variant_label)
+                variant_ids.append(variant_label)
+    return {
+        "enabled": enabled,
+        id_key: selected_ids,
+        "matched_project_type": matched_project_types[0] if len(matched_project_types) == 1 else None,
+        "matched_chapters": matched_chapters,
+        "matched_chapter": matched_chapters[0] if matched_chapters else None,
+        "match_reasons": match_reasons,
+        "match_reason": match_reasons[0] if match_reasons else None,
+        "hit_count": hit_count,
+        "warning_list": warning_list,
+        "variant_ids": variant_ids,
+    }
+
+
+def _merge_reference_library_summary_ui(
+    primary: dict[str, Any] | None,
+    fallback: dict[str, Any] | None,
+    *,
+    id_key: str,
+) -> dict[str, Any]:
+    current = _normalize_reference_library_summary_ui(primary, id_key=id_key)
+    fallback_summary = _normalize_reference_library_summary_ui(fallback, id_key=id_key)
+    merged = dict(current)
+    if not merged.get("enabled"):
+        merged["enabled"] = bool(fallback_summary.get("enabled"))
+    if not merged.get(id_key):
+        merged[id_key] = list(fallback_summary.get(id_key) or [])
+    if not merged.get("matched_project_type"):
+        merged["matched_project_type"] = fallback_summary.get("matched_project_type")
+    if not merged.get("matched_chapters"):
+        merged["matched_chapters"] = list(fallback_summary.get("matched_chapters") or [])
+        merged["matched_chapter"] = merged["matched_chapters"][0] if merged["matched_chapters"] else None
+    if not merged.get("match_reasons"):
+        merged["match_reasons"] = list(fallback_summary.get("match_reasons") or [])
+        merged["match_reason"] = merged["match_reasons"][0] if merged["match_reasons"] else None
+    if not merged.get("variant_ids"):
+        merged["variant_ids"] = list(fallback_summary.get("variant_ids") or [])
+    if not int(merged.get("hit_count") or 0):
+        merged["hit_count"] = int(fallback_summary.get("hit_count") or 0)
+    if fallback_summary.get("warning_list"):
+        merged["warning_list"] = list(
+            dict.fromkeys(
+                [
+                    *[str(item).strip() for item in (merged.get("warning_list") or []) if str(item).strip()],
+                    *[str(item).strip() for item in (fallback_summary.get("warning_list") or []) if str(item).strip()],
+                ]
+            )
+        )
+    return merged
+
+
+def _resolve_result_reference_library_summaries(result: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    payload = result if isinstance(result, dict) else {}
+    runtime_by_variant = payload.get("runtime_by_variant") if isinstance(payload.get("runtime_by_variant"), dict) else {}
+    case_summary = _merge_reference_library_summary_ui(
+        payload.get("case_library_summary") if isinstance(payload.get("case_library_summary"), dict) else {},
+        _aggregate_reference_library_summary_ui(
+            runtime_by_variant,
+            summary_key="case_library_summary",
+            id_key="selected_case_ids",
+        ),
+        id_key="selected_case_ids",
+    )
+    image_summary = _merge_reference_library_summary_ui(
+        payload.get("image_library_summary") if isinstance(payload.get("image_library_summary"), dict) else {},
+        _aggregate_reference_library_summary_ui(
+            runtime_by_variant,
+            summary_key="image_library_summary",
+            id_key="selected_image_ids",
+        ),
+        id_key="selected_image_ids",
+    )
+    return {
+        "case_library_summary": case_summary,
+        "image_library_summary": image_summary,
+    }
+
+
+def _decode_result_json_ui(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (bytes, bytearray)):
+        text = raw.decode("utf-8", errors="ignore")
+    else:
+        text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _variant_sections_from_result_ui(result: dict[str, Any] | None, variant: int) -> list[dict[str, Any]]:
+    payload = result if isinstance(result, dict) else {}
+    data = _decode_result_json_ui(payload.get("result_json"))
+    variants = data.get("variants") if isinstance(data.get("variants"), list) else []
+    try:
+        position = max(1, int(variant or 1))
+    except Exception:
+        position = 1
+    record: dict[str, Any] = {}
+    if position <= len(variants) and isinstance(variants[position - 1], dict):
+        record = variants[position - 1]
+    elif len(variants) == 1 and isinstance(variants[0], dict):
+        record = variants[0]
+    elif isinstance(data.get("sections"), list):
+        record = data
+    sections = record.get("sections") if isinstance(record.get("sections"), list) else []
+    return [section for section in sections if isinstance(section, dict)]
+
+
+def _chapter_case_reference_summary_ui(pack: dict[str, Any] | None) -> dict[str, Any]:
+    raw = pack if isinstance(pack, dict) else {}
+    hits = raw.get("hits") if isinstance(raw.get("hits"), list) else []
+    reference_titles = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        text = str(hit.get("title") or hit.get("filename") or hit.get("case_id") or "").strip()
+        if text and text not in reference_titles:
+            reference_titles.append(text)
+    summary = _normalize_reference_library_summary_ui(
+        {
+            "enabled": bool(raw.get("enabled", False)),
+            "selected_case_ids": raw.get("selected_case_ids") or [],
+            "matched_project_type": raw.get("matched_project_type"),
+            "matched_chapter": raw.get("matched_chapter"),
+            "match_reason": raw.get("match_reason"),
+            "warning_list": raw.get("warning_list") or [],
+            "hit_count": len(hits),
+        },
+        id_key="selected_case_ids",
+    )
+    summary["reference_titles"] = reference_titles
+    summary["style_hints"] = [str(x).strip() for x in (raw.get("style_hints") or []) if str(x).strip()]
+    summary["structure_hints"] = [str(x).strip() for x in (raw.get("structure_hints") or []) if str(x).strip()]
+    summary["non_fact_reference_notice"] = str(raw.get("non_fact_reference_notice") or "").strip()
+    return summary
+
+
+def _chapter_image_reference_summary_ui(pack: dict[str, Any] | None) -> dict[str, Any]:
+    raw = pack if isinstance(pack, dict) else {}
+    images = raw.get("images") if isinstance(raw.get("images"), list) else []
+    image_titles = []
+    preview_paths = []
+    for item in images:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("caption") or item.get("title") or item.get("image_id") or "").strip()
+        if text and text not in image_titles:
+            image_titles.append(text)
+        preview_path = _safe_local_preview_path(
+            item.get("preview_saved_as"),
+            item.get("source_path"),
+            item.get("storage_path"),
+        )
+        if preview_path and preview_path not in preview_paths:
+            preview_paths.append(preview_path)
+    summary = _normalize_reference_library_summary_ui(
+        {
+            "enabled": bool(raw.get("enabled", False)),
+            "selected_image_ids": raw.get("selected_image_ids") or [],
+            "matched_project_type": raw.get("matched_project_type"),
+            "matched_chapter": raw.get("matched_chapter"),
+            "match_reason": raw.get("match_reason"),
+            "warning_list": raw.get("warning_list") or [],
+            "hit_count": len(images),
+        },
+        id_key="selected_image_ids",
+    )
+    summary["image_titles"] = image_titles
+    summary["preview_paths"] = preview_paths
+    summary["first_preview_path"] = preview_paths[0] if preview_paths else ""
+    summary["caption_hint"] = str(raw.get("caption_hint") or "").strip()
+    summary["insertion_hint"] = str(raw.get("insertion_hint") or "").strip()
+    return summary
+
+
+def _chapter_reference_rows_ui(result: dict[str, Any] | None, variant: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for section in _variant_sections_from_result_ui(result, variant):
+        title = str(section.get("title") or "").strip() or "章节"
+        case_summary = _chapter_case_reference_summary_ui(
+            section.get("case_reference_pack") if isinstance(section.get("case_reference_pack"), dict) else {}
+        )
+        image_summary = _chapter_image_reference_summary_ui(
+            section.get("image_selection_pack") if isinstance(section.get("image_selection_pack"), dict) else {}
+        )
+        if not (
+            _reference_library_summary_has_content(case_summary, id_key="selected_case_ids")
+            or _reference_library_summary_has_content(image_summary, id_key="selected_image_ids")
+        ):
+            continue
+        rows.append(
+            {
+                "title": title,
+                "case_library": case_summary,
+                "image_library": image_summary,
+            }
+        )
+    return rows
+
+
+def _aggregate_reference_library_summary_from_chapter_rows_ui(
+    rows: list[dict[str, Any]] | None,
+    *,
+    summary_key: str,
+    id_key: str,
+) -> dict[str, Any]:
+    normalized_rows = rows if isinstance(rows, list) else []
+    enabled = False
+    selected_ids: list[str] = []
+    seen_ids: set[str] = set()
+    matched_project_types: list[str] = []
+    seen_project_types: set[str] = set()
+    matched_chapters: list[str] = []
+    seen_chapters: set[str] = set()
+    match_reasons: list[str] = []
+    seen_reasons: set[str] = set()
+    warning_list: list[str] = []
+    seen_warnings: set[str] = set()
+    hit_count = 0
+    for row in normalized_rows:
+        if not isinstance(row, dict):
+            continue
+        summary = row.get(summary_key) if isinstance(row.get(summary_key), dict) else {}
+        item = _normalize_reference_library_summary_ui(summary, id_key=id_key)
+        if not _reference_library_summary_has_content(item, id_key=id_key):
+            continue
+        enabled = enabled or bool(item.get("enabled"))
+        hit_count += int(item.get("hit_count") or 0)
+        for value in item.get(id_key) or []:
+            if value not in seen_ids:
+                seen_ids.add(value)
+                selected_ids.append(value)
+        project_type = str(item.get("matched_project_type") or "").strip()
+        if project_type and project_type not in seen_project_types:
+            seen_project_types.add(project_type)
+            matched_project_types.append(project_type)
+        chapters = [str(x).strip() for x in (item.get("matched_chapters") or []) if str(x).strip()]
+        if not chapters:
+            fallback_title = str(row.get("title") or "").strip()
+            if fallback_title:
+                chapters = [fallback_title]
+        for chapter in chapters:
+            if chapter not in seen_chapters:
+                seen_chapters.add(chapter)
+                matched_chapters.append(chapter)
+        for reason in item.get("match_reasons") or []:
+            reason_text = str(reason).strip()
+            if reason_text and reason_text not in seen_reasons:
+                seen_reasons.add(reason_text)
+                match_reasons.append(reason_text)
+        for warning in item.get("warning_list") or []:
+            warning_text = str(warning).strip()
+            if warning_text and warning_text not in seen_warnings:
+                seen_warnings.add(warning_text)
+                warning_list.append(warning_text)
+    return {
+        "enabled": enabled,
+        id_key: selected_ids,
+        "matched_project_type": matched_project_types[0] if len(matched_project_types) == 1 else None,
+        "matched_chapters": matched_chapters,
+        "matched_chapter": matched_chapters[0] if matched_chapters else None,
+        "match_reasons": match_reasons,
+        "match_reason": match_reasons[0] if match_reasons else None,
+        "hit_count": hit_count,
+        "warning_list": warning_list,
+        "variant_ids": [],
+    }
+
+
+def _chapter_reference_overview_ui(rows: list[dict[str, Any]] | None) -> dict[str, int]:
+    normalized_rows = rows if isinstance(rows, list) else []
+    case_chapters = 0
+    image_chapters = 0
+    warning_chapters = 0
+    preview_chapters = 0
+    for row in normalized_rows:
+        if not isinstance(row, dict):
+            continue
+        case_summary = row.get("case_library") if isinstance(row.get("case_library"), dict) else {}
+        image_summary = row.get("image_library") if isinstance(row.get("image_library"), dict) else {}
+        has_case = any(
+            [
+                int(case_summary.get("hit_count") or 0) > 0,
+                bool(case_summary.get("selected_case_ids")),
+                bool(case_summary.get("reference_titles")),
+            ]
+        )
+        has_image = any(
+            [
+                int(image_summary.get("hit_count") or 0) > 0,
+                bool(image_summary.get("selected_image_ids")),
+                bool(image_summary.get("image_titles")),
+                bool(str(image_summary.get("first_preview_path") or "").strip()),
+            ]
+        )
+        if has_case:
+            case_chapters += 1
+        if has_image:
+            image_chapters += 1
+        warning_list = [
+            str(x).strip()
+            for x in (case_summary.get("warning_list") or [])
+            if str(x).strip()
+        ] + [
+            str(x).strip()
+            for x in (image_summary.get("warning_list") or [])
+            if str(x).strip()
+        ]
+        if warning_list:
+            warning_chapters += 1
+        if str(image_summary.get("first_preview_path") or "").strip():
+            preview_chapters += 1
+    return {
+        "chapter_count": sum(1 for row in normalized_rows if isinstance(row, dict)),
+        "case_chapter_count": case_chapters,
+        "image_chapter_count": image_chapters,
+        "warning_chapter_count": warning_chapters,
+        "preview_chapter_count": preview_chapters,
+    }
+
+
+def _variant_reference_library_summaries_ui(
+    result: dict[str, Any] | None,
+    variant: int,
+    runtime: dict[str, Any] | None,
+) -> dict[str, Any]:
+    runtime_payload = runtime if isinstance(runtime, dict) else {}
+    chapter_rows = _chapter_reference_rows_ui(result, variant)
+    return {
+        "case_library_summary": _merge_reference_library_summary_ui(
+            runtime_payload.get("case_library_summary") if isinstance(runtime_payload.get("case_library_summary"), dict) else {},
+            _aggregate_reference_library_summary_from_chapter_rows_ui(
+                chapter_rows,
+                summary_key="case_library",
+                id_key="selected_case_ids",
+            ),
+            id_key="selected_case_ids",
+        ),
+        "image_library_summary": _merge_reference_library_summary_ui(
+            runtime_payload.get("image_library_summary") if isinstance(runtime_payload.get("image_library_summary"), dict) else {},
+            _aggregate_reference_library_summary_from_chapter_rows_ui(
+                chapter_rows,
+                summary_key="image_library",
+                id_key="selected_image_ids",
+            ),
+            id_key="selected_image_ids",
+        ),
+        "chapter_rows": chapter_rows,
+    }
+
+
+def _render_case_library_panel(base_url: str, actions_key: str) -> None:
+    flash = str(st.session_state.pop("case_library_flash", "") or "").strip()
+    if flash:
+        st.success(flash)
+    current_project_type = str(st.session_state.get("project_type") or "").strip()
+    upload_project_type = str(st.session_state.get("case_library_project_type") or current_project_type or (PROJECT_TYPES[0] if PROJECT_TYPES else "")).strip()
+    if PROJECT_TYPES and upload_project_type not in PROJECT_TYPES:
+        upload_project_type = current_project_type if current_project_type in PROJECT_TYPES else PROJECT_TYPES[0]
+        st.session_state["case_library_project_type"] = upload_project_type
+    st.markdown(
+        "<div class='zf-reference-banner'><strong>案例库</strong><span>默认关闭。仅学习格式、结构、表达方式；不得覆盖招标文件、BoQ、图纸、答疑与企业参数。</span></div>",
+        unsafe_allow_html=True,
+    )
+    try:
+        summary_payload = _get_json(base_url, "/actions/case_library/summary", actions_key, timeout=40)
+        summary = summary_payload.get("summary") if isinstance(summary_payload, dict) else {}
+        if not isinstance(summary, dict):
+            summary = {}
+    except Exception as e:
+        summary = {}
+        st.caption(f"案例库摘要暂不可用：{e}")
+    st.markdown(
+        _build_reference_library_summary_html(
+            label="案例",
+            summary=summary,
+            current_project_type=current_project_type,
+            latest_label_fallback="暂无案例",
+        ),
+        unsafe_allow_html=True,
+    )
+    try:
+        items_payload = _get_json(
+            base_url,
+            "/actions/case_library/items",
+            actions_key,
+            params={"project_type": current_project_type, "sort_by": "priority", "limit": 8},
+            timeout=40,
+        )
+        items = items_payload.get("items") if isinstance(items_payload, dict) else []
+        if not isinstance(items, list):
+            items = []
+    except Exception as e:
+        items = []
+        st.caption(f"案例库列表暂不可用：{e}")
+    case_id_to_label = {
+        str(item.get("case_id") or "").strip(): str(item.get("title") or item.get("name") or "未命名案例").strip() or "未命名案例"
+        for item in items
+        if isinstance(item, dict) and str(item.get("case_id") or "").strip()
+    }
+    current_selected = [
+        item_id
+        for item_id in (st.session_state.get("case_library_selected_ids") or [])
+        if str(item_id).strip() in case_id_to_label
+    ]
+    if current_selected != list(st.session_state.get("case_library_selected_ids") or []):
+        st.session_state["case_library_selected_ids"] = current_selected
+    c1, c2 = st.columns([1.3, 1.0], gap="medium")
+    with c1:
+        st.checkbox("生成时启用案例库增强", key="case_library_enabled")
+        st.caption("关闭时现网行为保持不变；启用后优先按项目类型与章节语义检索。")
+    with c2:
+        st.number_input("案例检索数量", min_value=1, max_value=8, key="case_library_top_k")
+        st.caption(f"当前生成项目类型：{current_project_type or '未选择'}")
+    st.multiselect(
+        "指定优先参考案例（可选）",
+        options=list(case_id_to_label.keys()),
+        key="case_library_selected_ids",
+        format_func=lambda case_id: case_id_to_label.get(str(case_id), str(case_id)),
+        help="不指定时，系统按项目类型、章节主题和已有样板画像自动检索。",
+    )
+    st.markdown("**当前可参考案例**")
+    _render_reference_library_items(
+        items,
+        kind="case",
+        empty_text="当前项目类型下还没有可用案例。",
+        selected_ids=st.session_state.get("case_library_selected_ids") or [],
+    )
+    st.markdown("**录入新案例**")
+    st.selectbox("案例项目类型", options=PROJECT_TYPES, key="case_library_project_type")
+    st.text_input("案例标题（可选）", key="case_library_upload_title", placeholder="例如：房建总承包 / 地库与装配式施工组织设计")
+    st.text_input("标签（可选）", key="case_library_upload_tags", placeholder="例如：医院, 地库, 装配式")
+    st.text_input("适用章节（可选）", key="case_library_upload_chapter_scope", placeholder="例如：工程概况, 施工部署, 安全文明")
+    st.text_area(
+        "案例摘要（可选）",
+        key="case_library_upload_summary",
+        height=76,
+        placeholder="例如：结构清晰、表达克制、施工部署与安全文明章节较成熟。",
+    )
+    st.text_area(
+        "风格画像（可选）",
+        key="case_library_upload_style_profile",
+        height=68,
+        placeholder="例如：先约束后展开、句式短、工程化字段齐。",
+    )
+    case_files = st.file_uploader(
+        "上传案例文件",
+        type=["pdf", "doc", "docx", "txt", "md"],
+        accept_multiple_files=True,
+        key="case_library_files",
+        help="建议上传高质量最终版施组或稳定可复用章节案例。",
+    )
+    if st.button("加入案例库", key="case_library_upload_btn", width="stretch", type="secondary"):
+        try:
+            if not case_files:
+                raise ValueError("请先上传至少 1 个案例文件")
+            project_type = str(st.session_state.get("case_library_project_type") or "").strip()
+            if project_type not in PROJECT_TYPES:
+                raise ValueError("请选择有效的项目类型")
+            saved = _post_files(
+                base_url,
+                "/actions/case_library/upload",
+                actions_key,
+                "files",
+                list(case_files or []),
+                params={
+                    "project_type": project_type,
+                    "title": str(st.session_state.get("case_library_upload_title") or "").strip(),
+                    "tags": ",".join(_normalize_reference_text_list_ui(st.session_state.get("case_library_upload_tags") or "")),
+                    "chapter_scope": ",".join(_normalize_reference_text_list_ui(st.session_state.get("case_library_upload_chapter_scope") or "")),
+                    "summary": str(st.session_state.get("case_library_upload_summary") or "").strip(),
+                    "style_profile": str(st.session_state.get("case_library_upload_style_profile") or "").strip(),
+                },
+                timeout=900,
+            )
+            saved_count = len(saved.get("items") or []) if isinstance(saved, dict) else 0
+            _queue_widget_update("case_library_upload_title", "")
+            _queue_widget_update("case_library_upload_tags", "")
+            _queue_widget_update("case_library_upload_chapter_scope", "")
+            _queue_widget_update("case_library_upload_summary", "")
+            _queue_widget_update("case_library_upload_style_profile", "")
+            _queue_widget_update("case_library_files", [])
+            st.session_state["case_library_flash"] = f"已加入案例库：{project_type} / {saved_count} 个文件。"
+            st.rerun()
+        except Exception as e:
+            st.error(f"案例入库失败: {e}")
+
+
+def _render_image_library_panel(base_url: str, actions_key: str) -> None:
+    flash = str(st.session_state.pop("image_library_flash", "") or "").strip()
+    if flash:
+        st.success(flash)
+    current_project_type = str(st.session_state.get("project_type") or "").strip()
+    upload_project_type = str(st.session_state.get("image_library_project_type") or current_project_type or (PROJECT_TYPES[0] if PROJECT_TYPES else "")).strip()
+    if PROJECT_TYPES and upload_project_type not in PROJECT_TYPES:
+        upload_project_type = current_project_type if current_project_type in PROJECT_TYPES else PROJECT_TYPES[0]
+        st.session_state["image_library_project_type"] = upload_project_type
+    st.markdown(
+        "<div class='zf-reference-banner'><strong>图片库</strong><span>默认关闭。启用后只在命中时插入本地图库图片；未命中不强插图，且不会覆盖高优先级事实。</span></div>",
+        unsafe_allow_html=True,
+    )
+    try:
+        summary_payload = _get_json(base_url, "/actions/image_library/summary", actions_key, timeout=40)
+        summary = summary_payload.get("summary") if isinstance(summary_payload, dict) else {}
+        if not isinstance(summary, dict):
+            summary = {}
+    except Exception as e:
+        summary = {}
+        st.caption(f"图片库摘要暂不可用：{e}")
+    st.markdown(
+        _build_reference_library_summary_html(
+            label="图片",
+            summary=summary,
+            current_project_type=current_project_type,
+            latest_label_fallback="暂无图片",
+        ),
+        unsafe_allow_html=True,
+    )
+    try:
+        items_payload = _get_json(
+            base_url,
+            "/actions/image_library/items",
+            actions_key,
+            params={"project_type": current_project_type, "limit": 8},
+            timeout=40,
+        )
+        items = items_payload.get("items") if isinstance(items_payload, dict) else []
+        if not isinstance(items, list):
+            items = []
+    except Exception as e:
+        items = []
+        st.caption(f"图片库列表暂不可用：{e}")
+    image_id_to_label = {
+        str(item.get("image_id") or "").strip(): str(item.get("title") or item.get("name") or "未命名图片").strip() or "未命名图片"
+        for item in items
+        if isinstance(item, dict) and str(item.get("image_id") or "").strip()
+    }
+    current_selected = [
+        item_id
+        for item_id in (st.session_state.get("image_library_selected_ids") or [])
+        if str(item_id).strip() in image_id_to_label
+    ]
+    if current_selected != list(st.session_state.get("image_library_selected_ids") or []):
+        st.session_state["image_library_selected_ids"] = current_selected
+    c1, c2 = st.columns([1.3, 1.0], gap="medium")
+    with c1:
+        st.checkbox("生成时启用图片库增强", key="image_library_enabled")
+        st.caption("即使关闭 AI 生图，只要这里启用且命中，也会插入图库中的本地图片。")
+    with c2:
+        st.number_input("图片检索数量", min_value=1, max_value=8, key="image_library_top_k")
+        st.caption(f"当前生成项目类型：{current_project_type or '未选择'}")
+    st.multiselect(
+        "指定优先图片（可选）",
+        options=list(image_id_to_label.keys()),
+        key="image_library_selected_ids",
+        format_func=lambda image_id: image_id_to_label.get(str(image_id), str(image_id)),
+        help="不指定时，系统按项目类型、章节主题、标签和工序范围自动检索。",
+    )
+    st.markdown("**当前可参考图片**")
+    _render_reference_library_items(
+        items,
+        kind="image",
+        empty_text="当前项目类型下还没有可用图片。",
+        selected_ids=st.session_state.get("image_library_selected_ids") or [],
+    )
+    st.markdown("**录入新图片**")
+    st.selectbox("图片项目类型", options=PROJECT_TYPES, key="image_library_project_type")
+    st.text_input("图片标题（可选）", key="image_library_upload_title", placeholder="例如：医院项目总平面布置图")
+    st.text_input("标签（可选）", key="image_library_upload_tags", placeholder="例如：总平, 临建, 安全文明")
+    st.text_input("章节范围（可选）", key="image_library_upload_chapter_scope", placeholder="例如：施工总平面布置, 安全文明")
+    st.text_input("工序范围（可选）", key="image_library_upload_process_scope", placeholder="例如：土方开挖, 模板工程")
+    st.text_input("图片说明（可选）", key="image_library_upload_caption", placeholder="例如：现场平面布置示意")
+    st.text_area(
+        "补充描述（可选）",
+        key="image_library_upload_description",
+        height=72,
+        placeholder="例如：适用于房建项目施工总平面章节，含塔吊、临建和道路组织。",
+    )
+    image_files = st.file_uploader(
+        "上传图片文件",
+        type=["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
+        accept_multiple_files=True,
+        key="image_library_files",
+        help="建议上传可直接用于成品插图的现场图、总平图、工序示意图。",
+    )
+    if st.button("加入图片库", key="image_library_upload_btn", width="stretch", type="secondary"):
+        try:
+            if not image_files:
+                raise ValueError("请先上传至少 1 张图片")
+            project_type = str(st.session_state.get("image_library_project_type") or "").strip()
+            if project_type not in PROJECT_TYPES:
+                raise ValueError("请选择有效的项目类型")
+            saved = _post_files(
+                base_url,
+                "/actions/image_library/upload",
+                actions_key,
+                "files",
+                list(image_files or []),
+                params={
+                    "project_type": project_type,
+                    "title": str(st.session_state.get("image_library_upload_title") or "").strip(),
+                    "tags": ",".join(_normalize_reference_text_list_ui(st.session_state.get("image_library_upload_tags") or "")),
+                    "chapter_scope": ",".join(_normalize_reference_text_list_ui(st.session_state.get("image_library_upload_chapter_scope") or "")),
+                    "process_scope": ",".join(_normalize_reference_text_list_ui(st.session_state.get("image_library_upload_process_scope") or "")),
+                    "caption": str(st.session_state.get("image_library_upload_caption") or "").strip(),
+                    "description": str(st.session_state.get("image_library_upload_description") or "").strip(),
+                },
+                timeout=900,
+            )
+            saved_count = len(saved.get("items") or []) if isinstance(saved, dict) else 0
+            _queue_widget_update("image_library_upload_title", "")
+            _queue_widget_update("image_library_upload_tags", "")
+            _queue_widget_update("image_library_upload_chapter_scope", "")
+            _queue_widget_update("image_library_upload_process_scope", "")
+            _queue_widget_update("image_library_upload_caption", "")
+            _queue_widget_update("image_library_upload_description", "")
+            _queue_widget_update("image_library_files", [])
+            st.session_state["image_library_flash"] = f"已加入图片库：{project_type} / {saved_count} 张图片。"
+            st.rerun()
+        except Exception as e:
+            st.error(f"图片入库失败: {e}")
+
+
+def _render_reference_libraries_panel(base_url: str, actions_key: str) -> None:
+    st.caption("默认关闭；启用后只作为增强参考源参与检索。案例学结构与表达，图片补插图，两者都不得覆盖高优先级事实源。")
+    tab_case, tab_image, tab_legacy = st.tabs(["案例库", "图片库", "历史样板库"])
+    with tab_case:
+        _render_case_library_panel(base_url, actions_key)
+    with tab_image:
+        _render_image_library_panel(base_url, actions_key)
+    with tab_legacy:
+        _render_template_library_panel(base_url, actions_key)
+
+
 def _render_template_library_items(
     base_url: str,
     actions_key: str,
@@ -3900,6 +4885,8 @@ def _build_submission_signature(
     generation_mode: str,
     selected_templates: list[str],
     total_pages_target: int,
+    case_library: dict[str, Any] | None,
+    image_library: dict[str, Any] | None,
     tender_files: list[Any] | None,
     boq_files: list[Any] | None,
     drawing_files: list[Any] | None,
@@ -3912,6 +4899,8 @@ def _build_submission_signature(
         "generation_mode": str(generation_mode or "").strip(),
         "selected_templates": [str(x).strip() for x in (selected_templates or []) if str(x).strip()],
         "total_pages_target": int(total_pages_target or 0),
+        "case_library": case_library if isinstance(case_library, dict) else {},
+        "image_library": image_library if isinstance(image_library, dict) else {},
         "files": {
             "tender_qa": _submission_file_refs(tender_files),
             "boq": _submission_file_refs(boq_files),
@@ -4302,6 +5291,30 @@ div.block-container {
 
 .zf-library-item p {
   margin: 7px 0 0 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 19px;
+  font-weight: 600;
+}
+
+.zf-reference-banner {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--brand-200);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(228, 238, 249, 0.92) 0%, rgba(244, 248, 252, 0.96) 100%);
+}
+
+.zf-reference-banner strong {
+  color: var(--brand-800);
+  font-size: 16px;
+  line-height: 22px;
+  font-weight: 800;
+}
+
+.zf-reference-banner span {
   color: var(--text-2);
   font-size: 13px;
   line-height: 19px;
@@ -5742,6 +6755,27 @@ def _init_state() -> None:
         "sample_library_project_type": PROJECT_TYPES[0] if PROJECT_TYPES else "",
         "sample_library_page_bucket": TEMPLATE_PAGE_BUCKETS[0] if TEMPLATE_PAGE_BUCKETS else "",
         "sample_library_note": "",
+        "case_library_enabled": False,
+        "case_library_top_k": 3,
+        "case_library_selected_ids": [],
+        "case_library_project_type": PROJECT_TYPES[0] if PROJECT_TYPES else "",
+        "case_library_upload_title": "",
+        "case_library_upload_tags": "",
+        "case_library_upload_chapter_scope": "",
+        "case_library_upload_summary": "",
+        "case_library_upload_style_profile": "",
+        "case_library_flash": "",
+        "image_library_enabled": False,
+        "image_library_top_k": 3,
+        "image_library_selected_ids": [],
+        "image_library_project_type": PROJECT_TYPES[0] if PROJECT_TYPES else "",
+        "image_library_upload_title": "",
+        "image_library_upload_tags": "",
+        "image_library_upload_chapter_scope": "",
+        "image_library_upload_process_scope": "",
+        "image_library_upload_caption": "",
+        "image_library_upload_description": "",
+        "image_library_flash": "",
         "template_library_flash": "",
         "recent_job_flash": "",
         "review_apply_flash": None,
@@ -5780,6 +6814,10 @@ def _init_state() -> None:
         st.session_state["project_type"] = PROJECT_TYPES[0]
     if PROJECT_TYPES and st.session_state.get("sample_library_project_type") not in PROJECT_TYPES:
         st.session_state["sample_library_project_type"] = str(st.session_state.get("project_type") or PROJECT_TYPES[0])
+    if PROJECT_TYPES and st.session_state.get("case_library_project_type") not in PROJECT_TYPES:
+        st.session_state["case_library_project_type"] = str(st.session_state.get("project_type") or PROJECT_TYPES[0])
+    if PROJECT_TYPES and st.session_state.get("image_library_project_type") not in PROJECT_TYPES:
+        st.session_state["image_library_project_type"] = str(st.session_state.get("project_type") or PROJECT_TYPES[0])
     if TEMPLATE_PAGE_BUCKETS and st.session_state.get("sample_library_page_bucket") not in TEMPLATE_PAGE_BUCKETS:
         st.session_state["sample_library_page_bucket"] = TEMPLATE_PAGE_BUCKETS[0]
     normalized_front_matter_mode = _normalize_front_matter_page_mode(st.session_state.get("front_matter_page_mode"))
@@ -6261,6 +7299,160 @@ def _render_downloads() -> None:
                 stages = runtime.get("pipeline_stages") if isinstance(runtime.get("pipeline_stages"), list) else []
                 if stages:
                     st.dataframe(stages, width="stretch", hide_index=True)
+            variant_reference = _variant_reference_library_summaries_ui(result, i, runtime)
+            variant_cards: list[str] = []
+            variant_info_lines: list[str] = []
+            variant_warning_lines: list[str] = []
+            for label, summary, id_key in [
+                (
+                    "案例库",
+                    variant_reference.get("case_library_summary") if isinstance(variant_reference.get("case_library_summary"), dict) else {},
+                    "selected_case_ids",
+                ),
+                (
+                    "图片库",
+                    variant_reference.get("image_library_summary") if isinstance(variant_reference.get("image_library_summary"), dict) else {},
+                    "selected_image_ids",
+                ),
+            ]:
+                normalized = _normalize_reference_library_summary_ui(summary, id_key=id_key)
+                if not _reference_library_summary_has_content(normalized, id_key=id_key):
+                    continue
+                selected_ids = normalized.get(id_key) or []
+                matched_project_type = str(normalized.get("matched_project_type") or "").strip() or "未命中"
+                matched_chapters = [str(x).strip() for x in (normalized.get("matched_chapters") or []) if str(x).strip()]
+                match_reasons = [str(x).strip() for x in (normalized.get("match_reasons") or []) if str(x).strip()]
+                chapter_text = " / ".join(matched_chapters[:3])
+                reason_text = " / ".join(match_reasons[:2]) if match_reasons else "未记录"
+                variant_cards.append(
+                    "<div class='zf-library-stat'>"
+                    f"<span>{html.escape(label)}</span>"
+                    f"<strong>{int(normalized.get('hit_count') or len(selected_ids) or 0)}</strong>"
+                    f"<em>项目类型：{html.escape(matched_project_type)}"
+                    + (f" · 章节：{html.escape(chapter_text)}" if chapter_text else "")
+                    + f" · 依据：{html.escape(reason_text)}</em></div>"
+                )
+                if selected_ids:
+                    variant_info_lines.append(f"{label}命中：{' / '.join(selected_ids[:6])}")
+                elif bool(normalized.get("enabled")):
+                    variant_info_lines.append(f"{label}：已启用，当前方案未命中")
+                for warning in normalized.get("warning_list") or []:
+                    variant_warning_lines.append(f"{label}告警：{warning}")
+            if variant_cards:
+                st.caption("增强参考源（本方案）")
+                st.markdown("<div class='zf-library-summary'>" + "".join(variant_cards) + "</div>", unsafe_allow_html=True)
+            for line in variant_info_lines:
+                st.caption(line)
+            for line in variant_warning_lines:
+                st.warning(line)
+            chapter_rows = variant_reference.get("chapter_rows") if isinstance(variant_reference.get("chapter_rows"), list) else []
+            if chapter_rows:
+                with st.expander("查看章节级参考命中", expanded=False):
+                        chapter_overview = _chapter_reference_overview_ui(chapter_rows)
+                        overview_cards = [
+                            (
+                                "<div class='zf-library-stat'>"
+                                f"<span>涉及章节</span><strong>{int(chapter_overview.get('chapter_count') or 0)}</strong>"
+                                "<em>仅展示命中过增强参考源的章节</em></div>"
+                            ),
+                            (
+                                "<div class='zf-library-stat'>"
+                                f"<span>案例命中章节</span><strong>{int(chapter_overview.get('case_chapter_count') or 0)}</strong>"
+                                "<em>用于结构、格式、表达参考</em></div>"
+                            ),
+                            (
+                                "<div class='zf-library-stat'>"
+                                f"<span>图片命中章节</span><strong>{int(chapter_overview.get('image_chapter_count') or 0)}</strong>"
+                                f"<em>可预览章节 {int(chapter_overview.get('preview_chapter_count') or 0)} 个</em></div>"
+                            ),
+                            (
+                                "<div class='zf-library-stat'>"
+                                f"<span>告警章节</span><strong>{int(chapter_overview.get('warning_chapter_count') or 0)}</strong>"
+                                "<em>未命中或风险提醒会在章节卡片中展开</em></div>"
+                            ),
+                        ]
+                        st.markdown("<div class='zf-library-summary'>" + "".join(overview_cards) + "</div>", unsafe_allow_html=True)
+                        st.caption("按章节展示实际命中的案例与图片参考；未命中章节不会列入此处。")
+                        for chapter in chapter_rows:
+                            title = str(chapter.get("title") or "").strip() or "章节"
+                            case_summary = chapter.get("case_library") if isinstance(chapter.get("case_library"), dict) else {}
+                            image_summary = chapter.get("image_library") if isinstance(chapter.get("image_library"), dict) else {}
+                            meta_parts: list[str] = ["章节级参考命中"]
+                            body_lines: list[str] = []
+                            if _reference_library_summary_has_content(case_summary, id_key="selected_case_ids"):
+                                case_titles = [str(x).strip() for x in (case_summary.get("reference_titles") or []) if str(x).strip()]
+                                case_ids = [str(x).strip() for x in (case_summary.get("selected_case_ids") or []) if str(x).strip()]
+                                case_reasons = [str(x).strip() for x in (case_summary.get("match_reasons") or []) if str(x).strip()]
+                                body_lines.append(
+                                    f"案例库：命中 {int(case_summary.get('hit_count') or len(case_ids) or 0)} 个；依据={ ' / '.join(case_reasons[:2]) if case_reasons else '未记录'}"
+                                )
+                                if case_titles:
+                                    body_lines.append("案例标题：" + " / ".join(case_titles[:4]))
+                                elif case_ids:
+                                    body_lines.append("案例ID：" + " / ".join(case_ids[:4]))
+                                style_hints = [str(x).strip() for x in (case_summary.get("style_hints") or []) if str(x).strip()]
+                                if style_hints:
+                                    body_lines.append("风格提示：" + "；".join(style_hints[:2]))
+                                structure_hints = [str(x).strip() for x in (case_summary.get("structure_hints") or []) if str(x).strip()]
+                                if structure_hints:
+                                    body_lines.append("结构提示：" + "；".join(structure_hints[:2]))
+                                case_notice = str(case_summary.get("non_fact_reference_notice") or "").strip()
+                                if case_notice:
+                                    body_lines.append(case_notice)
+                            if _reference_library_summary_has_content(image_summary, id_key="selected_image_ids"):
+                                image_titles = [str(x).strip() for x in (image_summary.get("image_titles") or []) if str(x).strip()]
+                                image_ids = [str(x).strip() for x in (image_summary.get("selected_image_ids") or []) if str(x).strip()]
+                                image_reasons = [str(x).strip() for x in (image_summary.get("match_reasons") or []) if str(x).strip()]
+                                body_lines.append(
+                                    f"图片库：命中 {int(image_summary.get('hit_count') or len(image_ids) or 0)} 个；依据={ ' / '.join(image_reasons[:2]) if image_reasons else '未记录'}"
+                                )
+                                if image_titles:
+                                    body_lines.append("图片说明：" + " / ".join(image_titles[:4]))
+                                elif image_ids:
+                                    body_lines.append("图片ID：" + " / ".join(image_ids[:4]))
+                                caption_hint = str(image_summary.get("caption_hint") or "").strip()
+                                if caption_hint:
+                                    body_lines.append(f"推荐图注：{caption_hint}")
+                                insertion_hint = str(image_summary.get("insertion_hint") or "").strip()
+                                if insertion_hint:
+                                    body_lines.append(insertion_hint)
+                            preview_path = str(image_summary.get("first_preview_path") or "").strip()
+                            if preview_path:
+                                cols = st.columns([0.28, 0.72], gap="medium")
+                                with cols[0]:
+                                    try:
+                                        st.image(preview_path, use_container_width=True)
+                                    except Exception:
+                                        st.caption("章节插图预览暂不可用")
+                                with cols[1]:
+                                    st.markdown(
+                                        _reference_library_card_html(
+                                            title=title,
+                                            meta_parts=meta_parts,
+                                            body_lines=body_lines,
+                                        ),
+                                        unsafe_allow_html=True,
+                                    )
+                            else:
+                                st.markdown(
+                                    _reference_library_card_html(
+                                        title=title,
+                                        meta_parts=meta_parts,
+                                        body_lines=body_lines,
+                                    ),
+                                    unsafe_allow_html=True,
+                                )
+                            warning_lines = [
+                                f"案例库告警：{warning}"
+                                for warning in (case_summary.get("warning_list") or [])
+                                if str(warning).strip()
+                            ] + [
+                                f"图片库告警：{warning}"
+                                for warning in (image_summary.get("warning_list") or [])
+                                if str(warning).strip()
+                            ]
+                            for warning_line in warning_lines:
+                                st.warning(warning_line)
             if files.get("docx"):
                 st.caption("本稿质量满意时，可直接回流到样板库，作为后续同类型章节的学习样板。")
                 feedback_note_key = f"feedback_sample_note_{job_id}_v{i}"
@@ -7102,6 +8294,12 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
             "resource_usage_summary": persisted_runtime.get("resource_usage_summary")
             if isinstance(persisted_runtime.get("resource_usage_summary"), dict)
             else {},
+            "case_library_summary": persisted_runtime.get("case_library_summary")
+            if isinstance(persisted_runtime.get("case_library_summary"), dict)
+            else {},
+            "image_library_summary": persisted_runtime.get("image_library_summary")
+            if isinstance(persisted_runtime.get("image_library_summary"), dict)
+            else {},
             "agent_contract_ok": agent_contract_checks.get("ok"),
             "agent_contract_error_count": agent_contract_checks.get("error_count"),
             "score_high_risk_count": ((score_mapping.get("summary") or {}).get("high_risk_item_count") if isinstance(score_mapping, dict) else None),
@@ -7203,6 +8401,9 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
         "generation_trace_by_variant": generation_trace_map,
         "runtime_budget_by_variant": runtime_budget_map,
         "remediation_by_variant": remediation_map,
+        "reference_enhancements": job_status.get("reference_enhancements") if isinstance(job_status.get("reference_enhancements"), dict) else {},
+        "case_library_summary": job_status.get("case_library_summary") if isinstance(job_status.get("case_library_summary"), dict) else {},
+        "image_library_summary": job_status.get("image_library_summary") if isinstance(job_status.get("image_library_summary"), dict) else {},
         "stage_artifacts_dir": str(job_status.get("stage_artifacts_dir") or "").strip(),
         "agent_runtime": job_status.get("agent_runtime") if isinstance(job_status.get("agent_runtime"), dict) else {},
         "result_json": raw_json,
@@ -7431,12 +8632,65 @@ def _render_result_aux_summary() -> None:
     result = st.session_state.get("run_result") or {}
     if not result:
         return
+    reference_summaries = _resolve_result_reference_library_summaries(result)
+    case_summary = reference_summaries.get("case_library_summary") if isinstance(reference_summaries.get("case_library_summary"), dict) else {}
+    image_summary = reference_summaries.get("image_library_summary") if isinstance(reference_summaries.get("image_library_summary"), dict) else {}
+    has_reference_summary = any(
+        [
+            _reference_library_summary_has_content(case_summary, id_key="selected_case_ids"),
+            _reference_library_summary_has_content(image_summary, id_key="selected_image_ids"),
+        ]
+    )
     remediation_map = result.get("remediation_by_variant") if isinstance(result.get("remediation_by_variant"), dict) else {}
     runtime = result.get("agent_runtime") if isinstance(result.get("agent_runtime"), dict) else {}
     stage_artifacts_dir = str(result.get("stage_artifacts_dir") or "").strip()
     generation_trace_map = result.get("generation_trace_by_variant") if isinstance(result.get("generation_trace_by_variant"), dict) else {}
-    if not remediation_map and not runtime and not stage_artifacts_dir and not generation_trace_map:
+    if not remediation_map and not runtime and not stage_artifacts_dir and not generation_trace_map and not has_reference_summary:
         return
+
+    if has_reference_summary:
+        summary_cards: list[str] = []
+        info_lines: list[str] = []
+        warning_lines: list[str] = []
+        for label, summary, id_key in [
+            ("案例库", case_summary, "selected_case_ids"),
+            ("图片库", image_summary, "selected_image_ids"),
+        ]:
+            if not isinstance(summary, dict):
+                continue
+            selected_ids = [str(x).strip() for x in (summary.get(id_key) or []) if str(x).strip()]
+            warning_list = [str(x).strip() for x in (summary.get("warning_list") or []) if str(x).strip()]
+            variant_ids = [str(x).strip() for x in (summary.get("variant_ids") or []) if str(x).strip()]
+            hit_count = int(summary.get("hit_count") or len(selected_ids) or 0)
+            matched_project_type = str(summary.get("matched_project_type") or "").strip() or "未命中"
+            matched_chapters = [str(x).strip() for x in (summary.get("matched_chapters") or []) if str(x).strip()]
+            match_reasons = [str(x).strip() for x in (summary.get("match_reasons") or []) if str(x).strip()]
+            match_reason = " / ".join(match_reasons[:2]) if match_reasons else "未记录"
+            chapter_text = " / ".join(matched_chapters[:3])
+            summary_cards.append(
+                "<div class='zf-library-stat'>"
+                f"<span>{html.escape(label)}</span>"
+                f"<strong>{hit_count}</strong>"
+                f"<em>项目类型：{html.escape(matched_project_type)}"
+                + (f" · 章节：{html.escape(chapter_text)}" if chapter_text else "")
+                + (f" · 版本：{html.escape(' / '.join(variant_ids[:4]))}" if variant_ids else "")
+                + f" · 依据：{html.escape(match_reason)}</em></div>"
+            )
+            if selected_ids:
+                info_lines.append(f"{label}命中：{' / '.join(selected_ids[:6])}")
+            elif bool(summary.get("enabled")):
+                info_lines.append(f"{label}：已启用，当前结果未命中")
+            if variant_ids:
+                info_lines.append(f"{label}作用版本：{' / '.join(variant_ids[:5])}")
+            if warning_list:
+                warning_lines.append(f"{label}告警：{'；'.join(warning_list)}")
+        if summary_cards:
+            st.markdown("#### 增强参考源命中（辅助）")
+            st.markdown("<div class='zf-library-summary'>" + "".join(summary_cards) + "</div>", unsafe_allow_html=True)
+        for line in info_lines:
+            st.caption(line)
+        for line in warning_lines:
+            st.warning(line)
 
     gate_rows = [v for v in remediation_map.values() if isinstance(v, dict)]
     total_variants = max(1, int(result.get("variants") or len(gate_rows) or 1))
@@ -9134,6 +10388,10 @@ with col_right:
         enabled_summary.append("质控")
     if bool(st.session_state.get("auto_remediate")):
         enabled_summary.append("自动修订")
+    if bool(st.session_state.get("case_library_enabled")):
+        enabled_summary.append("案例库")
+    if bool(st.session_state.get("image_library_enabled")):
+        enabled_summary.append("图片库")
     if bool((provider_status.get("text_backup") or {}).get("configured")):
         enabled_summary.append("文本主备")
     if bool((provider_status.get("automation") or {}).get("configured")):
@@ -9221,8 +10479,8 @@ with col_right:
                     placeholder='{"project_type":"房建","duration_days":180}',
                 )
 
-    with st.expander("样板库（辅助学习）", expanded=False):
-        _render_template_library_panel(base_url, actions_key)
+    with st.expander("参考资产库（案例 / 图片 / 样板）", expanded=False):
+        _render_reference_libraries_panel(base_url, actions_key)
     st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
@@ -9256,6 +10514,8 @@ if not current_selected_templates:
     current_selected_templates = ["A"]
 current_total_pages_target = int(st.session_state.get("total_pages_target") or 0)
 current_generation_mode = str(st.session_state.get("generation_mode") or "standard_auto").strip()
+current_case_library_options = _build_case_library_request_options()
+current_image_library_options = _build_image_library_request_options()
 current_submission_signature = _build_submission_signature(
     topic=current_topic,
     project_id=current_project_id,
@@ -9263,6 +10523,8 @@ current_submission_signature = _build_submission_signature(
     generation_mode=current_generation_mode,
     selected_templates=current_selected_templates,
     total_pages_target=current_total_pages_target,
+    case_library=current_case_library_options,
+    image_library=current_image_library_options,
     tender_files=list(tender_files or []),
     boq_files=list(boq_files or []),
     drawing_files=list(drawing_files or []),
@@ -9610,6 +10872,8 @@ if run_btn or submission_resume_reason == "auto_resume":
             "compare_mode": "summary",
             "compare_max_chars": int(mode_params["compare_max_chars"]),
             "compare_titles": None,
+            "case_library": current_case_library_options,
+            "image_library": current_image_library_options,
         }
         if bool(flow.get("plan_saved")) and not _has_saved_plan(project_id):
             flow = _touch_submission_flow(flow, plan_saved=False)
@@ -9649,8 +10913,16 @@ if run_btn or submission_resume_reason == "auto_resume":
             "chapter_pages": chapter_pages,
             "chapter_requirements": chapter_requirements or {},
             "front_matter_outline": front_matter_outline,
+            "case_library": current_case_library_options,
+            "image_library": current_image_library_options,
         }
         _append_log("文本模型链：服务端路由托管（MAIN -> BACKUP -> AUTOMATION 分离）")
+        if isinstance(current_case_library_options, dict) and bool(current_case_library_options.get("enabled")):
+            case_count = len(current_case_library_options.get("selected_case_ids") or [])
+            _append_log(f"案例库增强已启用：top_k={int(current_case_library_options.get('top_k') or 3)}，显式案例={case_count}")
+        if isinstance(current_image_library_options, dict) and bool(current_image_library_options.get("enabled")):
+            image_count = len(current_image_library_options.get("selected_image_ids") or [])
+            _append_log(f"图片库增强已启用：top_k={int(current_image_library_options.get('top_k') or 3)}，显式图片={image_count}")
         if params_override:
             generate_payload["params_override"] = params_override
 

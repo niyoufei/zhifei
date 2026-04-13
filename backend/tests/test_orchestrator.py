@@ -202,6 +202,7 @@ def test_build_hard_quality_gate_and_collect_remediation():
     quality = {
         "risk_triplet": {"by_section": [{"title": "第1章", "ok": False}]},
         "quantitative": {"by_section": [{"title": "第1章", "ok": False, "missing": ["频次"]}]},
+        "engineering_by_section": [{"title": "第1章", "ok": False, "missing": ["频次", "责任", "验收"]}],
         "vague_terms": {"by_section": [{"title": "第1章", "ok": False}]},
         "evidence_quality": {"by_section": [{"title": "第1章", "ok": False}]},
         "evidence_traceability": {"by_section": [{"title": "第1章", "ok": False}]},
@@ -211,15 +212,18 @@ def test_build_hard_quality_gate_and_collect_remediation():
     gate = _build_hard_quality_gate(quality=quality, evidence_tracking=evidence_tracking, sections=sections)
     assert gate["ok"] is False
     assert gate["failed"]
+    assert any(item.get("metric") == "engineering_ok_rate" for item in gate["failed"])
     recs = _collect_gate_remediation(quality=quality, sections=sections, failed=gate["failed"])
     assert recs
     assert any(r.get("type") == "risk_triplet_gap" for r in recs)
+    assert any(r.get("type") == "engineering_gap" for r in recs)
 
 
 def test_build_hard_quality_gate_prefers_section_level_evidence_metrics():
     quality = {
         "risk_triplet": {"by_section": [{"title": "第1章", "ok": True}]},
         "quantitative": {"by_section": [{"title": "第1章", "ok": True}]},
+        "engineering_by_section": [{"title": "第1章", "ok": True}],
         "vague_terms": {"by_section": [{"title": "第1章", "ok": True}]},
     }
     sections = [{"title": "第1章", "content": "测试", "graph_nodes": ["KG-1"]}]
@@ -241,6 +245,7 @@ def test_build_hard_quality_gate_prefers_section_level_evidence_metrics():
     )
     assert gate["metrics"]["evidence_binding_rate"] == 1.0
     assert gate["metrics"]["traceable_locator_rate"] == 1.0
+    assert gate["metrics"]["engineering_ok_rate"] == 1.0
 
 
 def test_normalize_provider_chain_maps_display_alias_to_runtime_model():

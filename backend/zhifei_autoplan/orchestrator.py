@@ -64,6 +64,18 @@ from backend.zhifei_autoplan.template_library import (
     infer_template_page_bucket,
     infer_template_scene_tags,
 )
+from backend.zhifei_autoplan.case_library_service import (
+    build_case_reference_pack,
+    normalize_case_library_options,
+    summarize_case_reference_pack,
+)
+from backend.zhifei_autoplan.image_library import (
+    build_image_selection_pack,
+    image_selection_pack_media_entries,
+    normalize_image_library_options,
+    summarize_image_selection_pack,
+)
+from backend.zhifei_autoplan.run_contract import contract_fingerprint, resolve_contract_stamp
 from backend.zhifei_autoplan.self_evolution import (
     build_runtime_budget_hints,
     load_runtime_budget_profile,
@@ -77,6 +89,7 @@ from backend.zhifei_autoplan.provider_runtime import (
 )
 from backend.zhifei_autoplan.remediation_strategy import ACTION_TAG_LABELS, QUALITY_GATE_METRIC_LABELS, enrich_strategy_rows
 from backend.zhifei_autoplan.resource_audit import (
+    append_resource_event,
     append_resource_events,
     build_llm_usage_events,
     summarize_sections,
@@ -921,6 +934,7 @@ def _build_hard_quality_gate(
         "traceable_locator_rate": 0.85,
         "risk_triplet_ok_rate": 0.95,
         "quantitative_ok_rate": 0.95,
+        "engineering_ok_rate": 0.95,
         "vague_terms_ok_rate": 0.95,
         "graph_binding_rate": 0.90,
     }
@@ -954,12 +968,16 @@ def _build_hard_quality_gate(
         "vague_terms_ok_rate": _ok_ratio((quality.get("vague_terms") or {}).get("by_section")),
         "graph_binding_rate": _safe_ratio(graph_bound, chapter_count),
     }
+    engineering_by_section = quality.get("engineering_by_section") if isinstance(quality.get("engineering_by_section"), list) else []
+    if engineering_by_section:
+        metrics["engineering_ok_rate"] = _ok_ratio(engineering_by_section)
     failed = []
     type_map = {
         "evidence_binding_rate": "evidence_gap",
         "traceable_locator_rate": "evidence_traceability_gap",
         "risk_triplet_ok_rate": "risk_triplet_gap",
         "quantitative_ok_rate": "quantitative_gap",
+        "engineering_ok_rate": "engineering_gap",
         "vague_terms_ok_rate": "vague_term",
         "graph_binding_rate": "evidence_gap",
     }
@@ -1070,6 +1088,19 @@ def _collect_gate_remediation(
                     "title": str(row.get("title") or "章节"),
                     "type": "quantitative_gap",
                     "suggestion": f"补齐量化指标（优先：{','.join(missing[:5]) or '频次/阈值/间距/厚度/时长'}）。",
+                }
+            )
+
+    if "engineering_gap" in failed_types:
+        for row in quality.get("engineering_by_section") or []:
+            if not isinstance(row, dict) or row.get("ok"):
+                continue
+            missing = [str(x).strip() for x in (row.get("missing") or []) if str(x).strip()]
+            out.append(
+                {
+                    "title": str(row.get("title") or "章节"),
+                    "type": "engineering_gap",
+                    "suggestion": f"补齐工程化执行字段（优先：{','.join(missing[:5]) or '频次/阈值/责任/验收/流程'}）。",
                 }
             )
 
@@ -1657,6 +1688,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         override=user_total_pages_target,
     )
     template_page_bucket = infer_template_page_bucket(total_pages_limit)
+    case_library_options = normalize_case_library_options(payload.get("case_library"))
+    image_library_options = normalize_image_library_options(payload.get("image_library"))
     speed_profile = _resolve_runtime_speed_profile(
         mode_effective=mode_effective,
         total_pages_limit=int(total_pages_limit or 0),
@@ -2084,6 +2117,24 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         template_hits = template_learning.get("hits") if isinstance(template_learning, dict) else []
         if not isinstance(template_hits, list):
             template_hits = []
+        case_reference_pack = build_case_reference_pack(
+            options=case_library_options,
+            topic=str(topic),
+            chapter_title=str(title),
+            project_type=project_type,
+            template_page_bucket=template_page_bucket,
+            scene_tags=template_scene_tags if 'template_scene_tags' in locals() else None,
+            template_learning=template_learning if isinstance(template_learning, dict) else None,
+            audit_path=workspace_paths(workspace_dir)["ingest_audit"] if workspace_dir else None,
+        )
+        image_selection_pack = build_image_selection_pack(
+            options=image_library_options,
+            topic=str(topic),
+            chapter_title=str(title),
+            project_type=project_type,
+            tags=template_scene_tags if 'template_scene_tags' in locals() else [],
+            audit_path=workspace_paths(workspace_dir)["ingest_audit"] if workspace_dir else None,
+        )
         kg_evidence = [f"{r.get('title')}: {r.get('text')}" for r in kg_hits.get("results", [])]
         # Include a lightweight evidence locator (sha@offset) to make "【证据:...】" traceable.
         doc_evidence = []
@@ -2214,6 +2265,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         if boq_focus.get("ppe_items"):
             section_requirements.append(f"劳保用品清单：{'；'.join(boq_focus.get('ppe_items')[:10])}")
         template_requirement_lines = template_learning.get("requirement_lines") if isinstance(template_learning, dict) else []
+        case_reference_lines = case_reference_pack.get("reference_lines") if isinstance(case_reference_pack, dict) else []
+        if isinstance(case_reference_lines, list):
+            section_requirements.extend([str(x).strip() for x in case_reference_lines if str(x).strip()])
+        image_insertion_hint = str(image_selection_pack.get("insertion_hint") or "").strip() if isinstance(image_selection_pack, dict) else ""
+        if image_insertion_hint:
+            section_requirements.append(image_insertion_hint)
         if isinstance(template_requirement_lines, list):
             section_requirements.extend([str(x).strip() for x in template_requirement_lines if str(x).strip()])
         if template_hits:
@@ -2426,6 +2483,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 ccid = str(chapter_contract.get("chapter_id") or "").strip()
                 if ccid:
                     rec.setdefault("contract_chapter_id", ccid)
+            if isinstance(case_reference_pack, dict):
+                rec.setdefault("case_reference_pack", case_reference_pack)
+            if isinstance(image_selection_pack, dict):
+                rec.setdefault("image_selection_pack", image_selection_pack)
             return rec
 
         last = None
@@ -2447,6 +2508,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     ).hexdigest(),
                     "kg_digest": hashlib.sha1("\n".join(kg_evidence).encode("utf-8", errors="ignore")).hexdigest(),
                     "doc_digest": hashlib.sha1("\n".join(doc_evidence).encode("utf-8", errors="ignore")).hexdigest(),
+                    "contract_fingerprint": contract_fingerprint(resolve_contract_stamp(payload)),
                     "length": {
                         "min": section_min_length,
                         "max": section_max_length,
@@ -2596,6 +2658,99 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     sections = await asyncio.gather(*[_build_section_with_limit(i, t) for i, t in enumerate(outline)])
     for sec in sections:
         sec["content"] = strip_nonconcrete_language(sec.get("content") or "")
+    case_reference_sections = []
+    image_selection_sections = []
+    selected_case_ids_seen: set[str] = set()
+    selected_image_ids_seen: set[str] = set()
+    selected_case_ids: list[str] = []
+    selected_image_ids: list[str] = []
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        chapter_title = str(sec.get("title") or "").strip()
+        case_pack = sec.get("case_reference_pack") if isinstance(sec.get("case_reference_pack"), dict) else {}
+        if case_pack:
+            case_summary = summarize_case_reference_pack(case_pack)
+            case_summary["chapter_title"] = chapter_title
+            case_reference_sections.append(case_summary)
+            for case_id in case_summary.get("selected_case_ids") or []:
+                text = str(case_id or "").strip()
+                if text and text not in selected_case_ids_seen:
+                    selected_case_ids_seen.add(text)
+                    selected_case_ids.append(text)
+            if case_summary.get("enabled"):
+                append_resource_event(
+                    "case_library_reference",
+                    workspace_dir=workspace_dir,
+                    session_id=session_id,
+                    user_id=payload.get("user_id"),
+                    job_id=payload.get("_job_id") or payload.get("job_id"),
+                    request_id=payload.get("request_id"),
+                    trace_id=payload.get("trace_id"),
+                    project_id=project_id,
+                    topic=topic,
+                    variant_id=variant_index,
+                    chapter_title=chapter_title,
+                    matched_project_type=case_summary.get("matched_project_type"),
+                    selected_case_ids=case_summary.get("selected_case_ids"),
+                    match_reason=case_summary.get("match_reason"),
+                    warning_list=case_summary.get("warning_list"),
+                )
+        image_pack = sec.get("image_selection_pack") if isinstance(sec.get("image_selection_pack"), dict) else {}
+        if image_pack:
+            image_summary = summarize_image_selection_pack(image_pack)
+            image_summary["chapter_title"] = chapter_title
+            image_selection_sections.append(image_summary)
+            for image_id in image_summary.get("selected_image_ids") or []:
+                text = str(image_id or "").strip()
+                if text and text not in selected_image_ids_seen:
+                    selected_image_ids_seen.add(text)
+                    selected_image_ids.append(text)
+            if image_summary.get("enabled"):
+                append_resource_event(
+                    "image_library_selection",
+                    workspace_dir=workspace_dir,
+                    session_id=session_id,
+                    user_id=payload.get("user_id"),
+                    job_id=payload.get("_job_id") or payload.get("job_id"),
+                    request_id=payload.get("request_id"),
+                    trace_id=payload.get("trace_id"),
+                    project_id=project_id,
+                    topic=topic,
+                    variant_id=variant_index,
+                    chapter_title=chapter_title,
+                    matched_project_type=image_summary.get("matched_project_type"),
+                    selected_image_ids=image_summary.get("selected_image_ids"),
+                    match_reason=image_summary.get("match_reason"),
+                    warning_list=image_summary.get("warning_list"),
+                )
+    case_reference_pack = {
+        "enabled": bool(case_library_options.get("enabled", False)),
+        "selected_case_ids": selected_case_ids,
+        "requested_selected_case_ids": list(case_library_options.get("selected_case_ids") or []),
+        "matched_project_type": project_type,
+        "chapters": case_reference_sections,
+        "warning_list": [
+            warning
+            for section in case_reference_sections
+            for warning in (section.get("warning_list") or [])
+            if str(warning or "").strip()
+        ],
+        "non_fact_reference_notice": "案例库仅用于格式、结构、表达方式参考，不得覆盖高优先级事实源。",
+    }
+    image_selection_pack = {
+        "enabled": bool(image_library_options.get("enabled", False)),
+        "selected_image_ids": selected_image_ids,
+        "requested_selected_image_ids": list(image_library_options.get("selected_image_ids") or []),
+        "matched_project_type": project_type,
+        "chapters": image_selection_sections,
+        "warning_list": [
+            warning
+            for section in image_selection_sections
+            for warning in (section.get("warning_list") or [])
+            if str(warning or "").strip()
+        ],
+    }
     evolution_applied_count = sum(1 for sec in sections if isinstance(sec, dict) and bool(sec.get("evolution_applied")))
     pipeline_stages: List[Dict[str, Any]] = [
         {
@@ -2603,6 +2758,20 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "ok": True,
             "enabled": bool(((params or {}).get("self_evolution") or {}).get("enabled", True)),
             "applied_count": int(evolution_applied_count),
+        },
+        {
+            "stage": "case_library_reference",
+            "ok": True,
+            "enabled": bool(case_library_options.get("enabled", False)),
+            "selected_case_count": len(selected_case_ids),
+            "warning_count": len(case_reference_pack.get("warning_list") or []),
+        },
+        {
+            "stage": "image_library_selection",
+            "ok": True,
+            "enabled": bool(image_library_options.get("enabled", False)),
+            "selected_image_count": len(selected_image_ids),
+            "warning_count": len(image_selection_pack.get("warning_list") or []),
         },
         {"stage": "draft_generation", "ok": True, "chapter_count": len(sections)}
     ]
@@ -2702,6 +2871,21 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     break
         except Exception:
             pass
+    image_library_media = image_selection_pack_media_entries(image_selection_pack)
+    if image_library_media:
+        seen_media_paths = {
+            str(item.get("path") or "").strip()
+            for item in media
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        }
+        for item in image_library_media:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            if not path or path in seen_media_paths:
+                continue
+            seen_media_paths.add(path)
+            media.append(item)
 
     remediation_combo_learning_summary: Dict[str, Any] = {
         "enabled": True,
@@ -4091,6 +4275,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "outline_count": len(outline),
         "version_mode": str(raw_variant_id or ""),
         "resource_usage_summary": resource_usage_summary,
+        "reference_enhancements": {
+            "case_library": summarize_case_reference_pack(case_reference_pack),
+            "image_library": summarize_image_selection_pack(image_selection_pack),
+        },
     }
     return {
         "topic": topic,
@@ -4174,4 +4362,6 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "generation_trace": generation_trace,
         "resource_usage_summary": resource_usage_summary,
         "params_used": params_used,
+        "case_reference_pack": case_reference_pack,
+        "image_selection_pack": image_selection_pack,
     }
