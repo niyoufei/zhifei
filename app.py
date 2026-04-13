@@ -919,6 +919,302 @@ def _outline_to_chapter_pages(outline: list[str]) -> dict[str, int]:
     return out
 
 
+def _normalize_reference_summary_ui(summary: dict[str, Any] | None, *, id_key: str) -> dict[str, Any]:
+    data = summary if isinstance(summary, dict) else {}
+    selected_ids = []
+    seen_ids: set[str] = set()
+    for item in (data.get(id_key) or []):
+        text = str(item or "").strip()
+        if not text or text in seen_ids:
+            continue
+        seen_ids.add(text)
+        selected_ids.append(text)
+    matched_chapters = []
+    seen_chapters: set[str] = set()
+    for item in [
+        *(data.get("matched_chapters") or []),
+        data.get("matched_chapter"),
+    ]:
+        text = str(item or "").strip()
+        if not text or text in seen_chapters:
+            continue
+        seen_chapters.add(text)
+        matched_chapters.append(text)
+    match_reasons = []
+    seen_reasons: set[str] = set()
+    for item in [
+        *(data.get("match_reasons") or []),
+        data.get("match_reason"),
+    ]:
+        text = str(item or "").strip()
+        if not text or text in seen_reasons:
+            continue
+        seen_reasons.add(text)
+        match_reasons.append(text)
+    warning_list = []
+    seen_warnings: set[str] = set()
+    for item in (data.get("warning_list") or []):
+        text = str(item or "").strip()
+        if not text or text in seen_warnings:
+            continue
+        seen_warnings.add(text)
+        warning_list.append(text)
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        id_key: selected_ids,
+        "matched_project_type": str(data.get("matched_project_type") or "").strip() or None,
+        "matched_chapters": matched_chapters,
+        "matched_chapter": matched_chapters[0] if matched_chapters else None,
+        "match_reasons": match_reasons,
+        "match_reason": match_reasons[0] if match_reasons else None,
+        "hit_count": int(data.get("hit_count") or len(selected_ids) or 0),
+        "warning_list": warning_list,
+    }
+
+
+def _reference_summary_has_content(summary: dict[str, Any] | None, *, id_key: str) -> bool:
+    normalized = _normalize_reference_summary_ui(summary, id_key=id_key)
+    return any(
+        [
+            bool(normalized.get("enabled")),
+            bool(normalized.get(id_key)),
+            bool(normalized.get("matched_project_type")),
+            bool(normalized.get("matched_chapters")),
+            bool(normalized.get("match_reasons")),
+            bool(normalized.get("warning_list")),
+            int(normalized.get("hit_count") or 0) > 0,
+        ]
+    )
+
+
+def _decode_result_json_ui(result: dict[str, Any] | None) -> dict[str, Any]:
+    payload = result if isinstance(result, dict) else {}
+    raw = payload.get("result_json")
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="ignore")
+    else:
+        text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        decoded = json.loads(text)
+    except Exception:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _variant_sections_from_result_ui(result: dict[str, Any] | None, variant: int) -> list[dict[str, Any]]:
+    payload = _decode_result_json_ui(result)
+    rows = payload.get("variants") if isinstance(payload.get("variants"), list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        candidate = row.get("variant_id")
+        try:
+            if int(candidate) == int(variant):
+                sections = row.get("sections")
+                return sections if isinstance(sections, list) else []
+        except Exception:
+            continue
+    return []
+
+
+def _chapter_case_reference_summary_ui(raw: dict[str, Any] | None) -> dict[str, Any]:
+    pack = raw if isinstance(raw, dict) else {}
+    hits = pack.get("hits") if isinstance(pack.get("hits"), list) else []
+    return _normalize_reference_summary_ui(
+        {
+            "enabled": bool(pack.get("enabled", False)),
+            "selected_case_ids": [
+                str(item).strip()
+                for item in (pack.get("selected_case_ids") or [])
+                if str(item).strip()
+            ],
+            "matched_project_type": pack.get("matched_project_type"),
+            "matched_chapter": pack.get("matched_chapter"),
+            "match_reason": pack.get("match_reason"),
+            "hit_count": len(hits),
+            "warning_list": pack.get("warning_list") or [],
+        },
+        id_key="selected_case_ids",
+    )
+
+
+def _chapter_image_reference_summary_ui(raw: dict[str, Any] | None) -> dict[str, Any]:
+    pack = raw if isinstance(raw, dict) else {}
+    images = pack.get("images") if isinstance(pack.get("images"), list) else []
+    return _normalize_reference_summary_ui(
+        {
+            "enabled": bool(pack.get("enabled", False)),
+            "selected_image_ids": [
+                str(item).strip()
+                for item in (pack.get("selected_image_ids") or [])
+                if str(item).strip()
+            ],
+            "matched_project_type": pack.get("matched_project_type"),
+            "matched_chapter": pack.get("matched_chapter"),
+            "match_reason": pack.get("match_reason"),
+            "hit_count": len(images),
+            "warning_list": pack.get("warning_list") or [],
+        },
+        id_key="selected_image_ids",
+    )
+
+
+def _chapter_reference_rows_ui(result: dict[str, Any] | None, variant: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for section in _variant_sections_from_result_ui(result, variant):
+        if not isinstance(section, dict):
+            continue
+        case_summary = _chapter_case_reference_summary_ui(section.get("case_reference_pack"))
+        image_summary = _chapter_image_reference_summary_ui(section.get("image_selection_pack"))
+        if not (
+            _reference_summary_has_content(case_summary, id_key="selected_case_ids")
+            or _reference_summary_has_content(image_summary, id_key="selected_image_ids")
+        ):
+            continue
+        rows.append(
+            {
+                "title": str(section.get("title") or "").strip() or "章节",
+                "case_library": case_summary,
+                "image_library": image_summary,
+            }
+        )
+    return rows
+
+
+def _aggregate_reference_summary_from_chapter_rows_ui(
+    rows: list[dict[str, Any]] | None,
+    *,
+    summary_key: str,
+    id_key: str,
+) -> dict[str, Any]:
+    normalized_rows = rows if isinstance(rows, list) else []
+    enabled = False
+    selected_ids: list[str] = []
+    seen_ids: set[str] = set()
+    matched_project_types: list[str] = []
+    seen_project_types: set[str] = set()
+    matched_chapters: list[str] = []
+    seen_chapters: set[str] = set()
+    match_reasons: list[str] = []
+    seen_reasons: set[str] = set()
+    warning_list: list[str] = []
+    seen_warnings: set[str] = set()
+    hit_count = 0
+    for row in normalized_rows:
+        if not isinstance(row, dict):
+            continue
+        summary = row.get(summary_key) if isinstance(row.get(summary_key), dict) else {}
+        item = _normalize_reference_summary_ui(summary, id_key=id_key)
+        if not _reference_summary_has_content(item, id_key=id_key):
+            continue
+        enabled = enabled or bool(item.get("enabled"))
+        hit_count += int(item.get("hit_count") or 0)
+        for value in item.get(id_key) or []:
+            if value not in seen_ids:
+                seen_ids.add(value)
+                selected_ids.append(value)
+        project_type = str(item.get("matched_project_type") or "").strip()
+        if project_type and project_type not in seen_project_types:
+            seen_project_types.add(project_type)
+            matched_project_types.append(project_type)
+        chapters = [str(x).strip() for x in (item.get("matched_chapters") or []) if str(x).strip()]
+        if not chapters:
+            fallback_title = str(row.get("title") or "").strip()
+            if fallback_title:
+                chapters = [fallback_title]
+        for chapter in chapters:
+            if chapter not in seen_chapters:
+                seen_chapters.add(chapter)
+                matched_chapters.append(chapter)
+        for reason in item.get("match_reasons") or []:
+            text = str(reason or "").strip()
+            if text and text not in seen_reasons:
+                seen_reasons.add(text)
+                match_reasons.append(text)
+        for warning in item.get("warning_list") or []:
+            text = str(warning or "").strip()
+            if text and text not in seen_warnings:
+                seen_warnings.add(text)
+                warning_list.append(text)
+    return {
+        "enabled": enabled,
+        id_key: selected_ids,
+        "matched_project_type": matched_project_types[0] if len(matched_project_types) == 1 else None,
+        "matched_chapters": matched_chapters,
+        "matched_chapter": matched_chapters[0] if matched_chapters else None,
+        "match_reasons": match_reasons,
+        "match_reason": match_reasons[0] if match_reasons else None,
+        "hit_count": hit_count,
+        "warning_list": warning_list,
+    }
+
+
+def _merge_reference_summary_ui(
+    primary: dict[str, Any] | None,
+    fallback: dict[str, Any] | None,
+    *,
+    id_key: str,
+) -> dict[str, Any]:
+    current = _normalize_reference_summary_ui(primary, id_key=id_key)
+    fallback_summary = _normalize_reference_summary_ui(fallback, id_key=id_key)
+    merged = dict(current)
+    if not merged.get("enabled"):
+        merged["enabled"] = bool(fallback_summary.get("enabled"))
+    if not merged.get(id_key):
+        merged[id_key] = list(fallback_summary.get(id_key) or [])
+    if not merged.get("matched_project_type"):
+        merged["matched_project_type"] = fallback_summary.get("matched_project_type")
+    if not merged.get("matched_chapters"):
+        merged["matched_chapters"] = list(fallback_summary.get("matched_chapters") or [])
+        merged["matched_chapter"] = merged["matched_chapters"][0] if merged["matched_chapters"] else None
+    if not merged.get("match_reasons"):
+        merged["match_reasons"] = list(fallback_summary.get("match_reasons") or [])
+        merged["match_reason"] = merged["match_reasons"][0] if merged["match_reasons"] else None
+    if not int(merged.get("hit_count") or 0):
+        merged["hit_count"] = int(fallback_summary.get("hit_count") or 0)
+    if fallback_summary.get("warning_list"):
+        merged["warning_list"] = list(
+            dict.fromkeys(
+                [
+                    *[str(x).strip() for x in (merged.get("warning_list") or []) if str(x).strip()],
+                    *[str(x).strip() for x in (fallback_summary.get("warning_list") or []) if str(x).strip()],
+                ]
+            )
+        )
+    return merged
+
+
+def _variant_reference_summaries_ui(
+    result: dict[str, Any] | None,
+    variant: int,
+    runtime: dict[str, Any] | None,
+) -> dict[str, Any]:
+    runtime_payload = runtime if isinstance(runtime, dict) else {}
+    chapter_rows = _chapter_reference_rows_ui(result, variant)
+    return {
+        "case_library_summary": _merge_reference_summary_ui(
+            runtime_payload.get("case_library_summary") if isinstance(runtime_payload.get("case_library_summary"), dict) else {},
+            _aggregate_reference_summary_from_chapter_rows_ui(
+                chapter_rows,
+                summary_key="case_library",
+                id_key="selected_case_ids",
+            ),
+            id_key="selected_case_ids",
+        ),
+        "image_library_summary": _merge_reference_summary_ui(
+            runtime_payload.get("image_library_summary") if isinstance(runtime_payload.get("image_library_summary"), dict) else {},
+            _aggregate_reference_summary_from_chapter_rows_ui(
+                chapter_rows,
+                summary_key="image_library",
+                id_key="selected_image_ids",
+            ),
+            id_key="selected_image_ids",
+        ),
+    }
+
+
 def _render_downloads() -> None:
     result = st.session_state.get("run_result") or {}
     if not result:
@@ -994,6 +1290,36 @@ def _render_downloads() -> None:
                 stages = runtime.get("pipeline_stages") if isinstance(runtime.get("pipeline_stages"), list) else []
                 if stages:
                     st.dataframe(stages, use_container_width=True, hide_index=True)
+            variant_reference = _variant_reference_summaries_ui(result, i, runtime)
+            for label, summary, id_key in [
+                (
+                    "案例库",
+                    variant_reference.get("case_library_summary") if isinstance(variant_reference.get("case_library_summary"), dict) else {},
+                    "selected_case_ids",
+                ),
+                (
+                    "图片库",
+                    variant_reference.get("image_library_summary") if isinstance(variant_reference.get("image_library_summary"), dict) else {},
+                    "selected_image_ids",
+                ),
+            ]:
+                normalized = _normalize_reference_summary_ui(summary, id_key=id_key)
+                if not _reference_summary_has_content(normalized, id_key=id_key):
+                    continue
+                selected_ids = normalized.get(id_key) or []
+                matched_project_type = str(normalized.get("matched_project_type") or "").strip() or "未命中"
+                matched_chapters = [str(x).strip() for x in (normalized.get("matched_chapters") or []) if str(x).strip()]
+                match_reasons = [str(x).strip() for x in (normalized.get("match_reasons") or []) if str(x).strip()]
+                st.caption(
+                    f"{label}：命中 {int(normalized.get('hit_count') or len(selected_ids) or 0)} 个；"
+                    f"项目类型={matched_project_type}"
+                    + (f"；章节={' / '.join(matched_chapters[:3])}" if matched_chapters else "")
+                    + (f"；依据={' / '.join(match_reasons[:2])}" if match_reasons else "")
+                )
+                if selected_ids:
+                    st.caption(f"{label}ID：{' / '.join(selected_ids[:6])}")
+                for warning in normalized.get("warning_list") or []:
+                    st.warning(f"{label}告警：{warning}")
 
 
 def _cancel_active_job(base_url: str, actions_key: str) -> None:
