@@ -610,6 +610,230 @@ def _ingest_docs(base_url: str, files: list[Any], project_id: str, source_hint: 
     return resp.json()
 
 
+def _normalize_reference_text_list_ui(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        values = raw
+    else:
+        values = re.split(r"[，,、;；/\s]+", str(raw or "").strip())
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _reference_top_k_state(key: str, default: int = 3) -> int:
+    raw = st.session_state.get(key)
+    try:
+        value = int(default if raw in (None, "") else raw)
+    except Exception:
+        value = default
+    return max(1, min(8, value))
+
+
+def _build_case_library_request_options() -> dict[str, Any]:
+    return {
+        "enabled": bool(st.session_state.get("case_library_enabled")),
+        "selected_case_ids": _normalize_reference_text_list_ui(st.session_state.get("case_library_selected_ids") or []),
+        "top_k": _reference_top_k_state("case_library_top_k"),
+    }
+
+
+def _build_image_library_request_options() -> dict[str, Any]:
+    return {
+        "enabled": bool(st.session_state.get("image_library_enabled")),
+        "selected_image_ids": _normalize_reference_text_list_ui(st.session_state.get("image_library_selected_ids") or []),
+        "top_k": _reference_top_k_state("image_library_top_k"),
+    }
+
+
+def _reference_item_label(item: dict[str, Any], id_key: str) -> str:
+    title = str(item.get("title") or item.get("filename") or item.get(id_key) or "").strip()
+    project_type = str(item.get("project_type") or "").strip()
+    tags = _normalize_reference_text_list_ui(item.get("tags") or [])
+    meta = [x for x in [project_type, " / ".join(tags[:3])] if x]
+    return f"{title}（{'；'.join(meta)}）" if meta else title
+
+
+def _render_reference_item_cards(items: list[dict[str, Any]], *, id_key: str, selected_ids: list[str]) -> None:
+    selected = {str(x).strip() for x in (selected_ids or []) if str(x).strip()}
+    if not items:
+        st.info("暂无已录入条目。")
+        return
+    for item in items[:8]:
+        item_id = str(item.get(id_key) or "").strip()
+        title = str(item.get("title") or item.get("filename") or item_id or "未命名").strip()
+        tags = " / ".join(_normalize_reference_text_list_ui(item.get("tags") or [])[:4])
+        chapter_scope = " / ".join(_normalize_reference_text_list_ui(item.get("chapter_scope") or [])[:4])
+        status = "已选择" if item_id and item_id in selected else "可选"
+        caption_parts = [
+            f"项目类型：{item.get('project_type') or '-'}",
+            f"标签：{tags or '-'}",
+            f"章节：{chapter_scope or '-'}",
+            f"状态：{status}",
+        ]
+        st.caption(f"{title}  " + "；".join(caption_parts))
+
+
+def _fetch_reference_items(
+    base_url: str,
+    actions_key: str,
+    path: str,
+    *,
+    project_type: str,
+) -> list[dict[str, Any]]:
+    payload = _get_json(
+        base_url,
+        path,
+        actions_key,
+        params={"project_type": project_type, "limit": 100},
+        timeout=60,
+    )
+    rows = payload.get("items") if isinstance(payload, dict) else []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _render_case_library_panel(base_url: str, actions_key: str) -> None:
+    st.markdown("**案例库**")
+    st.caption("默认关闭。启用后只作为格式、结构、表达方式参考，不覆盖招标文件、BoQ、图纸、答疑与企业参数。")
+    project_type = str(st.session_state.get("case_library_project_type") or st.session_state.get("project_type") or "").strip()
+    items: list[dict[str, Any]] = []
+    try:
+        items = _fetch_reference_items(base_url, actions_key, "/actions/case_library/items", project_type=project_type)
+    except Exception as e:
+        st.warning(f"案例库列表暂不可用：{e}")
+
+    item_ids = [str(item.get("case_id") or "").strip() for item in items if str(item.get("case_id") or "").strip()]
+    labels = {str(item.get("case_id") or "").strip(): _reference_item_label(item, "case_id") for item in items}
+    current_selected = [x for x in _normalize_reference_text_list_ui(st.session_state.get("case_library_selected_ids") or []) if x in set(item_ids)]
+    if current_selected != list(st.session_state.get("case_library_selected_ids") or []):
+        st.session_state["case_library_selected_ids"] = current_selected
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.checkbox("生成时启用案例库增强", key="case_library_enabled")
+    with c2:
+        st.number_input("案例检索数量", min_value=1, max_value=8, key="case_library_top_k")
+    st.multiselect(
+        "显式选择案例（可选）",
+        options=item_ids,
+        key="case_library_selected_ids",
+        format_func=lambda value: labels.get(str(value), str(value)),
+    )
+    _render_reference_item_cards(items, id_key="case_id", selected_ids=st.session_state.get("case_library_selected_ids") or [])
+
+    with st.expander("录入案例", expanded=False):
+        st.selectbox("案例项目类型", options=PROJECT_TYPES, key="case_library_project_type")
+        st.text_input("案例标题（可选）", key="case_library_upload_title")
+        st.text_input("标签（可选，逗号/顿号分隔）", key="case_library_upload_tags")
+        st.text_input("适用章节（可选，逗号/顿号分隔）", key="case_library_upload_chapter_scope")
+        st.text_area("摘要（可选）", key="case_library_upload_summary", height=80)
+        st.text_area("风格画像（可选）", key="case_library_upload_style_profile", height=80)
+        files = st.file_uploader(
+            "案例文件",
+            type=["pdf", "doc", "docx", "txt", "md"],
+            accept_multiple_files=True,
+            key="case_library_files",
+        )
+        if st.button("加入案例库", key="case_library_upload_btn", use_container_width=True):
+            try:
+                if not files:
+                    raise ValueError("请先选择案例文件")
+                params = {
+                    "project_type": str(st.session_state.get("case_library_project_type") or "").strip(),
+                    "title": str(st.session_state.get("case_library_upload_title") or "").strip(),
+                    "tags": ",".join(_normalize_reference_text_list_ui(st.session_state.get("case_library_upload_tags") or "")),
+                    "chapter_scope": ",".join(_normalize_reference_text_list_ui(st.session_state.get("case_library_upload_chapter_scope") or "")),
+                    "summary": str(st.session_state.get("case_library_upload_summary") or "").strip(),
+                    "style_profile": str(st.session_state.get("case_library_upload_style_profile") or "").strip(),
+                    "usable": "true",
+                }
+                res = _post_files(base_url, "/actions/case_library/upload", actions_key, "files", list(files), params=params, timeout=900)
+                saved = res.get("items") if isinstance(res, dict) else []
+                st.success(f"已加入案例库：{len(saved or [])} 个文件")
+                st.rerun()
+            except Exception as e:
+                st.error(f"案例库录入失败：{e}")
+
+
+def _render_image_library_panel(base_url: str, actions_key: str) -> None:
+    st.markdown("**图片库**")
+    st.caption("默认关闭。启用后只在命中时提供章节图片选择包；无匹配图片时不强行插图。")
+    project_type = str(st.session_state.get("image_library_project_type") or st.session_state.get("project_type") or "").strip()
+    items: list[dict[str, Any]] = []
+    try:
+        items = _fetch_reference_items(base_url, actions_key, "/actions/image_library/items", project_type=project_type)
+    except Exception as e:
+        st.warning(f"图片库列表暂不可用：{e}")
+
+    item_ids = [str(item.get("image_id") or "").strip() for item in items if str(item.get("image_id") or "").strip()]
+    labels = {str(item.get("image_id") or "").strip(): _reference_item_label(item, "image_id") for item in items}
+    current_selected = [x for x in _normalize_reference_text_list_ui(st.session_state.get("image_library_selected_ids") or []) if x in set(item_ids)]
+    if current_selected != list(st.session_state.get("image_library_selected_ids") or []):
+        st.session_state["image_library_selected_ids"] = current_selected
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.checkbox("生成时启用图片库增强", key="image_library_enabled")
+    with c2:
+        st.number_input("图片检索数量", min_value=1, max_value=8, key="image_library_top_k")
+    st.multiselect(
+        "显式选择图片（可选）",
+        options=item_ids,
+        key="image_library_selected_ids",
+        format_func=lambda value: labels.get(str(value), str(value)),
+    )
+    _render_reference_item_cards(items, id_key="image_id", selected_ids=st.session_state.get("image_library_selected_ids") or [])
+
+    with st.expander("录入图片", expanded=False):
+        st.selectbox("图片项目类型", options=PROJECT_TYPES, key="image_library_project_type")
+        st.text_input("图片标题（可选）", key="image_library_upload_title")
+        st.text_input("标签（可选，逗号/顿号分隔）", key="image_library_upload_tags")
+        st.text_input("章节范围（可选，逗号/顿号分隔）", key="image_library_upload_chapter_scope")
+        st.text_input("工序范围（可选，逗号/顿号分隔）", key="image_library_upload_process_scope")
+        st.text_input("图注（可选）", key="image_library_upload_caption")
+        st.text_area("图片说明（可选）", key="image_library_upload_description", height=80)
+        files = st.file_uploader(
+            "图片文件",
+            type=["png", "jpg", "jpeg", "webp", "gif"],
+            accept_multiple_files=True,
+            key="image_library_files",
+        )
+        if st.button("加入图片库", key="image_library_upload_btn", use_container_width=True):
+            try:
+                if not files:
+                    raise ValueError("请先选择图片文件")
+                params = {
+                    "project_type": str(st.session_state.get("image_library_project_type") or "").strip(),
+                    "title": str(st.session_state.get("image_library_upload_title") or "").strip(),
+                    "tags": ",".join(_normalize_reference_text_list_ui(st.session_state.get("image_library_upload_tags") or "")),
+                    "chapter_scope": ",".join(_normalize_reference_text_list_ui(st.session_state.get("image_library_upload_chapter_scope") or "")),
+                    "process_scope": ",".join(_normalize_reference_text_list_ui(st.session_state.get("image_library_upload_process_scope") or "")),
+                    "caption": str(st.session_state.get("image_library_upload_caption") or "").strip(),
+                    "description": str(st.session_state.get("image_library_upload_description") or "").strip(),
+                    "usable": "true",
+                }
+                res = _post_files(base_url, "/actions/image_library/upload", actions_key, "files", list(files), params=params, timeout=900)
+                saved = res.get("items") if isinstance(res, dict) else []
+                st.success(f"已加入图片库：{len(saved or [])} 张图片")
+                st.rerun()
+            except Exception as e:
+                st.error(f"图片库录入失败：{e}")
+
+
+def _render_reference_libraries_panel(base_url: str, actions_key: str) -> None:
+    with st.expander("参考库增强（默认关闭）", expanded=False):
+        case_tab, image_tab = st.tabs(["案例库", "图片库"])
+        with case_tab:
+            _render_case_library_panel(base_url, actions_key)
+        with image_tab:
+            _render_image_library_panel(base_url, actions_key)
+
+
 def _append_log(message: str) -> None:
     st.session_state.setdefault("run_logs", [])
     st.session_state["run_logs"].append(f"[{_now()}] {message}")
@@ -742,6 +966,25 @@ def _init_state() -> None:
         "chart_mode": "page_density_auto",
         "chart_every_n": 2,
         "chart_position": "chapter",
+        "case_library_enabled": False,
+        "case_library_top_k": 3,
+        "case_library_selected_ids": [],
+        "case_library_project_type": PROJECT_TYPES[0] if PROJECT_TYPES else "",
+        "case_library_upload_title": "",
+        "case_library_upload_tags": "",
+        "case_library_upload_chapter_scope": "",
+        "case_library_upload_summary": "",
+        "case_library_upload_style_profile": "",
+        "image_library_enabled": False,
+        "image_library_top_k": 3,
+        "image_library_selected_ids": [],
+        "image_library_project_type": PROJECT_TYPES[0] if PROJECT_TYPES else "",
+        "image_library_upload_title": "",
+        "image_library_upload_tags": "",
+        "image_library_upload_chapter_scope": "",
+        "image_library_upload_process_scope": "",
+        "image_library_upload_caption": "",
+        "image_library_upload_description": "",
         "auto_refresh": True,
     }
     for k, v in defaults.items():
@@ -778,6 +1021,10 @@ def _init_state() -> None:
     valid_templates = list(TEMPLATE_LIBRARY.keys())
     if valid_templates and st.session_state.get("template_key") not in valid_templates:
         st.session_state["template_key"] = valid_templates[0]
+    if PROJECT_TYPES and st.session_state.get("case_library_project_type") not in PROJECT_TYPES:
+        st.session_state["case_library_project_type"] = str(st.session_state.get("project_type") or PROJECT_TYPES[0])
+    if PROJECT_TYPES and st.session_state.get("image_library_project_type") not in PROJECT_TYPES:
+        st.session_state["image_library_project_type"] = str(st.session_state.get("project_type") or PROJECT_TYPES[0])
 
     # UI 默认值迁移：将高级参数中的勾选项改为默认不勾选（仅迁移一次）。
     defaults_rev = "2026-02-26-high-quality-defaults"
@@ -1320,6 +1567,30 @@ def _render_downloads() -> None:
                     st.caption(f"{label}ID：{' / '.join(selected_ids[:6])}")
                 for warning in normalized.get("warning_list") or []:
                     st.warning(f"{label}告警：{warning}")
+            chapter_rows = _chapter_reference_rows_ui(result, i)
+            if chapter_rows:
+                table_rows = []
+                for row in chapter_rows:
+                    case_summary = row.get("case_library") if isinstance(row.get("case_library"), dict) else {}
+                    image_summary = row.get("image_library") if isinstance(row.get("image_library"), dict) else {}
+                    case_ids = [str(x).strip() for x in (case_summary.get("selected_case_ids") or []) if str(x).strip()]
+                    image_ids = [str(x).strip() for x in (image_summary.get("selected_image_ids") or []) if str(x).strip()]
+                    warnings = [
+                        *[str(x).strip() for x in (case_summary.get("warning_list") or []) if str(x).strip()],
+                        *[str(x).strip() for x in (image_summary.get("warning_list") or []) if str(x).strip()],
+                    ]
+                    table_rows.append(
+                        {
+                            "章节": str(row.get("title") or "章节"),
+                            "案例命中": int(case_summary.get("hit_count") or len(case_ids) or 0),
+                            "案例ID": " / ".join(case_ids[:4]),
+                            "图片命中": int(image_summary.get("hit_count") or len(image_ids) or 0),
+                            "图片ID": " / ".join(image_ids[:4]),
+                            "告警": " / ".join(warnings[:4]),
+                        }
+                    )
+                with st.expander("章节级参考库摘要", expanded=False):
+                    st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
 
 def _cancel_active_job(base_url: str, actions_key: str) -> None:
@@ -1717,6 +1988,10 @@ with col_right:
     st.text_area("全局指令（生成内容必须无条件服从）", key="global_instruction", height=90)
     st.text_area("编制要求（每行一条）", key="requirements_text", height=120)
 
+_render_reference_libraries_panel(base_url, actions_key)
+current_case_library_options = _build_case_library_request_options()
+current_image_library_options = _build_image_library_request_options()
+
 outline = _render_outline_editor()
 
 # Optional tender-outline loader
@@ -2101,6 +2376,8 @@ if run_btn:
             "compare_mode": "summary",
             "compare_max_chars": int(mode_params["compare_max_chars"]),
             "compare_titles": None,
+            "case_library": current_case_library_options,
+            "image_library": current_image_library_options,
         }
         _append_log("步骤 4/6: 保存计划配置")
         _render_logs(log_holder)
@@ -2132,6 +2409,8 @@ if run_btn:
             "style": style,
             "chapter_pages": chapter_pages,
             "chapter_requirements": chapter_requirements or {},
+            "case_library": current_case_library_options,
+            "image_library": current_image_library_options,
         }
         provider_chain_payload: list[dict[str, str]] = []
         provider_chain_labels: list[str] = []
@@ -2199,6 +2478,18 @@ if run_btn:
             _append_log(f"文本模型链：{' -> '.join(provider_chain_labels)}")
         if params_override:
             generate_payload["params_override"] = params_override
+        if current_case_library_options.get("enabled"):
+            _append_log(
+                "案例库增强已启用："
+                f"top_k={current_case_library_options.get('top_k')}，"
+                f"显式案例={len(current_case_library_options.get('selected_case_ids') or [])}"
+            )
+        if current_image_library_options.get("enabled"):
+            _append_log(
+                "图片库增强已启用："
+                f"top_k={current_image_library_options.get('top_k')}，"
+                f"显式图片={len(current_image_library_options.get('selected_image_ids') or [])}"
+            )
 
         _append_log("步骤 5/6: 启动异步生成")
         _render_logs(log_holder)

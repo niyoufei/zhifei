@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,10 @@ def _load_helpers() -> SimpleNamespace:
     wanted_funcs = {
         "_normalize_reference_summary_ui",
         "_reference_summary_has_content",
+        "_normalize_reference_text_list_ui",
+        "_reference_top_k_state",
+        "_build_case_library_request_options",
+        "_build_image_library_request_options",
         "_decode_result_json_ui",
         "_variant_sections_from_result_ui",
         "_chapter_case_reference_summary_ui",
@@ -30,10 +35,53 @@ def _load_helpers() -> SimpleNamespace:
     namespace: dict[str, Any] = {
         "Any": Any,
         "json": json,
+        "re": re,
         "st": SimpleNamespace(session_state={}),
     }
     exec(compile(module, str(app_path), "exec"), namespace)
     return SimpleNamespace(**namespace)
+
+
+def test_reference_library_request_options_default_to_disabled():
+    helpers = _load_helpers()
+    helpers.st.session_state.clear()
+
+    assert helpers._build_case_library_request_options() == {
+        "enabled": False,
+        "selected_case_ids": [],
+        "top_k": 3,
+    }
+    assert helpers._build_image_library_request_options() == {
+        "enabled": False,
+        "selected_image_ids": [],
+        "top_k": 3,
+    }
+
+
+def test_reference_library_request_options_normalize_selected_ids_and_top_k():
+    helpers = _load_helpers()
+    helpers.st.session_state.clear()
+    helpers.st.session_state.update(
+        {
+            "case_library_enabled": True,
+            "case_library_selected_ids": ["case-1", "case-1", " case-2 "],
+            "case_library_top_k": 99,
+            "image_library_enabled": True,
+            "image_library_selected_ids": "image-1, image-2，image-1",
+            "image_library_top_k": 0,
+        }
+    )
+
+    assert helpers._build_case_library_request_options() == {
+        "enabled": True,
+        "selected_case_ids": ["case-1", "case-2"],
+        "top_k": 8,
+    }
+    assert helpers._build_image_library_request_options() == {
+        "enabled": True,
+        "selected_image_ids": ["image-1", "image-2"],
+        "top_k": 1,
+    }
 
 
 def test_variant_sections_from_result_ui_reads_result_json_bytes():
