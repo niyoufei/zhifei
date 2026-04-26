@@ -33,6 +33,8 @@ from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
 from backend.zhifei_autoplan.agent_contract import build_agent_contract, validate_section_with_contract
 from backend.zhifei_autoplan.score_mapper import build_score_mapping
 from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
+from backend.zhifei_autoplan.case_library_service import build_case_reference_pack
+from backend.zhifei_autoplan.image_library import build_image_selection_pack
 from backend.zhifei_autoplan.compliance_runtime import query_compliance
 from backend.zhifei_autoplan.terminology_guard import (
     load_labor_allocation_matrix,
@@ -391,6 +393,13 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     dry_run = bool(payload.get("dry_run", False))
     generate_images = bool(payload.get("generate_images", True))
     strict_quality = bool(payload.get("quality_strict", True))
+    case_library_options = payload.get("case_library") if isinstance(payload.get("case_library"), dict) else {}
+    image_library_options = payload.get("image_library") if isinstance(payload.get("image_library"), dict) else {}
+    reference_library_audit_path = (
+        payload.get("reference_library_audit_path")
+        or payload.get("ingest_audit_path")
+        or payload.get("audit_path")
+    )
     params = load_params()
     # Per-run parameter overrides (do not persist). Used for:
     # - tuning quant/qse defaults for one tender
@@ -688,6 +697,105 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         agent_parallelism = 4
     agent_parallelism = max(1, min(16, agent_parallelism))
     section_sem = asyncio.Semaphore(agent_parallelism)
+
+    def _build_case_pack_for_section(title: str) -> dict[str, Any]:
+        try:
+            return build_case_reference_pack(
+                options=case_library_options,
+                topic=str(topic),
+                chapter_title=str(title),
+                project_type=project_type,
+                audit_path=reference_library_audit_path,
+            )
+        except Exception as e:
+            return {
+                "enabled": bool(case_library_options.get("enabled")),
+                "requested_selected_case_ids": [],
+                "selected_case_ids": [],
+                "matched_project_type": project_type,
+                "matched_chapter": str(title or "").strip() or None,
+                "match_reason": "reference_pack_error",
+                "style_hints": [],
+                "structure_hints": [],
+                "reference_lines": [],
+                "non_fact_reference_notice": "",
+                "hits": [],
+                "warning_list": [f"case_reference_pack_error:{repr(e)}"],
+            }
+
+    def _build_image_pack_for_section(title: str) -> dict[str, Any]:
+        try:
+            return build_image_selection_pack(
+                options=image_library_options,
+                topic=str(topic),
+                chapter_title=str(title),
+                project_type=project_type,
+                tags=[str(title)],
+                audit_path=reference_library_audit_path,
+            )
+        except Exception as e:
+            return {
+                "enabled": bool(image_library_options.get("enabled")),
+                "requested_selected_image_ids": [],
+                "selected_image_ids": [],
+                "matched_project_type": project_type,
+                "matched_chapter": str(title or "").strip() or None,
+                "match_reason": "reference_pack_error",
+                "insertion_hint": "",
+                "caption_hint": "",
+                "images": [],
+                "warning_list": [f"image_selection_pack_error:{repr(e)}"],
+            }
+
+    def _reference_pack_summary(pack: Any, *, id_key: str, item_key: str) -> dict[str, Any]:
+        data = pack if isinstance(pack, dict) else {}
+        items = data.get(item_key) if isinstance(data.get(item_key), list) else []
+        return {
+            "enabled": bool(data.get("enabled", False)),
+            id_key: [
+                str(x).strip()
+                for x in (data.get(id_key) or [])
+                if str(x).strip()
+            ],
+            "matched_project_type": str(data.get("matched_project_type") or "").strip() or None,
+            "matched_chapter": str(data.get("matched_chapter") or "").strip() or None,
+            "match_reason": str(data.get("match_reason") or "").strip() or None,
+            "hit_count": len(items),
+            "warning_list": [
+                str(x).strip()
+                for x in (data.get("warning_list") or [])
+                if str(x).strip()
+            ],
+        }
+
+    def _aggregate_reference_packs(rows: list[dict[str, Any]], *, pack_key: str, id_key: str, item_key: str) -> dict[str, Any]:
+        chapter_summaries: list[dict[str, Any]] = []
+        selected_ids: list[str] = []
+        warnings: list[str] = []
+        enabled = False
+        seen_ids: set[str] = set()
+        seen_warnings: set[str] = set()
+        for row in rows:
+            pack = row.get(pack_key) if isinstance(row, dict) else None
+            summary = _reference_pack_summary(pack, id_key=id_key, item_key=item_key)
+            enabled = enabled or bool(summary.get("enabled"))
+            chapter_summaries.append(summary)
+            for item_id in summary.get(id_key) or []:
+                if item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                selected_ids.append(item_id)
+            for warning in summary.get("warning_list") or []:
+                if warning in seen_warnings:
+                    continue
+                seen_warnings.add(warning)
+                warnings.append(warning)
+        return {
+            "enabled": bool(enabled),
+            id_key: selected_ids,
+            "chapters": chapter_summaries,
+            "warning_list": warnings,
+        }
 
     async def build_section(idx: int, title: str):
         # 章节级重试：多模型轮询重试，最多尝试 3 个 provider（主+备1+备2）
@@ -987,6 +1095,24 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     sections = await asyncio.gather(*[_build_section_with_limit(i, t) for i, t in enumerate(outline)])
     for sec in sections:
         sec["content"] = strip_nonconcrete_language(sec.get("content") or "")
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        title = str(sec.get("title") or "").strip()
+        sec.setdefault("case_reference_pack", _build_case_pack_for_section(title))
+        sec.setdefault("image_selection_pack", _build_image_pack_for_section(title))
+    case_reference_pack = _aggregate_reference_packs(
+        sections,
+        pack_key="case_reference_pack",
+        id_key="selected_case_ids",
+        item_key="hits",
+    )
+    image_selection_pack = _aggregate_reference_packs(
+        sections,
+        pack_key="image_selection_pack",
+        id_key="selected_image_ids",
+        item_key="images",
+    )
     pipeline_stages: List[Dict[str, Any]] = [
         {"stage": "draft_generation", "ok": True, "chapter_count": len(sections)}
     ]
@@ -1400,6 +1526,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "global_instruction": global_instruction,
         "outline": outline,
         "sections": sections,
+        "case_reference_pack": case_reference_pack,
+        "image_selection_pack": image_selection_pack,
         "media": media,
         "branding": branding,
         # Keep the raw value for API backward-compatibility (some callers pass a string).

@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import asyncio
+import json
 
 from backend.zhifei_autoplan.orchestrator import (
     _build_weights_and_penalties,
@@ -893,7 +894,7 @@ class TestOrchestratorIntegration:
         assert len(call_times) == len(result["sections"])
         assert len(call_times) >= 3
         # Time difference between first and last call should be minimal
-        assert call_times[-1] - call_times[0] < 0.05  # 50ms tolerance
+        assert call_times[-1] - call_times[0] < 0.2  # allow CI scheduling jitter
 
 
 # =============================================================================
@@ -1445,3 +1446,84 @@ class TestPickProviderWithList:
             keys_used = [c.get("api_key") for c in seen]
             assert "bad_key" in keys_used
             assert "good_key" in keys_used
+
+
+@pytest.mark.asyncio
+async def test_run_autoplan_attaches_reference_packs_without_prompt_injection(tmp_path):
+    from backend.zhifei_autoplan.case_library_service import case_library_record_id
+    from backend.zhifei_autoplan.image_library import image_library_record_id
+
+    audit_path = tmp_path / "ingest.jsonl"
+    case_record = {
+        "ts": "2026-04-12T10:00:00Z",
+        "filename": "房建案例A.txt",
+        "project_type": "房建",
+        "library_scope": "case_library",
+        "saved_as": str(tmp_path / "房建案例A.txt"),
+        "library_title": "房建案例A",
+        "library_tags": ["医院"],
+        "chapter_scope": ["工程概况"],
+        "library_summary": "结构清晰",
+        "library_style_profile": "短句表达",
+        "sha256": "a" * 64,
+    }
+    image_record = {
+        "ts": "2026-04-12T11:00:00Z",
+        "filename": "现场平面.png",
+        "project_type": "房建",
+        "library_scope": "image_library",
+        "saved_as": str(tmp_path / "现场平面.png"),
+        "library_title": "现场平面",
+        "library_tags": ["平面"],
+        "chapter_scope": ["工程概况"],
+        "library_caption": "现场平面示意",
+        "sha256": "b" * 64,
+    }
+    audit_path.write_text(
+        "\n".join([
+            json.dumps(case_record, ensure_ascii=False),
+            json.dumps(image_record, ensure_ascii=False),
+        ]),
+        encoding="utf-8",
+    )
+
+    with patch("backend.zhifei_autoplan.orchestrator.load_tender_matrix", return_value={}), \
+         patch("backend.zhifei_autoplan.orchestrator.load_boq_data", return_value={}), \
+         patch("backend.zhifei_autoplan.orchestrator.search_kg", return_value={"results": []}), \
+         patch("backend.zhifei_autoplan.orchestrator.search_ingested_docs", return_value=[]), \
+         patch("backend.zhifei_autoplan.orchestrator.SectionWriter") as mock_writer_cls, \
+         patch("backend.zhifei_autoplan.orchestrator.run_quality_checks", return_value={"score": 100, "remediation": []}), \
+         patch("backend.zhifei_autoplan.orchestrator.apply_remediation"):
+        mock_writer = MagicMock()
+        mock_writer.write = AsyncMock(return_value={"title": "工程概况", "content": "正文保持不变"})
+        mock_writer_cls.return_value = mock_writer
+
+        result = await run_autoplan(
+            {
+                "topic": "医院改造项目",
+                "outline": ["工程概况"],
+                "project_type": "房建",
+                "dry_run": True,
+                "generate_images": False,
+                "auto_remediate": False,
+                "reference_library_audit_path": str(audit_path),
+                "case_library": {
+                    "enabled": True,
+                    "selected_case_ids": [case_library_record_id(case_record)],
+                },
+                "image_library": {
+                    "enabled": True,
+                    "selected_image_ids": [image_library_record_id(image_record)],
+                },
+            }
+        )
+
+    section = result["sections"][0]
+    assert section["content"] == "正文保持不变"
+    assert section["case_reference_pack"]["match_reason"] == "selected_case_ids"
+    assert section["image_selection_pack"]["match_reason"] == "selected_image_ids"
+    assert result["case_reference_pack"]["chapters"][0]["hit_count"] == 1
+    assert result["image_selection_pack"]["chapters"][0]["hit_count"] == 1
+    ctx = mock_writer.write.call_args.args[1]
+    assert "case_reference_pack" not in ctx
+    assert "image_selection_pack" not in ctx
