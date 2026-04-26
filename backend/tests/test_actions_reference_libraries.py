@@ -178,7 +178,11 @@ async def test_actions_image_library_upload_rejects_invalid_project_type(tmp_pat
 
 
 def test_build_image_selection_pack_roundtrip(tmp_path: Path) -> None:
-    from backend.zhifei_autoplan.image_library import build_image_selection_pack, image_library_record_id
+    from backend.zhifei_autoplan.image_library import (
+        build_image_selection_pack,
+        image_library_record_id,
+        image_selection_pack_media_entries,
+    )
 
     audit_path = tmp_path / "ingest.jsonl"
     image_path = tmp_path / "现场平面.png"
@@ -213,6 +217,28 @@ def test_build_image_selection_pack_roundtrip(tmp_path: Path) -> None:
     assert pack["selected_image_ids"] == [image_library_record_id(record)]
     assert pack["match_reason"] == "selected_image_ids"
     assert pack["images"][0]["caption"] == "现场平面示意"
+    assert image_selection_pack_media_entries(pack) == [
+        {"path": str(image_path), "caption": "现场平面示意"}
+    ]
+
+
+def test_image_selection_pack_media_entries_skips_missing_paths_and_deduplicates() -> None:
+    from backend.zhifei_autoplan.image_library import image_selection_pack_media_entries
+
+    assert image_selection_pack_media_entries(
+        {
+            "caption_hint": "兜底图注",
+            "images": [
+                {"source_path": "/tmp/a.png", "caption": "现场平面示意"},
+                {"storage_path": "/tmp/a.png", "caption": "重复路径"},
+                {"storage_path": "/tmp/b.png", "title": "材料堆场"},
+                {"caption": "缺少路径"},
+            ],
+        }
+    ) == [
+        {"path": "/tmp/a.png", "caption": "现场平面示意"},
+        {"path": "/tmp/b.png", "caption": "材料堆场"},
+    ]
 
 
 def test_build_image_selection_pack_no_match_is_noop_warning(tmp_path: Path) -> None:
@@ -233,4 +259,3 @@ def test_build_image_selection_pack_no_match_is_noop_warning(tmp_path: Path) -> 
     assert pack["enabled"] is True
     assert pack["images"] == []
     assert pack["warning_list"] == ["no_image_match"]
-
