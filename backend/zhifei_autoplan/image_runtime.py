@@ -71,6 +71,29 @@ def _extract_image_parts(resp) -> Tuple[List[Tuple[bytes, str]], str]:
     return images, "\n".join(texts).strip()
 
 
+class _NoopAsyncCloser:
+    async def aclose(self) -> None:
+        return None
+
+
+def _close_gemini_client_safely(client: Any) -> None:
+    if client is None:
+        return
+    try:
+        aio_client = getattr(client, "_aio", None)
+        api_client = getattr(aio_client, "_api_client", None)
+        if api_client is not None and not hasattr(api_client, "_async_httpx_client"):
+            setattr(api_client, "_async_httpx_client", _NoopAsyncCloser())
+    except Exception:
+        pass
+    try:
+        close_fn = getattr(client, "close", None)
+        if callable(close_fn):
+            close_fn()
+    except Exception:
+        pass
+
+
 def generate_image_gemini(
     prompt: str,
     api_key: str,
@@ -114,6 +137,8 @@ def generate_image_gemini(
         )
     except Exception as e:
         return {"ok": False, "paths": [], "text": "", "error": repr(e), "model": model_id}
+    finally:
+        _close_gemini_client_safely(client)
 
     images, text = _extract_image_parts(resp)
     paths: List[str] = []
@@ -135,4 +160,3 @@ def generate_image_gemini(
             continue
 
     return {"ok": bool(paths), "paths": paths, "text": text, "model": model_id, "provider": "google"}
-
