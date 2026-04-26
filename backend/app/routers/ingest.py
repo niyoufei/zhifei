@@ -29,6 +29,61 @@ def _ext(name: str) -> str:
     return (name.rsplit(".", 1)[-1].lower() if "." in name else "")
 
 
+def _resolve_workspace_context(
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+) -> Dict[str, str]:
+    if workspace_dir:
+        root = Path(workspace_dir)
+    elif session_id:
+        safe_session = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(session_id))
+        root = Path("backend/data/workspaces") / (safe_session or "default")
+    else:
+        root = Path("backend/data")
+    root.mkdir(parents=True, exist_ok=True)
+    return {"session_id": str(session_id or ""), "workspace_dir": str(root)}
+
+
+def workspace_paths(workspace_dir: str | Path) -> Dict[str, Path]:
+    root = Path(workspace_dir)
+    paths = {
+        "uploads": root / "uploads",
+        "extracts": root / "extracts",
+        "previews": root / "previews",
+        "ingest_audit": root / "audit" / "ingest.jsonl",
+    }
+    for key, path in paths.items():
+        if key == "ingest_audit":
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+def _extract_text_path(ext: str, path: Path) -> Dict[str, Any]:
+    if ext in {"txt", "md"}:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        return {
+            "doc_type": ext,
+            "pages": 1,
+            "text_bytes": len(text.encode("utf-8")),
+            "extract_text": text,
+        }
+    if ext == "pdf":
+        reader = PdfReader(str(path))
+        texts = []
+        for page in reader.pages:
+            texts.append(page.extract_text() or "")
+        text = "\n\n\f\n\n".join(texts)
+        return {
+            "doc_type": "pdf",
+            "pages": len(reader.pages),
+            "text_bytes": len(text.encode("utf-8")),
+            "extract_text": text,
+        }
+    return {"doc_type": ext or "unknown", "pages": None, "text_bytes": None}
+
+
 def _extract_text_bytes(ext: str, content: bytes) -> Dict[str, Any]:
     if ext in {"txt", "md"}:
         text = content.decode("utf-8", errors="ignore")
@@ -53,6 +108,50 @@ def _extract_text_bytes(ext: str, content: bytes) -> Dict[str, Any]:
             "extract_text": text,
         }
     return {"doc_type": ext or "unknown", "pages": None, "text_bytes": None}
+
+
+async def _persist_upload_file(
+    uf: UploadFile,
+    *,
+    target_dir: Path,
+) -> tuple[Path | None, str | None, int]:
+    filename = Path(str(uf.filename or "upload.bin")).name or "upload.bin"
+    temp_name = f".upload_{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}_{filename}"
+    temp_path = target_dir / temp_name
+    digest = hashlib.sha256()
+    total_bytes = 0
+    try:
+        await uf.seek(0)
+    except Exception:
+        pass
+    with temp_path.open("wb") as fh:
+        while True:
+            chunk = await uf.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total_bytes += len(chunk)
+            fh.write(chunk)
+    try:
+        await uf.seek(0)
+    except Exception:
+        pass
+    if total_bytes <= 0:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None, None, 0
+    digest_hex = digest.hexdigest()
+    out_path = target_dir / f"{digest_hex[:8]}_{filename}"
+    if out_path.exists():
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    else:
+        temp_path.replace(out_path)
+    return out_path, digest_hex, total_bytes
 
 
 def _meta_to_text(parsed_type: str | None, parsed_meta: Any) -> str:
@@ -247,29 +346,39 @@ async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> str | Non
             return None
     return None
 
-async def _handle_upload(files: List[UploadFile], project_id: str | None = None, source_hint: str | None = None):
+async def _handle_upload(
+    files: List[UploadFile],
+    project_id: str | None = None,
+    source_hint: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+):
     if not files:
         raise HTTPException(status_code=400, detail="no files uploaded")
 
+    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    ws_paths = workspace_paths(workspace["workspace_dir"])
     day = datetime.utcnow().strftime("%Y%m%d")
-    target_dir = UPLOAD_DIR / day
+    target_dir = ws_paths["uploads"] / day
     target_dir.mkdir(parents=True, exist_ok=True)
+    extract_dir = ws_paths["extracts"]
+    preview_dir = ws_paths["previews"]
+    audit_file = ws_paths["ingest_audit"]
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    audit_file.parent.mkdir(parents=True, exist_ok=True)
 
     records = []
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     normalized_hint = _normalize_source_hint(source_hint)
     for uf in files:
-        content = await uf.read()
-        if not content:
-            continue
-        digest = _sha256(content)
         ext = _ext(uf.filename or "")
 
-        saved_name = f"{digest[:8]}_{uf.filename}"
-        out_path = target_dir / saved_name
-        out_path.write_bytes(content)
+        out_path, digest, total_bytes = await _persist_upload_file(uf, target_dir=target_dir)
+        if not out_path or not digest or total_bytes <= 0:
+            continue
 
-        parsed = _extract_text_bytes(ext, content)
+        parsed = _extract_text_path(ext, out_path)
         parsed_type = None
         parsed_meta = None
         if parsed.get("extract_text") is None and ext not in {"txt", "md", "pdf"}:
@@ -304,7 +413,7 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None,
         preview_path = None
         try:
             preview_name = f"{digest[:8]}_preview.png"
-            preview_out = PREVIEW_DIR / preview_name
+            preview_out = preview_dir / preview_name
             if ext in {"png", "jpg", "jpeg"}:
                 preview_path = _make_preview_image(out_path, preview_out)
             elif ext == "pdf":
@@ -314,7 +423,7 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None,
 
         extract_path = None
         if parsed.get("extract_text") is not None:
-            extract_path = EXTRACT_DIR / f"{digest[:8]}.txt"
+            extract_path = extract_dir / f"{digest[:8]}.txt"
             extract_path.write_text(parsed["extract_text"], encoding="utf-8")
             parsed.pop("extract_text", None)
 
@@ -322,9 +431,10 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None,
             "ts": datetime.utcnow().isoformat() + "Z",
             "module": "ingest",
             "project_id": pid,
+            "workspace_dir": workspace["workspace_dir"],
             "filename": uf.filename,
             "saved_as": str(out_path),
-            "bytes": len(content),
+            "bytes": int(total_bytes),
             "sha256": digest,
             "extract_saved_as": str(extract_path) if extract_path else None,
             "preview_saved_as": preview_path,
@@ -335,7 +445,7 @@ async def _handle_upload(files: List[UploadFile], project_id: str | None = None,
             "tags": _classify_tags(uf.filename, ext, parsed_type, normalized_hint),
         }
         records.append(rec)
-        with (AUDIT_DIR / "ingest.jsonl").open("a", encoding="utf-8") as f:
+        with audit_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     if not records:
@@ -349,10 +459,34 @@ async def ping():
 
 
 @router.post("/upload")
-async def upload(files: List[UploadFile] = File(...), project_id: str | None = None, source_hint: str | None = None):
-    return await _handle_upload(files, project_id=project_id, source_hint=source_hint)
+async def upload(
+    files: List[UploadFile] = File(...),
+    project_id: str | None = None,
+    source_hint: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+):
+    return await _handle_upload(
+        files,
+        project_id=project_id,
+        source_hint=source_hint,
+        session_id=session_id,
+        workspace_dir=workspace_dir,
+    )
 
 
 @router.post("/ingest")
-async def ingest(files: List[UploadFile] = File(...), project_id: str | None = None, source_hint: str | None = None):
-    return await _handle_upload(files, project_id=project_id, source_hint=source_hint)
+async def ingest(
+    files: List[UploadFile] = File(...),
+    project_id: str | None = None,
+    source_hint: str | None = None,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+):
+    return await _handle_upload(
+        files,
+        project_id=project_id,
+        source_hint=source_hint,
+        session_id=session_id,
+        workspace_dir=workspace_dir,
+    )
