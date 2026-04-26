@@ -12,9 +12,9 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, UploadFil
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
 
-from backend.zhifei_autoplan.exporter import export_autoplan_compare_docx, export_autoplan_docx, export_autoplan_focus_xlsx
 from backend.zhifei_autoplan.job_store import create_job, get_job, update_job
 from backend.zhifei_autoplan.orchestrator import run_autoplan
+from backend.zhifei_autoplan.output_artifacts import save_outputs as save_output_artifacts
 from backend.zhifei_autoplan.plan_store import load_plan, save_plan
 from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
@@ -484,53 +484,7 @@ def _merge_plan_defaults(payload: dict) -> dict:
 
 
 def _save_outputs(base_name: str, results: list[dict]) -> dict:
-    build_dir = Path("build")
-    build_dir.mkdir(parents=True, exist_ok=True)
-    out_json = build_dir / f"{base_name}.json"
-    out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
-    docx_files = []
-    compare_files = []
-    focus_xlsx_files = []
-    score_overview_xlsx_files = []
-    expert_review_docx_files = []
-    for i, variant in enumerate(results):
-        out_docx = build_dir / f"{base_name}_v{i + 1}.docx"
-        export_autoplan_docx(variant, str(out_docx))
-        docx_files.append(str(out_docx))
-        out_compare = build_dir / f"{base_name}_compare_v{i + 1}.docx"
-        export_autoplan_compare_docx(variant, str(out_compare))
-        compare_files.append(str(out_compare))
-        out_focus = build_dir / f"{base_name}_focus_v{i + 1}.xlsx"
-        try:
-            focus_path = export_autoplan_focus_xlsx(variant, str(out_focus))
-        except Exception:
-            focus_path = ""
-        focus_xlsx_files.append(str(focus_path) if focus_path else None)
-        out_overview = build_dir / f"{base_name}_评分点覆盖与证据引用总览_v{i + 1}.xlsx"
-        try:
-            from backend.zhifei_autoplan.exporter import export_scoring_evidence_overview_xlsx
-
-            overview_path = export_scoring_evidence_overview_xlsx(variant, str(out_overview))
-        except Exception:
-            overview_path = ""
-        score_overview_xlsx_files.append(str(overview_path) if overview_path else None)
-
-        out_review = build_dir / f"{base_name}_专家复核提要版_v{i + 1}.docx"
-        try:
-            from backend.zhifei_autoplan.exporter import export_expert_review_brief_docx
-
-            review_path = export_expert_review_brief_docx(variant, str(out_review))
-        except Exception:
-            review_path = ""
-        expert_review_docx_files.append(str(review_path) if review_path else None)
-    return {
-        "json": str(out_json),
-        "docx": docx_files,
-        "compare_docx": compare_files,
-        "focus_xlsx": focus_xlsx_files,
-        "score_overview_xlsx": score_overview_xlsx_files,
-        "expert_review_docx": expert_review_docx_files,
-    }
+    return save_output_artifacts(base_name, results)
 
 
 def _rebuild_postprocessed_artifacts(
