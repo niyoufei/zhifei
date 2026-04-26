@@ -29,6 +29,22 @@ from backend.zhifei_autoplan.params_runtime import load_params, get_image_defaul
 from backend.zhifei_autoplan.four_new_tech import recommend_four_new
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
 from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
+from backend.zhifei_autoplan.case_library_service import (
+    CASE_LIBRARY_SCOPE,
+    case_library_record_id,
+    list_case_library_items,
+    normalize_case_library_options,
+)
+from backend.zhifei_autoplan.image_library import (
+    IMAGE_LIBRARY_SCOPE,
+    image_library_record_id,
+    list_image_library_items,
+    normalize_image_library_options,
+    normalize_text_list,
+)
+from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
+from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
+from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
 
 
 router = APIRouter(prefix="/actions", tags=["Actions Bridge"])
@@ -90,6 +106,8 @@ class ActionsGenerateRequest(BaseModel):
     # Per-run editable parameter overrides (do not persist). Example:
     # {"qse_defaults": {"PM10阈值": "≤120ug/m3"}, "quant_defaults": {"频次": "3次/日"}}
     params_override: dict | None = None
+    case_library: dict | None = None
+    image_library: dict | None = None
 
 
 class ActionsPlanRequest(BaseModel):
@@ -110,6 +128,8 @@ class ActionsPlanRequest(BaseModel):
     compare_mode: str = "summary"
     compare_max_chars: int = 1200
     compare_titles: list[str] | None = None
+    case_library: dict | None = None
+    image_library: dict | None = None
 
 
 class ActionsSection(BaseModel):
@@ -437,6 +457,14 @@ def _merge_plan_defaults(payload: dict) -> dict:
         payload["compare_max_chars"] = plan.get("compare_max_chars", 1200)
     if payload.get("compare_titles") is None:
         payload["compare_titles"] = plan.get("compare_titles")
+    if payload.get("case_library") is None:
+        payload["case_library"] = plan.get("case_library")
+    if payload.get("image_library") is None:
+        payload["image_library"] = plan.get("image_library")
+    if payload.get("case_library") is not None:
+        payload["case_library"] = normalize_case_library_options(payload.get("case_library"))
+    if payload.get("image_library") is not None:
+        payload["image_library"] = normalize_image_library_options(payload.get("image_library"))
     if payload.get("selected_templates") is None:
         payload["selected_templates"] = plan.get("selected_templates")
     payload["selected_templates"] = _normalize_selected_templates(payload.get("selected_templates"))
@@ -765,6 +793,164 @@ async def actions_plan_save(req: ActionsPlanRequest, project_id: str | None = No
 async def actions_plan_get(project_id: str | None = None, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
     return {"ok": True, "plan": load_plan(project_id=project_id) or {}}
+
+
+def _reference_audit_path(session_id: str | None = None, workspace_dir: str | None = None) -> Path:
+    workspace = _resolve_ingest_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
+    return ingest_workspace_paths(workspace["workspace_dir"])["ingest_audit"]
+
+
+def _case_library_saved_view(rec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "case_id": case_library_record_id(rec),
+        "title": str(rec.get("library_title") or rec.get("filename") or "").strip(),
+        "filename": rec.get("filename"),
+        "project_type": rec.get("project_type"),
+        "tags": normalize_text_list(rec.get("library_tags")),
+        "chapter_scope": normalize_text_list(rec.get("chapter_scope")),
+        "summary": str(rec.get("library_summary") or "").strip(),
+        "style_profile": str(rec.get("library_style_profile") or "").strip(),
+        "source_file": rec.get("saved_as"),
+        "storage_path": rec.get("saved_as"),
+        "extract_saved_as": rec.get("extract_saved_as"),
+        "enabled": bool(rec.get("enabled", True)),
+        "usable": bool(rec.get("usable", True)),
+        "created_at": rec.get("ts"),
+        "updated_at": rec.get("ts"),
+    }
+
+
+def _image_library_saved_view(rec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "image_id": image_library_record_id(rec),
+        "title": str(rec.get("library_title") or rec.get("filename") or "").strip(),
+        "filename": rec.get("filename"),
+        "project_type": rec.get("project_type"),
+        "tags": normalize_text_list(rec.get("library_tags")),
+        "chapter_scope": normalize_text_list(rec.get("chapter_scope")),
+        "process_scope": normalize_text_list(rec.get("process_scope")),
+        "caption": str(rec.get("library_caption") or "").strip(),
+        "description": str(rec.get("library_description") or "").strip(),
+        "source_path": rec.get("saved_as"),
+        "storage_path": rec.get("saved_as"),
+        "preview_saved_as": rec.get("preview_saved_as"),
+        "enabled": bool(rec.get("enabled", True)),
+        "usable": bool(rec.get("usable", True)),
+        "created_at": rec.get("ts"),
+        "updated_at": rec.get("ts"),
+    }
+
+
+@router.get("/case_library/items")
+async def actions_case_library_items(
+    project_type: str | None = None,
+    tags: str | None = None,
+    chapter_scope: str | None = None,
+    limit: int = 50,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    items = list_case_library_items(
+        project_type=project_type,
+        tags=normalize_text_list(tags),
+        chapter_scope=chapter_scope,
+        limit=max(1, min(int(limit or 50), 100)),
+        audit_path=_reference_audit_path(session_id=session_id, workspace_dir=workspace_dir),
+    )
+    return {"ok": True, "items": items}
+
+
+@router.post("/case_library/upload")
+async def actions_case_library_upload(
+    files: List[UploadFile] = File(...),
+    project_type: str | None = None,
+    title: str | None = None,
+    tags: str | None = None,
+    chapter_scope: str | None = None,
+    summary: str | None = None,
+    style_profile: str | None = None,
+    usable: bool | str | None = True,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    res = await _handle_ingest_upload(
+        files,
+        source_hint=CASE_LIBRARY_SCOPE,
+        session_id=session_id,
+        workspace_dir=workspace_dir,
+        library_scope=CASE_LIBRARY_SCOPE,
+        project_type=project_type,
+        title=title,
+        tags=tags,
+        chapter_scope=chapter_scope,
+        summary=summary,
+        style_profile=style_profile,
+        usable=usable,
+    )
+    rows = res.get("saved") if isinstance(res, dict) else []
+    return {"ok": True, "items": [_case_library_saved_view(row) for row in rows if isinstance(row, dict)]}
+
+
+@router.get("/image_library/items")
+async def actions_image_library_items(
+    project_type: str | None = None,
+    tags: str | None = None,
+    chapter_scope: str | None = None,
+    process_scope: str | None = None,
+    limit: int = 50,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    items = list_image_library_items(
+        project_type=project_type,
+        tags=normalize_text_list(tags),
+        chapter_scope=chapter_scope,
+        process_scope=process_scope,
+        limit=max(1, min(int(limit or 50), 100)),
+        audit_path=_reference_audit_path(session_id=session_id, workspace_dir=workspace_dir),
+    )
+    return {"ok": True, "items": items}
+
+
+@router.post("/image_library/upload")
+async def actions_image_library_upload(
+    files: List[UploadFile] = File(...),
+    project_type: str | None = None,
+    title: str | None = None,
+    tags: str | None = None,
+    chapter_scope: str | None = None,
+    process_scope: str | None = None,
+    caption: str | None = None,
+    description: str | None = None,
+    usable: bool | str | None = True,
+    session_id: str | None = None,
+    workspace_dir: str | None = None,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    res = await _handle_ingest_upload(
+        files,
+        source_hint=IMAGE_LIBRARY_SCOPE,
+        session_id=session_id,
+        workspace_dir=workspace_dir,
+        library_scope=IMAGE_LIBRARY_SCOPE,
+        project_type=project_type,
+        title=title,
+        tags=tags,
+        chapter_scope=chapter_scope,
+        process_scope=process_scope,
+        caption=caption,
+        description=description,
+        usable=usable,
+    )
+    rows = res.get("saved") if isinstance(res, dict) else []
+    return {"ok": True, "items": [_image_library_saved_view(row) for row in rows if isinstance(row, dict)]}
 
 
 @router.post("/tender/parse")
