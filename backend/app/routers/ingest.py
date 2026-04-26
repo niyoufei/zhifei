@@ -11,6 +11,10 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pypdf import PdfReader
 
+from backend.zhifei_autoplan.case_library_service import CASE_LIBRARY_SCOPE
+from backend.zhifei_autoplan.image_library import IMAGE_LIBRARY_SCOPE, normalize_text_list
+from backend.zhifei_autoplan.project_types import normalize_project_type
+
 router = APIRouter(prefix="/ingest", tags=["文档解析"])
 
 UPLOAD_DIR = Path("backend/data/uploads")
@@ -217,6 +221,38 @@ def _normalize_source_hint(source_hint: str | None) -> str:
     return aliases.get(raw, raw)
 
 
+def _normalize_library_scope(library_scope: str | None, source_hint: str | None = None) -> str:
+    raw = str(library_scope or "").strip().lower()
+    if not raw:
+        raw = _normalize_source_hint(source_hint)
+    aliases = {
+        "case": CASE_LIBRARY_SCOPE,
+        "case_library": CASE_LIBRARY_SCOPE,
+        "template_library": CASE_LIBRARY_SCOPE,
+        "benchmark": CASE_LIBRARY_SCOPE,
+        "样板库": CASE_LIBRARY_SCOPE,
+        "案例库": CASE_LIBRARY_SCOPE,
+        "image": IMAGE_LIBRARY_SCOPE,
+        "image_library": IMAGE_LIBRARY_SCOPE,
+        "图片库": IMAGE_LIBRARY_SCOPE,
+        "图库": IMAGE_LIBRARY_SCOPE,
+    }
+    return aliases.get(raw, raw)
+
+
+def _normalize_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "启用", "可用"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "禁用", "不可用"}:
+        return False
+    return bool(default)
+
+
 def _classify_tags(filename: str | None, ext: str, parsed_type: str | None, source_hint: str | None = None) -> list[str]:
     name = (filename or "").lower()
     tags = []
@@ -352,6 +388,17 @@ async def _handle_upload(
     source_hint: str | None = None,
     session_id: str | None = None,
     workspace_dir: str | None = None,
+    library_scope: str | None = None,
+    project_type: str | None = None,
+    title: str | None = None,
+    tags: str | None = None,
+    chapter_scope: str | None = None,
+    process_scope: str | None = None,
+    summary: str | None = None,
+    style_profile: str | None = None,
+    caption: str | None = None,
+    description: str | None = None,
+    usable: bool | str | None = True,
 ):
     if not files:
         raise HTTPException(status_code=400, detail="no files uploaded")
@@ -371,8 +418,25 @@ async def _handle_upload(
     records = []
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     normalized_hint = _normalize_source_hint(source_hint)
+    normalized_library_scope = _normalize_library_scope(library_scope, normalized_hint)
+    normalized_project_type = normalize_project_type(project_type)
+    normalized_title = str(title or "").strip()[:240] or None
+    normalized_tags = normalize_text_list(tags)
+    normalized_chapter_scope = normalize_text_list(chapter_scope)
+    normalized_process_scope = normalize_text_list(process_scope)
+    normalized_summary = str(summary or "").strip()[:1000]
+    normalized_style_profile = str(style_profile or "").strip()[:1000]
+    normalized_caption = str(caption or "").strip()[:500]
+    normalized_description = str(description or "").strip()[:1000]
+    normalized_usable = _normalize_bool(usable, default=True)
+    if normalized_library_scope in {CASE_LIBRARY_SCOPE, IMAGE_LIBRARY_SCOPE} and not normalized_project_type:
+        if normalized_library_scope == IMAGE_LIBRARY_SCOPE:
+            raise HTTPException(status_code=400, detail="image library upload requires valid project_type")
+        raise HTTPException(status_code=400, detail="case library upload requires valid project_type")
     for uf in files:
         ext = _ext(uf.filename or "")
+        if normalized_library_scope == IMAGE_LIBRARY_SCOPE and ext not in {"png", "jpg", "jpeg", "webp", "gif"}:
+            raise HTTPException(status_code=400, detail="image library upload requires image files")
 
         out_path, digest, total_bytes = await _persist_upload_file(uf, target_dir=target_dir)
         if not out_path or not digest or total_bytes <= 0:
@@ -442,6 +506,18 @@ async def _handle_upload(
             "parsed_type": parsed_type,
             "parsed_meta": parsed_meta,
             "source_hint": normalized_hint or None,
+            "project_type": normalized_project_type or None,
+            "library_scope": normalized_library_scope or None,
+            "library_title": normalized_title,
+            "library_tags": normalized_tags,
+            "chapter_scope": normalized_chapter_scope,
+            "process_scope": normalized_process_scope,
+            "library_summary": normalized_summary,
+            "library_style_profile": normalized_style_profile,
+            "library_caption": normalized_caption,
+            "library_description": normalized_description,
+            "enabled": normalized_usable,
+            "usable": normalized_usable,
             "tags": _classify_tags(uf.filename, ext, parsed_type, normalized_hint),
         }
         records.append(rec)
@@ -465,6 +541,17 @@ async def upload(
     source_hint: str | None = None,
     session_id: str | None = None,
     workspace_dir: str | None = None,
+    library_scope: str | None = None,
+    project_type: str | None = None,
+    title: str | None = None,
+    tags: str | None = None,
+    chapter_scope: str | None = None,
+    process_scope: str | None = None,
+    summary: str | None = None,
+    style_profile: str | None = None,
+    caption: str | None = None,
+    description: str | None = None,
+    usable: bool | str | None = True,
 ):
     return await _handle_upload(
         files,
@@ -472,6 +559,17 @@ async def upload(
         source_hint=source_hint,
         session_id=session_id,
         workspace_dir=workspace_dir,
+        library_scope=library_scope,
+        project_type=project_type,
+        title=title,
+        tags=tags,
+        chapter_scope=chapter_scope,
+        process_scope=process_scope,
+        summary=summary,
+        style_profile=style_profile,
+        caption=caption,
+        description=description,
+        usable=usable,
     )
 
 
@@ -482,6 +580,17 @@ async def ingest(
     source_hint: str | None = None,
     session_id: str | None = None,
     workspace_dir: str | None = None,
+    library_scope: str | None = None,
+    project_type: str | None = None,
+    title: str | None = None,
+    tags: str | None = None,
+    chapter_scope: str | None = None,
+    process_scope: str | None = None,
+    summary: str | None = None,
+    style_profile: str | None = None,
+    caption: str | None = None,
+    description: str | None = None,
+    usable: bool | str | None = True,
 ):
     return await _handle_upload(
         files,
@@ -489,4 +598,15 @@ async def ingest(
         source_hint=source_hint,
         session_id=session_id,
         workspace_dir=workspace_dir,
+        library_scope=library_scope,
+        project_type=project_type,
+        title=title,
+        tags=tags,
+        chapter_scope=chapter_scope,
+        process_scope=process_scope,
+        summary=summary,
+        style_profile=style_profile,
+        caption=caption,
+        description=description,
+        usable=usable,
     )
