@@ -21,20 +21,24 @@ from backend.zhifei_autoplan.exporter import (
     _auto_density_images_for_pages,
     _build_static_toc_entries,
     _clear_block_container,
+    _cover_image_caption,
     _format_cover_year_month,
     _format_toc_display_title,
     _hide_paragraph,
     _infer_toc_level,
     _insert_auto_toc,
+    _insert_cover_page,
     _normalize_front_matter_page_mode,
     _normalize_full_index_enabled,
     _paginate_toc_entries,
+    _resolve_cover_meta,
     _render_toc_line,
     _resolve_front_matter_plan,
     _set_cell_border,
     _set_cell_shading,
     _set_cell_width,
     _set_table_all_borders,
+    _style_cover_paragraph,
     _toc_entry_style,
     _topic_to_cover_project_name,
     _to_cn_month,
@@ -406,6 +410,80 @@ class TestHeaderFooterHelpers:
         assert "测试单位" in text
         assert "PAGE" in xml
         assert "14A6AE" in xml
+
+
+class TestCoverPageHelpers:
+    """Tests for deterministic DOCX cover page helper functions."""
+
+    def test_cover_image_caption_uses_specific_or_safe_default_label(self):
+        assert _cover_image_caption("智慧厂房", "深基坑开挖.png", "site_photo") == "智慧厂房 · 深基坑开挖"
+        assert _cover_image_caption("智慧厂房", "微信图片_20260401.jpg", "site_photo") == "智慧厂房 · 现场实景图"
+        assert _cover_image_caption("", "image.png", "") == "项目效果图"
+
+    def test_resolve_cover_meta_normalizes_input_without_external_lookup(self):
+        meta = _resolve_cover_meta(
+            {
+                "topic": "智慧厂房施工组织设计方案",
+                "project_code": "ZF-2026-001",
+                "cover_image_path": "/missing/cover.png",
+                "issue_year_month": "二零二六年四月",
+                "branding": {
+                    "bidder_company": "智飞建设有限公司",
+                    "logo_path": "/missing/logo.png",
+                },
+            }
+        )
+
+        assert meta["project_name"] == "智慧厂房"
+        assert meta["project_code"] == "ZF-2026-001"
+        assert meta["cover_title"] == "施工组织设计"
+        assert meta["cover_image_path"] == ""
+        assert meta["logo_path"] == ""
+        assert meta["bidder_company"] == "智飞建设有限公司"
+        assert meta["issue_year_month"] == "二零二六年四月"
+
+    def test_style_cover_paragraph_applies_text_and_formatting(self):
+        doc = Document()
+        paragraph = doc.add_paragraph()
+
+        run = _style_cover_paragraph(
+            paragraph,
+            east_font="黑体",
+            latin_font="Arial",
+            size_pt=18,
+            text="施工组织设计",
+            bold=True,
+            color_rgb=(16, 158, 170),
+            space_before_pt=6,
+            space_after_pt=8,
+            line_spacing_pt=24,
+        )
+
+        assert paragraph.text == "施工组织设计"
+        assert paragraph.alignment == 1
+        assert run.bold is True
+        assert run.font.size.pt == 18
+        assert str(run.font.color.rgb) == "109EAA"
+
+    def test_insert_cover_page_adds_cover_text_without_main_flow(self):
+        doc = Document()
+        meta = _resolve_cover_meta(
+            {
+                "topic": "智慧厂房施工组织设计",
+                "project_code": "ZF-2026-002",
+                "bidder_company": "智飞建设有限公司",
+                "issue_year_month": "二零二六年四月",
+            }
+        )
+
+        _insert_cover_page(doc, {"body_font": "宋体", "title_font": "黑体"}, meta)
+
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "智慧厂房" in text
+        assert "项目编号：ZF-2026-002" in text
+        assert "施工组织设计" in text
+        assert "智飞建设有限公司" in text
+        assert "二零二六年四月" in text
 
 
 # =============================================================================
