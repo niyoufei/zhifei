@@ -28,6 +28,7 @@ from backend.zhifei_autoplan.exporter import (
     _infer_toc_level,
     _insert_auto_toc,
     _insert_cover_page,
+    _insert_full_index_page,
     _normalize_front_matter_page_mode,
     _normalize_full_index_enabled,
     _paginate_toc_entries,
@@ -281,6 +282,71 @@ class TestFrontMatterHelpers:
         assert _infer_toc_level({"title": "一、施工部署"}) == 3
         assert _infer_toc_level({"title": "1.1 施工部署"}) == 3
         assert _infer_toc_level({"title": "手工指定", "level": 9}) == 3
+
+    def test_insert_full_index_page_renders_section_index(self):
+        doc = Document()
+        apply_paragraph = _apply_style(doc, {"body_font": "宋体", "title_font": "黑体"})
+
+        _insert_full_index_page(
+            doc,
+            apply_paragraph,
+            topic="智慧厂房施工组织设计",
+            sections=[
+                {"title": "第一章 工程概况"},
+                {"title": "第二章 施工部署"},
+            ],
+            chapter_pages={
+                "第一章 工程概况": 3,
+                "第二章 施工部署": {"target": 5},
+            },
+            effective_document_pages=42,
+        )
+
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "全文索引" in text
+        assert "智慧厂房施工组织设计；章节数=2；成品预计总页数=42页。" in text
+        assert "01. 第一章 工程概况（约3页）" in text
+        assert "02. 第二章 施工部署（约5页）" in text
+        assert "w:br" in doc._element.xml
+
+    def test_insert_full_index_page_prefers_structured_index_entries(self):
+        doc = Document()
+        apply_paragraph = _apply_style(doc, {"body_font": "宋体", "title_font": "黑体"})
+
+        _insert_full_index_page(
+            doc,
+            apply_paragraph,
+            topic="施工组织设计",
+            sections=[{"title": "第一章 工程概况"}],
+            chapter_pages={"第一章 工程概况": 3},
+            effective_document_pages=12,
+            index_entries=[
+                {"title": "索引项一", "summary": "A01. 自定义索引摘要", "planned_pages": 2},
+                {"title": "索引项二", "planned_pages": 4},
+            ],
+        )
+
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "A01. 自定义索引摘要（约2页）" in text
+        assert "02. 索引项二（约4页）" in text
+        assert "01. 第一章 工程概况" not in text
+
+    def test_insert_full_index_page_handles_empty_sections(self):
+        doc = Document()
+        apply_paragraph = _apply_style(doc, {"body_font": "宋体", "title_font": "黑体"})
+
+        _insert_full_index_page(
+            doc,
+            apply_paragraph,
+            topic="施工组织设计",
+            sections=[],
+            chapter_pages={},
+            effective_document_pages=1,
+        )
+
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "章节数=0" in text
+        assert "当前无可索引章节。" in text
 
 
 class TestTocRenderingHelpers:
