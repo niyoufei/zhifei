@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.shared import Cm
@@ -477,6 +478,166 @@ def _insert_auto_toc(
             except Exception:
                 pass
         doc.add_page_break()
+
+
+def _usable_page_width_cm(doc: Document) -> float:
+    try:
+        section = doc.sections[-1]
+        width_emu = int(section.page_width) - int(section.left_margin) - int(section.right_margin)
+        return max(8.0, float(width_emu) / 360000.0)
+    except Exception:
+        return 17.0
+
+
+def _clear_block_container(container) -> None:
+    try:
+        for paragraph in list(container.paragraphs):
+            element = paragraph._element
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+    except Exception:
+        pass
+    try:
+        for table in list(container.tables):
+            element = table._element
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+    except Exception:
+        pass
+
+
+def _set_cell_width(cell, width_cm: float) -> None:
+    try:
+        cell.width = Cm(float(width_cm))
+    except Exception:
+        pass
+    try:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        tc_w = tc_pr.first_child_found_in("w:tcW")
+        if tc_w is None:
+            tc_w = OxmlElement("w:tcW")
+            tc_pr.append(tc_w)
+        tc_w.set(qn("w:w"), str(int(float(width_cm) * 567)))
+        tc_w.set(qn("w:type"), "dxa")
+    except Exception:
+        pass
+
+
+def _set_cell_shading(cell, fill: str) -> None:
+    try:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        for child in list(tc_pr):
+            if child.tag == qn("w:shd"):
+                tc_pr.remove(child)
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), str(fill or "").strip() or "FFFFFF")
+        tc_pr.append(shd)
+    except Exception:
+        pass
+
+
+def _set_cell_border(cell, **kwargs) -> None:
+    try:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        tc_borders = tc_pr.first_child_found_in("w:tcBorders")
+        if tc_borders is None:
+            tc_borders = OxmlElement("w:tcBorders")
+            tc_pr.append(tc_borders)
+        for edge, cfg in kwargs.items():
+            edge_el = tc_borders.find(qn(f"w:{edge}"))
+            if edge_el is None:
+                edge_el = OxmlElement(f"w:{edge}")
+                tc_borders.append(edge_el)
+            edge_el.set(qn("w:val"), str(cfg.get("val", "single")))
+            edge_el.set(qn("w:sz"), str(cfg.get("sz", 6)))
+            edge_el.set(qn("w:space"), str(cfg.get("space", 0)))
+            edge_el.set(qn("w:color"), str(cfg.get("color", "D9EAF0")))
+    except Exception:
+        pass
+
+
+def _set_table_all_borders(table, *, color: str, sz: int = 6, top: bool = False, bottom: bool = False) -> None:
+    for row in table.rows:
+        for cell in row.cells:
+            edges: Dict[str, Dict[str, Any]] = {}
+            if top:
+                edges["top"] = {"color": color, "sz": sz}
+            if bottom:
+                edges["bottom"] = {"color": color, "sz": sz}
+            if edges:
+                _set_cell_border(cell, **edges)
+
+
+def _apply_footer_page_numbers(
+    doc: Document,
+    style_cfg: Dict[str, Any],
+    *,
+    bidder_company: str,
+    logo_path: str | None,
+) -> None:
+    font_east = str((style_cfg or {}).get("body_font") or "宋体")
+    font_latin = str((style_cfg or {}).get("body_latin_font") or font_east)
+    company = str(bidder_company or "").strip()
+    logo = str(logo_path or "").strip()
+    if logo and not Path(logo).exists():
+        logo = ""
+    usable_width = _usable_page_width_cm(doc)
+    for section in doc.sections:
+        try:
+            section.different_first_page_header_footer = True
+        except Exception:
+            pass
+        try:
+            footer = section.footer
+            footer.is_linked_to_previous = False
+        except Exception:
+            continue
+        _clear_block_container(footer)
+        table = footer.add_table(rows=1, cols=2, width=Cm(usable_width))
+        try:
+            table.autofit = False
+        except Exception:
+            pass
+        _set_table_all_borders(table, color="14A6AE", sz=10, top=True)
+        left_cell = table.cell(0, 0)
+        right_cell = table.cell(0, 1)
+        _set_cell_width(left_cell, usable_width * 0.72)
+        _set_cell_width(right_cell, usable_width * 0.28)
+        try:
+            left_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            right_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        except Exception:
+            pass
+        p_left = left_cell.paragraphs[0] if left_cell.paragraphs else left_cell.add_paragraph()
+        p_right = right_cell.paragraphs[0] if right_cell.paragraphs else right_cell.add_paragraph()
+        try:
+            p_left.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p_right.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            p_left.paragraph_format.space_before = Pt(4)
+            p_left.paragraph_format.space_after = Pt(0)
+            p_right.paragraph_format.space_before = Pt(4)
+            p_right.paragraph_format.space_after = Pt(0)
+        except Exception:
+            pass
+        if logo:
+            try:
+                p_left.add_run().add_picture(logo, width=Cm(1.0))
+            except Exception:
+                pass
+        if company:
+            run_company = p_left.add_run(f" {company}" if logo else company)
+            _set_run_font(run_company, font_east, font_latin, 12.0)
+            try:
+                run_company.bold = True
+            except Exception:
+                pass
+        _append_field_run(p_right, "PAGE")
+        for run in p_right.runs:
+            _set_run_font(run, font_east, font_latin, 14.0)
 
 
 def _apply_style(doc: Document, style: Dict[str, Any]):

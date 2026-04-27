@@ -12,12 +12,15 @@ from unittest.mock import MagicMock, patch, Mock
 
 import pytest
 from docx import Document
+from docx.shared import Cm
 
 from backend.zhifei_autoplan.exporter import (
     _append_field_run,
+    _apply_footer_page_numbers,
     _apply_style,
     _auto_density_images_for_pages,
     _build_static_toc_entries,
+    _clear_block_container,
     _format_cover_year_month,
     _format_toc_display_title,
     _hide_paragraph,
@@ -28,9 +31,14 @@ from backend.zhifei_autoplan.exporter import (
     _paginate_toc_entries,
     _render_toc_line,
     _resolve_front_matter_plan,
+    _set_cell_border,
+    _set_cell_shading,
+    _set_cell_width,
+    _set_table_all_borders,
     _toc_entry_style,
     _topic_to_cover_project_name,
     _to_cn_month,
+    _usable_page_width_cm,
     export_autoplan_docx,
     export_autoplan_compare_docx,
     export_autoplan_docx_from_file,
@@ -346,6 +354,58 @@ class TestTocRenderingHelpers:
         assert "一、施工部署" in text
         assert "TOC" in xml
         assert "vanish" in xml
+
+
+class TestHeaderFooterHelpers:
+    """Tests for deterministic DOCX header/footer helper functions."""
+
+    def test_usable_page_width_and_clear_container_helpers(self):
+        doc = Document()
+        width_cm = _usable_page_width_cm(doc)
+        assert width_cm >= 8.0
+
+        footer = doc.sections[0].footer
+        footer.add_paragraph("临时页脚")
+        footer.add_table(rows=1, cols=1, width=Cm(2))
+        assert "临时页脚" in footer._element.xml
+
+        _clear_block_container(footer)
+
+        assert "临时页脚" not in footer._element.xml
+        assert "tbl" not in footer._element.xml
+
+    def test_table_cell_width_shading_and_border_helpers_emit_xml(self):
+        doc = Document()
+        table = doc.add_table(rows=1, cols=2)
+        left_cell = table.cell(0, 0)
+
+        _set_cell_width(left_cell, 4.2)
+        _set_cell_shading(left_cell, "14A6AE")
+        _set_cell_border(left_cell, top={"color": "14A6AE", "sz": 10})
+        _set_table_all_borders(table, color="D9EAF0", sz=8, bottom=True)
+
+        xml = table._element.xml
+        assert "tcW" in xml
+        assert "14A6AE" in xml
+        assert "D9EAF0" in xml
+        assert "bottom" in xml
+
+    def test_apply_footer_page_numbers_adds_company_and_page_field(self):
+        doc = Document()
+
+        _apply_footer_page_numbers(
+            doc,
+            {"body_font": "宋体", "body_latin_font": "Times New Roman"},
+            bidder_company="测试单位",
+            logo_path=None,
+        )
+
+        footer = doc.sections[0].footer
+        xml = footer._element.xml
+        text = "\n".join(cell.text for table in footer.tables for row in table.rows for cell in row.cells)
+        assert "测试单位" in text
+        assert "PAGE" in xml
+        assert "14A6AE" in xml
 
 
 # =============================================================================
