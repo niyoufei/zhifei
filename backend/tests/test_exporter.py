@@ -630,6 +630,7 @@ class TestExportAutoplanDocx:
         assert "quality_checks" not in report
         assert "evidence" not in report
         assert "remediation" not in report
+        assert "quality_evidence" not in report
         report_log = report_log_path.read_text(encoding="utf-8")
         assert "DOCX build report" in report_log
         assert "schema_version=docx_build_report.v1" in report_log
@@ -788,8 +789,8 @@ class TestExportAutoplanDocx:
         assert "整改建议清单" in text
         assert "补充证据材料" in text
 
-    def test_quality_evidence_currently_stays_in_docx_not_build_report(self, temp_dir, data_with_quality_checks):
-        """Lock current quality/evidence export behavior before moving it anywhere else."""
+    def test_quality_evidence_stays_in_docx_and_is_mirrored_to_build_report(self, temp_dir, data_with_quality_checks):
+        """Lock current DOCX behavior while mirroring quality/evidence details to build report."""
         output_path = Path(temp_dir) / "quality_evidence_baseline.docx"
         data_with_quality_checks["quality_checks"]["issue_list"] = [
             {
@@ -831,9 +832,20 @@ class TestExportAutoplanDocx:
         assert "quality_checks" not in report
         assert "evidence" not in report
         assert "remediation" not in report
-        assert "证据定位不足" not in report_text
-        assert "补齐来源定位" not in report_text
-        assert "补充证据材料" not in report_text
+        quality_evidence = report["quality_evidence"]
+        assert quality_evidence["quality_checks"]["evidence"]["by_section"] == [
+            {"title": "第一章", "evidence_count": 2},
+            {"title": "第二章", "evidence_count": 0},
+        ]
+        assert quality_evidence["evidence"]["ok"] is False
+        assert quality_evidence["remediation"] == [
+            {"title": "第二章", "type": "missing_evidence", "suggestion": "补充证据材料"}
+        ]
+        assert quality_evidence["issue_list"][0]["problem"] == "证据定位不足"
+        assert quality_evidence["auto_revision_suggestions"][0]["suggestion"] == "补齐来源定位"
+        assert "证据定位不足" in report_text
+        assert "补齐来源定位" in report_text
+        assert "补充证据材料" in report_text
 
     def test_export_llm_compare_full_mode(self, temp_dir, data_with_llm_remediation):
         """Test export LLM compare in full mode."""

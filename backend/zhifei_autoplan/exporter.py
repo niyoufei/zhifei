@@ -1065,6 +1065,29 @@ def _build_report_paths(output_path: str) -> tuple[Path, Path]:
     return out.with_suffix(".build_report.json"), out.with_suffix(".build_report.log")
 
 
+def _json_safe_report_value(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        return str(value)
+
+
+def _build_quality_evidence_report(quality_checks: Any) -> Dict[str, Any]:
+    if not isinstance(quality_checks, dict) or not quality_checks:
+        return {}
+    return {
+        "quality_checks": _json_safe_report_value(quality_checks),
+        "evidence": _json_safe_report_value(quality_checks.get("evidence") or {}),
+        "evidence_quality": _json_safe_report_value(quality_checks.get("evidence_quality") or {}),
+        "evidence_traceability": _json_safe_report_value(quality_checks.get("evidence_traceability") or {}),
+        "drawing_evidence": _json_safe_report_value(quality_checks.get("drawing_evidence") or {}),
+        "standard_evidence": _json_safe_report_value(quality_checks.get("standard_evidence") or {}),
+        "remediation": _json_safe_report_value(quality_checks.get("remediation") or []),
+        "issue_list": _json_safe_report_value(quality_checks.get("issue_list") or []),
+        "auto_revision_suggestions": _json_safe_report_value(quality_checks.get("auto_revision_suggestions") or []),
+    }
+
+
 def _write_docx_build_report(
     output_path: str,
     *,
@@ -1073,6 +1096,7 @@ def _write_docx_build_report(
     front_matter_plan: Dict[str, Any],
     layout_receipts: List[Dict[str, Any]],
     media_count: int,
+    quality_checks: Any = None,
 ) -> None:
     report_json_path, report_log_path = _build_report_paths(output_path)
     report_json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1090,6 +1114,9 @@ def _write_docx_build_report(
         "layout_receipts": list(layout_receipts or []),
         "media_count": int(media_count or 0),
     }
+    quality_evidence = _build_quality_evidence_report(quality_checks)
+    if quality_evidence:
+        report["quality_evidence"] = quality_evidence
     report_json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     report_log_path.write_text(
         "\n".join(
@@ -1813,6 +1840,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         front_matter_plan=front_matter_plan,
         layout_receipts=layout_receipts,
         media_count=media_index,
+        quality_checks=data.get("quality_checks"),
     )
     return output_path
 
