@@ -272,6 +272,56 @@ def _resolve_front_matter_plan(
     }
 
 
+def _insert_full_index_page(
+    doc: Document,
+    apply_paragraph,
+    *,
+    topic: str,
+    sections: List[Dict[str, Any]],
+    chapter_pages: Dict[str, Any] | None,
+    effective_document_pages: int,
+    index_entries: List[Dict[str, Any]] | None = None,
+) -> None:
+    heading = doc.add_heading("全文索引", level=1)
+    apply_paragraph(heading, is_title=True)
+    intro = doc.add_paragraph(
+        f"{str(topic or '施工组织设计').strip()}；"
+        f"章节数={len(sections or [])}；"
+        f"成品预计总页数={max(1, int(effective_document_pages or 1))}页。"
+    )
+    apply_paragraph(intro)
+
+    normalized_entries = [item for item in (index_entries or []) if isinstance(item, dict)]
+    if normalized_entries:
+        for idx, item in enumerate(normalized_entries, start=1):
+            title = str(item.get("title") or f"章节{idx}").strip() or f"章节{idx}"
+            summary = str(item.get("summary") or "").strip()
+            planned_pages = _to_int(item.get("planned_pages"), 0)
+            line = summary or f"{idx:02d}. {title}"
+            if planned_pages and "约" not in line:
+                line += f"（约{int(planned_pages)}页）"
+            paragraph = doc.add_paragraph(line)
+            apply_paragraph(paragraph)
+        doc.add_page_break()
+        return
+
+    if not sections:
+        note = doc.add_paragraph("当前无可索引章节。")
+        apply_paragraph(note)
+        doc.add_page_break()
+        return
+
+    for idx, section in enumerate(sections or [], start=1):
+        title = str((section or {}).get("title") or f"章节{idx}").strip() or f"章节{idx}"
+        planned_pages = _extract_chapter_page_target(chapter_pages or {}, title)
+        line = f"{idx:02d}. {title}"
+        if planned_pages:
+            line += f"（约{int(planned_pages)}页）"
+        paragraph = doc.add_paragraph(line)
+        apply_paragraph(paragraph)
+    doc.add_page_break()
+
+
 def _build_static_toc_entries(
     *,
     sections: List[Dict[str, Any]],
