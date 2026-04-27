@@ -567,6 +567,45 @@ class TestExportAutoplanDocx:
         assert result == str(output_path)
         assert output_path.exists()
 
+    def test_current_export_baseline_before_front_matter_integration(self, temp_dir):
+        """Current export keeps new front matter helpers available but not wired into the main flow."""
+        output_path = Path(temp_dir) / "baseline.docx"
+        data = {
+            "topic": "智慧厂房施工组织设计",
+            "branding": {"bidder_company": "智飞建设有限公司"},
+            "style": {
+                "body_font": "宋体",
+                "title_font": "黑体",
+                "cover_page_count": 1,
+                "toc_page_count": 2,
+                "full_index_enabled": True,
+                "full_index_page_count": 1,
+            },
+            "chapter_pages": {"第一章 工程概况": 2},
+            "sections": [
+                {
+                    "title": "第一章 工程概况",
+                    "content": "本章用于锁定当前导出正文基线。",
+                    "agent_role": "项目经理",
+                }
+            ],
+        }
+
+        export_autoplan_docx(data, str(output_path))
+
+        doc = Document(str(output_path))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "智慧厂房施工组织设计" in text
+        assert "智飞建设有限公司" in text
+        assert "第一章 工程概况" in text
+        assert "负责人：项目经理" in text
+        assert "本章用于锁定当前导出正文基线。" in text
+        assert re.search(r"\d{4}-\d{2}-\d{2}", text)
+        assert "目录" not in text
+        assert "全文索引" not in text
+        assert not output_path.with_suffix(".build_report.json").exists()
+        assert not output_path.with_suffix(".build_report.log").exists()
+
     def test_export_creates_parent_directories(self, temp_dir, basic_data):
         """Test export creates nested parent directories."""
         output_path = Path(temp_dir) / "nested" / "dir" / "output.docx"
