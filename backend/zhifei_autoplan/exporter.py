@@ -1060,6 +1060,53 @@ def _auto_density_images_for_pages(chapter_pages: int, total_pages: int) -> int:
     return cp
 
 
+def _build_report_paths(output_path: str) -> tuple[Path, Path]:
+    out = Path(output_path)
+    return out.with_suffix(".build_report.json"), out.with_suffix(".build_report.log")
+
+
+def _write_docx_build_report(
+    output_path: str,
+    *,
+    topic: str,
+    sections: List[Dict[str, Any]],
+    front_matter_plan: Dict[str, Any],
+    layout_receipts: List[Dict[str, Any]],
+    media_count: int,
+) -> None:
+    report_json_path, report_log_path = _build_report_paths(output_path)
+    report_json_path.parent.mkdir(parents=True, exist_ok=True)
+    section_titles = [
+        str((sec or {}).get("title") or f"章节{idx + 1}").strip() or f"章节{idx + 1}"
+        for idx, sec in enumerate(sections or [])
+    ]
+    report = {
+        "schema_version": "docx_build_report.v1",
+        "output_path": str(output_path),
+        "topic": str(topic or ""),
+        "section_count": len(section_titles),
+        "section_titles": section_titles,
+        "front_matter_plan": dict(front_matter_plan or {}),
+        "layout_receipts": list(layout_receipts or []),
+        "media_count": int(media_count or 0),
+    }
+    report_json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report_log_path.write_text(
+        "\n".join(
+            [
+                "DOCX build report",
+                f"schema_version={report['schema_version']}",
+                f"output_path={report['output_path']}",
+                f"topic={report['topic']}",
+                f"section_count={report['section_count']}",
+                f"media_count={report['media_count']}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
     style_raw = data.get("style") or {}
     style_cfg = _normalize_style(style_raw)
@@ -1759,6 +1806,14 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
+    _write_docx_build_report(
+        output_path,
+        topic=str(topic),
+        sections=sections,
+        front_matter_plan=front_matter_plan,
+        layout_receipts=layout_receipts,
+        media_count=media_index,
+    )
     return output_path
 
 

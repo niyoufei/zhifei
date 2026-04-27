@@ -20,6 +20,7 @@ from backend.zhifei_autoplan.exporter import (
     _apply_footer_page_numbers,
     _apply_style,
     _auto_density_images_for_pages,
+    _build_report_paths,
     _build_static_toc_entries,
     _clear_block_container,
     _cover_image_caption,
@@ -221,6 +222,13 @@ class TestFrontMatterHelpers:
         assert _to_cn_month(10) == "十"
         assert _to_cn_month(12) == "十二"
         assert _format_cover_year_month(dt.datetime(2026, 4, 1)) == "二零二六年四月"
+
+    def test_build_report_paths_use_docx_stem(self, temp_dir):
+        output_path = Path(temp_dir) / "nested" / "baseline.docx"
+        json_path, log_path = _build_report_paths(str(output_path))
+
+        assert json_path == output_path.parent / "baseline.build_report.json"
+        assert log_path == output_path.parent / "baseline.build_report.log"
 
     def test_front_matter_plan_counts_include_and_exclude_modes(self):
         include_plan = _resolve_front_matter_plan(
@@ -568,8 +576,8 @@ class TestExportAutoplanDocx:
         assert result == str(output_path)
         assert output_path.exists()
 
-    def test_export_wires_front_matter_helpers_without_build_report(self, temp_dir):
-        """Front matter helpers are wired into export without build-report side effects."""
+    def test_export_wires_front_matter_helpers_and_writes_build_report(self, temp_dir):
+        """Front matter helpers are wired into export and emit minimal build report artifacts."""
         output_path = Path(temp_dir) / "baseline.docx"
         data = {
             "topic": "智慧厂房施工组织设计",
@@ -606,8 +614,26 @@ class TestExportAutoplanDocx:
         assert "第一章 工程概况" in text
         assert "负责人：项目经理" in text
         assert "本章用于锁定当前导出正文基线。" in text
-        assert not output_path.with_suffix(".build_report.json").exists()
-        assert not output_path.with_suffix(".build_report.log").exists()
+        report_json_path, report_log_path = _build_report_paths(str(output_path))
+        assert report_json_path.exists()
+        assert report_log_path.exists()
+        report = json.loads(report_json_path.read_text(encoding="utf-8"))
+        assert report["schema_version"] == "docx_build_report.v1"
+        assert report["output_path"] == str(output_path)
+        assert report["topic"] == "智慧厂房施工组织设计"
+        assert report["section_count"] == 1
+        assert report["section_titles"] == ["第一章 工程概况"]
+        assert report["front_matter_plan"]["full_index_pages"] == 1
+        assert report["media_count"] == 0
+        assert report["layout_receipts"][0]["title"] == "第一章 工程概况"
+        assert report["layout_receipts"][0]["target_pages"] == 2
+        assert "quality_checks" not in report
+        assert "evidence" not in report
+        assert "remediation" not in report
+        report_log = report_log_path.read_text(encoding="utf-8")
+        assert "DOCX build report" in report_log
+        assert "schema_version=docx_build_report.v1" in report_log
+        assert "section_count=1" in report_log
         with zipfile.ZipFile(output_path) as zf:
             xml = "\n".join(
                 zf.read(name).decode("utf-8", errors="ignore")
