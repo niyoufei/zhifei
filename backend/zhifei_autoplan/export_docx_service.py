@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable
 
 from backend.zhifei_autoplan.boq_store import load_boq_data
@@ -13,6 +14,34 @@ from backend.zhifei_autoplan.params_runtime import get_image_defaults, load_para
 from backend.zhifei_autoplan.provider_runtime import iterate_image_failover_slots
 from backend.zhifei_autoplan.quality_check import run_quality_checks, strip_nonconcrete_language
 from backend.zhifei_autoplan.tender_store import load_tender_matrix
+
+
+def _accepts_keyword(fn: Callable[..., Any], keyword: str) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == keyword and parameter.kind in {
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }:
+            return True
+    return False
+
+
+def _call_with_optional_workspace(
+    fn: Callable[..., Any],
+    *args: Any,
+    workspace_dir: str | None,
+    **kwargs: Any,
+) -> Any:
+    call_kwargs = dict(kwargs)
+    if workspace_dir and _accepts_keyword(fn, "workspace_dir"):
+        call_kwargs["workspace_dir"] = workspace_dir
+    return fn(*args, **call_kwargs)
 
 
 def _normalize_metrics_in_sections(sections: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -43,8 +72,20 @@ def build_export_indexes(
         from backend.zhifei_autoplan.drawing_index import build_drawing_index
         from backend.zhifei_autoplan.standard_index import build_standard_index
 
-        drawing_index = build_drawing_index(topic, outline, project_id=project_id, workspace_dir=workspace_dir)
-        standard_index = build_standard_index(topic, outline, project_id=project_id, workspace_dir=workspace_dir)
+        drawing_index = _call_with_optional_workspace(
+            build_drawing_index,
+            topic,
+            outline,
+            project_id=project_id,
+            workspace_dir=workspace_dir,
+        )
+        standard_index = _call_with_optional_workspace(
+            build_standard_index,
+            topic,
+            outline,
+            project_id=project_id,
+            workspace_dir=workspace_dir,
+        )
         cross_index = build_cross_index(
             boq=boq,
             sections=sections,
@@ -86,7 +127,14 @@ def build_export_media(
     media: list[dict[str, Any]] = []
     if stats:
         media.extend(generate_boq_chart_fn(stats))
-    media.extend(generate_ingested_previews_fn(limit=6, project_id=project_id, workspace_dir=workspace_dir))
+    media.extend(
+        _call_with_optional_workspace(
+            generate_ingested_previews_fn,
+            limit=6,
+            project_id=project_id,
+            workspace_dir=workspace_dir,
+        )
+    )
     try:
         img_defaults = get_image_defaults_fn(params)
         aspect_ratio = (
@@ -143,7 +191,8 @@ def _resolve_export_logo_context(
             or raw_request.get("bidder_domain")
             or project_id
         ):
-            logo_raw = resolve_logo_fn(
+            logo_raw = _call_with_optional_workspace(
+                resolve_logo_fn,
                 bidder_company=raw_request.get("bidder_company"),
                 logo_url=raw_request.get("logo_url"),
                 bidder_domain=raw_request.get("bidder_domain"),
@@ -162,7 +211,8 @@ def _resolve_export_logo_context(
                 from backend.zhifei_autoplan.branding_store import update_branding
 
                 update_branding_fn = update_branding
-            update_branding_fn(
+            _call_with_optional_workspace(
+                update_branding_fn,
                 str(project_id),
                 {
                     "bidder_company": raw_request.get("bidder_company"),
@@ -197,7 +247,8 @@ def build_export_mindmap_media(
     for image_slot in iterate_image_failover_slots_fn():
         if getattr(image_slot, "provider", None) != "google":
             continue
-        mindmap = generate_outline_mindmap_fn(
+        mindmap = _call_with_optional_workspace(
+            generate_outline_mindmap_fn,
             raw_request.get("topic"),
             outline,
             api_key=getattr(image_slot, "api_key", None),
@@ -250,9 +301,25 @@ def execute_export_docx_request(
     )
     if save_outputs_fn is None:
         raise ValueError("save_outputs_fn required")
-    job_id = create_job_fn({"action": "export_docx", "workspace_dir": workspace_dir}, user_id=None, workspace_dir=workspace_dir)
-    outputs = save_outputs_fn(f"actions_export_{job_id}", [payload], workspace_dir=workspace_dir)
-    update_job_fn(job_id, status="done", result=outputs, workspace_dir=workspace_dir)
+    job_id = _call_with_optional_workspace(
+        create_job_fn,
+        {"action": "export_docx", "workspace_dir": workspace_dir},
+        user_id=None,
+        workspace_dir=workspace_dir,
+    )
+    outputs = _call_with_optional_workspace(
+        save_outputs_fn,
+        f"actions_export_{job_id}",
+        [payload],
+        workspace_dir=workspace_dir,
+    )
+    _call_with_optional_workspace(
+        update_job_fn,
+        job_id,
+        status="done",
+        result=outputs,
+        workspace_dir=workspace_dir,
+    )
     return {"ok": True, "job_id": job_id, "files": outputs}
 
 
@@ -349,8 +416,16 @@ def collect_export_docx_inputs(
     normalize_metrics_in_sections_fn: Callable[[list[dict[str, Any]]], dict[str, Any] | None] = _normalize_metrics_in_sections,
 ) -> dict[str, Any]:
     project_id = str(raw_request.get("project_id") or "").strip() or None
-    tender = load_tender_matrix_fn(project_id=project_id, workspace_dir=workspace_dir) or {}
-    boq = load_boq_data_fn(project_id=project_id, workspace_dir=workspace_dir) or {}
+    tender = _call_with_optional_workspace(
+        load_tender_matrix_fn,
+        project_id=project_id,
+        workspace_dir=workspace_dir,
+    ) or {}
+    boq = _call_with_optional_workspace(
+        load_boq_data_fn,
+        project_id=project_id,
+        workspace_dir=workspace_dir,
+    ) or {}
     boq_focus = build_boq_focus_fn(boq)
     params = load_params_fn()
     sections = [dict(section) for section in raw_request.get("sections") or []]
@@ -390,7 +465,8 @@ def compute_export_docx_analysis(
             boq_focus["four_new_recommendations"] = recommendations
     except Exception:
         pass
-    quality_checks = run_quality_checks_fn(
+    quality_checks = _call_with_optional_workspace(
+        run_quality_checks_fn,
         tender,
         outline,
         sections,
@@ -400,7 +476,8 @@ def compute_export_docx_analysis(
         strict=True,
         workspace_dir=workspace_dir,
     )
-    indexes = build_export_indexes_fn(
+    indexes = _call_with_optional_workspace(
+        build_export_indexes_fn,
         topic=str(raw_request.get("topic") or ""),
         outline=outline,
         project_id=project_id,
