@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import math
 import re
@@ -17,6 +18,11 @@ from backend.zhifei_autoplan.terminology_guard import load_global_terminology, n
 
 _AUTOFIX_MARK_RE = re.compile(r"【自动补充】(?P<name>[^\n]{1,80}?)(?:：|:)")
 _OVERVIEW_SECTION_RE = re.compile(r"(工程概况|项目概况)")
+_TOC_CHAPTER_RE = re.compile(r"^第[一二三四五六七八九十百零0-9]+章")
+_TOC_SECTION_RE = re.compile(r"^第[一二三四五六七八九十百零0-9]+节")
+_TOC_CN_ITEM_RE = re.compile(r"^[一二三四五六七八九十百零]+[、.]")
+_TOC_NUMERIC_ITEM_RE = re.compile(r"^\d+(?:\.\d+){1,3}")
+_CN_DIGITS = {"0": "零", "1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
 
 
 def _strip_internal_autofix_markers(text: str) -> str:
@@ -172,6 +178,151 @@ def _set_run_font(run, east_font: str, latin_font: str, size_pt: float):
     if latin_font:
         rfonts.set(qn("w:ascii"), latin_font)
         rfonts.set(qn("w:hAnsi"), latin_font)
+
+
+def _topic_to_cover_project_name(topic: Any) -> str:
+    raw = str(topic or "").strip()
+    if not raw:
+        return ""
+    for suffix in ("施工组织设计方案", "施工组织设计", "施组方案"):
+        if raw.endswith(suffix):
+            return raw[: -len(suffix)].strip()
+    return raw
+
+
+def _to_cn_month(month: int) -> str:
+    month = max(1, min(12, int(month or 1)))
+    if month < 10:
+        return _CN_DIGITS[str(month)]
+    if month == 10:
+        return "十"
+    return "十" + _CN_DIGITS[str(month % 10)]
+
+
+def _format_cover_year_month(dt: _dt.datetime | None = None) -> str:
+    current = dt or _dt.datetime.now()
+    year_cn = "".join(_CN_DIGITS.get(ch, ch) for ch in f"{int(current.year):04d}")
+    return f"{year_cn}年{_to_cn_month(int(current.month))}月"
+
+
+def _normalize_front_matter_page_mode(value: Any) -> str:
+    return "exclude" if str(value or "").strip().lower() == "exclude" else "include"
+
+
+def _normalize_full_index_enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "enable", "enabled"}
+
+
+def _resolve_front_matter_plan(
+    *,
+    style_raw: Dict[str, Any],
+    data: Dict[str, Any],
+    body_pages_estimate: int,
+) -> Dict[str, Any]:
+    style = style_raw if isinstance(style_raw, dict) else {}
+    payload = data if isinstance(data, dict) else {}
+    cover_pages = max(1, _to_int(style.get("cover_page_count"), 1))
+    toc_pages = max(1, _to_int(style.get("toc_page_count"), 1))
+    configured_index_pages = max(1, _to_int(style.get("full_index_page_count"), 1))
+    full_index_enabled = _normalize_full_index_enabled(style.get("full_index_enabled"))
+    count_mode = _normalize_front_matter_page_mode(style.get("front_matter_page_mode"))
+    document_total_target = max(
+        1,
+        _to_int(style.get("document_total_pages_target"), 0)
+        or _to_int(payload.get("total_pages_target"), 0)
+        or int(body_pages_estimate or 1),
+    )
+    full_index_pages = configured_index_pages if full_index_enabled else 0
+    actual_front_matter_pages = cover_pages + toc_pages + full_index_pages
+    effective_document_pages = (
+        document_total_target
+        if count_mode == "include"
+        else document_total_target + actual_front_matter_pages
+    )
+    return {
+        "cover_pages": cover_pages,
+        "toc_pages": toc_pages,
+        "configured_index_pages": configured_index_pages,
+        "full_index_enabled": full_index_enabled,
+        "count_mode": count_mode,
+        "full_index_pages": full_index_pages,
+        "actual_front_matter_pages": actual_front_matter_pages,
+        "document_total_target": document_total_target,
+        "effective_document_pages": effective_document_pages,
+    }
+
+
+def _build_static_toc_entries(
+    *,
+    sections: List[Dict[str, Any]],
+    section_pages: List[int],
+    front_matter_plan: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    plan = front_matter_plan if isinstance(front_matter_plan, dict) else {}
+    cover_pages = max(1, _to_int(plan.get("cover_pages"), 1))
+    toc_pages = max(1, _to_int(plan.get("toc_pages"), 1))
+    full_index_pages = max(0, _to_int(plan.get("full_index_pages"), 0))
+    current_page = cover_pages + full_index_pages + toc_pages + 1
+    entries: List[Dict[str, Any]] = []
+    for idx, sec in enumerate(sections or []):
+        title = str((sec or {}).get("title") or f"章节{idx + 1}").strip() or f"章节{idx + 1}"
+        planned_pages = max(1, _to_int(section_pages[idx] if idx < len(section_pages) else 1, 1))
+        entries.append(
+            {
+                "order": idx + 1,
+                "title": title,
+                "start_page": current_page,
+                "planned_pages": planned_pages,
+            }
+        )
+        current_page += planned_pages
+    return entries
+
+
+def _paginate_toc_entries(entries: List[Dict[str, Any]], toc_pages: int) -> List[List[Dict[str, Any]]]:
+    page_count = max(1, int(toc_pages or 1))
+    chunks: List[List[Dict[str, Any]]] = []
+    cursor = 0
+    total = len(entries or [])
+    for page_idx in range(page_count):
+        remaining_pages = page_count - page_idx
+        remaining_entries = total - cursor
+        if remaining_entries <= 0:
+            chunks.append([])
+            continue
+        take = max(1, math.ceil(remaining_entries / max(1, remaining_pages)))
+        chunks.append((entries or [])[cursor: cursor + take])
+        cursor += take
+    return chunks
+
+
+def _infer_toc_level(entry: Dict[str, Any]) -> int:
+    raw = _to_int(entry.get("level"), 0) if isinstance(entry, dict) else 0
+    if raw > 0:
+        return min(3, raw)
+    title = re.sub(r"\s+", " ", str((entry or {}).get("title") or "").strip())
+    if _TOC_CHAPTER_RE.match(title):
+        return 1
+    if _TOC_SECTION_RE.match(title):
+        return 2
+    if _TOC_CN_ITEM_RE.match(title) or _TOC_NUMERIC_ITEM_RE.match(title):
+        return 3
+    return 1
+
+
+def _format_toc_display_title(title: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(title or "").strip())
+    for pattern in (_TOC_CHAPTER_RE, _TOC_SECTION_RE):
+        match = pattern.match(cleaned)
+        if match:
+            prefix = match.group(0)
+            suffix = cleaned[len(prefix):].strip(" 、.")
+            return f"{prefix}、{suffix}" if suffix else prefix
+    return cleaned
 
 
 def _apply_style(doc: Document, style: Dict[str, Any]):

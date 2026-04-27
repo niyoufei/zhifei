@@ -3,6 +3,7 @@ Tests for backend/zhifei_autoplan/exporter.py
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import tempfile
@@ -15,6 +16,16 @@ from docx import Document
 from backend.zhifei_autoplan.exporter import (
     _apply_style,
     _auto_density_images_for_pages,
+    _build_static_toc_entries,
+    _format_cover_year_month,
+    _format_toc_display_title,
+    _infer_toc_level,
+    _normalize_front_matter_page_mode,
+    _normalize_full_index_enabled,
+    _paginate_toc_entries,
+    _resolve_front_matter_plan,
+    _topic_to_cover_project_name,
+    _to_cn_month,
     export_autoplan_docx,
     export_autoplan_compare_docx,
     export_autoplan_docx_from_file,
@@ -178,6 +189,81 @@ class TestApplyStyle:
         # Should not raise exception
         apply_func = _apply_style(doc, style)
         assert callable(apply_func)
+
+
+class TestFrontMatterHelpers:
+    """Tests for deterministic DOCX front matter helper functions."""
+
+    def test_cover_title_and_date_helpers(self):
+        assert _topic_to_cover_project_name("某厂房施工组织设计方案") == "某厂房"
+        assert _topic_to_cover_project_name("某厂房施工组织设计") == "某厂房"
+        assert _topic_to_cover_project_name("某厂房施组方案") == "某厂房"
+        assert _to_cn_month(1) == "一"
+        assert _to_cn_month(10) == "十"
+        assert _to_cn_month(12) == "十二"
+        assert _format_cover_year_month(dt.datetime(2026, 4, 1)) == "二零二六年四月"
+
+    def test_front_matter_plan_counts_include_and_exclude_modes(self):
+        include_plan = _resolve_front_matter_plan(
+            style_raw={
+                "cover_page_count": 1,
+                "toc_page_count": 2,
+                "full_index_enabled": "yes",
+                "full_index_page_count": 1,
+                "front_matter_page_mode": "include",
+                "document_total_pages_target": 120,
+            },
+            data={},
+            body_pages_estimate=90,
+        )
+        assert include_plan["actual_front_matter_pages"] == 4
+        assert include_plan["effective_document_pages"] == 120
+
+        exclude_plan = _resolve_front_matter_plan(
+            style_raw={
+                "cover_page_count": 1,
+                "toc_page_count": 2,
+                "full_index_enabled": False,
+                "front_matter_page_mode": "exclude",
+            },
+            data={"total_pages_target": 120},
+            body_pages_estimate=90,
+        )
+        assert exclude_plan["actual_front_matter_pages"] == 3
+        assert exclude_plan["effective_document_pages"] == 123
+        assert _normalize_front_matter_page_mode("bad") == "include"
+        assert _normalize_full_index_enabled("enabled") is True
+        assert _normalize_full_index_enabled("off") is False
+
+    def test_static_toc_entries_start_after_front_matter(self):
+        entries = _build_static_toc_entries(
+            sections=[
+                {"title": "第一章 工程概况"},
+                {"title": "第二章 施工部署"},
+            ],
+            section_pages=[3, 4],
+            front_matter_plan={
+                "cover_pages": 1,
+                "toc_pages": 2,
+                "full_index_pages": 1,
+            },
+        )
+        assert entries == [
+            {"order": 1, "title": "第一章 工程概况", "start_page": 5, "planned_pages": 3},
+            {"order": 2, "title": "第二章 施工部署", "start_page": 8, "planned_pages": 4},
+        ]
+
+    def test_toc_pagination_and_display_helpers(self):
+        entries = [{"title": f"第{i}章"} for i in range(1, 6)]
+        chunks = _paginate_toc_entries(entries, 2)
+        assert [len(chunk) for chunk in chunks] == [3, 2]
+        assert _format_toc_display_title("第一章 工程概况") == "第一章、工程概况"
+        assert _format_toc_display_title("第一节 项目概况") == "第一节、项目概况"
+        assert _infer_toc_level({"title": "第一章 工程概况"}) == 1
+        assert _infer_toc_level({"title": "第一节 项目概况"}) == 2
+        assert _infer_toc_level({"title": "一、施工部署"}) == 3
+        assert _infer_toc_level({"title": "1.1 施工部署"}) == 3
+        assert _infer_toc_level({"title": "手工指定", "level": 9}) == 3
 
 
 # =============================================================================
