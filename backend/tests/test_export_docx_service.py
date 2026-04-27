@@ -133,6 +133,78 @@ def test_execute_export_docx_request_builds_payload_and_updates_job():
     assert seen["results"][0] == payload
 
 
+def test_execute_export_docx_request_accepts_current_store_signatures():
+    seen: dict[str, object] = {}
+
+    def _load_tender_matrix(*, project_id=None):
+        seen["tender_project_id"] = project_id
+        return {"project_name": "当前项目", "project_code": "CUR-01"}
+
+    def _load_boq_data(*, project_id=None):
+        seen["boq_project_id"] = project_id
+        return {"stats": {"items": 1}}
+
+    def _run_quality_checks(tender, outline, sections, *, boq, boq_focus, project_id, strict):
+        seen["quality_project_id"] = project_id
+        return {"score": 90, "strict": strict}
+
+    def _build_export_indexes(*, topic, outline, project_id, boq, sections, boq_focus, quality_checks):
+        seen["index_project_id"] = project_id
+        return {"drawing_index": None, "standard_index": None, "cross_index": None}
+
+    def _create_job(payload, user_id=None):
+        seen["job_payload"] = payload
+        seen["job_user_id"] = user_id
+        return "job-current-store"
+
+    def _save_outputs(base_name, results):
+        seen["base_name"] = base_name
+        seen["results"] = results
+        return {"json": "/tmp/current-store.json"}
+
+    def _update_job(job_id, status=None, result=None):
+        seen["updated_job_id"] = job_id
+        seen["updated_status"] = status
+        seen["updated_result"] = result
+
+    out = export_docx_service.execute_export_docx_request(
+        raw_request={
+            "topic": "当前签名兼容",
+            "project_id": "P-CURRENT",
+            "sections": [{"title": "工程概况", "content": "文本"}],
+            "generate_images": False,
+        },
+        workspace_dir="/tmp/ws-current",
+        save_outputs_fn=_save_outputs,
+        load_tender_matrix_fn=_load_tender_matrix,
+        load_boq_data_fn=_load_boq_data,
+        build_boq_focus_fn=lambda boq: {"focus": "ok"},
+        load_params_fn=lambda: {},
+        strip_nonconcrete_language_fn=lambda text: text,
+        normalize_metrics_in_sections_fn=lambda sections: None,
+        recommend_four_new_fn=lambda *args, **kwargs: [],
+        run_quality_checks_fn=_run_quality_checks,
+        build_export_indexes_fn=_build_export_indexes,
+        build_evidence_tracking_fn=lambda **kwargs: {"rows": [], "summary": {}},
+        build_export_media_fn=lambda **kwargs: [{"path": "/tmp/ignored.png"}],
+        create_job_fn=_create_job,
+        update_job_fn=_update_job,
+    )
+
+    assert out == {"ok": True, "job_id": "job-current-store", "files": {"json": "/tmp/current-store.json"}}
+    assert seen["tender_project_id"] == "P-CURRENT"
+    assert seen["boq_project_id"] == "P-CURRENT"
+    assert seen["quality_project_id"] == "P-CURRENT"
+    assert seen["index_project_id"] == "P-CURRENT"
+    assert seen["job_payload"] == {"action": "export_docx", "workspace_dir": "/tmp/ws-current"}
+    assert seen["job_user_id"] is None
+    assert seen["base_name"] == "actions_export_job-current-store"
+    assert seen["updated_job_id"] == "job-current-store"
+    assert seen["updated_status"] == "done"
+    assert seen["updated_result"] == {"json": "/tmp/current-store.json"}
+    assert seen["results"][0]["project_name"] == "当前项目"
+
+
 def test_build_export_docx_payload_keeps_image_selection_pack_media_when_generate_images_disabled():
     payload = export_docx_service.build_export_docx_payload(
         raw_request={
@@ -519,6 +591,85 @@ def test_build_export_media_includes_logo_and_google_mindmap():
                 "bidder_domain": "acme.test",
                 "workspace_dir": "/tmp/ws-media",
             },
+        }
+    ]
+
+
+def test_build_export_media_accepts_current_media_and_branding_signatures():
+    branding_calls: list[dict] = []
+    mindmap_calls: list[dict] = []
+
+    def _generate_ingested_previews(limit=6, project_id=None):
+        return [{"path": f"/tmp/preview-{project_id}-{limit}.png", "caption": "预览"}]
+
+    def _resolve_logo(*, bidder_company=None, logo_url=None, bidder_domain=None, project_id=None):
+        return f"/tmp/logo-{project_id}.png"
+
+    def _update_branding(project_id, payload, merge=True):
+        branding_calls.append({"project_id": project_id, "payload": payload, "merge": merge})
+
+    def _generate_outline_mindmap(
+        topic,
+        outline,
+        *,
+        api_key=None,
+        model=None,
+        aspect_ratio=None,
+        logo_path=None,
+        bidder_company=None,
+        logo_url=None,
+        bidder_domain=None,
+    ):
+        mindmap_calls.append({"topic": topic, "outline": outline, "logo_path": logo_path})
+        return {"path": "/tmp/current-mindmap.png", "caption": "脑图"}
+
+    out = export_docx_service.build_export_media(
+        raw_request={
+            "topic": "当前媒体签名",
+            "bidder_company": "ACME",
+            "bidder_domain": "acme.test",
+            "logo_url": "https://example.com/logo.png",
+        },
+        project_id="P-CURRENT",
+        boq={"stats": {"items": 1}},
+        params={},
+        outline=["施工部署"],
+        workspace_dir="/tmp/ws-media-current",
+        generate_boq_chart_fn=lambda stats: [{"path": "/tmp/current-chart.png", "caption": "统计图"}],
+        generate_ingested_previews_fn=_generate_ingested_previews,
+        get_image_defaults_fn=lambda params: {"aspect_ratio": "16:9"},
+        iterate_image_failover_slots_fn=lambda: [SimpleNamespace(provider="google", api_key="g-key", model="g-model")],
+        generate_outline_mindmap_fn=_generate_outline_mindmap,
+        resolve_logo_fn=_resolve_logo,
+        prepare_logo_for_embedding_fn=lambda raw: "/tmp/current-logo-embed.png",
+        update_branding_fn=_update_branding,
+    )
+
+    assert out == [
+        {"path": "/tmp/current-chart.png", "caption": "统计图"},
+        {"path": "/tmp/preview-P-CURRENT-6.png", "caption": "预览"},
+        {"path": "/tmp/current-logo-embed.png", "caption": "投标单位LOGO"},
+        {"path": "/tmp/current-mindmap.png", "caption": "脑图"},
+    ]
+    assert branding_calls == [
+        {
+            "project_id": "P-CURRENT",
+            "payload": {
+                "bidder_company": "ACME",
+                "bidder_domain": "acme.test",
+                "logo_url": "https://example.com/logo.png",
+                "logo_raw_path": "/tmp/logo-P-CURRENT.png",
+                "logo_embed_path": "/tmp/current-logo-embed.png",
+                "logo_path": "/tmp/current-logo-embed.png",
+            },
+            "merge": True,
+        }
+    ]
+    assert mindmap_calls == [
+        {
+            "topic": "当前媒体签名",
+            "outline": ["施工部署"],
+            "logo_path": "/tmp/current-logo-embed.png",
         }
     ]
 
