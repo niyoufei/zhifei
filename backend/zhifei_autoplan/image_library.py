@@ -247,3 +247,18 @@ def build_image_selection_pack(
         pack["caption_hint"] = first_caption
     return pack
 
+
+def image_selection_pack_media_entries(raw: Any) -> list[dict[str, Any]]:
+    pack = raw if isinstance(raw, dict) else {}
+    out: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in pack.get("images") or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("source_path") or item.get("storage_path") or item.get("path") or "").strip()
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        caption = str(item.get("caption") or item.get("title") or pack.get("caption_hint") or "").strip()
+        out.append({"path": path, "caption": caption})
+    return out
