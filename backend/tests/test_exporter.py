@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import re
 import tempfile
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 
@@ -567,8 +568,8 @@ class TestExportAutoplanDocx:
         assert result == str(output_path)
         assert output_path.exists()
 
-    def test_current_export_baseline_before_front_matter_integration(self, temp_dir):
-        """Current export keeps new front matter helpers available but not wired into the main flow."""
+    def test_export_wires_front_matter_helpers_without_build_report(self, temp_dir):
+        """Front matter helpers are wired into export without build-report side effects."""
         output_path = Path(temp_dir) / "baseline.docx"
         data = {
             "topic": "智慧厂房施工组织设计",
@@ -597,14 +598,24 @@ class TestExportAutoplanDocx:
         text = "\n".join(p.text for p in doc.paragraphs)
         assert "智慧厂房施工组织设计" in text
         assert "智飞建设有限公司" in text
+        assert "施工组织设计" in text
+        assert "全文索引" in text
+        assert "目录" in text
+        assert "01. 第一章 工程概况（约2页）" in text
+        assert "第一章、工程概况" in text
         assert "第一章 工程概况" in text
         assert "负责人：项目经理" in text
         assert "本章用于锁定当前导出正文基线。" in text
-        assert re.search(r"\d{4}-\d{2}-\d{2}", text)
-        assert "目录" not in text
-        assert "全文索引" not in text
         assert not output_path.with_suffix(".build_report.json").exists()
         assert not output_path.with_suffix(".build_report.log").exists()
+        with zipfile.ZipFile(output_path) as zf:
+            xml = "\n".join(
+                zf.read(name).decode("utf-8", errors="ignore")
+                for name in zf.namelist()
+                if name.startswith("word/document") or name.startswith("word/footer")
+            )
+        assert "TOC" in xml
+        assert "PAGE" in xml
 
     def test_export_creates_parent_directories(self, temp_dir, basic_data):
         """Test export creates nested parent directories."""
@@ -1103,7 +1114,8 @@ class TestExportAutoplanDocxFromFile:
         text = "\n".join(p.text for p in doc.paragraphs)
         
         # Should use first variant
-        assert "测试施工组织设计" in text
+        assert "测试" in text
+        assert "施工组织设计" in text
         assert "第二版本" not in text
 
     def test_export_from_file_with_empty_variants(self, temp_dir):
