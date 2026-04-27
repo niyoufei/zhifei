@@ -26,6 +26,19 @@ _TOC_SECTION_RE = re.compile(r"^第[一二三四五六七八九十百零0-9]+节
 _TOC_CN_ITEM_RE = re.compile(r"^[一二三四五六七八九十百零]+[、.]")
 _TOC_NUMERIC_ITEM_RE = re.compile(r"^\d+(?:\.\d+){1,3}")
 _CN_DIGITS = {"0": "零", "1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
+_GENERIC_COVER_IMAGE_STEMS = {
+    "",
+    "image",
+    "img",
+    "photo",
+    "picture",
+    "cover",
+    "wechat image",
+    "微信图片",
+    "现场照片",
+    "现场图",
+    "现状",
+}
 
 
 def _strip_internal_autofix_markers(text: str) -> str:
@@ -638,6 +651,190 @@ def _apply_footer_page_numbers(
         _append_field_run(p_right, "PAGE")
         for run in p_right.runs:
             _set_run_font(run, font_east, font_latin, 14.0)
+
+
+def _style_cover_paragraph(
+    paragraph,
+    *,
+    east_font: str,
+    latin_font: str,
+    size_pt: float,
+    text: Any = "",
+    bold: bool = False,
+    color_rgb: tuple[int, int, int] | None = None,
+    space_before_pt: float = 0.0,
+    space_after_pt: float = 0.0,
+    line_spacing_pt: float | None = None,
+):
+    try:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.space_before = Pt(float(space_before_pt or 0))
+        paragraph.paragraph_format.space_after = Pt(float(space_after_pt or 0))
+        if line_spacing_pt is not None:
+            paragraph.paragraph_format.line_spacing = Pt(float(line_spacing_pt))
+    except Exception:
+        pass
+    run = paragraph.add_run(str(text or ""))
+    _set_run_font(run, str(east_font or "宋体"), str(latin_font or east_font or "宋体"), float(size_pt or 12))
+    try:
+        run.bold = bool(bold)
+        if color_rgb is not None:
+            run.font.color.rgb = RGBColor(int(color_rgb[0]), int(color_rgb[1]), int(color_rgb[2]))
+    except Exception:
+        pass
+    return run
+
+
+def _cover_image_caption(project_name: Any, filename: Any, source_hint: Any = "") -> str:
+    name = str(project_name or "").strip()
+    source = str(source_hint or "").strip().lower()
+    stem = Path(str(filename or "")).stem.strip()
+    stem = re.sub(r"[_\-]+", " ", stem).strip()
+    stem = re.sub(r"(?:\(|（)\d+(?:\)|）)$", "", stem).strip()
+    stem = re.sub(r"^微信图片\s*\d{6,}$", "微信图片", stem).strip()
+    stem_key = stem.lower()
+
+    if stem and stem_key not in _GENERIC_COVER_IMAGE_STEMS:
+        label = stem
+    elif source in {"site_photo", "site", "scene", "现场", "现场照片"}:
+        label = "现场实景图"
+    else:
+        label = "项目效果图"
+    return f"{name} · {label}" if name else label
+
+
+def _resolve_cover_meta(data: Dict[str, Any] | None) -> Dict[str, Any]:
+    raw = data if isinstance(data, dict) else {}
+    branding = raw.get("branding") if isinstance(raw.get("branding"), dict) else {}
+    topic = str(raw.get("topic") or "施工组织设计").strip() or "施工组织设计"
+    project_name = str(raw.get("project_name") or "").strip() or _topic_to_cover_project_name(topic)
+    project_code = str(raw.get("project_code") or "").strip()
+    bidder_company = str(branding.get("bidder_company") or raw.get("bidder_company") or "").strip()
+
+    logo_path = str(branding.get("logo_path") or raw.get("logo_path") or "").strip()
+    if logo_path and not Path(logo_path).exists():
+        logo_path = ""
+    cover_image_path = str(raw.get("cover_image_path") or branding.get("cover_image_path") or "").strip()
+    if cover_image_path and not Path(cover_image_path).exists():
+        cover_image_path = ""
+
+    cover_image_caption = str(raw.get("cover_image_caption") or branding.get("cover_image_caption") or "").strip()
+    if cover_image_path and not cover_image_caption:
+        cover_image_caption = _cover_image_caption(project_name, Path(cover_image_path).name, "site_photo")
+
+    return {
+        "project_id": str(raw.get("project_id") or branding.get("project_id") or "").strip(),
+        "project_name": project_name,
+        "project_code": project_code,
+        "topic": topic,
+        "cover_title": str(raw.get("cover_title") or "施工组织设计").strip() or "施工组织设计",
+        "cover_image_path": cover_image_path,
+        "cover_image_caption": cover_image_caption,
+        "bidder_company": bidder_company,
+        "logo_path": logo_path,
+        "issue_year_month": str(raw.get("issue_year_month") or branding.get("issue_year_month") or "").strip()
+        or _format_cover_year_month(),
+    }
+
+
+def _insert_cover_page(doc: Document, style_cfg: Dict[str, Any], cover_meta: Dict[str, Any] | None) -> None:
+    cfg = _normalize_style(style_cfg or {})
+    meta = cover_meta if isinstance(cover_meta, dict) else {}
+    title_font = str(cfg.get("title_font") or "黑体")
+    title_latin = str(cfg.get("title_latin_font") or cfg.get("body_latin_font") or title_font)
+    body_font = str(cfg.get("body_font") or "宋体")
+    body_latin = str(cfg.get("body_latin_font") or body_font)
+    accent = (16, 158, 170)
+
+    project_name = str(meta.get("project_name") or "").strip()
+    project_code = str(meta.get("project_code") or "").strip()
+    cover_title = str(meta.get("cover_title") or "施工组织设计").strip() or "施工组织设计"
+    bidder_company = str(meta.get("bidder_company") or "").strip()
+    issue_year_month = str(meta.get("issue_year_month") or "").strip()
+
+    if project_name:
+        _style_cover_paragraph(
+            doc.add_paragraph(),
+            east_font=title_font,
+            latin_font=title_latin,
+            size_pt=max(float(cfg.get("doc_title_size") or 20), 20.0),
+            text=project_name,
+            bold=True,
+            color_rgb=accent,
+            space_before_pt=42,
+            space_after_pt=10,
+            line_spacing_pt=30,
+        )
+    if project_code:
+        _style_cover_paragraph(
+            doc.add_paragraph(),
+            east_font=body_font,
+            latin_font=body_latin,
+            size_pt=12,
+            text=f"项目编号：{project_code}",
+            space_after_pt=18,
+        )
+    _style_cover_paragraph(
+        doc.add_paragraph(),
+        east_font=title_font,
+        latin_font=title_latin,
+        size_pt=28,
+        text=cover_title,
+        bold=True,
+        space_before_pt=18,
+        space_after_pt=24,
+        line_spacing_pt=36,
+    )
+
+    cover_image_path = str(meta.get("cover_image_path") or "").strip()
+    if cover_image_path and Path(cover_image_path).exists():
+        try:
+            doc.add_picture(cover_image_path, width=Cm(12))
+            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        except Exception:
+            pass
+    cover_image_caption = str(meta.get("cover_image_caption") or "").strip()
+    if cover_image_caption:
+        _style_cover_paragraph(
+            doc.add_paragraph(),
+            east_font=body_font,
+            latin_font=body_latin,
+            size_pt=10.5,
+            text=cover_image_caption,
+            color_rgb=(90, 98, 102),
+            space_before_pt=4,
+            space_after_pt=20,
+        )
+
+    logo_path = str(meta.get("logo_path") or "").strip()
+    if logo_path and Path(logo_path).exists():
+        try:
+            doc.add_picture(logo_path, width=Cm(2.4))
+            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        except Exception:
+            pass
+    if bidder_company:
+        _style_cover_paragraph(
+            doc.add_paragraph(),
+            east_font=body_font,
+            latin_font=body_latin,
+            size_pt=14,
+            text=bidder_company,
+            bold=True,
+            space_before_pt=18,
+            space_after_pt=8,
+        )
+    if issue_year_month:
+        _style_cover_paragraph(
+            doc.add_paragraph(),
+            east_font=body_font,
+            latin_font=body_latin,
+            size_pt=12,
+            text=issue_year_month,
+            space_after_pt=12,
+        )
+    doc.add_page_break()
 
 
 def _apply_style(doc: Document, style: Dict[str, Any]):
