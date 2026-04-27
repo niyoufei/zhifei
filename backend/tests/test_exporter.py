@@ -14,16 +14,21 @@ import pytest
 from docx import Document
 
 from backend.zhifei_autoplan.exporter import (
+    _append_field_run,
     _apply_style,
     _auto_density_images_for_pages,
     _build_static_toc_entries,
     _format_cover_year_month,
     _format_toc_display_title,
+    _hide_paragraph,
     _infer_toc_level,
+    _insert_auto_toc,
     _normalize_front_matter_page_mode,
     _normalize_full_index_enabled,
     _paginate_toc_entries,
+    _render_toc_line,
     _resolve_front_matter_plan,
+    _toc_entry_style,
     _topic_to_cover_project_name,
     _to_cn_month,
     export_autoplan_docx,
@@ -264,6 +269,83 @@ class TestFrontMatterHelpers:
         assert _infer_toc_level({"title": "一、施工部署"}) == 3
         assert _infer_toc_level({"title": "1.1 施工部署"}) == 3
         assert _infer_toc_level({"title": "手工指定", "level": 9}) == 3
+
+
+class TestTocRenderingHelpers:
+    """Tests for deterministic DOCX TOC rendering helper functions."""
+
+    def test_append_field_run_and_hide_paragraph_emit_docx_xml(self):
+        doc = Document()
+        paragraph = doc.add_paragraph()
+
+        _append_field_run(paragraph, 'TOC \\o "1-2" \\h \\z \\u')
+        _hide_paragraph(paragraph)
+
+        xml = paragraph._element.xml
+        assert "TOC" in xml
+        assert "fldCharType" in xml
+        assert "vanish" in xml
+
+    def test_toc_entry_style_uses_level_specific_formatting(self):
+        style_cfg = {
+            "body_font": "宋体",
+            "body_latin_font": "Times New Roman",
+            "body_size": 12,
+            "title_font": "黑体",
+            "title_latin_font": "Arial",
+            "title_size": 16,
+        }
+
+        level1 = _toc_entry_style(style_cfg, 1)
+        level2 = _toc_entry_style(style_cfg, 2)
+        level3 = _toc_entry_style(style_cfg, 3)
+
+        assert level1["font_east"] == "黑体"
+        assert level1["bold"] is True
+        assert level1["left_indent_cm"] == 0.0
+        assert level2["font_east"] == "宋体"
+        assert level2["color_rgb"] == (16, 158, 170)
+        assert level2["left_indent_cm"] == 1.0
+        assert level3["left_indent_cm"] == 2.0
+
+    def test_render_toc_line_adds_formatted_static_entry(self):
+        doc = Document()
+        paragraph = _render_toc_line(
+            doc,
+            {"title": "第一章 工程概况", "start_page": 5, "level": 1},
+            style_cfg={"title_font": "黑体", "title_latin_font": "Arial", "title_size": 16},
+        )
+
+        assert "第一章、工程概况" in paragraph.text
+        assert "5" in paragraph.text
+        assert "·" in paragraph.text
+        assert paragraph.runs[0].bold is True
+
+    def test_insert_auto_toc_renders_field_and_static_entries(self):
+        doc = Document()
+        apply_paragraph = _apply_style(doc, {"body_font": "宋体", "title_font": "黑体"})
+
+        _insert_auto_toc(
+            doc,
+            apply_paragraph,
+            style_cfg={"body_font": "宋体", "title_font": "黑体", "doc_title_size": 18},
+            toc_pages=2,
+            toc_entries=[
+                {"title": "第一章 工程概况", "start_page": 4, "level": 1},
+                {"title": "第一节 项目概况", "start_page": 5, "level": 2},
+                {"title": "一、施工部署", "start_page": 6, "level": 3},
+            ],
+        )
+
+        text = "\n".join(p.text for p in doc.paragraphs)
+        xml = "\n".join(p._element.xml for p in doc.paragraphs)
+        assert "目录" in text
+        assert "目录（续）" in text
+        assert "第一章、工程概况" in text
+        assert "第一节、项目概况" in text
+        assert "一、施工部署" in text
+        assert "TOC" in xml
+        assert "vanish" in xml
 
 
 # =============================================================================

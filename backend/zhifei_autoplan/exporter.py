@@ -9,8 +9,10 @@ from typing import Dict, Any, List
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.shared import Cm
 from docx.shared import Pt
+from docx.shared import RGBColor
 from docx.oxml.ns import qn
 from backend.zhifei_autoplan.media import generate_section_visuals
 from backend.zhifei_autoplan.terminology_guard import load_global_terminology, normalize_text_terminology
@@ -323,6 +325,158 @@ def _format_toc_display_title(title: str) -> str:
             suffix = cleaned[len(prefix):].strip(" 、.")
             return f"{prefix}、{suffix}" if suffix else prefix
     return cleaned
+
+
+def _append_field_run(paragraph, instruction: str) -> None:
+    run = paragraph.add_run()
+    r = run._r
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = str(instruction or "")
+    fld_separate = OxmlElement("w:fldChar")
+    fld_separate.set(qn("w:fldCharType"), "separate")
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+    r.append(fld_begin)
+    r.append(instr)
+    r.append(fld_separate)
+    r.append(fld_end)
+
+
+def _hide_paragraph(paragraph) -> None:
+    if not getattr(paragraph, "runs", None):
+        paragraph.add_run()
+    for run in paragraph.runs:
+        try:
+            rpr = run._element.get_or_add_rPr()
+            if rpr.find(qn("w:vanish")) is None:
+                rpr.append(OxmlElement("w:vanish"))
+        except Exception:
+            continue
+
+
+def _toc_entry_style(style_cfg: Dict[str, Any], level: int) -> Dict[str, Any]:
+    style = style_cfg if isinstance(style_cfg, dict) else {}
+    body_font = str(style.get("body_font") or "宋体")
+    body_latin = str(style.get("body_latin_font") or body_font)
+    title_font = str(style.get("title_font") or body_font)
+    title_latin = str(style.get("title_latin_font") or body_latin)
+    body_size = _to_float(style.get("body_size"), 14.0)
+    title_size = _to_float(style.get("title_size"), body_size + 2.0)
+    if level <= 1:
+        return {
+            "font_east": title_font,
+            "font_latin": title_latin,
+            "size_pt": max(title_size, body_size + 2.0),
+            "bold": True,
+            "left_indent_cm": 0.0,
+            "color_rgb": (0, 0, 0),
+        }
+    if level == 2:
+        return {
+            "font_east": body_font,
+            "font_latin": body_latin,
+            "size_pt": max(body_size + 1.0, 14.5),
+            "bold": False,
+            "left_indent_cm": 1.0,
+            "color_rgb": (16, 158, 170),
+        }
+    return {
+        "font_east": body_font,
+        "font_latin": body_latin,
+        "size_pt": max(body_size, 13.5),
+        "bold": False,
+        "left_indent_cm": 2.0,
+        "color_rgb": (0, 0, 0),
+    }
+
+
+def _render_toc_line(
+    doc: Document,
+    entry: Dict[str, Any],
+    *,
+    style_cfg: Dict[str, Any],
+):
+    level = _infer_toc_level(entry)
+    line_cfg = _toc_entry_style(style_cfg, level)
+    title = _format_toc_display_title(str((entry or {}).get("title") or "章节"))
+    page_number = int(_to_int((entry or {}).get("start_page"), 1) or 1)
+    dot_count = max(10, 52 - len(title) - max(0, level - 1) * 4)
+    paragraph = doc.add_paragraph()
+    try:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.left_indent = Cm(float(line_cfg["left_indent_cm"]))
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(4 if level == 1 else 2)
+        paragraph.paragraph_format.line_spacing = Pt(22)
+    except Exception:
+        pass
+    run = paragraph.add_run(f"{title}{'·' * dot_count}{page_number}")
+    _set_run_font(run, str(line_cfg["font_east"]), str(line_cfg["font_latin"]), float(line_cfg["size_pt"]))
+    try:
+        run.bold = bool(line_cfg["bold"])
+        color = tuple(line_cfg.get("color_rgb") or (0, 0, 0))
+        run.font.color.rgb = RGBColor(int(color[0]), int(color[1]), int(color[2]))
+    except Exception:
+        pass
+    return paragraph
+
+
+def _insert_auto_toc(
+    doc: Document,
+    apply_paragraph,
+    *,
+    style_cfg: Dict[str, Any],
+    toc_pages: int = 1,
+    toc_entries: List[Dict[str, Any]] | None = None,
+) -> None:
+    page_chunks = _paginate_toc_entries(toc_entries or [], max(1, int(toc_pages or 1)))
+    style = style_cfg if isinstance(style_cfg, dict) else {}
+    title_font = str(style.get("title_font") or "宋体")
+    title_latin = str(style.get("title_latin_font") or style.get("body_latin_font") or title_font)
+    title_size = max(_to_float(style.get("doc_title_size"), 18.0), 18.0)
+    for page_idx, page_entries in enumerate(page_chunks):
+        heading = doc.add_paragraph()
+        try:
+            heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            heading.paragraph_format.first_line_indent = Cm(0)
+            heading.paragraph_format.space_before = Pt(6)
+            heading.paragraph_format.space_after = Pt(10)
+            heading.paragraph_format.line_spacing = Pt(24)
+        except Exception:
+            pass
+        title_run = heading.add_run("目录" if page_idx == 0 else "目录（续）")
+        _set_run_font(title_run, title_font, title_latin, title_size)
+        try:
+            title_run.bold = True
+            title_run.font.color.rgb = RGBColor(16, 158, 170)
+        except Exception:
+            pass
+
+        field_paragraph = doc.add_paragraph()
+        _append_field_run(field_paragraph, 'TOC \\o "1-2" \\h \\z \\u')
+        apply_paragraph(field_paragraph)
+        _hide_paragraph(field_paragraph)
+        try:
+            field_paragraph.paragraph_format.first_line_indent = Cm(0)
+        except Exception:
+            pass
+
+        if page_entries:
+            for entry in page_entries:
+                _render_toc_line(doc, entry, style_cfg=style)
+        elif page_idx == 0:
+            empty = doc.add_paragraph("当前无章节目录。")
+            apply_paragraph(empty)
+            try:
+                empty.paragraph_format.first_line_indent = Cm(0)
+                empty.paragraph_format.left_indent = Cm(0)
+            except Exception:
+                pass
+        doc.add_page_break()
 
 
 def _apply_style(doc: Document, style: Dict[str, Any]):
