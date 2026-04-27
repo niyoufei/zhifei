@@ -1071,9 +1071,9 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
     apply_paragraph = _apply_style(doc, style_raw)
 
     topic = data.get("topic") or "施组方案"
-    branding = data.get("branding") if isinstance(data.get("branding"), dict) else {}
-    bidder_company = str(branding.get("bidder_company") or "").strip()
-    logo_path = branding.get("logo_path")
+    cover_meta = _resolve_cover_meta(data)
+    bidder_company = str(cover_meta.get("bidder_company") or "").strip()
+    logo_path = cover_meta.get("logo_path")
 
     def _brand_image_with_logo(src_path: str) -> str:
         """
@@ -1116,50 +1116,6 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         except Exception:
             return src_path
 
-    # Header branding (company + logo), best-effort.
-    _apply_branding_header(doc, style_cfg, topic=str(topic), bidder_company=bidder_company, logo_path=logo_path)
-
-    # Cover page (optional): logo + project title + bidder.
-    has_cover = False
-    if isinstance(logo_path, str) and logo_path.strip() and Path(logo_path).exists():
-        try:
-            doc.add_picture(str(logo_path), width=Cm(6))
-            try:
-                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            except Exception:
-                pass
-            has_cover = True
-        except Exception:
-            pass
-    if bidder_company:
-        p = doc.add_paragraph(bidder_company)
-        apply_paragraph(p, is_title=True)
-        try:
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        except Exception:
-            pass
-        has_cover = True
-
-    h = doc.add_heading(topic, level=1)
-    apply_paragraph(h, is_title=True)
-    try:
-        h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    except Exception:
-        pass
-    has_cover = True
-
-    try:
-        import datetime as _dt
-
-        dp = doc.add_paragraph(_dt.datetime.now().strftime("%Y-%m-%d"))
-        apply_paragraph(dp)
-        dp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    except Exception:
-        pass
-
-    if has_cover:
-        doc.add_page_break()
-
     layout_receipts = []
     sections = data.get("sections") or []
     terminology_entries = load_global_terminology()
@@ -1182,11 +1138,48 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         return _estimate_content_pages(content_doc, chars_per_page)
 
     total_planned_pages = 0
+    section_pages: List[int] = []
     for sec in sections:
         title = str(sec.get("title") or "章节")
         content = _strip_internal_autofix_markers(sec.get("content") or "")
-        total_planned_pages += _effective_pages_for_section(title, content, style_cfg)
+        pages = _effective_pages_for_section(title, content, style_cfg)
+        section_pages.append(pages)
+        total_planned_pages += pages
     total_planned_pages = max(1, int(total_planned_pages))
+
+    front_matter_plan = _resolve_front_matter_plan(
+        style_raw=style_raw,
+        data=data,
+        body_pages_estimate=total_planned_pages,
+    )
+    _apply_branding_header(doc, style_cfg, topic=str(topic), bidder_company=bidder_company, logo_path=logo_path)
+    _apply_footer_page_numbers(
+        doc,
+        style_cfg,
+        bidder_company=bidder_company,
+        logo_path=str(logo_path or ""),
+    )
+    _insert_cover_page(doc, style_cfg, cover_meta)
+    if int(front_matter_plan.get("full_index_pages") or 0) > 0:
+        _insert_full_index_page(
+            doc,
+            apply_paragraph,
+            topic=str(topic),
+            sections=sections,
+            chapter_pages=chapter_pages,
+            effective_document_pages=int(front_matter_plan.get("effective_document_pages") or total_planned_pages),
+        )
+    _insert_auto_toc(
+        doc,
+        apply_paragraph,
+        style_cfg=style_cfg,
+        toc_pages=int(front_matter_plan.get("toc_pages") or 1),
+        toc_entries=_build_static_toc_entries(
+            sections=sections,
+            section_pages=section_pages,
+            front_matter_plan=front_matter_plan,
+        ),
+    )
 
     media_cursor = 0
     media_index = 0
