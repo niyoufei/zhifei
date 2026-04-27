@@ -788,6 +788,53 @@ class TestExportAutoplanDocx:
         assert "整改建议清单" in text
         assert "补充证据材料" in text
 
+    def test_quality_evidence_currently_stays_in_docx_not_build_report(self, temp_dir, data_with_quality_checks):
+        """Lock current quality/evidence export behavior before moving it anywhere else."""
+        output_path = Path(temp_dir) / "quality_evidence_baseline.docx"
+        data_with_quality_checks["quality_checks"]["issue_list"] = [
+            {
+                "title": "第二章",
+                "type": "missing_evidence",
+                "severity": "high",
+                "problem": "证据定位不足",
+                "suggestion": "补充合同条款定位",
+            }
+        ]
+        data_with_quality_checks["quality_checks"]["auto_revision_suggestions"] = [
+            {
+                "title": "第二章",
+                "type": "evidence_fix",
+                "suggestion": "补齐来源定位",
+            }
+        ]
+
+        export_autoplan_docx(data_with_quality_checks, str(output_path))
+
+        doc = Document(str(output_path))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "质量校验摘要" in text
+        assert "质量校验清单" in text
+        assert "evidence：需改进" in text
+        assert "章节证据数量清单" in text
+        assert "- 第一章: 证据数 2" in text
+        assert "- 第二章: 证据数 0" in text
+        assert "问题清单（自动检测）" in text
+        assert "证据定位不足" in text
+        assert "自动修订建议（按章节聚合）" in text
+        assert "补齐来源定位" in text
+        assert "整改建议清单" in text
+        assert "补充证据材料" in text
+
+        report_json_path, _ = _build_report_paths(str(output_path))
+        report = json.loads(report_json_path.read_text(encoding="utf-8"))
+        report_text = json.dumps(report, ensure_ascii=False)
+        assert "quality_checks" not in report
+        assert "evidence" not in report
+        assert "remediation" not in report
+        assert "证据定位不足" not in report_text
+        assert "补齐来源定位" not in report_text
+        assert "补充证据材料" not in report_text
+
     def test_export_llm_compare_full_mode(self, temp_dir, data_with_llm_remediation):
         """Test export LLM compare in full mode."""
         output_path = Path(temp_dir) / "llm_compare.docx"
