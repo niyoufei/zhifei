@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from fastapi.responses import FileResponse
 
 from backend.zhifei_autoplan.job_store import create_job, get_job, update_job
+from backend.zhifei_autoplan import export_docx_service as export_docx_core
 from backend.zhifei_autoplan.orchestrator import run_autoplan
 from backend.zhifei_autoplan.output_artifacts import save_outputs as save_output_artifacts
 from backend.zhifei_autoplan.plan_store import load_plan, save_plan
@@ -24,8 +25,7 @@ from backend.zhifei_autoplan.tender_store import load_tender_matrix
 from backend.zhifei_autoplan.boq_store import load_boq_data
 from backend.zhifei_autoplan.quality_check import run_quality_checks, strip_nonconcrete_language
 from backend.zhifei_autoplan.orchestrator import _build_boq_focus
-from backend.zhifei_autoplan.media import generate_boq_chart, generate_ingested_previews, generate_outline_mindmap
-from backend.zhifei_autoplan.params_runtime import load_params, get_image_defaults, save_params
+from backend.zhifei_autoplan.params_runtime import load_params, save_params
 from backend.zhifei_autoplan.four_new_tech import recommend_four_new
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
 from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
@@ -161,6 +161,9 @@ class ActionsExportRequest(BaseModel):
     bidder_company: str | None = None
     bidder_domain: str | None = None
     logo_url: str | None = None
+    media: List[dict] | None = None
+    image_selection_pack: dict | None = None
+    case_reference_pack: dict | None = None
 
 
 class ActionsParamsSetRequest(BaseModel):
@@ -987,160 +990,17 @@ async def actions_quality_check(req: ActionsQualityCheckRequest, x_actions_key: 
 
 
 @router.post("/export_docx")
-async def actions_export_docx(req: ActionsExportRequest, x_actions_key: str | None = Header(default=None)):
+async def actions_export_docx(
+    req: ActionsExportRequest,
+    workspace_dir: str | None = None,
+    x_actions_key: str | None = Header(default=None),
+):
     _auth_actions_key(x_actions_key)
-    pid = str(req.project_id or "").strip() or None
-    tender = load_tender_matrix(project_id=pid) or {}
-    boq = load_boq_data(project_id=pid) or {}
-    boq_focus = _build_boq_focus(boq)
-    params = load_params()
-    sections = [s.model_dump() for s in req.sections]
-    for s in sections:
-        s["content"] = strip_nonconcrete_language(s.get("content") or "")
-    plan_receipt = None
-    try:
-        from backend.zhifei_autoplan.plan_consistency import normalize_metrics_in_sections
-
-        plan_receipt = normalize_metrics_in_sections(sections)
-    except Exception:
-        plan_receipt = None
-    outline = req.outline or [s.get("title") for s in sections]
-    # Four-new recommendations for realism (used by focus_xlsx + downstream remediation).
-    try:
-        recs = recommend_four_new(boq, outline=outline, limit=6, topic=str(req.topic))
-        if isinstance(recs, list) and recs:
-            boq_focus["four_new_recommendations"] = recs
-    except Exception:
-        pass
-    qc = run_quality_checks(
-        tender,
-        outline,
-        sections,
-        boq=boq,
-        boq_focus=boq_focus,
-        project_id=pid,
-        strict=True,
+    return export_docx_core.execute_export_docx_request(
+        raw_request=req.model_dump(),
+        workspace_dir=str(workspace_dir or "."),
+        save_outputs_fn=_save_outputs,
     )
-    # Drawing/standard index + cross-index for reviewer XLSX (best-effort).
-    drawing_index = None
-    standard_index = None
-    cross_index = None
-    try:
-        from backend.zhifei_autoplan.drawing_index import build_drawing_index
-        from backend.zhifei_autoplan.standard_index import build_standard_index
-        from backend.zhifei_autoplan.cross_index import build_cross_index
-
-        drawing_index = build_drawing_index(req.topic, outline, project_id=pid)
-        standard_index = build_standard_index(req.topic, outline, project_id=pid)
-        cross_index = build_cross_index(
-            boq=boq,
-            sections=sections,
-            boq_focus=boq_focus,
-            drawing_index=drawing_index,
-            standard_index=standard_index,
-            quality_checks=qc,
-            project_id=pid,
-        )
-    except Exception:
-        drawing_index = None
-        standard_index = None
-        cross_index = None
-    payload = {
-        "topic": req.topic,
-        "style": req.style or {},
-        "outline": outline,
-        "sections": sections,
-        "quality_checks": qc,
-        "boq_focus": boq_focus,
-        "drawing_index": drawing_index,
-        "standard_index": standard_index,
-        "cross_index": cross_index,
-        "plan_consistency": plan_receipt,
-    }
-    try:
-        payload["evidence_tracking"] = build_evidence_tracking(
-            sections=sections,
-            tender=tender,
-            chapter_pages={},
-        )
-    except Exception:
-        payload["evidence_tracking"] = {"rows": [], "summary": {}}
-    if bool(req.generate_images):
-        stats = boq.get("stats") if isinstance(boq, dict) else None
-        media = []
-        if stats:
-            media.extend(generate_boq_chart(stats))
-        media.extend(generate_ingested_previews(limit=6, project_id=pid))
-        # Mindmap (prefer Gemini "banana" image model when key is configured)
-        try:
-            img_defaults = get_image_defaults(params)
-            image_provider = (req.image_provider or img_defaults.get("provider") or "").strip()
-            image_model = (req.image_model or img_defaults.get("model") or "").strip()
-            aspect_ratio = (req.image_aspect_ratio or img_defaults.get("aspect_ratio") or "16:9").strip()
-            image_api_key = req.image_api_key or os.environ.get("ZF_GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-            # Resolve bidder logo once; embed it into DOCX and pass into mindmap generation if possible.
-            logo_embed = None
-            logo_raw_path = None
-            try:
-                from backend.zhifei_autoplan.logo_runtime import resolve_logo, prepare_logo_for_embedding
-
-                # Resolve when bidder info is provided OR project_id is set (so we can scope to this project).
-                if req.bidder_company or req.logo_url or req.bidder_domain or pid:
-                    logo_raw = resolve_logo(
-                        bidder_company=req.bidder_company,
-                        logo_url=req.logo_url,
-                        bidder_domain=req.bidder_domain,
-                        project_id=pid,
-                    )
-                    if logo_raw:
-                        logo_raw_path = str(logo_raw)
-                        logo_embed = prepare_logo_for_embedding(logo_raw) or None
-            except Exception:
-                logo_embed = None
-            if logo_embed:
-                media.append({"path": logo_embed, "caption": "投标单位LOGO"})
-                # Lock branding to this project to avoid mis-grabs across reruns.
-                try:
-                    if pid:
-                        from backend.zhifei_autoplan.branding_store import update_branding
-
-                        update_branding(
-                            str(pid),
-                            {
-                                "bidder_company": req.bidder_company,
-                                "bidder_domain": req.bidder_domain,
-                                "logo_url": req.logo_url,
-                                "logo_raw_path": logo_raw_path,
-                                "logo_embed_path": str(logo_embed),
-                                "logo_path": str(logo_embed),
-                            },
-                            merge=True,
-                        )
-                except Exception:
-                    pass
-            mm = None
-            if image_provider == "google":
-                mm = generate_outline_mindmap(
-                    req.topic,
-                    outline,
-                    api_key=image_api_key,
-                    model=image_model,
-                    aspect_ratio=aspect_ratio,
-                    logo_path=logo_embed,
-                    bidder_company=req.bidder_company,
-                    logo_url=req.logo_url,
-                    bidder_domain=req.bidder_domain,
-                )
-            if mm:
-                media.append(mm)
-        except Exception:
-            pass
-        if media:
-            payload["media"] = media
-    job_id = create_job({"action": "export_docx"}, user_id=None)
-    outputs = _save_outputs(f"actions_export_{job_id}", [payload])
-    update_job(job_id, status="done", result=outputs)
-    return {"ok": True, "job_id": job_id, "files": outputs}
 
 
 @router.post("/generate")
