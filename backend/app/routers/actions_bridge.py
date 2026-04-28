@@ -42,6 +42,7 @@ from backend.zhifei_autoplan.image_library import (
     normalize_image_library_options,
     normalize_text_list,
 )
+from backend.zhifei_autoplan.ollama_preview import run_ollama_preview
 from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
 from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
 from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
@@ -191,6 +192,15 @@ class ActionsReviewApplyRequest(BaseModel):
     variant: int = 1
     apply_all: bool = False
     decisions: List[ActionsReviewDecision] = []
+
+
+class ActionsOllamaPreviewRequest(BaseModel):
+    content: str = ""
+    section_title: str | None = None
+    instruction: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    timeout: float | None = None
 
 
 @router.get("/params/get")
@@ -908,6 +918,22 @@ async def actions_image_library_upload(
     )
     rows = res.get("saved") if isinstance(res, dict) else []
     return {"ok": True, "items": [_image_library_saved_view(row) for row in rows if isinstance(row, dict)]}
+
+
+@router.post("/ollama/preview")
+async def actions_ollama_preview(
+    req: ActionsOllamaPreviewRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    return run_ollama_preview(
+        content=req.content,
+        section_title=req.section_title,
+        instruction=req.instruction,
+        model=req.model,
+        base_url=req.base_url,
+        timeout=req.timeout,
+    )
 
 
 @router.post("/tender/parse")
