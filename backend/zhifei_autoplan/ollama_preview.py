@@ -88,6 +88,32 @@ def build_preview_prompt(*, content: str, section_title: str = "", instruction: 
     )
 
 
+def build_section_review_prompt(
+    *,
+    project_name: str | None = None,
+    section_title: str | None = None,
+    section_content: str,
+    review_focus: str | None = None,
+) -> str:
+    project = _clean_text(project_name, limit=200) or "未命名项目"
+    title = _clean_text(section_title, limit=200) or "未命名章节"
+    body = _clean_text(section_content)
+    focus = _clean_text(review_focus, limit=1000) or "章节完整性、缺项、风险点、可执行字段、证据支撑和表达清晰度"
+    return (
+        "你是施工组织设计文档的人工章节复核助手。"
+        "本次只允许输出复核建议，不允许改写正文，不允许生成新事实，不允许替用户自动采纳。\n"
+        "输出要求：\n"
+        "1. 用简体中文。\n"
+        "2. 按“缺项”“风险点”“优化建议”三类输出。\n"
+        "3. 只基于给定章节文本判断，信息不足时明确写“信息不足”。\n"
+        "4. 不要输出完整改写稿，不要改变原章节。\n\n"
+        f"项目名称：{project}\n"
+        f"章节标题：{title}\n"
+        f"复核重点：{focus}\n\n"
+        f"已生成章节正文：\n{body}\n"
+    )
+
+
 def _default_transport(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -209,3 +235,56 @@ def run_ollama_preview(
             "think": False,
         },
     }
+
+
+def _as_section_review_result(result: dict[str, Any]) -> dict[str, Any]:
+    out = dict(result)
+    out["review_type"] = "section_review"
+    out["fallback_reason"] = None if out.get("ok") else str(
+        out.get("error") or out.get("warning") or out.get("status") or ""
+    )
+    return out
+
+
+def run_ollama_section_review(
+    *,
+    project_name: str | None = None,
+    section_title: str | None = None,
+    section_content: str,
+    review_focus: str | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+    timeout: float | int | str | None = None,
+    enabled: bool | None = None,
+    transport: Transport | None = None,
+) -> dict[str, Any]:
+    if not _clean_text(section_content):
+        result = run_ollama_preview(
+            content="",
+            section_title=section_title,
+            instruction="只做人工章节复核，返回缺项、风险点和可人工采纳的优化建议；不要改写正文。",
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            enabled=enabled,
+            transport=transport,
+        )
+        return _as_section_review_result(result)
+
+    prompt = build_section_review_prompt(
+        project_name=project_name,
+        section_title=section_title,
+        section_content=section_content,
+        review_focus=review_focus,
+    )
+    result = run_ollama_preview(
+        content=prompt,
+        section_title=section_title,
+        instruction="只做人工章节复核，返回缺项、风险点和可人工采纳的优化建议；不要改写正文。",
+        model=model,
+        base_url=base_url,
+        timeout=timeout,
+        enabled=enabled,
+        transport=transport,
+    )
+    return _as_section_review_result(result)
