@@ -75,3 +75,49 @@ OLLAMA_TIMEOUT=60
 - 不调用 provider / LLMClient 主链。
 - 不改变生成 payload 或导出结果。
 - 测试应使用 mock / helper 断言，不连接真实 Ollama。
+
+## 前端本地模型预览按钮真实验收记录
+
+本记录对应前端“本地模型预览”按钮：
+
+- 代码基线: `79c502f feat: add ZDoc Ollama preview UI button`
+- 验收方式: 启动临时前后端服务，通过页面按钮真实调用 `/actions/ollama/preview`
+- 本地 Ollama: `http://localhost:11434`
+- 模型: `qwen3:0.6b`
+- 失败模型: `not-exist-model`
+- 验收期间未写入 `.env`
+
+验收时使用进程级环境变量：
+
+```text
+ZDOC_OLLAMA_PREVIEW_ENABLED=1
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3:0.6b
+OLLAMA_TIMEOUT=60
+```
+
+前端验收结果：
+
+- Ollama 服务可访问。
+- `qwen3:0.6b` 模型存在。
+- 页面存在“本地模型预览（人工触发）”折叠区。
+- 页面存在“本地模型预览”按钮。
+- 点击按钮会调用 `/actions/ollama/preview`。
+- 成功模型调用返回 `ok=true`、`status=ok`。
+- 成功模型调用返回 `content` 非空。
+- 页面显示“本地模型预览完成：qwen3:0.6b”。
+- 页面只展示预览结果，不自动写回正文。
+- 返回预览内容为：`信息不足。`
+- `not-exist-model` 场景页面不崩溃。
+- `not-exist-model` 场景返回 fallback / error。
+
+前端验收期间已确认以下主链能力未被触发：
+
+- 未触发 `run_autoplan`。
+- 未触发 `LLMClient.__init__`。
+- 未触发 `create_job` / `update_job`。
+- 未触发 `_save_outputs` / `save_output_artifacts`。
+- 未写 job / result bundle。
+- 未接入文档主生成链。
+
+该按钮仅为人工触发预览入口。后续不得将该入口改造成默认生成链、provider 主链、orchestrator 链路、job 写入链路或自动正文修改链路。
