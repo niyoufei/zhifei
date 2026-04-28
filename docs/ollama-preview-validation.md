@@ -62,3 +62,16 @@ OLLAMA_TIMEOUT=60
 - job / result bundle 写入
 
 后续如需接入前端展示，应继续保持默认关闭、人工触发、失败回退、不写主链状态的边界。
+
+## 前端接入边界
+
+前端“本地模型预览”入口只允许作为人工按钮存在：
+
+- 只调用既有 `/actions/ollama/preview`。
+- 只展示本地模型返回的预览建议。
+- 不自动写回正文。
+- 不写 job / result bundle。
+- 不调用 orchestrator。
+- 不调用 provider / LLMClient 主链。
+- 不改变生成 payload 或导出结果。
+- 测试应使用 mock / helper 断言，不连接真实 Ollama。
