@@ -1134,6 +1134,225 @@ def _write_docx_build_report(
     )
 
 
+def _append_quality_evidence_appendix(
+    doc: Document,
+    apply_paragraph: Any,
+    quality_checks: Any,
+    *,
+    sections: List[Dict[str, Any]],
+    compare_cfg: Dict[str, Any],
+) -> None:
+    qc = quality_checks or {}
+    if not qc:
+        return
+
+    doc.add_page_break()
+    hq = doc.add_heading("质量校验摘要", level=1)
+    apply_paragraph(hq, is_title=True)
+    quality_keys = (
+        "structure",
+        "score_coverage",
+        "closed_loop",
+        "engineering",
+        "risk_triplet",
+        "qse_closed_loop",
+        "logic_template_adherence",
+        "quantitative",
+        "vague_terms",
+        "officialese",
+        "consistency",
+        "boq_focus_coverage",
+        "boq_focus_item_closure",
+        "boq_focus_item_typed_evidence",
+        "required_topics",
+        "required_topics_detail",
+        "trade_names",
+        "evidence",
+        "evidence_quality",
+        "evidence_traceability",
+        "drawing_evidence",
+        "standard_evidence",
+        "template_style",
+    )
+    for key in quality_keys:
+        item = qc.get(key) or {}
+        ok = item.get("ok")
+        p = doc.add_paragraph(f"{key}：{'通过' if ok else '需改进'}")
+        apply_paragraph(p)
+        for k, v in item.items():
+            if k == "ok":
+                continue
+            p2 = doc.add_paragraph(f"- {k}: {v}")
+            apply_paragraph(p2)
+
+    hqc = doc.add_heading("质量校验清单", level=2)
+    apply_paragraph(hqc, is_title=True)
+    for key in quality_keys:
+        item = qc.get(key) or {}
+        ok = item.get("ok")
+        mark = "☑" if ok else "☐"
+        p = doc.add_paragraph(f"{mark} {key}")
+        apply_paragraph(p)
+        details = {k: v for k, v in item.items() if k != "ok"}
+        if details and not ok:
+            for k, v in details.items():
+                p2 = doc.add_paragraph(f"  - {k}: {v}")
+                apply_paragraph(p2)
+
+    by_section = qc.get("score_coverage_by_section") or []
+    if by_section:
+        hsc = doc.add_heading("章节评分点覆盖清单", level=2)
+        apply_paragraph(hsc, is_title=True)
+        for sec in by_section:
+            title = sec.get("title") or "章节"
+            ok = sec.get("ok")
+            mark = "☑" if ok else "☐"
+            p = doc.add_paragraph(f"{mark} {title}")
+            apply_paragraph(p)
+            if not ok:
+                for miss in sec.get("missing", []):
+                    p2 = doc.add_paragraph(f"  - 缺失：{miss.get('dimension')} / {miss.get('keywords')}")
+                    apply_paragraph(p2)
+
+    by_evidence = (qc.get("evidence") or {}).get("by_section") or []
+    if by_evidence:
+        hce = doc.add_heading("章节证据数量清单", level=2)
+        apply_paragraph(hce, is_title=True)
+        for sec in by_evidence:
+            title = sec.get("title") or "章节"
+            cnt = sec.get("evidence_count")
+            p = doc.add_paragraph(f"- {title}: 证据数 {cnt}")
+            apply_paragraph(p)
+
+    issues = qc.get("issue_list") or []
+    hi = doc.add_heading("问题清单（自动检测）", level=2)
+    apply_paragraph(hi, is_title=True)
+    if issues:
+        for it in issues[:200]:
+            sev = it.get("severity") or "medium"
+            title = it.get("title") or "章节"
+            typ = it.get("type") or "issue"
+            prob = it.get("problem") or ""
+            sugg = it.get("suggestion") or ""
+            p = doc.add_paragraph(f"- [{sev}] {title} / {typ}: {prob}")
+            apply_paragraph(p)
+            if sugg:
+                p2 = doc.add_paragraph(f"  建议：{sugg}")
+                apply_paragraph(p2)
+    else:
+        p = doc.add_paragraph("- 无")
+        apply_paragraph(p)
+
+    recs = qc.get("auto_revision_suggestions") or []
+    hr = doc.add_heading("自动修订建议（按章节聚合）", level=2)
+    apply_paragraph(hr, is_title=True)
+    if recs:
+        seen = set()
+        for r in recs[:300]:
+            title = r.get("title") or "章节"
+            typ = r.get("type") or "issue"
+            sugg = r.get("suggestion") or ""
+            key = (title, typ, sugg)
+            if key in seen:
+                continue
+            seen.add(key)
+            p = doc.add_paragraph(f"- {title} / {typ}: {sugg}")
+            apply_paragraph(p)
+    else:
+        p = doc.add_paragraph("- 无")
+        apply_paragraph(p)
+
+    by_closed = qc.get("closed_loop_by_section") or []
+    if by_closed:
+        hcl = doc.add_heading("章节风险-措施闭环清单", level=2)
+        apply_paragraph(hcl, is_title=True)
+        for sec in by_closed:
+            title = sec.get("title") or "章节"
+            ok = sec.get("ok")
+            mark = "☑" if ok else "☐"
+            p = doc.add_paragraph(f"{mark} {title}（风险: {sec.get('has_risk')} / 措施: {sec.get('has_measure')}）")
+            apply_paragraph(p)
+
+    by_eng = qc.get("engineering_by_section") or []
+    if by_eng:
+        heg = doc.add_heading("章节工程落地要素清单", level=2)
+        apply_paragraph(heg, is_title=True)
+        for sec in by_eng:
+            title = sec.get("title") or "章节"
+            ok = sec.get("ok")
+            mark = "☑" if ok else "☐"
+            missing = sec.get("missing") or []
+            p = doc.add_paragraph(f"{mark} {title}（缺失: {missing}）")
+            apply_paragraph(p)
+
+    remediation = qc.get("remediation") or []
+    if remediation:
+        hrs = doc.add_heading("整改建议清单", level=2)
+        apply_paragraph(hrs, is_title=True)
+        for rec in remediation:
+            title = rec.get("title") or "章节"
+            rtype = rec.get("type") or "issue"
+            suggestion = rec.get("suggestion") or ""
+            p = doc.add_paragraph(f"- {title} / {rtype}: {suggestion}")
+            apply_paragraph(p)
+
+    issue_list = qc.get("issue_list") or []
+    if issue_list:
+        hi = doc.add_heading("问题清单", level=2)
+        apply_paragraph(hi, is_title=True)
+        for it in issue_list:
+            title = it.get("title") or "章节"
+            itype = it.get("type") or "issue"
+            sev = it.get("severity") or "medium"
+            prob = it.get("problem") or ""
+            p = doc.add_paragraph(f"- [{sev}] {title} / {itype}: {prob}")
+            apply_paragraph(p)
+
+    auto_revision = qc.get("auto_revision_suggestions") or []
+    if auto_revision:
+        ha = doc.add_heading("自动修订建议", level=2)
+        apply_paragraph(ha, is_title=True)
+        for rec in auto_revision:
+            title = rec.get("title") or "章节"
+            rtype = rec.get("type") or "issue"
+            suggestion = rec.get("suggestion") or ""
+            p = doc.add_paragraph(f"- {title} / {rtype}: {suggestion}")
+            apply_paragraph(p)
+
+    has_compare = False
+    for sec in sections:
+        if sec.get("auto_remediated") == "llm" and sec.get("original_content"):
+            has_compare = True
+            break
+    if has_compare:
+        hcp = doc.add_heading("LLM整改前后对比", level=2)
+        apply_paragraph(hcp, is_title=True)
+        mode = compare_cfg.get("mode", "full")
+        max_chars = _to_int(compare_cfg.get("max_chars"), 800)
+        titles_filter = compare_cfg.get("titles")
+        for sec in sections:
+            if sec.get("auto_remediated") != "llm" or not sec.get("original_content"):
+                continue
+            if isinstance(titles_filter, list) and sec.get("title") not in titles_filter:
+                continue
+            title = sec.get("title") or "章节"
+            h3 = doc.add_heading(title, level=3)
+            apply_paragraph(h3, is_title=True)
+            p1 = doc.add_paragraph("整改前：")
+            apply_paragraph(p1)
+            before = sec.get("original_content") or ""
+            after = sec.get("content") or ""
+            if mode == "summary":
+                before = before[:max_chars] + ("..." if len(before) > max_chars else "")
+                after = after[:max_chars] + ("..." if len(after) > max_chars else "")
+            p2 = doc.add_paragraph(before)
+            apply_paragraph(p2)
+            p3 = doc.add_paragraph("整改后：")
+            apply_paragraph(p3)
+            p4 = doc.add_paragraph(after)
+            apply_paragraph(p4)
+
+
 def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
     style_raw = data.get("style") or {}
     style_cfg = _normalize_style(style_raw)
@@ -1590,246 +1809,13 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             p = doc.add_paragraph(f"- {title}: 目标{target}页，估算{estimated}页（{status}）")
             apply_paragraph(p)
 
-    # 质量校验摘要
-    qc = data.get("quality_checks") or {}
-    if qc:
-        doc.add_page_break()
-        hq = doc.add_heading("质量校验摘要", level=1)
-        apply_paragraph(hq, is_title=True)
-        for key in (
-            "structure",
-            "score_coverage",
-            "closed_loop",
-            "engineering",
-            "risk_triplet",
-            "qse_closed_loop",
-            "logic_template_adherence",
-            "quantitative",
-            "vague_terms",
-            "officialese",
-            "consistency",
-            "boq_focus_coverage",
-            "boq_focus_item_closure",
-            "boq_focus_item_typed_evidence",
-            "required_topics",
-            "required_topics_detail",
-            "trade_names",
-            "evidence",
-            "evidence_quality",
-            "evidence_traceability",
-            "drawing_evidence",
-            "standard_evidence",
-            "template_style",
-        ):
-            item = qc.get(key) or {}
-            ok = item.get("ok")
-            p = doc.add_paragraph(f"{key}：{'通过' if ok else '需改进'}")
-            apply_paragraph(p)
-            for k, v in item.items():
-                if k == "ok":
-                    continue
-                p2 = doc.add_paragraph(f"- {k}: {v}")
-                apply_paragraph(p2)
-        # 可勾选清单（便于评审）
-        hqc = doc.add_heading("质量校验清单", level=2)
-        apply_paragraph(hqc, is_title=True)
-        for key in (
-            "structure",
-            "score_coverage",
-            "closed_loop",
-            "engineering",
-            "risk_triplet",
-            "qse_closed_loop",
-            "logic_template_adherence",
-            "quantitative",
-            "vague_terms",
-            "officialese",
-            "consistency",
-            "boq_focus_coverage",
-            "boq_focus_item_closure",
-            "boq_focus_item_typed_evidence",
-            "required_topics",
-            "required_topics_detail",
-            "trade_names",
-            "evidence",
-            "evidence_quality",
-            "evidence_traceability",
-            "drawing_evidence",
-            "standard_evidence",
-            "template_style",
-        ):
-            item = qc.get(key) or {}
-            ok = item.get("ok")
-            mark = "☑" if ok else "☐"
-            p = doc.add_paragraph(f"{mark} {key}")
-            apply_paragraph(p)
-            details = {k: v for k, v in item.items() if k != "ok"}
-            if details and not ok:
-                for k, v in details.items():
-                    p2 = doc.add_paragraph(f"  - {k}: {v}")
-                    apply_paragraph(p2)
-
-        # 章节评分点覆盖清单
-        by_section = qc.get("score_coverage_by_section") or []
-        if by_section:
-            hsc = doc.add_heading("章节评分点覆盖清单", level=2)
-            apply_paragraph(hsc, is_title=True)
-            for sec in by_section:
-                title = sec.get("title") or "章节"
-                ok = sec.get("ok")
-                mark = "☑" if ok else "☐"
-                p = doc.add_paragraph(f"{mark} {title}")
-                apply_paragraph(p)
-                if not ok:
-                    for miss in sec.get("missing", []):
-                        p2 = doc.add_paragraph(f"  - 缺失：{miss.get('dimension')} / {miss.get('keywords')}")
-                        apply_paragraph(p2)
-
-        # 章节证据数量清单
-        by_evidence = (qc.get("evidence") or {}).get("by_section") or []
-        if by_evidence:
-            hce = doc.add_heading("章节证据数量清单", level=2)
-            apply_paragraph(hce, is_title=True)
-            for sec in by_evidence:
-                title = sec.get("title") or "章节"
-                cnt = sec.get("evidence_count")
-                p = doc.add_paragraph(f"- {title}: 证据数 {cnt}")
-                apply_paragraph(p)
-
-        # 问题清单 + 自动修订建议（便于评审/二次编辑）
-        issues = qc.get("issue_list") or []
-        hi = doc.add_heading("问题清单（自动检测）", level=2)
-        apply_paragraph(hi, is_title=True)
-        if issues:
-            for it in issues[:200]:
-                sev = it.get("severity") or "medium"
-                title = it.get("title") or "章节"
-                typ = it.get("type") or "issue"
-                prob = it.get("problem") or ""
-                sugg = it.get("suggestion") or ""
-                p = doc.add_paragraph(f"- [{sev}] {title} / {typ}: {prob}")
-                apply_paragraph(p)
-                if sugg:
-                    p2 = doc.add_paragraph(f"  建议：{sugg}")
-                    apply_paragraph(p2)
-        else:
-            p = doc.add_paragraph("- 无")
-            apply_paragraph(p)
-
-        recs = qc.get("auto_revision_suggestions") or []
-        hr = doc.add_heading("自动修订建议（按章节聚合）", level=2)
-        apply_paragraph(hr, is_title=True)
-        if recs:
-            # De-dup by (title,type,suggestion)
-            seen = set()
-            for r in recs[:300]:
-                title = r.get("title") or "章节"
-                typ = r.get("type") or "issue"
-                sugg = r.get("suggestion") or ""
-                key = (title, typ, sugg)
-                if key in seen:
-                    continue
-                seen.add(key)
-                p = doc.add_paragraph(f"- {title} / {typ}: {sugg}")
-                apply_paragraph(p)
-        else:
-            p = doc.add_paragraph("- 无")
-            apply_paragraph(p)
-
-        # 章节风险-措施闭环清单
-        by_closed = qc.get("closed_loop_by_section") or []
-        if by_closed:
-            hcl = doc.add_heading("章节风险-措施闭环清单", level=2)
-            apply_paragraph(hcl, is_title=True)
-            for sec in by_closed:
-                title = sec.get("title") or "章节"
-                ok = sec.get("ok")
-                mark = "☑" if ok else "☐"
-                p = doc.add_paragraph(f"{mark} {title}（风险: {sec.get('has_risk')} / 措施: {sec.get('has_measure')}）")
-                apply_paragraph(p)
-
-        # 章节工程落地要素清单
-        by_eng = qc.get("engineering_by_section") or []
-        if by_eng:
-            heg = doc.add_heading("章节工程落地要素清单", level=2)
-            apply_paragraph(heg, is_title=True)
-            for sec in by_eng:
-                title = sec.get("title") or "章节"
-                ok = sec.get("ok")
-                mark = "☑" if ok else "☐"
-                missing = sec.get("missing") or []
-                p = doc.add_paragraph(f"{mark} {title}（缺失: {missing}）")
-                apply_paragraph(p)
-
-        # 整改建议清单
-        remediation = qc.get("remediation") or []
-        if remediation:
-            hrs = doc.add_heading("整改建议清单", level=2)
-            apply_paragraph(hrs, is_title=True)
-            for rec in remediation:
-                title = rec.get("title") or "章节"
-                rtype = rec.get("type") or "issue"
-                suggestion = rec.get("suggestion") or ""
-                p = doc.add_paragraph(f"- {title} / {rtype}: {suggestion}")
-                apply_paragraph(p)
-
-        issue_list = qc.get("issue_list") or []
-        if issue_list:
-            hi = doc.add_heading("问题清单", level=2)
-            apply_paragraph(hi, is_title=True)
-            for it in issue_list:
-                title = it.get("title") or "章节"
-                itype = it.get("type") or "issue"
-                sev = it.get("severity") or "medium"
-                prob = it.get("problem") or ""
-                p = doc.add_paragraph(f"- [{sev}] {title} / {itype}: {prob}")
-                apply_paragraph(p)
-
-        auto_revision = qc.get("auto_revision_suggestions") or []
-        if auto_revision:
-            ha = doc.add_heading("自动修订建议", level=2)
-            apply_paragraph(ha, is_title=True)
-            for rec in auto_revision:
-                title = rec.get("title") or "章节"
-                rtype = rec.get("type") or "issue"
-                suggestion = rec.get("suggestion") or ""
-                p = doc.add_paragraph(f"- {title} / {rtype}: {suggestion}")
-                apply_paragraph(p)
-
-        # LLM整改前后对比
-        has_compare = False
-        for sec in sections:
-            if sec.get("auto_remediated") == "llm" and sec.get("original_content"):
-                has_compare = True
-                break
-        if has_compare:
-            hcp = doc.add_heading("LLM整改前后对比", level=2)
-            apply_paragraph(hcp, is_title=True)
-            compare_cfg = data.get("compare") or {}
-            mode = compare_cfg.get("mode", "full")
-            max_chars = _to_int(compare_cfg.get("max_chars"), 800)
-            titles_filter = compare_cfg.get("titles")
-            for sec in sections:
-                if sec.get("auto_remediated") != "llm" or not sec.get("original_content"):
-                    continue
-                if isinstance(titles_filter, list) and sec.get("title") not in titles_filter:
-                    continue
-                title = sec.get("title") or "章节"
-                h3 = doc.add_heading(title, level=3)
-                apply_paragraph(h3, is_title=True)
-                p1 = doc.add_paragraph("整改前：")
-                apply_paragraph(p1)
-                before = sec.get("original_content") or ""
-                after = sec.get("content") or ""
-                if mode == "summary":
-                    before = before[:max_chars] + ("..." if len(before) > max_chars else "")
-                    after = after[:max_chars] + ("..." if len(after) > max_chars else "")
-                p2 = doc.add_paragraph(before)
-                apply_paragraph(p2)
-                p3 = doc.add_paragraph("整改后：")
-                apply_paragraph(p3)
-                p4 = doc.add_paragraph(after)
-                apply_paragraph(p4)
+    _append_quality_evidence_appendix(
+        doc,
+        apply_paragraph,
+        data.get("quality_checks"),
+        sections=sections,
+        compare_cfg=data.get("compare") or {},
+    )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
