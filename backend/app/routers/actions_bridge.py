@@ -42,7 +42,7 @@ from backend.zhifei_autoplan.image_library import (
     normalize_image_library_options,
     normalize_text_list,
 )
-from backend.zhifei_autoplan.ollama_preview import run_ollama_preview
+from backend.zhifei_autoplan.ollama_preview import run_ollama_preview, run_ollama_section_review
 from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
 from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
 from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
@@ -198,6 +198,16 @@ class ActionsOllamaPreviewRequest(BaseModel):
     content: str = ""
     section_title: str | None = None
     instruction: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    timeout: float | None = None
+
+
+class ActionsOllamaSectionReviewRequest(BaseModel):
+    project_name: str | None = None
+    section_title: str | None = None
+    section_content: str = ""
+    review_focus: str | None = None
     model: str | None = None
     base_url: str | None = None
     timeout: float | None = None
@@ -930,6 +940,23 @@ async def actions_ollama_preview(
         content=req.content,
         section_title=req.section_title,
         instruction=req.instruction,
+        model=req.model,
+        base_url=req.base_url,
+        timeout=req.timeout,
+    )
+
+
+@router.post("/ollama/review_section")
+async def actions_ollama_review_section(
+    req: ActionsOllamaSectionReviewRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    return run_ollama_section_review(
+        project_name=req.project_name,
+        section_title=req.section_title,
+        section_content=req.section_content,
+        review_focus=req.review_focus,
         model=req.model,
         base_url=req.base_url,
         timeout=req.timeout,
