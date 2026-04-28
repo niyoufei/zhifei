@@ -13,6 +13,11 @@ __pycache__/
 # Local backup snapshots, never commit
 /_untracked_backup*/
 
+# Local backups and generated runtime artifacts
+/backup/
+/output/
+/runtime/
+
 # ===== ZhiFei_V20.1 generated data =====
 # Ignore generated data folders prefixed with ZhiFei_V20.1
 **/ZhiFei_V20.1*/
@@ -40,6 +45,10 @@ __pycache__/
 /03_系统核心规则与字典/**
 /knowledge_graph/**
 /文档生成系统.app/**
+
+# Local user materials and app bundle
+/04_实战演习输入/
+/施组专家系统.app/
 
 # ===== Generated outputs (non-source artifacts) =====
 /build/**
@@ -96,11 +105,17 @@ __pycache__/
 /backend/data/autoplan/jobs/**
 /backend/data/autoplan/media/**
 /backend/data/autoplan/projects/**
+/backend/data/workspaces/
 /backend/data/autoplan/tender_matrix.json
 /backend/data/autoplan/boq_data.json
 /backend/data/autoplan/param_receipt_latest.json
 /backend/data/autoplan/params.json
 /backend/data/autoplan/variant_cycle_global.json
+
+# Local autoplan runtime state
+/backend/data/autoplan/archive/
+/backend/data/autoplan/evolution/
+/backend/data/autoplan/plan.json
 
 # Backend local assets / generated packs
 /backend/Project_Files/**
