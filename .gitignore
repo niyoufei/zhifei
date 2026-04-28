@@ -117,6 +117,9 @@ __pycache__/
 /backend/data/autoplan/evolution/
 /backend/data/autoplan/plan.json
 
+# Local KG upload and activation state
+/backend/data/kg/
+
 # Backend local assets / generated packs
 /backend/Project_Files/**
 /backend/ZhiFei_V20.1*/
