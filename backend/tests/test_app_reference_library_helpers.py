@@ -18,6 +18,9 @@ def _load_helpers() -> SimpleNamespace:
         "_reference_top_k_state",
         "_build_case_library_request_options",
         "_build_image_library_request_options",
+        "_ollama_preview_timeout_state",
+        "_build_ollama_preview_request_payload",
+        "_normalize_ollama_preview_result_ui",
         "_decode_result_json_ui",
         "_variant_sections_from_result_ui",
         "_chapter_case_reference_summary_ui",
@@ -81,6 +84,94 @@ def test_reference_library_request_options_normalize_selected_ids_and_top_k():
         "enabled": True,
         "selected_image_ids": ["image-1", "image-2"],
         "top_k": 1,
+    }
+
+
+def test_ollama_preview_request_payload_defaults_to_manual_preview_boundary():
+    helpers = _load_helpers()
+    helpers.st.session_state.clear()
+
+    payload = helpers._build_ollama_preview_request_payload()
+
+    assert payload["section_title"] == "施工组织设计方案"
+    assert payload["model"] == "qwen3:0.6b"
+    assert payload["base_url"] == "http://localhost:11434"
+    assert payload["timeout"] == 60
+    assert "不要改写正文" in payload["instruction"]
+    assert "项目主题：施工组织设计方案" in payload["content"]
+    assert "job" not in payload
+    assert "result_bundle" not in payload
+
+
+def test_ollama_preview_request_payload_uses_current_page_context_and_clamps_timeout():
+    helpers = _load_helpers()
+    helpers.st.session_state.clear()
+    helpers.st.session_state.update(
+        {
+            "topic_text": "厂房施工组织设计",
+            "project_type": "房建",
+            "generation_mode": "quality_200",
+            "selected_templates": ["A", "B"],
+            "outline_items": ["工程概况", "施工部署"],
+            "requirements_text": "质量验收记录按工序归档",
+            "global_instruction": "禁止臆造缺失参数",
+            "ollama_preview_content": "深基坑土方开挖需补充监测频次。",
+            "ollama_preview_section_title": "施工部署复核",
+            "ollama_preview_instruction": "只列风险。",
+            "ollama_preview_model": " qwen3:0.6b ",
+            "ollama_preview_base_url": "http://localhost:11434/",
+            "ollama_preview_timeout": 999,
+        }
+    )
+
+    payload = helpers._build_ollama_preview_request_payload()
+
+    assert payload["section_title"] == "施工部署复核"
+    assert payload["instruction"] == "只列风险。"
+    assert payload["model"] == "qwen3:0.6b"
+    assert payload["base_url"] == "http://localhost:11434/"
+    assert payload["timeout"] == 300
+    assert "项目主题：厂房施工组织设计" in payload["content"]
+    assert "- 工程概况" in payload["content"]
+    assert "质量验收记录按工序归档" in payload["content"]
+    assert "深基坑土方开挖需补充监测频次。" in payload["content"]
+
+
+def test_normalize_ollama_preview_result_ui_keeps_success_and_fallback_readonly():
+    helpers = _load_helpers()
+
+    ok = helpers._normalize_ollama_preview_result_ui(
+        {
+            "ok": True,
+            "status": "ok",
+            "model": "qwen3:0.6b",
+            "content": "信息不足。",
+        }
+    )
+    fallback = helpers._normalize_ollama_preview_result_ui(
+        {
+            "ok": False,
+            "status": "fallback",
+            "warning": "ollama_preview_disabled",
+            "fallback": {"message": "main flow was not affected"},
+        }
+    )
+
+    assert ok == {
+        "ok": True,
+        "status": "ok",
+        "model": "qwen3:0.6b",
+        "content": "信息不足。",
+        "warning": "",
+        "has_content": True,
+    }
+    assert fallback == {
+        "ok": False,
+        "status": "fallback",
+        "model": "",
+        "content": "",
+        "warning": "ollama_preview_disabled",
+        "has_content": False,
     }
 
 

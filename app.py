@@ -651,6 +651,69 @@ def _build_image_library_request_options() -> dict[str, Any]:
     }
 
 
+def _ollama_preview_timeout_state() -> int:
+    raw = st.session_state.get("ollama_preview_timeout")
+    try:
+        value = int(raw if raw not in (None, "") else 60)
+    except Exception:
+        value = 60
+    return max(1, min(300, value))
+
+
+def _build_ollama_preview_request_payload() -> dict[str, Any]:
+    outline = _normalize_reference_text_list_ui(st.session_state.get("outline_items") or [])
+    selected_templates = _normalize_reference_text_list_ui(st.session_state.get("selected_templates") or [])
+    topic = str(st.session_state.get("topic_text") or "施工组织设计方案").strip() or "施工组织设计方案"
+    project_type = str(st.session_state.get("project_type") or "").strip() or "-"
+    generation_mode = str(st.session_state.get("generation_mode") or "").strip() or "-"
+    requirements = str(st.session_state.get("requirements_text") or "").strip()
+    global_instruction = str(st.session_state.get("global_instruction") or "").strip()
+    preview_body = str(st.session_state.get("ollama_preview_content") or "").strip()
+
+    lines = [
+        f"项目主题：{topic}",
+        f"项目类型：{project_type}",
+        f"编制模式：{generation_mode}",
+        f"版本选择：{' / '.join(selected_templates) if selected_templates else '-'}",
+        "目录：",
+        *[f"- {item}" for item in outline[:80]],
+    ]
+    if requirements:
+        lines.extend(["编制要求：", requirements])
+    if global_instruction:
+        lines.extend(["全局指令：", global_instruction])
+    if preview_body:
+        lines.extend(["待预览正文：", preview_body])
+
+    content = "\n".join([line for line in lines if str(line).strip()]).strip()
+    instruction = str(st.session_state.get("ollama_preview_instruction") or "").strip()
+    return {
+        "content": content[:12000],
+        "section_title": str(st.session_state.get("ollama_preview_section_title") or topic).strip() or topic,
+        "instruction": instruction or "只做人工预览增强，指出缺项、风险和可人工采纳的优化建议；不要改写正文，不要生成新事实。",
+        "model": str(st.session_state.get("ollama_preview_model") or "qwen3:0.6b").strip() or "qwen3:0.6b",
+        "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
+        or "http://localhost:11434",
+        "timeout": _ollama_preview_timeout_state(),
+    }
+
+
+def _normalize_ollama_preview_result_ui(raw: Any) -> dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    fallback = payload.get("fallback") if isinstance(payload.get("fallback"), dict) else {}
+    status = str(payload.get("status") or ("ok" if payload.get("ok") else "fallback")).strip()
+    content = str(payload.get("content") or "").strip()
+    warning = str(payload.get("warning") or payload.get("error") or fallback.get("message") or "").strip()
+    return {
+        "ok": bool(payload.get("ok")),
+        "status": status or "fallback",
+        "model": str(payload.get("model") or "").strip(),
+        "content": content,
+        "warning": warning,
+        "has_content": bool(content),
+    }
+
+
 def _reference_item_label(item: dict[str, Any], id_key: str) -> str:
     title = str(item.get("title") or item.get("filename") or item.get(id_key) or "").strip()
     project_type = str(item.get("project_type") or "").strip()
@@ -834,6 +897,53 @@ def _render_reference_libraries_panel(base_url: str, actions_key: str) -> None:
             _render_image_library_panel(base_url, actions_key)
 
 
+def _render_ollama_preview_panel(base_url: str, actions_key: str) -> None:
+    with st.expander("本地模型预览（人工触发）", expanded=False):
+        st.caption("仅调用 `/actions/ollama/preview` 做只读预览，不写 job/result bundle，不接主生成链，不自动改正文。")
+        m1, m2, m3 = st.columns([2, 2, 1])
+        with m1:
+            st.text_input("Ollama 地址", key="ollama_preview_base_url")
+        with m2:
+            st.text_input("本地模型", key="ollama_preview_model")
+        with m3:
+            st.number_input("超时（秒）", min_value=1, max_value=300, key="ollama_preview_timeout")
+        st.text_input("预览标题", key="ollama_preview_section_title")
+        st.text_area("人工预览指令", key="ollama_preview_instruction", height=80)
+        st.text_area("待预览补充正文（可选）", key="ollama_preview_content", height=120)
+
+        if st.button("本地模型预览", key="ollama_preview_btn", type="secondary", use_container_width=True):
+            try:
+                if not actions_key.strip():
+                    raise ValueError("Actions Key 不能为空")
+                payload = _build_ollama_preview_request_payload()
+                result = _post_json(
+                    base_url,
+                    "/actions/ollama/preview",
+                    actions_key,
+                    payload,
+                    timeout=int(payload.get("timeout") or 60) + 10,
+                )
+                st.session_state["ollama_preview_result"] = result
+            except Exception as e:
+                st.session_state["ollama_preview_result"] = {
+                    "ok": False,
+                    "status": "fallback",
+                    "content": "",
+                    "warning": str(e),
+                }
+
+        raw_result = st.session_state.get("ollama_preview_result") or {}
+        if isinstance(raw_result, dict) and raw_result:
+            normalized = _normalize_ollama_preview_result_ui(raw_result)
+            if normalized.get("ok"):
+                st.success(f"本地模型预览完成：{normalized.get('model') or 'ollama'}")
+            elif normalized.get("warning"):
+                st.warning(f"本地模型预览未完成：{normalized.get('warning')}")
+            if normalized.get("content"):
+                st.markdown("**预览结果（只读，不自动写回正文）**")
+                st.code(normalized.get("content") or "", language="markdown")
+
+
 def _append_log(message: str) -> None:
     st.session_state.setdefault("run_logs", [])
     st.session_state["run_logs"].append(f"[{_now()}] {message}")
@@ -985,6 +1095,13 @@ def _init_state() -> None:
         "image_library_upload_process_scope": "",
         "image_library_upload_caption": "",
         "image_library_upload_description": "",
+        "ollama_preview_base_url": "http://localhost:11434",
+        "ollama_preview_model": "qwen3:0.6b",
+        "ollama_preview_timeout": 60,
+        "ollama_preview_section_title": "",
+        "ollama_preview_instruction": "只做人工预览增强，指出缺项、风险和可人工采纳的优化建议；不要改写正文，不要生成新事实。",
+        "ollama_preview_content": "",
+        "ollama_preview_result": {},
         "auto_refresh": True,
     }
     for k, v in defaults.items():
@@ -1989,6 +2106,7 @@ with col_right:
     st.text_area("编制要求（每行一条）", key="requirements_text", height=120)
 
 _render_reference_libraries_panel(base_url, actions_key)
+_render_ollama_preview_panel(base_url, actions_key)
 current_case_library_options = _build_case_library_request_options()
 current_image_library_options = _build_image_library_request_options()
 
