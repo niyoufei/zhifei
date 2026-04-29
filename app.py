@@ -1692,7 +1692,57 @@ def _render_ollama_section_review_panel(
                 st.warning(f"本地模型章节复核未完成：{normalized.get('error') or normalized.get('warning') or '-'}")
             if normalized.get("content"):
                 st.markdown("**章节复核建议（只读，不自动写回正文）**")
-                st.code(normalized.get("content") or "", language="markdown")
+                review_content = str(normalized.get("content") or "").strip()
+                st.code(review_content, language="markdown")
+                markdown_export = "\n\n".join(
+                    [
+                        "# 本地模型章节复核建议",
+                        f"- 方案编号：v{variant}",
+                        f"- 章节标题：{section_title}",
+                        f"- 模型：{normalized.get('model') or '-'}",
+                        f"- 状态：{normalized.get('status') or '-'}",
+                        "## 复核建议正文",
+                        review_content,
+                    ]
+                )
+                text_export = "\n".join(
+                    [
+                        "本地模型章节复核建议",
+                        f"方案编号：v{variant}",
+                        f"章节标题：{section_title}",
+                        f"模型：{normalized.get('model') or '-'}",
+                        f"状态：{normalized.get('status') or '-'}",
+                        "",
+                        "复核建议正文：",
+                        review_content,
+                    ]
+                )
+                st.text_area(
+                    "复制复核建议",
+                    value=review_content,
+                    height=180,
+                    key=f"ollama_section_review_copy_v{variant}_s{int(selected_index)}",
+                    help="仅供手动复制，不会写回正文或产物。",
+                )
+                dl_md, dl_txt = st.columns([1, 1])
+                with dl_md:
+                    st.download_button(
+                        "下载复核建议.md",
+                        data=markdown_export,
+                        file_name=f"ollama_section_review_v{variant}_s{int(selected_index) + 1}.md",
+                        mime="text/markdown",
+                        key=f"ollama_section_review_download_md_v{variant}_s{int(selected_index)}",
+                        use_container_width=True,
+                    )
+                with dl_txt:
+                    st.download_button(
+                        "下载复核建议.txt",
+                        data=text_export,
+                        file_name=f"ollama_section_review_v{variant}_s{int(selected_index) + 1}.txt",
+                        mime="text/plain",
+                        key=f"ollama_section_review_download_txt_v{variant}_s{int(selected_index)}",
+                        use_container_width=True,
+                    )
 
 
 def _render_downloads() -> None:
