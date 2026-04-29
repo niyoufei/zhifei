@@ -163,3 +163,44 @@ OLLAMA_TIMEOUT=60
   - No generated result files were modified.
   - No `git clean` was executed.
   - No dependencies were installed.
+
+## Manual Ollama section review UI validation
+
+- Validation target: front-end "本地模型章节复核（人工触发）" entry.
+- Corresponding endpoint: `POST /actions/ollama/review_section`.
+- Front-end button rendering:
+  - The result area displayed "本地模型章节复核（人工触发）".
+  - The UI displayed the "本地模型复核本章" button.
+- Section selection:
+  - Generated sections were selectable.
+  - An empty-content section displayed `当前章节未找到可复核正文`.
+  - The UI did not fabricate section content.
+- Success scenario:
+  - `OLLAMA_MODEL=qwen3:0.6b`
+  - Returned `ok=true`
+  - `status=ok`
+  - `review_type=section_review`
+  - `content` was non-empty
+- Missing model fallback scenario:
+  - `OLLAMA_MODEL=not-exist-model-for-validation`
+  - Returned `ok=false`
+  - `status=fallback`
+  - `review_type=section_review`
+  - `error=ollama_preview_error:HTTPError`
+  - The page did not crash.
+- Main-chain isolation:
+  - No generated text was written back.
+  - Generated artifacts were not refreshed.
+  - Export was not triggered.
+  - Review apply was not triggered.
+  - Formal generation was not triggered.
+- Write isolation:
+  - `backend/data/autoplan/jobs` file count remained 87 before and after validation.
+  - `build` file count remained 1395 before and after validation.
+  - `output` file count remained 0 before and after validation.
+- Workspace result:
+  - `git status --short` was clean.
+  - No tracked files were modified.
+  - Temporary front-end and back-end services were stopped after validation.
+  - No `git clean` was executed.
+  - No dependencies were installed.
