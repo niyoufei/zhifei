@@ -714,6 +714,14 @@ def _normalize_ollama_preview_result_ui(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_ollama_section_review_result_ui(raw: Any) -> dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    normalized = _normalize_ollama_preview_result_ui(payload)
+    normalized["review_type"] = str(payload.get("review_type") or "").strip()
+    normalized["error"] = str(payload.get("error") or "").strip()
+    return normalized
+
+
 def _reference_item_label(item: dict[str, Any], id_key: str) -> str:
     title = str(item.get("title") or item.get("filename") or item.get(id_key) or "").strip()
     project_type = str(item.get("project_type") or "").strip()
@@ -1102,6 +1110,7 @@ def _init_state() -> None:
         "ollama_preview_instruction": "只做人工预览增强，指出缺项、风险和可人工采纳的优化建议；不要改写正文，不要生成新事实。",
         "ollama_preview_content": "",
         "ollama_preview_result": {},
+        "ollama_section_review_focus": "章节完整性、缺项、风险点、可执行字段、证据支撑和表达清晰度",
         "auto_refresh": True,
     }
     for k, v in defaults.items():
@@ -1383,6 +1392,38 @@ def _variant_sections_from_result_ui(result: dict[str, Any] | None, variant: int
     return []
 
 
+def _section_review_title_ui(section: dict[str, Any], index: int) -> str:
+    title = str(section.get("title") or section.get("heading") or "").strip()
+    return title or f"章节 {index + 1}"
+
+
+def _section_review_content_ui(section: dict[str, Any]) -> str:
+    for key in ["content", "body", "markdown", "text"]:
+        value = section.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _build_ollama_section_review_request_payload(section: dict[str, Any], *, section_title: str) -> dict[str, Any]:
+    project_name = (
+        str(st.session_state.get("topic_text") or "").strip()
+        or str(st.session_state.get("project_id_text") or "").strip()
+        or "施工组织设计方案"
+    )
+    review_focus = str(st.session_state.get("ollama_section_review_focus") or "").strip()
+    return {
+        "project_name": project_name,
+        "section_title": section_title,
+        "section_content": _section_review_content_ui(section)[:12000],
+        "review_focus": review_focus or "章节完整性、缺项、风险点、可执行字段、证据支撑和表达清晰度",
+        "model": str(st.session_state.get("ollama_preview_model") or "qwen3:0.6b").strip() or "qwen3:0.6b",
+        "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
+        or "http://localhost:11434",
+        "timeout": _ollama_preview_timeout_state(),
+    }
+
+
 def _chapter_case_reference_summary_ui(raw: dict[str, Any] | None) -> dict[str, Any]:
     pack = raw if isinstance(raw, dict) else {}
     hits = pack.get("hits") if isinstance(pack.get("hits"), list) else []
@@ -1579,6 +1620,81 @@ def _variant_reference_summaries_ui(
     }
 
 
+def _render_ollama_section_review_panel(
+    base_url: str,
+    actions_key: str,
+    result: dict[str, Any],
+    variant: int,
+) -> None:
+    sections = _variant_sections_from_result_ui(result, variant)
+    if not sections:
+        return
+
+    with st.expander("本地模型章节复核（人工触发）", expanded=False):
+        st.caption("只调用 `/actions/ollama/review_section` 展示复核建议，不改正文、不写 job/result bundle、不刷新导出产物。")
+        options = list(range(len(sections)))
+        selected_index = st.selectbox(
+            "选择待复核章节",
+            options=options,
+            format_func=lambda idx: _section_review_title_ui(sections[int(idx)], int(idx)),
+            key=f"ollama_section_review_selected_v{variant}",
+        )
+        section = sections[int(selected_index)] if options else {}
+        section_title = _section_review_title_ui(section, int(selected_index))
+        section_content = _section_review_content_ui(section)
+        result_key = f"ollama_section_review_result_v{variant}_s{int(selected_index)}"
+        st.text_area(
+            "复核重点",
+            key="ollama_section_review_focus",
+            height=80,
+            placeholder="例如：章节完整性、参数、责任、频次、验收、记录、证据支撑和风险闭环",
+        )
+        st.caption(
+            f"当前章节：{section_title}；可复核正文长度={len(section_content)} 字；"
+            f"模型={st.session_state.get('ollama_preview_model') or 'qwen3:0.6b'}"
+        )
+
+        if st.button("本地模型复核本章", key=f"ollama_section_review_btn_v{variant}", type="secondary", use_container_width=True):
+            try:
+                if not actions_key.strip():
+                    raise ValueError("Actions Key 不能为空")
+                if not section_content:
+                    raise ValueError("当前章节未找到可复核正文")
+                payload = _build_ollama_section_review_request_payload(section, section_title=section_title)
+                result_payload = _post_json(
+                    base_url,
+                    "/actions/ollama/review_section",
+                    actions_key,
+                    payload,
+                    timeout=int(payload.get("timeout") or 60) + 10,
+                )
+                st.session_state[result_key] = result_payload
+            except Exception as e:
+                st.session_state[result_key] = {
+                    "ok": False,
+                    "status": "fallback",
+                    "review_type": "section_review",
+                    "model": str(st.session_state.get("ollama_preview_model") or "qwen3:0.6b"),
+                    "content": "",
+                    "warning": str(e),
+                }
+
+        raw_result = st.session_state.get(result_key) or {}
+        if isinstance(raw_result, dict) and raw_result:
+            normalized = _normalize_ollama_section_review_result_ui(raw_result)
+            st.caption(
+                f"ok={normalized.get('ok')}；status={normalized.get('status') or '-'}；"
+                f"model={normalized.get('model') or '-'}；review_type={normalized.get('review_type') or '-'}"
+            )
+            if normalized.get("ok"):
+                st.success("本地模型章节复核完成")
+            else:
+                st.warning(f"本地模型章节复核未完成：{normalized.get('error') or normalized.get('warning') or '-'}")
+            if normalized.get("content"):
+                st.markdown("**章节复核建议（只读，不自动写回正文）**")
+                st.code(normalized.get("content") or "", language="markdown")
+
+
 def _render_downloads() -> None:
     result = st.session_state.get("run_result") or {}
     if not result:
@@ -1708,6 +1824,7 @@ def _render_downloads() -> None:
                     )
                 with st.expander("章节级参考库摘要", expanded=False):
                     st.dataframe(table_rows, use_container_width=True, hide_index=True)
+            _render_ollama_section_review_panel(base_url, actions_key, result, i)
 
 
 def _cancel_active_job(base_url: str, actions_key: str) -> None:
