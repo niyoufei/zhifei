@@ -121,3 +121,45 @@ OLLAMA_TIMEOUT=60
 - 未接入文档主生成链。
 
 该按钮仅为人工触发预览入口。后续不得将该入口改造成默认生成链、provider 主链、orchestrator 链路、job 写入链路或自动正文修改链路。
+
+## Manual Ollama section review endpoint validation
+
+- Validation target: `POST /actions/ollama/review_section`
+- This endpoint is a manual sidecar endpoint for section review only.
+- It is disabled by default and controlled by `ZDOC_OLLAMA_PREVIEW_ENABLED=1`.
+- Disabled scenario:
+  - HTTP 200
+  - `ok=false`
+  - `status=disabled`
+  - `review_type=section_review`
+  - `warning=ollama_preview_disabled`
+- Success scenario:
+  - `OLLAMA_MODEL=qwen3:0.6b`
+  - HTTP 200
+  - `ok=true`
+  - `status=ok`
+  - `review_type=section_review`
+  - `content` was non-empty
+- Missing model fallback scenario:
+  - `OLLAMA_MODEL=not-exist-model-for-validation`
+  - HTTP 200
+  - `ok=false`
+  - `status=fallback`
+  - `error=ollama_preview_error:HTTPError`
+  - No crash occurred.
+- Main-chain isolation:
+  - `run_autoplan`
+  - `create_job`
+  - `update_job`
+  - `_save_outputs`
+  - `save_output_artifacts`
+  - `LLMClient`
+  all had patch counts of 0.
+- No job/result bundle/output writes:
+  - `backend/data/autoplan/jobs` file count remained 87 before and after validation.
+  - `build` file count remained 236 before and after validation.
+- Workspace result:
+  - `git status --short` was clean after validation.
+  - No generated result files were modified.
+  - No `git clean` was executed.
+  - No dependencies were installed.
