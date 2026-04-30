@@ -391,7 +391,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         provider = provider_chain[0].get("provider") or provider
         model = provider_chain[0].get("model") or model
     dry_run = bool(payload.get("dry_run", False))
-    generate_images = bool(payload.get("generate_images", True))
+    no_write_preview = bool(payload.get("no_write") or payload.get("preview_only"))
+    generate_images = bool(payload.get("generate_images", True)) and not no_write_preview
     strict_quality = bool(payload.get("quality_strict", True))
     case_library_options = payload.get("case_library") if isinstance(payload.get("case_library"), dict) else {}
     image_library_options = payload.get("image_library") if isinstance(payload.get("image_library"), dict) else {}
@@ -1445,7 +1446,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         from backend.zhifei_autoplan.param_trace import build_param_receipt, save_latest_receipt
 
         param_receipt = build_param_receipt(sections, params)
-        param_receipt_path = save_latest_receipt(param_receipt, project_id=str(project_id) if project_id else None)
+        if not no_write_preview:
+            param_receipt_path = save_latest_receipt(param_receipt, project_id=str(project_id) if project_id else None)
     except Exception:
         param_receipt = None
         param_receipt_path = None
