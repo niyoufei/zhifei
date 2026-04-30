@@ -4,7 +4,9 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import asyncio
 import json
+from pathlib import Path
 import sys
+import types
 
 from backend.zhifei_autoplan.orchestrator import (
     _build_weights_and_penalties,
@@ -36,6 +38,15 @@ def _assert_write_paths_not_loaded() -> None:
     assert "backend.zhifei_autoplan.output_artifacts" not in sys.modules
     assert "backend.zhifei_autoplan.exporter" not in sys.modules
     assert "backend.zhifei_autoplan.export_docx_service" not in sys.modules
+
+
+def _file_count(path: str) -> int:
+    root = Path(path)
+    if not root.exists():
+        return 0
+    if root.is_file():
+        return 1
+    return sum(1 for item in root.rglob("*") if item.is_file())
 
 
 # =============================================================================
@@ -318,6 +329,91 @@ class TestRunAutoplan:
         assert call_kwargs["base_url"] == "http://127.0.0.1:11434"
         assert call_kwargs["api_key"] is None
         _assert_write_paths_not_loaded()
+
+    @pytest.mark.asyncio
+    async def test_no_write_ollama_main_chain_smoke_guard(self, mock_dependencies, monkeypatch):
+        """Ollama can enter run_autoplan with write paths patched and no real network calls."""
+        from backend.zhifei_autoplan import param_trace
+
+        before_counts = {
+            "jobs": _file_count("backend/data/autoplan/jobs"),
+            "build": _file_count("build"),
+            "output": _file_count("output"),
+        }
+        blocked_calls: list[str] = []
+
+        def _blocked(name: str):
+            def _inner(*args, **kwargs):
+                blocked_calls.append(name)
+                raise AssertionError(f"{name} should not be called")
+
+            return _inner
+
+        def _fake_module(name: str, functions: list[str]):
+            module = types.ModuleType(name)
+            for fn in functions:
+                setattr(module, fn, _blocked(f"{name}.{fn}"))
+            return module
+
+        monkeypatch.setattr(param_trace, "save_latest_receipt", lambda *args, **kwargs: "mock://param_receipt")
+        monkeypatch.setattr("urllib.request.urlopen", _blocked("urllib.request.urlopen"))
+        monkeypatch.setitem(
+            sys.modules,
+            "backend.zhifei_autoplan.job_store",
+            _fake_module("backend.zhifei_autoplan.job_store", ["create_job", "update_job", "get_job"]),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "backend.zhifei_autoplan.output_artifacts",
+            _fake_module("backend.zhifei_autoplan.output_artifacts", ["save_outputs"]),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "backend.zhifei_autoplan.exporter",
+            _fake_module(
+                "backend.zhifei_autoplan.exporter",
+                [
+                    "export_autoplan_docx",
+                    "export_autoplan_compare_docx",
+                    "export_autoplan_focus_xlsx",
+                    "export_scoring_evidence_overview_xlsx",
+                    "export_expert_review_brief_docx",
+                ],
+            ),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "backend.zhifei_autoplan.export_docx_service",
+            _fake_module("backend.zhifei_autoplan.export_docx_service", ["execute_export_docx_request"]),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "backend.app.routers.actions_bridge",
+            _fake_module("backend.app.routers.actions_bridge", ["actions_generate", "actions_generate_async", "_save_outputs"]),
+        )
+
+        result = await run_autoplan({
+            "topic": "Ollama no-write smoke",
+            "outline": ["章节1"],
+            "provider": "ollama",
+            "model": "qwen3:0.6b",
+            "base_url": "http://127.0.0.1:11434",
+            "dry_run": False,
+        })
+
+        mock_dependencies["llm_cls"].assert_called()
+        call_kwargs = mock_dependencies["llm_cls"].call_args.kwargs
+        assert call_kwargs["provider"] == "ollama"
+        assert call_kwargs["model"] == "qwen3:0.6b"
+        assert call_kwargs["base_url"] == "http://127.0.0.1:11434"
+        assert mock_dependencies["writer"].write.called
+        assert result["sections"]
+        assert blocked_calls == []
+        assert {
+            "jobs": _file_count("backend/data/autoplan/jobs"),
+            "build": _file_count("build"),
+            "output": _file_count("output"),
+        } == before_counts
 
     @pytest.mark.asyncio
     async def test_provider_api_key_fallback_from_env_openai(self, mock_dependencies, monkeypatch):
