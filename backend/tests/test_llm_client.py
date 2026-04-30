@@ -6,6 +6,7 @@ LLMClient 单元测试
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -241,6 +242,28 @@ class TestInitProvider:
         client = LLMClient(provider="unknown", model="test")
         assert client._impl is None
 
+    def test_init_ollama_provider_disabled_by_default(self, monkeypatch):
+        """Ollama provider 默认关闭且不初始化 adapter。"""
+        monkeypatch.delenv("ZDOC_OLLAMA_PROVIDER_ENABLED", raising=False)
+        with patch("backend.zhifei_autoplan.utils.llm_client.OllamaProvider") as mock:
+            client = LLMClient(provider="ollama", model="qwen3:0.6b")
+            mock.assert_not_called()
+            assert client._impl is None
+            assert client._init_error == "ollama_provider_disabled"
+
+    def test_init_ollama_provider_enabled_without_api_key(self, monkeypatch):
+        """Ollama provider 显式启用后不需要 API key。"""
+        monkeypatch.setenv("ZDOC_OLLAMA_PROVIDER_ENABLED", "1")
+        with patch("backend.zhifei_autoplan.utils.llm_client.OllamaProvider") as mock:
+            mock.return_value = MagicMock()
+            client = LLMClient(
+                provider="ollama",
+                model="qwen3:0.6b",
+                base_url="http://127.0.0.1:11434",
+            )
+            mock.assert_called_once_with(model="qwen3:0.6b", base_url="http://127.0.0.1:11434")
+            assert client._impl == mock.return_value
+
     def test_init_provider_with_none_api_key(self):
         """缺少必需密钥时应短路，不触发 provider 初始化。"""
         with patch("backend.zhifei_autoplan.utils.llm_client.OpenAIProvider") as mock:
@@ -274,6 +297,45 @@ class TestComplete:
         assert result["provider"] == "unknown"
         assert result["model"] == "test"
         assert result["text"] == ""
+
+    @pytest.mark.asyncio
+    async def test_complete_ollama_disabled_does_not_call_provider(self, monkeypatch):
+        """Ollama provider 默认关闭时不触发 adapter complete。"""
+        monkeypatch.delenv("ZDOC_OLLAMA_PROVIDER_ENABLED", raising=False)
+        with patch("backend.zhifei_autoplan.utils.llm_client.OllamaProvider") as mock:
+            client = LLMClient(provider="ollama", model="qwen3:0.6b")
+            result = await client.complete("test prompt")
+            mock.assert_not_called()
+
+        assert result == {
+            "provider": "ollama",
+            "model": "qwen3:0.6b",
+            "text": "",
+            "error": "ollama_provider_disabled",
+        }
+
+    @pytest.mark.asyncio
+    async def test_complete_ollama_enabled_uses_mock_provider(self, monkeypatch):
+        """Ollama provider 显式启用后只调用 mock provider。"""
+        monkeypatch.setenv("ZDOC_OLLAMA_PROVIDER_ENABLED", "1")
+        mock_impl = MagicMock()
+        mock_impl.complete = AsyncMock(
+            return_value={
+                "provider": "ollama",
+                "model": "qwen3:0.6b",
+                "text": "local response",
+                "ok": True,
+            }
+        )
+
+        with patch("backend.zhifei_autoplan.utils.llm_client.OllamaProvider", return_value=mock_impl):
+            client = LLMClient(provider="ollama", model="qwen3:0.6b")
+            result = await client.complete("test prompt")
+
+        mock_impl.complete.assert_called_once_with("test prompt")
+        assert result["ok"] is True
+        assert result["provider"] == "ollama"
+        assert result["text"] == "local response"
 
     @pytest.mark.asyncio
     async def test_complete_returns_init_error_when_provider_init_failed(self):
@@ -339,3 +401,11 @@ class TestComplete:
             mock_impl.complete.assert_called_once_with(
                 "test", max_tokens=100, temperature=0.5, top_p=0.9
             )
+
+
+def test_llm_client_import_does_not_pull_main_chain_modules():
+    assert "backend.zhifei_autoplan.orchestrator" not in sys.modules
+    assert "backend.zhifei_autoplan.job_store" not in sys.modules
+    assert "backend.zhifei_autoplan.output_artifacts" not in sys.modules
+    assert "backend.zhifei_autoplan.exporter" not in sys.modules
+    assert "backend.zhifei_autoplan.export_docx_service" not in sys.modules

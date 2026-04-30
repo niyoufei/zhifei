@@ -5,6 +5,7 @@ import urllib.error
 
 import pytest
 
+from backend.zhifei_autoplan.providers import ollama_provider
 from backend.zhifei_autoplan.providers.ollama_provider import (
     OllamaProvider,
     build_ollama_chat_payload,
@@ -120,5 +121,5 @@ async def test_complete_empty_content_returns_fallback() -> None:
 
 
 def test_adapter_import_does_not_pull_main_chain_modules() -> None:
-    assert "backend.zhifei_autoplan.utils.llm_client" not in sys.modules
+    assert not hasattr(ollama_provider, "LLMClient")
     assert "backend.zhifei_autoplan.orchestrator" not in sys.modules

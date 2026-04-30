@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Optional, Dict, Any
 
 from backend.zhifei_autoplan.providers.openai_provider import OpenAIProvider
@@ -12,6 +13,14 @@ from backend.zhifei_autoplan.providers.baidu_provider import BaiduProvider
 from backend.zhifei_autoplan.providers.iflytek_provider import IflytekProvider
 from backend.zhifei_autoplan.providers.tencent_provider import TencentProvider
 from backend.zhifei_autoplan.providers.grok_provider import GrokProvider
+from backend.zhifei_autoplan.providers.ollama_provider import OllamaProvider
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "y"}
 
 
 class LLMClient:
@@ -99,6 +108,11 @@ class LLMClient:
             return IflytekProvider(self.api_key or "", self.model, self.base_url or "")
         if self.provider == "tencent":
             return TencentProvider(self.api_key or "", self.model, self.base_url or "")
+        if self.provider == "ollama":
+            if not _env_bool("ZDOC_OLLAMA_PROVIDER_ENABLED", default=False):
+                self._init_error = "ollama_provider_disabled"
+                return None
+            return OllamaProvider(model=self.model, base_url=self.base_url)
         return None
 
     async def complete(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
