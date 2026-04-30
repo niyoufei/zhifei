@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import asyncio
 import json
+import sys
 
 from backend.zhifei_autoplan.orchestrator import (
     _build_weights_and_penalties,
@@ -27,6 +28,14 @@ def _find_ctx_by_title(mock_writer, title: str) -> dict:
             ctx = call_args[0][1]
             return ctx if isinstance(ctx, dict) else {}
     return {}
+
+
+def _assert_write_paths_not_loaded() -> None:
+    assert "backend.app.routers.actions_bridge" not in sys.modules
+    assert "backend.zhifei_autoplan.job_store" not in sys.modules
+    assert "backend.zhifei_autoplan.output_artifacts" not in sys.modules
+    assert "backend.zhifei_autoplan.exporter" not in sys.modules
+    assert "backend.zhifei_autoplan.export_docx_service" not in sys.modules
 
 
 # =============================================================================
@@ -290,6 +299,25 @@ class TestRunAutoplan:
         assert call_kwargs["provider"] == "openai"
         assert call_kwargs["model"] == "gpt-4"
         assert call_kwargs["api_key"] == "test-key"
+
+    @pytest.mark.asyncio
+    async def test_ollama_provider_path_passes_to_llm_without_real_ollama(self, mock_dependencies):
+        """Ollama provider is passed to LLMClient, while the real adapter and write paths stay untouched."""
+        await run_autoplan({
+            "outline": ["章节1"],
+            "provider": "ollama",
+            "model": "qwen3:0.6b",
+            "base_url": "http://127.0.0.1:11434",
+            "dry_run": False,
+        })
+
+        mock_dependencies["llm_cls"].assert_called()
+        call_kwargs = mock_dependencies["llm_cls"].call_args.kwargs
+        assert call_kwargs["provider"] == "ollama"
+        assert call_kwargs["model"] == "qwen3:0.6b"
+        assert call_kwargs["base_url"] == "http://127.0.0.1:11434"
+        assert call_kwargs["api_key"] is None
+        _assert_write_paths_not_loaded()
 
     @pytest.mark.asyncio
     async def test_provider_api_key_fallback_from_env_openai(self, mock_dependencies, monkeypatch):
@@ -888,6 +916,8 @@ class TestOrchestratorIntegration:
         
         result = await run_autoplan({
             "outline": ["章节1", "章节2", "章节3"],
+            "strict_tender_outline": True,
+            "agent_parallelism": 3,
         })
         
         # All sections should start at approximately the same time (concurrent)
@@ -1405,6 +1435,32 @@ class TestPickProviderWithList:
         assert calls[0]["api_key"] == "g_key_1"
         assert calls[1]["api_key"] == "g_key_2"
         assert calls[2]["api_key"] == "o_key_1"
+
+    @pytest.mark.asyncio
+    async def test_provider_chain_accepts_ollama_slot_without_real_ollama(self, mock_deps_prov):
+        """provider_chain can carry an Ollama slot to LLMClient without invoking real Ollama or write paths."""
+        await run_autoplan(
+            {
+                "outline": ["章节1"],
+                "provider_chain": [
+                    {
+                        "slot": "main",
+                        "provider": "ollama",
+                        "model": "qwen3:0.6b",
+                    }
+                ],
+                "base_url": "http://127.0.0.1:11434",
+                "dry_run": False,
+            }
+        )
+
+        calls = mock_deps_prov["llm_calls"]
+        assert len(calls) >= 1
+        assert calls[0]["provider"] == "ollama"
+        assert calls[0]["model"] == "qwen3:0.6b"
+        assert calls[0]["base_url"] == "http://127.0.0.1:11434"
+        assert calls[0]["api_key"] is None
+        _assert_write_paths_not_loaded()
 
     @pytest.mark.asyncio
     async def test_provider_chain_same_provider_key_fallback(self):
