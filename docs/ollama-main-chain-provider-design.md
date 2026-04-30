@@ -116,3 +116,41 @@ That PR should not:
 - Call a real Ollama service in automated tests.
 
 It should be a focused PR with its own tests and acceptance notes.
+
+## LLMClient optional Ollama provider real validation
+
+- Validation target: `LLMClient(provider="ollama")`.
+- Current capability: `OllamaProvider` is wired into `LLMClient` as an explicit optional provider.
+- Default state: disabled by default and controlled by `ZDOC_OLLAMA_PROVIDER_ENABLED=1`.
+- Validation prerequisite: Ollama `/api/tags` returned HTTP `200`.
+- Validation prerequisite: the model list included `qwen3:0.6b`.
+- Success scenario: `ZDOC_OLLAMA_PROVIDER_ENABLED=1`.
+- Success scenario: `provider=ollama`.
+- Success scenario: `model=qwen3:0.6b`.
+- Success scenario: `ok=true`.
+- Success scenario: returned `text` was non-empty.
+- Success text summary: `本地模型章节复核用于确保模型在特定章节的逻辑、数据和计算过程准确无误，从而提升整体模型的可靠性与准确性。`
+- Missing-model fallback scenario: `model=not-exist-model-for-validation`.
+- Missing-model fallback scenario: `ok=false`.
+- Missing-model fallback scenario: `text=""`.
+- Missing-model fallback scenario: `error=ollama_error:HTTPError`.
+- Missing-model fallback scenario: no crash occurred.
+- Main-chain isolation: `run_autoplan` was not triggered.
+- Main-chain isolation: `create_job` was not triggered.
+- Main-chain isolation: `update_job` was not triggered.
+- Main-chain isolation: `_save_outputs` was not triggered.
+- Main-chain isolation: `save_output_artifacts` was not triggered.
+- Main-chain isolation: export/docx paths were not triggered.
+- Main-chain isolation: related modules were not imported.
+- Write isolation: `backend/data/autoplan/jobs` file count remained `87 -> 87`.
+- Write isolation: `build` file count remained `1389 -> 1389`.
+- Write isolation: `output` file count remained `0 -> 0`.
+- Workspace result: `git status --short` was empty.
+- Workspace result: no files were modified by validation.
+- Workspace result: no `git clean` was executed.
+- Workspace result: no dependencies were installed.
+- Conclusion: `LLMClient(provider="ollama")` real invocation works.
+- Conclusion: a missing Ollama model falls back safely.
+- Conclusion: the integration is still not connected to `orchestrator`.
+- Conclusion: the integration still does not change `provider_chain`.
+- Conclusion: the integration still does not enter the main generation chain.
