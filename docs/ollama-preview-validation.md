@@ -204,3 +204,50 @@ OLLAMA_TIMEOUT=60
   - Temporary front-end and back-end services were stopped after validation.
   - No `git clean` was executed.
   - No dependencies were installed.
+
+## Manual Ollama section review copy and download validation
+
+- Validation target: front-end copy and download actions for "章节复核建议".
+- Covered features:
+  - `复制复核建议`
+  - `下载复核建议.md`
+  - `下载复核建议.txt`
+- Validation method:
+  - Injected minimal `run_result` and review result state to render the UI.
+  - Did not connect to Ollama.
+  - Did not click the section review button.
+  - Did not trigger formal generation.
+- Compile check:
+  - `python3 -m py_compile app.py` passed.
+- Copy area validation:
+  - The page displayed `复制复核建议`.
+  - The copy area content was the review suggestion body.
+  - The area is for manual user copying.
+- Markdown download validation:
+  - The page contains `下载复核建议.md`.
+  - It uses `st.download_button`.
+  - The content is generated in front-end memory via `markdown_export`.
+  - It contains `# 本地模型章节复核建议`.
+  - It contains the variant number, section title, model, status, and `## 复核建议正文`.
+- TXT download validation:
+  - The page contains `下载复核建议.txt`.
+  - It uses `st.download_button`.
+  - The content is generated in front-end memory via `text_export`.
+  - The content is plain text.
+  - It contains the title, variant number, section title, model, status, and review suggestion body.
+- Isolation validation:
+  - Did not connect to Ollama.
+  - Did not write back section content.
+  - Did not refresh generated artifacts.
+  - Did not trigger the export chain.
+  - Did not trigger review apply.
+  - Did not call the generation chain.
+- Write isolation:
+  - `backend/data/autoplan/jobs` file count remained `87 -> 87`.
+  - `build` file count remained `1389 -> 1389`.
+  - `output` file count remained `0 -> 0`.
+- Workspace result:
+  - `git status --short` was clean.
+  - No tracked files were modified.
+  - No `git clean` was executed.
+  - No dependencies were installed.
