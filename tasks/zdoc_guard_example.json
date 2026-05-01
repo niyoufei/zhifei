@@ -1,0 +1,26 @@
+{
+  "name": "zdoc guarded PR checks example",
+  "pr_title": "chore: add guarded PR workflow checks for ZDoc",
+  "tag_name": "v0.0.0-zdoc-guard-example",
+  "allowed_files": [
+    "scripts/guards/zdoc_guard.py",
+    "scripts/guards/README.md",
+    "tasks/zdoc_guard_example.json"
+  ],
+  "forbidden_files": [
+    "app.py",
+    "backend/**",
+    "docs/**",
+    "output/**",
+    "build/**",
+    "runtime/**"
+  ],
+  "test_commands": [
+    "python3 -m py_compile scripts/guards/zdoc_guard.py"
+  ],
+  "count_paths": [
+    "backend/data/autoplan/jobs",
+    "build",
+    "output"
+  ]
+}
