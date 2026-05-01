@@ -355,8 +355,10 @@ class TestRunAutoplan:
                 setattr(module, fn, _blocked(f"{name}.{fn}"))
             return module
 
-        monkeypatch.setattr(param_trace, "save_latest_receipt", lambda *args, **kwargs: "mock://param_receipt")
+        save_receipt = MagicMock(return_value="mock://param_receipt")
+        monkeypatch.setattr(param_trace, "save_latest_receipt", save_receipt)
         monkeypatch.setattr("urllib.request.urlopen", _blocked("urllib.request.urlopen"))
+        mock_dependencies["boq"].return_value = {"stats": {"工程量": 1}}
         monkeypatch.setitem(
             sys.modules,
             "backend.zhifei_autoplan.job_store",
@@ -399,6 +401,7 @@ class TestRunAutoplan:
             "model": "qwen3:0.6b",
             "base_url": "http://127.0.0.1:11434",
             "dry_run": False,
+            "no_write": True,
         })
 
         mock_dependencies["llm_cls"].assert_called()
@@ -408,12 +411,57 @@ class TestRunAutoplan:
         assert call_kwargs["base_url"] == "http://127.0.0.1:11434"
         assert mock_dependencies["writer"].write.called
         assert result["sections"]
+        save_receipt.assert_not_called()
+        mock_dependencies["chart"].assert_not_called()
+        mock_dependencies["previews"].assert_not_called()
         assert blocked_calls == []
         assert {
             "jobs": _file_count("backend/data/autoplan/jobs"),
             "build": _file_count("build"),
             "output": _file_count("output"),
         } == before_counts
+
+    @pytest.mark.asyncio
+    async def test_preview_only_alias_skips_param_receipt_write(self, mock_dependencies, monkeypatch):
+        """preview_only is an alias for no-write preview mode."""
+        from backend.zhifei_autoplan import param_trace
+
+        save_receipt = MagicMock(return_value="mock://param_receipt")
+        monkeypatch.setattr(param_trace, "save_latest_receipt", save_receipt)
+
+        result = await run_autoplan({
+            "outline": ["章节1"],
+            "provider": "ollama",
+            "model": "qwen3:0.6b",
+            "base_url": "http://127.0.0.1:11434",
+            "dry_run": False,
+            "preview_only": True,
+        })
+
+        mock_dependencies["llm_cls"].assert_called()
+        assert result["sections"]
+        save_receipt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_default_mode_still_saves_param_receipt(self, mock_dependencies, monkeypatch):
+        """Default run_autoplan behavior is unchanged when no_write/preview_only is absent."""
+        from backend.zhifei_autoplan import param_trace
+
+        save_receipt = MagicMock(return_value="mock://param_receipt")
+        monkeypatch.setattr(param_trace, "save_latest_receipt", save_receipt)
+
+        result = await run_autoplan({
+            "outline": ["章节1"],
+            "provider": "ollama",
+            "model": "qwen3:0.6b",
+            "base_url": "http://127.0.0.1:11434",
+            "dry_run": False,
+            "generate_images": False,
+        })
+
+        mock_dependencies["llm_cls"].assert_called()
+        assert result["sections"]
+        save_receipt.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_provider_api_key_fallback_from_env_openai(self, mock_dependencies, monkeypatch):
