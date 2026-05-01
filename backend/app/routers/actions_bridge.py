@@ -213,6 +213,18 @@ class ActionsOllamaSectionReviewRequest(BaseModel):
     timeout: float | None = None
 
 
+class ActionsOllamaMainChainSmokeRequest(BaseModel):
+    topic: str | None = None
+    outline: List[str] = []
+    requirements: List[str] = []
+    global_instruction: str | None = None
+    section_title: str | None = None
+    section_content: str | None = None
+    chapter_requirements: dict | None = None
+    model: str | None = None
+    base_url: str | None = None
+
+
 @router.get("/params/get")
 async def actions_params_get(x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
@@ -961,6 +973,156 @@ async def actions_ollama_review_section(
         base_url=req.base_url,
         timeout=req.timeout,
     )
+
+
+def _ollama_smoke_enabled() -> bool:
+    return os.environ.get("ZDOC_OLLAMA_MAIN_CHAIN_SMOKE_ENABLED", "").strip() == "1"
+
+
+def _ollama_smoke_model(req_model: str | None) -> str:
+    return (req_model or os.environ.get("OLLAMA_MODEL") or "qwen3:0.6b").strip() or "qwen3:0.6b"
+
+
+def _ollama_smoke_base_url(req_base_url: str | None) -> str:
+    return (req_base_url or os.environ.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
+
+
+def _ollama_smoke_title(req: ActionsOllamaMainChainSmokeRequest) -> str:
+    candidates = [req.section_title, *(req.outline or [])]
+    for value in candidates:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return "Ollama主链烟测"
+
+
+def _ollama_smoke_requirements(req: ActionsOllamaMainChainSmokeRequest) -> list[str]:
+    requirements = [str(item).strip() for item in (req.requirements or []) if str(item or "").strip()]
+    if requirements:
+        return requirements[:1]
+    section_content = str(req.section_content or "").strip()
+    if section_content:
+        return [section_content]
+    return ["仅用于 no-write 主链烟测，输出一段简短章节内容。"]
+
+
+def _ollama_smoke_payload(req: ActionsOllamaMainChainSmokeRequest) -> dict:
+    title = _ollama_smoke_title(req)
+    chapter_requirements: dict[str, Any] = {}
+    if isinstance(req.chapter_requirements, dict):
+        raw = req.chapter_requirements.get(title)
+        if raw is not None:
+            chapter_requirements[title] = raw
+    if title not in chapter_requirements:
+        chapter_requirements[title] = _ollama_smoke_requirements(req)
+
+    return {
+        "topic": str(req.topic or "ZDoc Ollama no-write main-chain smoke").strip(),
+        "outline": [title],
+        "requirements": _ollama_smoke_requirements(req),
+        "global_instruction": req.global_instruction,
+        "chapter_requirements": chapter_requirements,
+        "chapter_pages": {title: 1},
+        "total_pages_target": 1,
+        "strict_tender_outline": True,
+        "provider": "ollama",
+        "model": _ollama_smoke_model(req.model),
+        "base_url": _ollama_smoke_base_url(req.base_url),
+        "no_write": True,
+        "preview_only": True,
+        "generate_images": False,
+        "auto_remediate": False,
+        "quality_strict": False,
+        "agent_parallelism": 1,
+        "variant_parallelism": 1,
+    }
+
+
+def _section_text_preview(section: dict) -> str:
+    for key in ("content", "body", "markdown", "text"):
+        value = section.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:500]
+    return ""
+
+
+def _ollama_smoke_sections_preview(result: dict) -> list[dict]:
+    sections = result.get("sections") if isinstance(result, dict) else []
+    if not isinstance(sections, list):
+        return []
+    preview: list[dict] = []
+    for section in sections[:1]:
+        if not isinstance(section, dict):
+            continue
+        preview.append(
+            {
+                "title": section.get("title"),
+                "provider": section.get("provider"),
+                "model": section.get("model"),
+                "error": section.get("error"),
+                "content_preview": _section_text_preview(section),
+            }
+        )
+    return preview
+
+
+@router.post("/ollama/main_chain_smoke")
+async def actions_ollama_main_chain_smoke(
+    req: ActionsOllamaMainChainSmokeRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    model = _ollama_smoke_model(req.model)
+    base_url = _ollama_smoke_base_url(req.base_url)
+    smoke_type = "ollama_main_chain_no_write"
+    if not _ollama_smoke_enabled():
+        return {
+            "ok": False,
+            "enabled": False,
+            "status": "disabled",
+            "provider": "ollama",
+            "model": model,
+            "base_url": base_url,
+            "section_count": 0,
+            "sections_preview": [],
+            "error": None,
+            "warning": "ollama_main_chain_smoke_disabled",
+            "smoke_type": smoke_type,
+        }
+
+    payload = _ollama_smoke_payload(req)
+    try:
+        result = await run_autoplan(payload)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "enabled": True,
+            "status": "fallback",
+            "provider": "ollama",
+            "model": model,
+            "base_url": base_url,
+            "section_count": 0,
+            "sections_preview": [],
+            "error": f"ollama_main_chain_smoke_error:{type(exc).__name__}",
+            "warning": None,
+            "smoke_type": smoke_type,
+        }
+
+    sections = result.get("sections") if isinstance(result, dict) else []
+    section_count = len(sections) if isinstance(sections, list) else 0
+    return {
+        "ok": True,
+        "enabled": True,
+        "status": "ok",
+        "provider": "ollama",
+        "model": model,
+        "base_url": base_url,
+        "section_count": section_count,
+        "sections_preview": _ollama_smoke_sections_preview(result if isinstance(result, dict) else {}),
+        "error": None,
+        "warning": None,
+        "smoke_type": smoke_type,
+    }
 
 
 @router.post("/tender/parse")
