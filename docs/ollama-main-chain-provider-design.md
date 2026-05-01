@@ -154,3 +154,51 @@ It should be a focused PR with its own tests and acceptance notes.
 - Conclusion: the integration is still not connected to `orchestrator`.
 - Conclusion: the integration still does not change `provider_chain`.
 - Conclusion: the integration still does not enter the main generation chain.
+
+## No-write Ollama main-chain smoke validation
+
+- Validation target: `run_autoplan(no_write=True)` main-chain smoke validation.
+- Validation method: did not call `/actions/generate`.
+- Validation method: did not call `/actions/generate_async`.
+- Validation method: did not start ZDoc frontend or backend services.
+- Validation method: called `run_autoplan()` directly.
+- Ollama service: `/api/tags` returned HTTP status `200`.
+- Ollama service: `qwen3:0.6b` was confirmed in the model list.
+- Call configuration: `provider=ollama`.
+- Call configuration: `model=qwen3:0.6b`.
+- Call configuration: `base_url=http://127.0.0.1:11434`.
+- Call configuration: `no_write=True`.
+- Call configuration: `generate_images=False`.
+- Call configuration: `auto_remediate=False`.
+- Call configuration: `quality_strict=False`.
+- Call configuration: `agent_parallelism=1`.
+- Call configuration: `variant_parallelism=1`.
+- Validation result: `run_autoplan(no_write=True)` completed.
+- Validation result: no uncaught exception occurred.
+- Validation result: `section_count=1`.
+- Validation result: the section title was `Ollama主链烟测`.
+- Validation result: `provider=ollama`.
+- Validation result: `model=qwen3:0.6b`.
+- Validation result: `error=null`.
+- Validation result: the section content was non-empty.
+- Real Ollama call confirmation: `OllamaProvider.complete` was called once.
+- Real Ollama call confirmation: `base_url=http://127.0.0.1:11434`.
+- Real Ollama call confirmation: `model=qwen3:0.6b`.
+- Write isolation: `create_job` was not triggered.
+- Write isolation: `update_job` was not triggered.
+- Write isolation: `_save_outputs` was not triggered.
+- Write isolation: `save_output_artifacts` was not triggered.
+- Write isolation: export/docx/xlsx paths were not triggered.
+- Write isolation: `save_latest_receipt` call count was `0`.
+- Write isolation: `param_receipt_latest.json` size and mtime did not change.
+- File count validation: `backend/data/autoplan/jobs` file count remained `87 -> 87`.
+- File count validation: `build` file count remained `1389 -> 1389`.
+- File count validation: `output` file count remained `0 -> 0`.
+- Workspace result: `git status --short` was empty.
+- Workspace result: there were no tracked modifications.
+- Workspace result: no commit was created during validation.
+- Workspace result: no PR was created during validation.
+- Workspace result: no `git clean` was executed.
+- Conclusion: Ollama can enter the main-chain smoke path under `no_write=True` protection.
+- Conclusion: `/actions/generate_async` should still not be opened directly for Ollama main-chain validation.
+- Conclusion: the next step should first design an API-level no-write smoke endpoint or manually confirm write-back boundaries.
