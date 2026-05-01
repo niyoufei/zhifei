@@ -202,3 +202,63 @@ It should be a focused PR with its own tests and acceptance notes.
 - Conclusion: Ollama can enter the main-chain smoke path under `no_write=True` protection.
 - Conclusion: `/actions/generate_async` should still not be opened directly for Ollama main-chain validation.
 - Conclusion: the next step should first design an API-level no-write smoke endpoint or manually confirm write-back boundaries.
+
+## Manual no-write Ollama main-chain smoke endpoint validation
+
+- Validation target: `POST /actions/ollama/main_chain_smoke`.
+- Validation method: used in-process FastAPI TestClient.
+- Validation method: did not start ZDoc frontend or backend services.
+- Validation method: did not call `/actions/generate`.
+- Validation method: did not call `/actions/generate_async`.
+- Ollama service: `/api/tags` returned HTTP status `200`.
+- Ollama service: `qwen3:0.6b` was confirmed in the model list.
+- Disabled scenario: HTTP `200`.
+- Disabled scenario: `ok=false`.
+- Disabled scenario: `enabled=false`.
+- Disabled scenario: `status=disabled`.
+- Disabled scenario: `smoke_type=ollama_main_chain_no_write`.
+- Disabled scenario: `warning=ollama_main_chain_smoke_disabled`.
+- Disabled scenario: `section_count=0`.
+- Disabled scenario: `run_autoplan` was not called.
+- Success scenario: `ZDOC_OLLAMA_MAIN_CHAIN_SMOKE_ENABLED=1`.
+- Success scenario: `ZDOC_OLLAMA_PROVIDER_ENABLED=1`.
+- Success scenario: `model=qwen3:0.6b`.
+- Success scenario: `base_url=http://127.0.0.1:11434`.
+- Success scenario: HTTP `200`.
+- Success scenario: `ok=true`.
+- Success scenario: `status=ok`.
+- Success scenario: `provider=ollama`.
+- Success scenario: `model=qwen3:0.6b`.
+- Success scenario: `smoke_type=ollama_main_chain_no_write`.
+- Success scenario: `section_count=1`.
+- Success scenario: `sections_preview` was non-empty.
+- Success scenario: the first section was `Ollama主链烟测`.
+- Success scenario: the first preview contained Ollama-generated content.
+- Success scenario: `error=null`.
+- Missing-model scenario: `model=not-exist-model-for-validation`.
+- Missing-model scenario: HTTP `200`.
+- Missing-model scenario: no crash occurred.
+- Missing-model scenario: `provider=ollama`.
+- Missing-model scenario: `model=not-exist-model-for-validation`.
+- Missing-model scenario: `section_count=1`.
+- Missing-model scenario: current behavior is a section-level safe return.
+- Missing-model scenario: `sections_preview[0].error=ollama_error:HTTPError`.
+- Missing-model scenario: current behavior is not top-level `status=fallback`.
+- Write and main-chain isolation: `create_job` was not triggered.
+- Write and main-chain isolation: `update_job` was not triggered.
+- Write and main-chain isolation: `_save_outputs` was not triggered.
+- Write and main-chain isolation: `save_output_artifacts` was not triggered.
+- Write and main-chain isolation: export/docx/xlsx paths were not triggered.
+- Write and main-chain isolation: `param_trace.save_latest_receipt` call count was `0`.
+- File count validation: `backend/data/autoplan/jobs` file count remained `87 -> 87`.
+- File count validation: `build` file count remained `1389 -> 1389`.
+- File count validation: `output` file count remained `0 -> 0`.
+- Workspace result: `git status --short` was empty.
+- Workspace result: no files were modified.
+- Workspace result: no files were moved or deleted.
+- Workspace result: no `git clean` was executed.
+- Workspace result: no dependencies were installed.
+- Conclusion: the manual no-write Ollama main-chain smoke endpoint passed real API validation.
+- Conclusion: the endpoint can serve as a controlled manual smoke-test entrypoint.
+- Conclusion: `/actions/generate_async` is still not open for Ollama usage.
+- Conclusion: Ollama is still not allowed to write jobs, result bundles, build artifacts, output artifacts, or export files.
