@@ -43,6 +43,7 @@ from backend.zhifei_autoplan.image_library import (
     normalize_text_list,
 )
 from backend.zhifei_autoplan.ollama_preview import run_ollama_preview, run_ollama_section_review
+from backend.zhifei_autoplan.section_drafts import build_section_draft, compute_section_draft_diff
 from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
 from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
 from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
@@ -211,6 +212,18 @@ class ActionsOllamaSectionReviewRequest(BaseModel):
     model: str | None = None
     base_url: str | None = None
     timeout: float | None = None
+
+
+class ActionsOllamaSectionDraftBuildRequest(BaseModel):
+    project_name: str | None = None
+    section_title: str | None = None
+    original_content: str = ""
+    draft_content: str = ""
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    prompt: str | None = None
+    confirmed_by: str | None = None
 
 
 class ActionsOllamaMainChainSmokeRequest(BaseModel):
@@ -973,6 +986,52 @@ async def actions_ollama_review_section(
         base_url=req.base_url,
         timeout=req.timeout,
     )
+
+
+def _ollama_write_back_enabled() -> bool:
+    return os.environ.get("ZDOC_OLLAMA_WRITE_BACK_ENABLED", "").strip() == "1"
+
+
+@router.post("/ollama/section_draft/build")
+async def actions_ollama_section_draft_build(
+    req: ActionsOllamaSectionDraftBuildRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    section_title = (req.section_title or "").strip()
+    if not _ollama_write_back_enabled():
+        return {
+            "ok": False,
+            "status": "disabled",
+            "draft_type": "section_draft",
+            "section_title": section_title,
+            "draft": None,
+            "diff_preview": "",
+            "audit": [],
+            "error": None,
+            "warning": "ollama_write_back_disabled",
+        }
+
+    draft = build_section_draft(
+        section_title=section_title,
+        original_content=req.original_content,
+        draft_content=req.draft_content,
+        provider=req.provider,
+        model=req.model,
+        base_url=req.base_url,
+        prompt=req.prompt,
+    )
+    diff_preview = compute_section_draft_diff(req.original_content, req.draft_content)
+    return {
+        "ok": True,
+        "status": "ok",
+        "draft_type": "section_draft",
+        "section_title": draft.get("section_title", section_title),
+        "draft": draft,
+        "diff_preview": diff_preview,
+        "audit": draft.get("audit", []),
+        "error": None,
+    }
 
 
 def _ollama_smoke_enabled() -> bool:
