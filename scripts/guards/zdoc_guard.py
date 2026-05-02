@@ -24,20 +24,9 @@ DEFAULT_COUNT_PATHS = [
     "output",
 ]
 
-BLOCKED_COMMAND_SNIPPETS = [
-    "git clean",
-    "git reset --hard",
-    "gh pr merge",
-    "git tag ",
-    "git push",
-    "ollama",
-    "uvicorn",
-    "streamlit",
-    "run_autoplan",
-    "generate_async",
-    "actions/generate",
-    "export_docx",
-]
+NETWORK_CLIENTS = {"curl", "wget", "http", "https", "httpie"}
+SERVICE_COMMANDS = {"uvicorn", "streamlit", "gunicorn", "hypercorn"}
+SHELL_COMMANDS = {"sh", "bash", "zsh", "fish"}
 
 
 @dataclass(frozen=True)
@@ -206,11 +195,72 @@ def command_from_spec(value: Any) -> list[str]:
     raise SystemExit("[FAIL] test_commands entries must be strings or arrays")
 
 
+def executable_name(token: str) -> str:
+    return Path(token).name.lower()
+
+
+def split_command_text(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError as exc:
+        raise SystemExit(f"[FAIL] test command is not valid shell syntax: {command}: {exc}") from exc
+
+
+def shell_subcommand(tokens: Sequence[str]) -> str | None:
+    if not tokens or executable_name(tokens[0]) not in SHELL_COMMANDS:
+        return None
+    for index, token in enumerate(tokens[1:-1], start=1):
+        if token == "-c" or (token.startswith("-") and "c" in token):
+            return tokens[index + 1]
+    return None
+
+
+def has_recursive_force_flags(tokens: Sequence[str]) -> bool:
+    flags = "".join(token.lstrip("-") for token in tokens[1:] if token.startswith("-"))
+    return "r" in flags and "f" in flags
+
+
+def risky_command_reason(tokens: Sequence[str]) -> str | None:
+    if not tokens:
+        return None
+    executable = executable_name(tokens[0])
+    lowered = [str(token).lower() for token in tokens]
+
+    if executable == "ollama":
+        return "direct Ollama command"
+    if executable in SERVICE_COMMANDS:
+        return "service start command"
+    if executable.startswith("python") and len(lowered) >= 3 and lowered[1] == "-m" and lowered[2] in SERVICE_COMMANDS | {"http.server"}:
+        return "service start module"
+    if executable in NETWORK_CLIENTS and any("11434" in token for token in lowered):
+        return "network access to Ollama port 11434"
+    if executable in NETWORK_CLIENTS and any("actions/generate" in token or "export_docx" in token for token in lowered):
+        return "network access to generation/export endpoint"
+    if executable == "git" and len(lowered) >= 2:
+        subcommand = lowered[1]
+        if subcommand == "clean":
+            return "git clean"
+        if subcommand == "reset" and "--hard" in lowered[2:]:
+            return "git reset --hard"
+        if subcommand in {"push", "tag"}:
+            return f"git {subcommand}"
+    if executable == "gh" and lowered[1:3] == ["pr", "merge"]:
+        return "gh pr merge"
+    if executable == "rm" and has_recursive_force_flags(tokens):
+        return "rm -rf"
+    if any(token in {"run_autoplan", "generate_async", "export_docx"} for token in lowered):
+        return "direct generation/export command"
+    return None
+
+
 def ensure_safe_command(command: str) -> None:
-    lowered = command.lower()
-    for snippet in BLOCKED_COMMAND_SNIPPETS:
-        if snippet in lowered:
-            raise SystemExit(f"[FAIL] blocked high-risk command in task spec: {command}")
+    tokens = split_command_text(command)
+    nested = shell_subcommand(tokens)
+    if nested:
+        ensure_safe_command(nested)
+    reason = risky_command_reason(tokens)
+    if reason is not None:
+        raise SystemExit(f"[FAIL] blocked high-risk command in task spec ({reason}): {command}")
 
 
 def run_test_commands(root: Path, task: dict[str, Any]) -> list[CommandResult]:
