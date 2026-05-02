@@ -1743,6 +1743,92 @@ def _render_ollama_section_review_panel(
                         key=f"ollama_section_review_download_txt_v{variant}_s{int(selected_index)}",
                         use_container_width=True,
                     )
+                st.markdown("**草稿对比预览（不写回）**")
+                st.caption("当前仅生成草稿对比预览，不写回正文，不更新成果，不触发导出。")
+                draft_content_key = f"ollama_section_draft_content_v{variant}_s{int(selected_index)}"
+                draft_source_key = f"{draft_content_key}_source"
+                if st.session_state.get(draft_source_key) != review_content:
+                    st.session_state[draft_content_key] = review_content
+                    st.session_state[draft_source_key] = review_content
+                draft_content = st.text_area(
+                    "草稿内容（仅用于草稿预览，不会写回正文）",
+                    key=draft_content_key,
+                    height=220,
+                    help="默认填入本地模型章节复核建议，可手动编辑后生成只读 diff/audit 预览。",
+                )
+                draft_result_key = f"ollama_section_draft_preview_result_v{variant}_s{int(selected_index)}"
+                if st.button(
+                    "生成草稿对比预览（不写回）",
+                    key=f"ollama_section_draft_preview_btn_v{variant}_s{int(selected_index)}",
+                    type="secondary",
+                    use_container_width=True,
+                ):
+                    try:
+                        if not actions_key.strip():
+                            raise ValueError("Actions Key 不能为空")
+                        if not section_content:
+                            raise ValueError("当前章节未找到可对比正文")
+                        if not str(draft_content or "").strip():
+                            raise ValueError("草稿内容不能为空")
+                        project_name = (
+                            str(st.session_state.get("topic_text") or "").strip()
+                            or str(st.session_state.get("project_id_text") or "").strip()
+                            or "施工组织设计方案"
+                        )
+                        draft_payload = {
+                            "project_name": project_name,
+                            "section_title": section_title,
+                            "original_content": section_content,
+                            "draft_content": str(draft_content or "").strip(),
+                            "provider": "ollama",
+                            "model": str(normalized.get("model") or st.session_state.get("ollama_preview_model") or "qwen3:0.6b"),
+                            "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
+                            or "http://localhost:11434",
+                            "prompt": str(st.session_state.get("ollama_section_review_focus") or "").strip()
+                            or "基于本地模型章节复核建议生成草稿对比预览",
+                            "confirmed_by": "streamlit_manual_preview",
+                        }
+                        st.session_state[draft_result_key] = _post_json(
+                            base_url,
+                            "/actions/ollama/section_draft/build",
+                            actions_key,
+                            draft_payload,
+                            timeout=60,
+                        )
+                    except Exception as e:
+                        st.session_state[draft_result_key] = {
+                            "ok": False,
+                            "status": "error",
+                            "draft_type": "section_draft",
+                            "section_title": section_title,
+                            "draft": None,
+                            "diff_preview": "",
+                            "audit": [],
+                            "error": str(e),
+                        }
+                draft_preview_result = st.session_state.get(draft_result_key) or {}
+                if isinstance(draft_preview_result, dict) and draft_preview_result:
+                    draft_status = str(draft_preview_result.get("status") or "").strip()
+                    draft_warning = str(draft_preview_result.get("warning") or draft_preview_result.get("error") or "").strip()
+                    st.caption(
+                        f"ok={bool(draft_preview_result.get('ok'))}；status={draft_status or '-'}；"
+                        f"draft_type={draft_preview_result.get('draft_type') or '-'}"
+                    )
+                    if draft_status == "disabled":
+                        st.warning(f"草稿预览未启用：{draft_warning or 'ollama_write_back_disabled'}")
+                    elif draft_preview_result.get("ok"):
+                        st.success("草稿对比预览已生成")
+                    else:
+                        st.warning(f"草稿对比预览未完成：{draft_warning or '-'}")
+                    diff_preview = str(draft_preview_result.get("diff_preview") or "")
+                    if diff_preview.strip():
+                        st.code(diff_preview, language="diff")
+                    else:
+                        st.info("暂无 diff_preview。")
+                    st.markdown("**草稿审计记录（只读）**")
+                    st.json(draft_preview_result.get("audit") or [])
+                    with st.expander("草稿数据（只读）", expanded=False):
+                        st.json(draft_preview_result.get("draft") or {})
 
 
 def _render_downloads() -> None:
