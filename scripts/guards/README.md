@@ -47,3 +47,17 @@ any job/build/output/export write path.
 
 If a task needs a broader file scope, update the task spec intentionally and
 review the expanded scope before running `verify`.
+
+## Risky Command Matching
+
+The guard blocks high-risk actions, not ordinary filename keywords. Test files
+or paths that contain words such as `ollama` are allowed when they are passed to
+normal test commands such as `pytest`.
+
+The guard still blocks direct high-risk actions such as `ollama serve`, direct
+`ollama ...` commands, network checks against `localhost:11434` or
+`127.0.0.1:11434`, service start commands, destructive shell commands, and
+unsafe Git operations such as `git clean` or `git reset --hard`.
+
+Real Ollama validation remains outside this guard workflow unless a human
+explicitly authorizes it and runs it in the designated 2号窗口.
