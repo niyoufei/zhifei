@@ -178,3 +178,74 @@ That PR should:
 - Avoid export triggers.
 - Avoid real Ollama calls.
 - Focus only on draft/original/diff/apply/reject/rollback state transitions in memory or isolated helpers.
+
+## Draft-only section draft build endpoint validation
+
+Validation target:
+
+- `POST /actions/ollama/section_draft/build`
+
+Validation method:
+
+- Used in-process FastAPI TestClient.
+- Did not start frontend or backend services.
+- Did not connect to Ollama.
+- Did not run real generation.
+
+Default disabled scenario:
+
+- `ZDOC_OLLAMA_WRITE_BACK_ENABLED` was not set.
+- Response returned `status=disabled`.
+- Response returned `warning=ollama_write_back_disabled`.
+- Response returned `draft=None`.
+- Response returned `audit=[]`.
+
+Enabled draft build scenario:
+
+- `ZDOC_OLLAMA_WRITE_BACK_ENABLED=1` was set.
+- Response returned `ok=true`.
+- Response returned `status=ok`.
+- Response returned `draft_type=section_draft`.
+- `draft` was non-empty.
+- `diff_preview` was non-empty.
+- `audit` was non-empty.
+- Original and draft hashes existed and were different.
+- Diff preview included the original removed line and the draft added line.
+
+Ollama isolation:
+
+- `run_ollama_preview` was not called.
+- `run_ollama_section_review` was not called.
+- `LLMClient` was not called.
+
+Main-chain and write isolation:
+
+- `run_autoplan` was not called.
+- `create_job` was not called.
+- `update_job` was not called.
+- `_save_outputs` was not called.
+- `save_output_artifacts` was not called.
+- `export_docx_core.execute_export_docx_request` was not called.
+
+File-count validation:
+
+- `backend/data/autoplan/jobs`: `87 -> 87`.
+- `build`: `1389 -> 1389`.
+- `output`: `0 -> 0`.
+
+Workspace result from the lightweight validation run:
+
+- `git status --short` was empty.
+- No tracked files were modified.
+- No `git add` was run.
+- No commit was created.
+- No PR was created.
+- `git clean` was not run.
+
+Conclusion:
+
+- The draft-only build endpoint works within the default-disabled boundary.
+- The endpoint only returns draft, diff, and audit data.
+- Apply, reject, and rollback APIs are still not implemented.
+- The endpoint still does not write job, result bundle, build, output, or export artifacts.
+- The endpoint is still not connected to the frontend.
