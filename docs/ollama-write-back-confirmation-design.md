@@ -249,3 +249,73 @@ Conclusion:
 - Apply, reject, and rollback APIs are still not implemented.
 - The endpoint still does not write job, result bundle, build, output, or export artifacts.
 - The endpoint is still not connected to the frontend.
+
+## Draft-only section draft preview UI validation
+
+Validation target:
+
+- Frontend `生成草稿对比预览（不写回）` UI.
+
+Validation method:
+
+- Used static source inspection.
+- Did not start the Streamlit service.
+- Did not connect to Ollama.
+- Did not run real generation.
+
+Compile check:
+
+- `python3 -m py_compile app.py` passed.
+
+UI entry:
+
+- The `生成草稿对比预览（不写回）` button exists.
+- The UI calls `/actions/ollama/section_draft/build`.
+
+Input boundary:
+
+- `original_content` comes from the current section body.
+- `draft_content` is editable through `st.text_area`.
+- `draft_content` defaults to the local model section review suggestion.
+
+Display boundary:
+
+- `diff_preview` is displayed with `language="diff"`.
+- `audit` is displayed with `st.json()`.
+- `draft` is shown inside the `草稿数据（只读）` expander.
+
+Write-back isolation:
+
+- The draft preview UI block has no apply, reject, or rollback buttons.
+- The draft preview UI block does not call `/actions/review/apply`.
+- Note: other existing review write-back areas in `app.py` may still contain `/actions/review/apply`, but they are outside this draft preview UI.
+
+Main-chain and write isolation:
+
+- `_save_outputs` was not called.
+- `save_output_artifacts` was not called.
+- `create_job` was not called.
+- `update_job` was not called.
+- Export, docx, and xlsx paths were not triggered.
+- `/actions/generate_async` was not called.
+- `LLMClient` was not called.
+- Ollama was not called directly.
+
+File-count validation:
+
+- `backend/data/autoplan/jobs`: `87 -> 87`.
+- `build`: `1389 -> 1389`.
+- `output`: `0 -> 0`.
+
+Workspace result:
+
+- `git status --short` was empty.
+- No files were modified, moved, or deleted during validation.
+- `git clean`, `git reset`, `git delete`, and file moves were not run.
+
+Conclusion:
+
+- The draft-only preview UI only generates a draft comparison preview.
+- Apply, reject, and rollback are still not implemented.
+- The UI still does not write back to the section body.
+- The UI still does not write job, result bundle, build, output, or export artifacts.
