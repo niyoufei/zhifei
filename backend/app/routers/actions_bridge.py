@@ -43,7 +43,13 @@ from backend.zhifei_autoplan.image_library import (
     normalize_text_list,
 )
 from backend.zhifei_autoplan.ollama_preview import run_ollama_preview, run_ollama_section_review
-from backend.zhifei_autoplan.section_drafts import build_section_draft, compute_section_draft_diff
+from backend.zhifei_autoplan.section_drafts import (
+    apply_section_draft,
+    build_section_draft,
+    compute_section_draft_diff,
+    reject_section_draft,
+    rollback_section_draft,
+)
 from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
 from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
 from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
@@ -224,6 +230,12 @@ class ActionsOllamaSectionDraftBuildRequest(BaseModel):
     base_url: str | None = None
     prompt: str | None = None
     confirmed_by: str | None = None
+
+
+class ActionsOllamaSectionDraftDecisionRequest(BaseModel):
+    draft: dict
+    confirmed_by: str | None = None
+    confirmed_at: str | None = None
 
 
 class ActionsOllamaMainChainSmokeRequest(BaseModel):
@@ -992,6 +1004,31 @@ def _ollama_write_back_enabled() -> bool:
     return os.environ.get("ZDOC_OLLAMA_WRITE_BACK_ENABLED", "").strip() == "1"
 
 
+def _ollama_section_draft_disabled_response(action_type: str) -> dict:
+    return {
+        "ok": False,
+        "status": "disabled",
+        "draft_type": "section_draft",
+        "action_type": action_type,
+        "draft": None,
+        "audit": [],
+        "error": None,
+        "warning": "ollama_write_back_disabled",
+    }
+
+
+def _ollama_section_draft_decision_response(action_type: str, draft: dict) -> dict:
+    return {
+        "ok": True,
+        "status": draft.get("status", "ok"),
+        "draft_type": "section_draft",
+        "action_type": action_type,
+        "draft": draft,
+        "audit": draft.get("audit", []),
+        "error": None,
+    }
+
+
 @router.post("/ollama/section_draft/build")
 async def actions_ollama_section_draft_build(
     req: ActionsOllamaSectionDraftBuildRequest,
@@ -1032,6 +1069,60 @@ async def actions_ollama_section_draft_build(
         "audit": draft.get("audit", []),
         "error": None,
     }
+
+
+@router.post("/ollama/section_draft/apply_preview")
+async def actions_ollama_section_draft_apply_preview(
+    req: ActionsOllamaSectionDraftDecisionRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    action_type = "apply_preview"
+    if not _ollama_write_back_enabled():
+        return _ollama_section_draft_disabled_response(action_type)
+
+    draft = apply_section_draft(
+        req.draft,
+        confirmed_by=req.confirmed_by,
+        confirmed_at=req.confirmed_at,
+    )
+    return _ollama_section_draft_decision_response(action_type, draft)
+
+
+@router.post("/ollama/section_draft/reject")
+async def actions_ollama_section_draft_reject(
+    req: ActionsOllamaSectionDraftDecisionRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    action_type = "reject"
+    if not _ollama_write_back_enabled():
+        return _ollama_section_draft_disabled_response(action_type)
+
+    draft = reject_section_draft(
+        req.draft,
+        confirmed_by=req.confirmed_by,
+        confirmed_at=req.confirmed_at,
+    )
+    return _ollama_section_draft_decision_response(action_type, draft)
+
+
+@router.post("/ollama/section_draft/rollback")
+async def actions_ollama_section_draft_rollback(
+    req: ActionsOllamaSectionDraftDecisionRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    action_type = "rollback"
+    if not _ollama_write_back_enabled():
+        return _ollama_section_draft_disabled_response(action_type)
+
+    draft = rollback_section_draft(
+        req.draft,
+        confirmed_by=req.confirmed_by,
+        confirmed_at=req.confirmed_at,
+    )
+    return _ollama_section_draft_decision_response(action_type, draft)
 
 
 def _ollama_smoke_enabled() -> bool:
