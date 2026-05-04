@@ -1788,6 +1788,8 @@ def _render_ollama_section_review_panel(
                             or "基于本地模型章节复核建议生成草稿对比预览",
                             "confirmed_by": "streamlit_manual_preview",
                         }
+                        draft_decision_result_key = f"ollama_section_draft_decision_result_v{variant}_s{int(selected_index)}"
+                        st.session_state.pop(draft_decision_result_key, None)
                         st.session_state[draft_result_key] = _post_json(
                             base_url,
                             "/actions/ollama/section_draft/build",
@@ -1807,6 +1809,7 @@ def _render_ollama_section_review_panel(
                             "error": str(e),
                         }
                 draft_preview_result = st.session_state.get(draft_result_key) or {}
+                draft_decision_result_key = f"ollama_section_draft_decision_result_v{variant}_s{int(selected_index)}"
                 if isinstance(draft_preview_result, dict) and draft_preview_result:
                     draft_status = str(draft_preview_result.get("status") or "").strip()
                     draft_warning = str(draft_preview_result.get("warning") or draft_preview_result.get("error") or "").strip()
@@ -1827,6 +1830,69 @@ def _render_ollama_section_review_panel(
                         st.info("暂无 diff_preview。")
                     st.markdown("**草稿审计记录（只读）**")
                     st.json(draft_preview_result.get("audit") or [])
+                    st.markdown("**草稿决策预览（不写回）**")
+                    st.caption("当前操作仅生成草稿决策预览，不写回正式正文，不更新成果，不触发导出。")
+                    draft_data = draft_preview_result.get("draft") if isinstance(draft_preview_result.get("draft"), dict) else {}
+                    decision_buttons = st.columns([1, 1, 1])
+                    decision_actions = [
+                        ("应用预览（不写回）", "apply_preview", "/actions/ollama/section_draft/apply_preview"),
+                        ("拒绝草稿", "reject", "/actions/ollama/section_draft/reject"),
+                        ("回滚预览", "rollback", "/actions/ollama/section_draft/rollback"),
+                    ]
+                    for idx, (label, action_name, endpoint) in enumerate(decision_actions):
+                        with decision_buttons[idx]:
+                            if st.button(
+                                label,
+                                key=f"ollama_section_draft_decision_{action_name}_btn_v{variant}_s{int(selected_index)}",
+                                type="secondary",
+                                use_container_width=True,
+                            ):
+                                try:
+                                    if not actions_key.strip():
+                                        raise ValueError("Actions Key 不能为空")
+                                    if not draft_data:
+                                        raise ValueError("请先生成可用的草稿对比预览")
+                                    st.session_state[draft_decision_result_key] = _post_json(
+                                        base_url,
+                                        endpoint,
+                                        actions_key,
+                                        {
+                                            "draft": draft_data,
+                                            "confirmed_by": f"streamlit_manual_{action_name}",
+                                        },
+                                        timeout=60,
+                                    )
+                                except Exception as e:
+                                    st.session_state[draft_decision_result_key] = {
+                                        "ok": False,
+                                        "status": "error",
+                                        "draft_type": "section_draft",
+                                        "action_type": action_name,
+                                        "draft": None,
+                                        "audit": [],
+                                        "error": str(e),
+                                    }
+                    draft_decision_result = st.session_state.get(draft_decision_result_key) or {}
+                    if isinstance(draft_decision_result, dict) and draft_decision_result:
+                        decision_status = str(draft_decision_result.get("status") or "").strip()
+                        decision_action = str(draft_decision_result.get("action_type") or "").strip()
+                        decision_warning = str(draft_decision_result.get("warning") or draft_decision_result.get("error") or "").strip()
+                        decision_draft = (
+                            draft_decision_result.get("draft") if isinstance(draft_decision_result.get("draft"), dict) else {}
+                        )
+                        decision_draft_status = str(decision_draft.get("status") or "").strip()
+                        st.info(
+                            f"status={decision_status or '-'}；action_type={decision_action or '-'}；"
+                            f"draft.status={decision_draft_status or '-'}"
+                        )
+                        if decision_status == "disabled":
+                            st.warning(f"草稿决策预览未启用：{decision_warning or 'ollama_write_back_disabled'}")
+                        elif not draft_decision_result.get("ok"):
+                            st.warning(f"草稿决策预览未完成：{decision_warning or '-'}")
+                        st.markdown("**草稿决策审计记录（只读）**")
+                        st.json(draft_decision_result.get("audit") or [])
+                        with st.expander("草稿决策数据（只读）", expanded=False):
+                            st.json(decision_draft)
                     with st.expander("草稿数据（只读）", expanded=False):
                         st.json(draft_preview_result.get("draft") or {})
 
