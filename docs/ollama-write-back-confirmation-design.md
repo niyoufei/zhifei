@@ -319,3 +319,80 @@ Conclusion:
 - Apply, reject, and rollback are still not implemented.
 - The UI still does not write back to the section body.
 - The UI still does not write job, result bundle, build, output, or export artifacts.
+
+## Draft-only section draft decision UI validation
+
+Validation targets:
+
+- `生成草稿对比预览（不写回）`.
+- `应用预览（不写回）`.
+- `拒绝草稿`.
+- `回滚预览`.
+
+Validation method:
+
+- Used static source inspection.
+- `python3 -m py_compile app.py` passed.
+- Did not start Streamlit or FastAPI.
+- Did not connect to Ollama.
+- Did not run real generation.
+
+Build button boundary:
+
+- The `生成草稿对比预览（不写回）` button exists.
+- Disabled feedback exists: `草稿预览未启用` / `ollama_write_back_disabled`.
+- Enabled response display paths exist for `diff_preview`, audit JSON, and draft JSON.
+- The draft preview block does not modify `run_result`.
+
+Decision button boundary:
+
+- The `应用预览（不写回）` button exists.
+- The `拒绝草稿` button exists.
+- The `回滚预览` button exists.
+- The three buttons call their corresponding draft-only endpoints.
+- Decision actions use independent session state: `ollama_section_draft_decision_result...`.
+- Decision actions do not overwrite the build result.
+- Decision actions do not modify the current section body.
+
+Safety copy:
+
+- The page includes `不写回正式正文`.
+- The page includes `不更新成果`.
+- The page includes `不触发导出`.
+
+Forbidden path validation:
+
+- `/actions/review/apply` was not called by the draft decision UI block.
+- `/actions/generate` was not called by the draft decision UI block.
+- `/actions/generate_async` was not called by the draft decision UI block.
+- `LLMClient` was not called by the draft decision UI block.
+- Direct Ollama preview/review endpoints were not called by the draft decision UI block.
+- `run_autoplan` was not called by the draft decision UI block.
+- `create_job` was not called by the draft decision UI block.
+- `update_job` was not called by the draft decision UI block.
+- `_save_outputs` was not called by the draft decision UI block.
+- `save_output_artifacts` was not called by the draft decision UI block.
+- docx, xlsx, and export paths were not triggered by the draft decision UI block.
+
+File-count validation:
+
+- `backend/data/autoplan/jobs`: `87 -> 87`.
+- `build`: `1389 -> 1389`.
+- `output`: `0 -> 0`.
+
+Workspace result during validation:
+
+- `git status --short` was empty.
+- No files were modified, moved, or deleted during validation.
+- No `git add` was run.
+- No commit was created.
+- No PR was created.
+- No job, build, output, or result bundle was written.
+
+Conclusion:
+
+- The draft-only decision UI only displays draft decision previews.
+- The UI still does not formally write back to the section body.
+- The UI still does not update a job or result bundle.
+- The UI still does not trigger the export chain.
+- The UI still does not enter the formal deliverable chain.
