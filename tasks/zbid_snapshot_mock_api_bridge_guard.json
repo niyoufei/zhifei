@@ -1,0 +1,58 @@
+{
+  "name": "ZBid snapshot mock API bridge guarded checks",
+  "pr_title": "chore: add ZBid snapshot mock API bridge guard spec",
+  "tag_name": "v0.1.44-zbid-snapshot-mock-api-bridge-guard-spec",
+  "allowed_files": [
+    "backend/app/routers/actions_bridge.py",
+    "backend/tests/test_actions_zbid_snapshot_mapper_api.py",
+    "docs/zbid-snapshot-mock-api-bridge-smoke-test-design.md",
+    "docs/zbid-snapshot-mock-api-bridge-v0.1.41-review.md",
+    "tasks/zbid_snapshot_mock_api_bridge_guard.json"
+  ],
+  "forbidden_files": [
+    "app.py",
+    "frontend/**",
+    "backend/zhifei_autoplan/orchestrator.py",
+    "backend/zhifei_autoplan/utils/llm_client.py",
+    "backend/zhifei_autoplan/providers/**",
+    "backend/zhifei_autoplan/section_drafts.py",
+    "backend/zhifei_autoplan/zbid_snapshot_mapper.py",
+    "backend/data/autoplan/jobs/**",
+    "build/**",
+    "output/**",
+    "docs/**/*.docx",
+    "docs/**/*.xlsx",
+    "docs/**/*.pptx"
+  ],
+  "test_commands": [
+    "python -m pytest backend/tests/test_actions_zbid_snapshot_mapper_api.py backend/tests/test_zbid_snapshot_mapper.py"
+  ],
+  "count_paths": [
+    "backend/data/autoplan/jobs",
+    "build",
+    "output"
+  ],
+  "risky_command_notes": [
+    "ollama serve",
+    "ollama run",
+    "/actions/generate_async",
+    "/actions/review/apply",
+    "export",
+    "save_output_artifacts",
+    "run_autoplan",
+    "create_job",
+    "update_job",
+    "git clean",
+    "rm -rf"
+  ],
+  "guard_boundaries": [
+    "check-only task spec",
+    "no service start",
+    "no Ollama connection",
+    "no real generation",
+    "no export",
+    "no job or result bundle writes",
+    "no build or output writes",
+    "no formal apply"
+  ]
+}
