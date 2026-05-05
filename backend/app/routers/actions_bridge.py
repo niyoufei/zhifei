@@ -50,6 +50,7 @@ from backend.zhifei_autoplan.section_drafts import (
     reject_section_draft,
     rollback_section_draft,
 )
+from backend.zhifei_autoplan.zbid_snapshot_mapper import map_zbid_snapshot_to_zdoc_draft_input
 from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
 from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
 from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
@@ -248,6 +249,10 @@ class ActionsOllamaMainChainSmokeRequest(BaseModel):
     chapter_requirements: dict | None = None
     model: str | None = None
     base_url: str | None = None
+
+
+class ActionsZBidSnapshotDraftInputPreviewRequest(BaseModel):
+    snapshot: dict
 
 
 @router.get("/params/get")
@@ -1027,6 +1032,56 @@ def _ollama_section_draft_decision_response(action_type: str, draft: dict) -> di
         "audit": draft.get("audit", []),
         "error": None,
     }
+
+
+def _zbid_mock_api_enabled() -> bool:
+    return os.environ.get("ZDOC_ZBID_MOCK_API_ENABLED", "").strip() == "1"
+
+
+def _zbid_mock_api_base_response(*, ok: bool, status: str, data: dict | None, error: str | None = None) -> dict:
+    return {
+        "ok": ok,
+        "status": status,
+        "mode": "mock_only",
+        "draft_only": True,
+        "no_write": True,
+        "source_system": "zbid",
+        "data": data,
+        "error": error,
+    }
+
+
+@router.post("/zbid/snapshot_draft_input/preview")
+async def actions_zbid_snapshot_draft_input_preview(
+    req: ActionsZBidSnapshotDraftInputPreviewRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    if not _zbid_mock_api_enabled():
+        return _zbid_mock_api_base_response(
+            ok=False,
+            status="disabled",
+            data=None,
+            error="zbid_mock_api_disabled",
+        )
+
+    try:
+        data = map_zbid_snapshot_to_zdoc_draft_input(req.snapshot)
+    except ValueError as exc:
+        detail = _zbid_mock_api_base_response(
+            ok=False,
+            status="validation_error",
+            data=None,
+            error="validation_error",
+        )
+        detail["message"] = str(exc)
+        raise HTTPException(status_code=400, detail=detail) from None
+
+    return _zbid_mock_api_base_response(
+        ok=True,
+        status="mapped",
+        data=data,
+    )
 
 
 @router.post("/ollama/section_draft/build")
