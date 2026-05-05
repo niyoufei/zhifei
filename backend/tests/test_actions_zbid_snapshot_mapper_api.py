@@ -7,9 +7,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from backend.zhifei_autoplan.zbid_snapshot_mapper import FORBIDDEN_KEYS
+
+
+ZBID_PREVIEW_PATH = "/actions/zbid/snapshot_draft_input/preview"
+TEST_ACTIONS_KEY = "test-actions-key"
 
 
 def _file_count(path: str) -> int:
@@ -116,6 +121,16 @@ def _assert_no_forbidden_keys(value) -> None:
     elif isinstance(value, list):
         for child in value:
             _assert_no_forbidden_keys(child)
+
+
+def _actions_test_client(actions_bridge) -> TestClient:
+    app = FastAPI()
+    app.include_router(actions_bridge.router)
+    return TestClient(app)
+
+
+def _actions_headers() -> dict[str, str]:
+    return {"X-Actions-Key": TEST_ACTIONS_KEY}
 
 
 def _no_write_chain_patches(actions_bridge):
@@ -286,3 +301,129 @@ async def test_zbid_snapshot_preview_response_does_not_contain_forbidden_keys() 
         result = await actions_bridge.actions_zbid_snapshot_draft_input_preview(req, x_actions_key="test-actions-key")
 
     _assert_no_forbidden_keys(result)
+
+
+def test_zbid_snapshot_preview_http_smoke_disabled_does_not_call_mapper(monkeypatch) -> None:
+    from backend.app.routers import actions_bridge
+
+    monkeypatch.delenv("ZDOC_ZBID_MOCK_API_ENABLED", raising=False)
+
+    with (
+        patch.dict(os.environ, {"ZF_ACTIONS_KEY": TEST_ACTIONS_KEY}, clear=False),
+        patch.object(
+            actions_bridge,
+            "map_zbid_snapshot_to_zdoc_draft_input",
+            side_effect=AssertionError("mapper must not be called when disabled"),
+        ) as mapper_mock,
+    ):
+        client = _actions_test_client(actions_bridge)
+        response = client.post(ZBID_PREVIEW_PATH, json={"snapshot": _valid_snapshot()}, headers=_actions_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["status"] == "disabled"
+    assert body["mode"] == "mock_only"
+    assert body["draft_only"] is True
+    assert body["no_write"] is True
+    assert body["source_system"] == "zbid"
+    assert body["data"] is None
+    mapper_mock.assert_not_called()
+
+
+def test_zbid_snapshot_preview_http_smoke_enabled_valid_snapshot_no_write() -> None:
+    from backend.app.routers import actions_bridge
+
+    before_counts = _artifact_counts()
+    snapshot = _valid_snapshot()
+
+    with ExitStack() as stack:
+        no_write_mocks = _start_patches(stack, _no_write_chain_patches(actions_bridge))
+        stack.enter_context(patch.dict(os.environ, {"ZF_ACTIONS_KEY": TEST_ACTIONS_KEY, "ZDOC_ZBID_MOCK_API_ENABLED": "1"}, clear=False))
+        mapper_mock = stack.enter_context(
+            patch.object(
+                actions_bridge,
+                "map_zbid_snapshot_to_zdoc_draft_input",
+                wraps=actions_bridge.map_zbid_snapshot_to_zdoc_draft_input,
+            )
+        )
+
+        client = _actions_test_client(actions_bridge)
+        response = client.post(ZBID_PREVIEW_PATH, json={"snapshot": snapshot}, headers=_actions_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"] == "mapped"
+    assert body["mode"] == "mock_only"
+    assert body["draft_only"] is True
+    assert body["no_write"] is True
+    assert body["source_system"] == "zbid"
+    assert body["data"]["mode"] == "draft_only"
+    assert body["data"]["source_system"] == "zbid"
+    assert body["data"]["safety_boundary"]["no_write"] is True
+    assert body["data"]["safety_boundary"]["allow_ollama"] is False
+
+    _assert_no_forbidden_keys(body)
+    mapper_mock.assert_called_once_with(snapshot)
+    for mock in no_write_mocks:
+        mock.assert_not_called()
+    assert _artifact_counts() == before_counts
+
+
+def test_zbid_snapshot_preview_http_smoke_invalid_snapshot_returns_controlled_400() -> None:
+    from backend.app.routers import actions_bridge
+
+    before_counts = _artifact_counts()
+    snapshot = _valid_snapshot()
+    snapshot.pop("snapshot_meta")
+
+    with ExitStack() as stack:
+        no_write_mocks = _start_patches(stack, _no_write_chain_patches(actions_bridge))
+        stack.enter_context(patch.dict(os.environ, {"ZF_ACTIONS_KEY": TEST_ACTIONS_KEY, "ZDOC_ZBID_MOCK_API_ENABLED": "1"}, clear=False))
+
+        client = _actions_test_client(actions_bridge)
+        response = client.post(ZBID_PREVIEW_PATH, json={"snapshot": snapshot}, headers=_actions_headers())
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["status"] == "validation_error"
+    assert detail["mode"] == "mock_only"
+    assert detail["draft_only"] is True
+    assert detail["no_write"] is True
+    assert detail["source_system"] == "zbid"
+    assert detail["data"] is None
+    assert detail["error"] == "validation_error"
+    assert detail["message"] == "missing required top-level field: snapshot_meta"
+    assert "Traceback" not in detail["message"]
+
+    for mock in no_write_mocks:
+        mock.assert_not_called()
+    assert _artifact_counts() == before_counts
+
+
+def test_zbid_snapshot_preview_http_smoke_forbidden_key_returns_controlled_400() -> None:
+    from backend.app.routers import actions_bridge
+
+    before_counts = _artifact_counts()
+    snapshot = _valid_snapshot()
+    snapshot["project"]["nested"] = {"job": "must-not-pass"}
+
+    with ExitStack() as stack:
+        no_write_mocks = _start_patches(stack, _no_write_chain_patches(actions_bridge))
+        stack.enter_context(patch.dict(os.environ, {"ZF_ACTIONS_KEY": TEST_ACTIONS_KEY, "ZDOC_ZBID_MOCK_API_ENABLED": "1"}, clear=False))
+
+        client = _actions_test_client(actions_bridge)
+        response = client.post(ZBID_PREVIEW_PATH, json={"snapshot": snapshot}, headers=_actions_headers())
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["status"] == "validation_error"
+    assert detail["error"] == "validation_error"
+    assert "forbidden field" in detail["message"]
+    assert "Traceback" not in detail["message"]
+
+    for mock in no_write_mocks:
+        mock.assert_not_called()
+    assert _artifact_counts() == before_counts
