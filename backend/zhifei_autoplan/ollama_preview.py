@@ -23,10 +23,24 @@ LOCAL_LLM_PREVIEW_ALLOWED_FIELDS = frozenset(
         "source_context",
     }
 )
+LOCAL_LLM_PREVIEW_BRIDGE_ALLOWED_FIELDS = frozenset(
+    {
+        "section_text",
+        "section_title",
+        "review_focus",
+        "preview_type",
+        "source_context",
+        "trigger",
+        "caller",
+    }
+)
+LOCAL_LLM_PREVIEW_BRIDGE_SOURCE = "zdoc_local_llm_preview_api_task_bridge_fake"
+LOCAL_LLM_PREVIEW_BRIDGE_TYPE = "api_task_bridge"
 
 
 Transport = Callable[[str, dict[str, Any], float], dict[str, Any]]
 LocalLLMPreviewClient = Callable[[dict[str, Any]], dict[str, Any]]
+LocalLLMPreviewHelper = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -126,6 +140,139 @@ def _local_llm_preview_response(
         "reason": reason,
         "safety": _preview_safety(),
     }
+
+
+def _with_local_llm_bridge_metadata(
+    result: dict[str, Any],
+    *,
+    trigger: str = "manual",
+    caller: str = "",
+) -> dict[str, Any]:
+    out = dict(result)
+    out["bridge_type"] = LOCAL_LLM_PREVIEW_BRIDGE_TYPE
+    out["bridge_source"] = LOCAL_LLM_PREVIEW_BRIDGE_SOURCE
+    out["trigger"] = _clean_text(trigger, limit=80) or "manual"
+    out["caller"] = _clean_text(caller, limit=120)
+    out["preview_only"] = True
+    out["no_write"] = True
+    out["affects_generation"] = False
+    out["affects_export"] = False
+    out["affects_zbid_writeback"] = False
+    safety = dict(out.get("safety") if isinstance(out.get("safety"), dict) else {})
+    safety.update(_preview_safety())
+    out["safety"] = safety
+    return out
+
+
+def build_zdoc_local_llm_preview_api_payload(request: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "section_text": _clean_text(request.get("section_text")),
+        "section_title": _clean_text(request.get("section_title"), limit=200),
+        "review_focus": _clean_text(request.get("review_focus"), limit=1000),
+        "preview_type": _clean_text(request.get("preview_type"), limit=80) or "section_review",
+        "source_context": request.get("source_context") if isinstance(request.get("source_context"), dict) else {},
+    }
+
+
+def run_zdoc_local_llm_preview_task(
+    request: dict[str, Any] | None,
+    *,
+    preview_helper: LocalLLMPreviewHelper | None = None,
+) -> dict[str, Any]:
+    trigger = "manual"
+    caller = ""
+    if isinstance(request, dict):
+        trigger = _clean_text(request.get("trigger"), limit=80) or trigger
+        caller = _clean_text(request.get("caller"), limit=120)
+
+    enabled = _env_bool(LOCAL_LLM_PREVIEW_FLAG, default=False)
+    if not enabled:
+        return _with_local_llm_bridge_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=False,
+                status="disabled",
+                warning="local_llm_preview_api_task_bridge_disabled",
+                reason="feature_flag_disabled",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    if not isinstance(request, dict):
+        return _with_local_llm_bridge_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="missing_input",
+                reason="payload_required",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    extra_fields = sorted(set(request) - LOCAL_LLM_PREVIEW_BRIDGE_ALLOWED_FIELDS)
+    if extra_fields:
+        return _with_local_llm_bridge_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="illegal_field",
+                reason=f"illegal_field:{extra_fields[0]}",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    if "section_text" not in request:
+        return _with_local_llm_bridge_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="missing_field",
+                reason="missing_field:section_text",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    payload = build_zdoc_local_llm_preview_api_payload(request)
+    helper = preview_helper or run_zdoc_local_llm_preview
+    try:
+        result = helper(dict(payload))
+    except (TimeoutError, socket.timeout):
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type="bridge_helper_timeout",
+            reason="bridge_helper_timeout",
+        )
+    except Exception as exc:
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type=f"bridge_helper_error:{type(exc).__name__}",
+            reason="bridge_helper_error",
+        )
+
+    if not isinstance(result, dict):
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type="invalid_bridge_response",
+            reason="bridge_response_must_be_dict",
+        )
+
+    return _with_local_llm_bridge_metadata(result, trigger=trigger, caller=caller)
 
 
 def _stable_local_llm_fake_preview(request: dict[str, Any]) -> dict[str, Any]:

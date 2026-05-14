@@ -9,6 +9,7 @@ from backend.zhifei_autoplan.ollama_preview import (
     run_ollama_preview,
     run_ollama_section_review,
     run_zdoc_local_llm_preview,
+    run_zdoc_local_llm_preview_task,
 )
 
 
@@ -38,6 +39,14 @@ def _valid_local_preview_payload() -> dict:
     }
 
 
+def _valid_local_preview_bridge_request() -> dict:
+    return {
+        **_valid_local_preview_payload(),
+        "trigger": "manual",
+        "caller": "unit_test",
+    }
+
+
 def _assert_local_preview_guard(result: dict) -> None:
     assert result["preview_only"] is True
     assert result["no_write"] is True
@@ -50,6 +59,14 @@ def _assert_local_preview_guard(result: dict) -> None:
     assert result["safety"]["affects_generation"] is False
     assert result["safety"]["affects_export"] is False
     assert result["safety"]["affects_zbid_writeback"] is False
+
+
+def _assert_local_preview_bridge_guard(result: dict) -> None:
+    _assert_local_preview_guard(result)
+    assert result["bridge_type"] == "api_task_bridge"
+    assert result["bridge_source"] == "zdoc_local_llm_preview_api_task_bridge_fake"
+    assert result["safety"]["manual_trigger"] is True
+    assert result["safety"]["requires_human_review"] is True
 
 
 def test_zdoc_local_llm_preview_absent_flag_disabled_does_not_call_fake_client(monkeypatch) -> None:
@@ -209,6 +226,138 @@ def test_zdoc_local_llm_preview_invalid_fake_response_returns_stable_failure(
     assert result["status"] == "failure"
     assert result["error_type"] == "invalid_fake_response"
     _assert_local_preview_guard(result)
+
+
+def test_zdoc_local_llm_preview_task_default_disabled_does_not_call_helper_or_write(monkeypatch) -> None:
+    monkeypatch.delenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", raising=False)
+    before_counts = _write_surface_counts()
+
+    def fail_helper(_payload):
+        raise AssertionError("preview helper must not be called when bridge is disabled")
+
+    result = run_zdoc_local_llm_preview_task(_valid_local_preview_bridge_request(), preview_helper=fail_helper)
+
+    assert result["ok"] is False
+    assert result["enabled"] is False
+    assert result["status"] == "disabled"
+    assert result["warning"] == "local_llm_preview_api_task_bridge_disabled"
+    assert result["reason"] == "feature_flag_disabled"
+    assert result["trigger"] == "manual"
+    assert result["caller"] == "unit_test"
+    assert _write_surface_counts() == before_counts
+    _assert_local_preview_bridge_guard(result)
+
+
+@pytest.mark.parametrize("flag_value", ["", "false", "0", "no", "off"])
+def test_zdoc_local_llm_preview_task_false_flags_disabled_without_helper(monkeypatch, flag_value: str) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", flag_value)
+
+    def fail_helper(_payload):
+        raise AssertionError("preview helper must not be called when bridge is disabled")
+
+    result = run_zdoc_local_llm_preview_task(_valid_local_preview_bridge_request(), preview_helper=fail_helper)
+
+    assert result["ok"] is False
+    assert result["enabled"] is False
+    assert result["status"] == "disabled"
+    _assert_local_preview_bridge_guard(result)
+
+
+def test_zdoc_local_llm_preview_task_enabled_calls_fake_helper_without_writes(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "1")
+    before_counts = _write_surface_counts()
+    request = _valid_local_preview_bridge_request()
+    original_request = copy.deepcopy(request)
+    helper_calls = []
+
+    def counting_helper(payload):
+        helper_calls.append(copy.deepcopy(payload))
+        return run_zdoc_local_llm_preview(payload)
+
+    result = run_zdoc_local_llm_preview_task(request, preview_helper=counting_helper)
+
+    assert result["ok"] is True
+    assert result["enabled"] is True
+    assert result["status"] == "ok"
+    assert result["model"] == "fake-local-llm"
+    assert result["preview_type"] == "section_review"
+    assert result["trigger"] == "manual"
+    assert result["caller"] == "unit_test"
+    assert len(result["suggestions"]) == 3
+    assert helper_calls == [_valid_local_preview_payload() | {"source_context": {}}]
+    assert request == original_request
+    assert "content" not in result
+    assert "docx" not in result
+    assert "markdown" not in result
+    assert "json" not in result
+    assert "job_id" not in result
+    assert "export_path" not in result
+    assert _write_surface_counts() == before_counts
+    _assert_local_preview_bridge_guard(result)
+
+
+def test_zdoc_local_llm_preview_task_enabled_does_not_call_ollama_or_external_api(monkeypatch) -> None:
+    import backend.zhifei_autoplan.ollama_preview as preview_module
+
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "on")
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("external model/API transport must not be called")
+
+    monkeypatch.setattr(preview_module.urllib.request, "urlopen", fail_urlopen)
+
+    result = run_zdoc_local_llm_preview_task(_valid_local_preview_bridge_request())
+
+    assert result["ok"] is True
+    assert result["source"] == "zdoc_local_llm_preview_fake"
+    _assert_local_preview_bridge_guard(result)
+
+
+def test_zdoc_local_llm_preview_task_deterministic_and_does_not_modify_section(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "yes")
+    request = _valid_local_preview_bridge_request()
+    original_request = copy.deepcopy(request)
+
+    first = run_zdoc_local_llm_preview_task(request)
+    second = run_zdoc_local_llm_preview_task(request)
+
+    assert first == second
+    assert request == original_request
+    assert request["section_text"] == "质量控制措施：责任到人，按节点验收。"
+    assert first["advisory"] != request["section_text"]
+    _assert_local_preview_bridge_guard(first)
+
+
+@pytest.mark.parametrize(
+    ("bridge_request", "error_type", "reason"),
+    [
+        (None, "missing_input", "payload_required"),
+        ({"section_title": "质量保证措施", "trigger": "manual"}, "missing_field", "missing_field:section_text"),
+        ({**_valid_local_preview_bridge_request(), "section_text": "   "}, "empty_text", "section_text_required"),
+        ({**_valid_local_preview_bridge_request(), "export": True}, "illegal_field", "illegal_field:export"),
+        ({**_valid_local_preview_bridge_request(), "job": "job-1"}, "illegal_field", "illegal_field:job"),
+    ],
+)
+def test_zdoc_local_llm_preview_task_invalid_inputs_return_stable_failure(
+    monkeypatch,
+    bridge_request,
+    error_type: str,
+    reason: str,
+) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+
+    result = run_zdoc_local_llm_preview_task(bridge_request)
+
+    assert result["ok"] is False
+    assert result["enabled"] is True
+    assert result["status"] == "failure"
+    assert result["error_type"] == error_type
+    assert result["reason"] == reason
+    assert result["advisory"] == ""
+    assert result["suggestions"] == []
+    assert _write_surface_counts() == before_counts
+    _assert_local_preview_bridge_guard(result)
 
 
 def test_ollama_preview_disabled_does_not_call_network(monkeypatch) -> None:
