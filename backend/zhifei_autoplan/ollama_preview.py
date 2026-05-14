@@ -11,9 +11,22 @@ from typing import Any, Callable
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3:0.6b"
 DEFAULT_TIMEOUT_SECONDS = 60.0
+LOCAL_LLM_PREVIEW_FLAG = "ZDOC_LOCAL_LLM_PREVIEW_ENABLED"
+LOCAL_LLM_PREVIEW_SOURCE = "zdoc_local_llm_preview_fake"
+LOCAL_LLM_PREVIEW_MODEL = "fake-local-llm"
+LOCAL_LLM_PREVIEW_ALLOWED_FIELDS = frozenset(
+    {
+        "section_text",
+        "section_title",
+        "review_focus",
+        "preview_type",
+        "source_context",
+    }
+)
 
 
 Transport = Callable[[str, dict[str, Any], float], dict[str, Any]]
+LocalLLMPreviewClient = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -67,6 +80,197 @@ def _fallback_response(
             "message": "Ollama preview is unavailable; main generation flow was not affected.",
         },
     }
+
+
+def _preview_safety() -> dict[str, bool]:
+    return {
+        "default_off": True,
+        "manual_trigger": True,
+        "preview_only": True,
+        "no_write": True,
+        "affects_generation": False,
+        "affects_export": False,
+        "affects_zbid_writeback": False,
+        "requires_human_review": True,
+    }
+
+
+def _local_llm_preview_response(
+    *,
+    ok: bool,
+    enabled: bool,
+    status: str,
+    advisory: str = "",
+    suggestions: list[str] | None = None,
+    preview_type: str = "section_review",
+    warning: str | None = None,
+    error_type: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": bool(ok),
+        "enabled": bool(enabled),
+        "status": status,
+        "preview_only": True,
+        "no_write": True,
+        "affects_generation": False,
+        "affects_export": False,
+        "affects_zbid_writeback": False,
+        "source": LOCAL_LLM_PREVIEW_SOURCE,
+        "model": LOCAL_LLM_PREVIEW_MODEL,
+        "preview_type": preview_type,
+        "advisory": advisory,
+        "suggestions": list(suggestions or []),
+        "warning": warning,
+        "error_type": error_type,
+        "reason": reason,
+        "safety": _preview_safety(),
+    }
+
+
+def _stable_local_llm_fake_preview(request: dict[str, Any]) -> dict[str, Any]:
+    title = " ".join(_clean_text(request.get("section_title"), limit=120).split()) or "untitled section"
+    focus = " ".join(_clean_text(request.get("review_focus"), limit=160).split())
+    focus_text = focus or "missing items, risks, and manual review suggestions"
+    return {
+        "advisory": (
+            f"Fake local LLM preview for {title}: advisory-only review for {focus_text}. "
+            "The original section was not modified."
+        ),
+        "suggestions": [
+            "Check whether required evidence is present before manual adoption.",
+            "Review risk and compliance wording without changing the source text.",
+            "Keep this preview out of generation, export, job, output, and ZBid write-back paths.",
+        ],
+    }
+
+
+def run_zdoc_local_llm_preview(
+    payload: dict[str, Any] | None,
+    *,
+    fake_client: LocalLLMPreviewClient | None = None,
+) -> dict[str, Any]:
+    enabled = _env_bool(LOCAL_LLM_PREVIEW_FLAG, default=False)
+    if not enabled:
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=False,
+            status="disabled",
+            warning="local_llm_preview_disabled",
+            reason="feature_flag_disabled",
+        )
+
+    if not isinstance(payload, dict):
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            error_type="missing_input",
+            reason="payload_required",
+        )
+
+    extra_fields = sorted(set(payload) - LOCAL_LLM_PREVIEW_ALLOWED_FIELDS)
+    if extra_fields:
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            error_type="illegal_field",
+            reason=f"illegal_field:{extra_fields[0]}",
+        )
+
+    if "section_text" not in payload:
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            error_type="missing_field",
+            reason="missing_field:section_text",
+        )
+
+    section_text = _clean_text(payload.get("section_text"))
+    preview_type = _clean_text(payload.get("preview_type"), limit=80) or "section_review"
+    if not section_text:
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=preview_type,
+            error_type="empty_text",
+            reason="section_text_required",
+        )
+
+    request = {
+        "section_text": section_text,
+        "section_title": _clean_text(payload.get("section_title"), limit=200),
+        "review_focus": _clean_text(payload.get("review_focus"), limit=1000),
+        "preview_type": preview_type,
+        "source_context": payload.get("source_context") if isinstance(payload.get("source_context"), dict) else {},
+    }
+
+    client = fake_client or _stable_local_llm_fake_preview
+    try:
+        data = client(dict(request))
+    except (TimeoutError, socket.timeout):
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=preview_type,
+            error_type="fake_client_timeout",
+            reason="fake_client_timeout",
+        )
+    except Exception as exc:
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=preview_type,
+            error_type=f"fake_client_error:{type(exc).__name__}",
+            reason="fake_client_error",
+        )
+
+    if not isinstance(data, dict):
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=preview_type,
+            error_type="invalid_fake_response",
+            reason="fake_response_must_be_dict",
+        )
+
+    advisory = _clean_text(data.get("advisory"), limit=4000)
+    raw_suggestions = data.get("suggestions")
+    if not advisory or not isinstance(raw_suggestions, list):
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=preview_type,
+            error_type="invalid_fake_response",
+            reason="advisory_and_suggestions_required",
+        )
+
+    suggestions = [_clean_text(item, limit=500) for item in raw_suggestions if _clean_text(item, limit=500)]
+    if not suggestions:
+        return _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=preview_type,
+            error_type="invalid_fake_response",
+            reason="suggestions_required",
+        )
+
+    return _local_llm_preview_response(
+        ok=True,
+        enabled=True,
+        status="ok",
+        preview_type=preview_type,
+        advisory=advisory,
+        suggestions=suggestions,
+    )
 
 
 def build_preview_prompt(*, content: str, section_title: str = "", instruction: str = "") -> str:

@@ -1,8 +1,214 @@
 from __future__ import annotations
 
+import copy
+from pathlib import Path
+
 import pytest
 
-from backend.zhifei_autoplan.ollama_preview import run_ollama_preview, run_ollama_section_review
+from backend.zhifei_autoplan.ollama_preview import (
+    run_ollama_preview,
+    run_ollama_section_review,
+    run_zdoc_local_llm_preview,
+)
+
+
+def _file_count(path: str) -> int:
+    root = Path(path)
+    if not root.exists():
+        return 0
+    return sum(1 for item in root.rglob("*") if item.is_file())
+
+
+def _write_surface_counts() -> dict[str, int]:
+    return {
+        "output": _file_count("output"),
+        "job": _file_count("job"),
+        "export": _file_count("export"),
+        "autoplan_jobs": _file_count("backend/data/autoplan/jobs"),
+        "build": _file_count("build"),
+    }
+
+
+def _valid_local_preview_payload() -> dict:
+    return {
+        "section_title": "质量保证措施",
+        "section_text": "质量控制措施：责任到人，按节点验收。",
+        "review_focus": "缺项、风险和证据支撑",
+        "preview_type": "section_review",
+    }
+
+
+def _assert_local_preview_guard(result: dict) -> None:
+    assert result["preview_only"] is True
+    assert result["no_write"] is True
+    assert result["affects_generation"] is False
+    assert result["affects_export"] is False
+    assert result["affects_zbid_writeback"] is False
+    assert result["source"] == "zdoc_local_llm_preview_fake"
+    assert result["safety"]["preview_only"] is True
+    assert result["safety"]["no_write"] is True
+    assert result["safety"]["affects_generation"] is False
+    assert result["safety"]["affects_export"] is False
+    assert result["safety"]["affects_zbid_writeback"] is False
+
+
+def test_zdoc_local_llm_preview_absent_flag_disabled_does_not_call_fake_client(monkeypatch) -> None:
+    monkeypatch.delenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", raising=False)
+
+    def fail_client(_payload):
+        raise AssertionError("fake/model client must not be called when disabled")
+
+    result = run_zdoc_local_llm_preview(_valid_local_preview_payload(), fake_client=fail_client)
+
+    assert result["ok"] is False
+    assert result["enabled"] is False
+    assert result["status"] == "disabled"
+    assert result["warning"] == "local_llm_preview_disabled"
+    assert result["reason"] == "feature_flag_disabled"
+    _assert_local_preview_guard(result)
+
+
+@pytest.mark.parametrize("flag_value", ["", "false", "0", "no", "off"])
+def test_zdoc_local_llm_preview_false_flags_disabled(monkeypatch, flag_value: str) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", flag_value)
+
+    def fail_client(_payload):
+        raise AssertionError("fake/model client must not be called when disabled")
+
+    result = run_zdoc_local_llm_preview(_valid_local_preview_payload(), fake_client=fail_client)
+
+    assert result["ok"] is False
+    assert result["enabled"] is False
+    assert result["status"] == "disabled"
+    _assert_local_preview_guard(result)
+
+
+def test_zdoc_local_llm_preview_enabled_returns_fake_preview_without_writes(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "1")
+    before_counts = _write_surface_counts()
+    payload = _valid_local_preview_payload()
+
+    result = run_zdoc_local_llm_preview(payload)
+
+    assert result["ok"] is True
+    assert result["enabled"] is True
+    assert result["status"] == "ok"
+    assert result["model"] == "fake-local-llm"
+    assert result["preview_type"] == "section_review"
+    assert result["advisory"].startswith("Fake local LLM preview for 质量保证措施")
+    assert len(result["suggestions"]) == 3
+    assert "content" not in result
+    assert "docx" not in result
+    assert "markdown" not in result
+    assert "json" not in result
+    assert "job_id" not in result
+    assert "export_path" not in result
+    assert _write_surface_counts() == before_counts
+    _assert_local_preview_guard(result)
+
+
+def test_zdoc_local_llm_preview_enabled_does_not_call_ollama_or_external_api(monkeypatch) -> None:
+    import backend.zhifei_autoplan.ollama_preview as preview_module
+
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "on")
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("external model/API transport must not be called")
+
+    monkeypatch.setattr(preview_module.urllib.request, "urlopen", fail_urlopen)
+
+    result = run_zdoc_local_llm_preview(_valid_local_preview_payload())
+
+    assert result["ok"] is True
+    assert result["source"] == "zdoc_local_llm_preview_fake"
+    _assert_local_preview_guard(result)
+
+
+def test_zdoc_local_llm_preview_deterministic_and_does_not_modify_section(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "yes")
+    payload = _valid_local_preview_payload()
+    original_payload = copy.deepcopy(payload)
+
+    first = run_zdoc_local_llm_preview(payload)
+    second = run_zdoc_local_llm_preview(payload)
+
+    assert first == second
+    assert payload == original_payload
+    assert payload["section_text"] == "质量控制措施：责任到人，按节点验收。"
+    assert first["advisory"] != payload["section_text"]
+    _assert_local_preview_guard(first)
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_type", "reason"),
+    [
+        (None, "missing_input", "payload_required"),
+        ({"section_title": "质量保证措施"}, "missing_field", "missing_field:section_text"),
+        ({**_valid_local_preview_payload(), "section_text": "   "}, "empty_text", "section_text_required"),
+        ({**_valid_local_preview_payload(), "export": True}, "illegal_field", "illegal_field:export"),
+        ({**_valid_local_preview_payload(), "job": "job-1"}, "illegal_field", "illegal_field:job"),
+    ],
+)
+def test_zdoc_local_llm_preview_invalid_inputs_return_stable_failure(
+    monkeypatch,
+    payload,
+    error_type: str,
+    reason: str,
+) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+
+    result = run_zdoc_local_llm_preview(payload)
+
+    assert result["ok"] is False
+    assert result["enabled"] is True
+    assert result["status"] == "failure"
+    assert result["error_type"] == error_type
+    assert result["reason"] == reason
+    assert result["advisory"] == ""
+    assert result["suggestions"] == []
+    _assert_local_preview_guard(result)
+
+
+def test_zdoc_local_llm_preview_fake_client_timeout_returns_stable_failure(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "1")
+
+    def timeout_client(_payload):
+        raise TimeoutError("timeout")
+
+    result = run_zdoc_local_llm_preview(_valid_local_preview_payload(), fake_client=timeout_client)
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "fake_client_timeout"
+    assert result["reason"] == "fake_client_timeout"
+    _assert_local_preview_guard(result)
+
+
+@pytest.mark.parametrize(
+    "fake_response",
+    [
+        None,
+        {},
+        {"advisory": "建议", "suggestions": "not-a-list"},
+        {"advisory": "", "suggestions": ["建议"]},
+        {"advisory": "建议", "suggestions": []},
+    ],
+)
+def test_zdoc_local_llm_preview_invalid_fake_response_returns_stable_failure(
+    monkeypatch,
+    fake_response,
+) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "1")
+
+    def fake_client(_payload):
+        return fake_response
+
+    result = run_zdoc_local_llm_preview(_valid_local_preview_payload(), fake_client=fake_client)
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "invalid_fake_response"
+    _assert_local_preview_guard(result)
 
 
 def test_ollama_preview_disabled_does_not_call_network(monkeypatch) -> None:
