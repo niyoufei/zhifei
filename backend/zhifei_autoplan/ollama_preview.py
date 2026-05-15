@@ -36,6 +36,15 @@ LOCAL_LLM_PREVIEW_BRIDGE_ALLOWED_FIELDS = frozenset(
 )
 LOCAL_LLM_PREVIEW_BRIDGE_SOURCE = "zdoc_local_llm_preview_api_task_bridge_fake"
 LOCAL_LLM_PREVIEW_BRIDGE_TYPE = "api_task_bridge"
+LOCAL_LLM_PREVIEW_ENDPOINT_UI_SOURCE = "zdoc_local_llm_preview_endpoint_ui_entry_fake"
+LOCAL_LLM_PREVIEW_ENDPOINT_UI_TYPE = "endpoint_ui_entry"
+LOCAL_LLM_PREVIEW_ENDPOINT_UI_ALLOWED_FIELDS = LOCAL_LLM_PREVIEW_BRIDGE_ALLOWED_FIELDS | frozenset(
+    {
+        "entry_point",
+        "ui_action",
+    }
+)
+LOCAL_LLM_PREVIEW_MANUAL_TRIGGERS = frozenset({"manual", "internal_diagnostic"})
 
 
 Transport = Callable[[str, dict[str, Any], float], dict[str, Any]]
@@ -164,6 +173,57 @@ def _with_local_llm_bridge_metadata(
     return out
 
 
+def _clean_local_llm_preview_entry_point(value: Any) -> str:
+    raw = _clean_text(value, limit=40).lower()
+    if raw in {"ui", "user_interface"}:
+        return "ui"
+    return "endpoint"
+
+
+def _with_local_llm_endpoint_ui_metadata(
+    result: dict[str, Any],
+    *,
+    entry_point: str = "endpoint",
+    trigger: str = "manual",
+    caller: str = "",
+    ui_action: str = "manual_preview",
+) -> dict[str, Any]:
+    out = _with_local_llm_bridge_metadata(result, trigger=trigger, caller=caller)
+    out["entry_type"] = LOCAL_LLM_PREVIEW_ENDPOINT_UI_TYPE
+    out["entry_source"] = LOCAL_LLM_PREVIEW_ENDPOINT_UI_SOURCE
+    out["entry_point"] = _clean_local_llm_preview_entry_point(entry_point)
+    out["ui_action"] = _clean_text(ui_action, limit=80) or "manual_preview"
+    out["endpoint_entry_ready"] = True
+    out["ui_entry_ready"] = True
+    out["endpoint_registered"] = False
+    out["ui_registered"] = False
+    out["service_started"] = False
+    out["fake_only"] = True
+    out["preview_only"] = True
+    out["no_write"] = True
+    out["affects_generation"] = False
+    out["affects_export"] = False
+    out["affects_zbid_writeback"] = False
+    safety = dict(out.get("safety") if isinstance(out.get("safety"), dict) else {})
+    safety.update(
+        {
+            "endpoint_ui_entry": True,
+            "fake_only": True,
+            "endpoint_registered": False,
+            "ui_registered": False,
+            "service_started": False,
+            "manual_trigger": True,
+            "preview_only": True,
+            "no_write": True,
+            "affects_generation": False,
+            "affects_export": False,
+            "affects_zbid_writeback": False,
+        }
+    )
+    out["safety"] = safety
+    return out
+
+
 def build_zdoc_local_llm_preview_api_payload(request: dict[str, Any]) -> dict[str, Any]:
     return {
         "section_text": _clean_text(request.get("section_text")),
@@ -273,6 +333,214 @@ def run_zdoc_local_llm_preview_task(
         )
 
     return _with_local_llm_bridge_metadata(result, trigger=trigger, caller=caller)
+
+
+def build_zdoc_local_llm_preview_endpoint_ui_payload(request: dict[str, Any]) -> dict[str, Any]:
+    trigger = _clean_text(request.get("trigger"), limit=80) or "manual"
+    return {
+        "section_text": _clean_text(request.get("section_text")),
+        "section_title": _clean_text(request.get("section_title"), limit=200),
+        "review_focus": _clean_text(request.get("review_focus"), limit=1000),
+        "preview_type": _clean_text(request.get("preview_type"), limit=80) or "section_review",
+        "source_context": request.get("source_context") if isinstance(request.get("source_context"), dict) else {},
+        "trigger": trigger,
+        "caller": _clean_text(request.get("caller"), limit=120),
+    }
+
+
+def run_zdoc_local_llm_preview_endpoint_ui_entry(
+    request: dict[str, Any] | None,
+    *,
+    preview_bridge: LocalLLMPreviewHelper | None = None,
+) -> dict[str, Any]:
+    entry_point = "endpoint"
+    trigger = "manual"
+    caller = ""
+    ui_action = "manual_preview"
+    if isinstance(request, dict):
+        entry_point = _clean_local_llm_preview_entry_point(request.get("entry_point"))
+        trigger = _clean_text(request.get("trigger"), limit=80) or trigger
+        caller = _clean_text(request.get("caller"), limit=120)
+        ui_action = _clean_text(request.get("ui_action"), limit=80) or ui_action
+
+    enabled = _env_bool(LOCAL_LLM_PREVIEW_FLAG, default=False)
+    if not enabled:
+        return _with_local_llm_endpoint_ui_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=False,
+                status="disabled",
+                warning="local_llm_preview_endpoint_ui_entry_disabled",
+                reason="feature_flag_disabled",
+            ),
+            entry_point=entry_point,
+            trigger=trigger,
+            caller=caller,
+            ui_action=ui_action,
+        )
+
+    if trigger not in LOCAL_LLM_PREVIEW_MANUAL_TRIGGERS:
+        return _with_local_llm_endpoint_ui_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="invalid_trigger",
+                reason="manual_trigger_required",
+            ),
+            entry_point=entry_point,
+            trigger=trigger,
+            caller=caller,
+            ui_action=ui_action,
+        )
+
+    if not isinstance(request, dict):
+        return _with_local_llm_endpoint_ui_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="missing_input",
+                reason="payload_required",
+            ),
+            entry_point=entry_point,
+            trigger=trigger,
+            caller=caller,
+            ui_action=ui_action,
+        )
+
+    extra_fields = sorted(set(request) - LOCAL_LLM_PREVIEW_ENDPOINT_UI_ALLOWED_FIELDS)
+    if extra_fields:
+        return _with_local_llm_endpoint_ui_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="illegal_field",
+                reason=f"illegal_field:{extra_fields[0]}",
+            ),
+            entry_point=entry_point,
+            trigger=trigger,
+            caller=caller,
+            ui_action=ui_action,
+        )
+
+    if "section_text" not in request:
+        return _with_local_llm_endpoint_ui_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="missing_field",
+                reason="missing_field:section_text",
+            ),
+            entry_point=entry_point,
+            trigger=trigger,
+            caller=caller,
+            ui_action=ui_action,
+        )
+
+    payload = build_zdoc_local_llm_preview_endpoint_ui_payload(request)
+    if not payload["section_text"]:
+        return _with_local_llm_endpoint_ui_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                preview_type=payload.get("preview_type") or "section_review",
+                error_type="empty_text",
+                reason="section_text_required",
+            ),
+            entry_point=entry_point,
+            trigger=trigger,
+            caller=caller,
+            ui_action=ui_action,
+        )
+
+    bridge = preview_bridge or run_zdoc_local_llm_preview_task
+    try:
+        result = bridge(dict(payload))
+    except (TimeoutError, socket.timeout):
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type="endpoint_ui_bridge_timeout",
+            reason="endpoint_ui_bridge_timeout",
+        )
+    except Exception as exc:
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type=f"endpoint_ui_bridge_error:{type(exc).__name__}",
+            reason="endpoint_ui_bridge_error",
+        )
+
+    if not isinstance(result, dict):
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type="invalid_endpoint_ui_bridge_response",
+            reason="endpoint_ui_bridge_response_must_be_dict",
+        )
+
+    return _with_local_llm_endpoint_ui_metadata(
+        result,
+        entry_point=entry_point,
+        trigger=payload.get("trigger") or trigger,
+        caller=payload.get("caller") or caller,
+        ui_action=ui_action,
+    )
+
+
+def build_zdoc_local_llm_preview_ui_view(result: dict[str, Any]) -> dict[str, Any]:
+    normalized = result if isinstance(result, dict) else _local_llm_preview_response(
+        ok=False,
+        enabled=False,
+        status="failure",
+        error_type="invalid_ui_view_input",
+        reason="result_must_be_dict",
+    )
+    out = _with_local_llm_endpoint_ui_metadata(
+        normalized,
+        entry_point=str(normalized.get("entry_point") or "ui"),
+        trigger=str(normalized.get("trigger") or "manual"),
+        caller=str(normalized.get("caller") or ""),
+        ui_action=str(normalized.get("ui_action") or "manual_preview"),
+    )
+    suggestions = out.get("suggestions") if isinstance(out.get("suggestions"), list) else []
+    return {
+        "ok": bool(out.get("ok")),
+        "enabled": bool(out.get("enabled")),
+        "status": str(out.get("status") or ""),
+        "entry_type": LOCAL_LLM_PREVIEW_ENDPOINT_UI_TYPE,
+        "entry_source": LOCAL_LLM_PREVIEW_ENDPOINT_UI_SOURCE,
+        "entry_point": out.get("entry_point"),
+        "preview_only": True,
+        "no_write": True,
+        "affects_generation": False,
+        "affects_export": False,
+        "affects_zbid_writeback": False,
+        "display": {
+            "kind": "local_llm_preview_diagnostics",
+            "label": "Local LLM preview diagnostics",
+            "advisory": _clean_text(out.get("advisory"), limit=4000),
+            "suggestions": [_clean_text(item, limit=500) for item in suggestions if _clean_text(item, limit=500)],
+            "disabled": not bool(out.get("enabled")),
+            "actions": {
+                "can_write_back": False,
+                "can_generate": False,
+                "can_export": False,
+                "can_zbid_writeback": False,
+            },
+        },
+        "safety": dict(out.get("safety") if isinstance(out.get("safety"), dict) else {}),
+    }
 
 
 def _stable_local_llm_fake_preview(request: dict[str, Any]) -> dict[str, Any]:
