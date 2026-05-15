@@ -157,7 +157,7 @@ def _valid_zdoc_ollama_preview_request() -> dict:
     }
 
 
-def _assert_zdoc_ollama_guard(result: dict) -> None:
+def _assert_zdoc_ollama_guard(result: dict, *, calls_ollama: bool = False) -> None:
     assert result["preview_only"] is True
     assert result["no_write"] is True
     assert result["affects_generation"] is False
@@ -169,7 +169,7 @@ def _assert_zdoc_ollama_guard(result: dict) -> None:
     assert result["transport_target"] == "127.0.0.1:11434"
     assert result["fake_transport_only"] is True
     assert result["real_transport_enabled"] is False
-    assert result["calls_ollama"] is False
+    assert result["calls_ollama"] is calls_ollama
     assert result["calls_external_model_api"] is False
     assert result["downloads_models"] is False
     assert result["pulls_models"] is False
@@ -885,6 +885,34 @@ def test_zdoc_ollama_preview_adapter_flag_absent_disabled_without_transport(monk
     _assert_zdoc_ollama_guard(result)
 
 
+def test_zdoc_ollama_preview_requested_model_missing_does_not_generate_or_pull(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_OLLAMA_PREVIEW_MODEL", "missing-model:latest")
+    generate_calls = []
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(*_args, **_kwargs):
+        generate_calls.append(True)
+        raise AssertionError("generate must not be called when requested model is unavailable")
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "model_unavailable"
+    assert result["reason"] == "requested_model_unavailable"
+    assert result["model"] == "missing-model:latest"
+    assert generate_calls == []
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
 @pytest.mark.parametrize("flag_value", ["false", "0", "no", "off"])
 def test_zdoc_ollama_preview_adapter_false_flags_disabled_without_transport(monkeypatch, flag_value: str) -> None:
     monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
@@ -923,7 +951,7 @@ def test_zdoc_ollama_preview_selects_model_from_fake_tags(monkeypatch) -> None:
     assert result["model"] == "qwen3:0.6b"
     assert result["selection_only"] is True
     assert seen == {"url": "http://127.0.0.1:11434/api/tags", "payload": {}, "timeout": 2.0}
-    _assert_zdoc_ollama_guard(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
 def test_zdoc_ollama_preview_fake_tags_empty_returns_model_unavailable(monkeypatch) -> None:
@@ -949,7 +977,7 @@ def test_zdoc_ollama_preview_fake_tags_empty_returns_model_unavailable(monkeypat
     assert result["error_type"] == "model_unavailable"
     assert result["reason"] == "no_local_ollama_models"
     assert generate_calls == []
-    _assert_zdoc_ollama_guard(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
 def test_zdoc_ollama_preview_fake_tags_unreachable_returns_stable_failure(monkeypatch) -> None:
@@ -972,7 +1000,7 @@ def test_zdoc_ollama_preview_fake_tags_unreachable_returns_stable_failure(monkey
     assert result["status"] == "failure"
     assert result["error_type"] == "ollama_unreachable"
     assert result["reason"] == "tags_unreachable"
-    _assert_zdoc_ollama_guard(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
 def test_zdoc_ollama_preview_fake_generate_success_is_preview_only(monkeypatch) -> None:
@@ -1034,7 +1062,7 @@ def test_zdoc_ollama_preview_fake_generate_success_is_preview_only(monkeypatch) 
     assert seen["generate_url"] != "http://127.0.0.1:11434/review/apply"
     assert request == original_request
     assert _write_surface_counts() == before_counts
-    _assert_zdoc_ollama_guard(first)
+    _assert_zdoc_ollama_guard(first, calls_ollama=True)
 
 
 def test_zdoc_ollama_preview_fake_generate_timeout_returns_stable_failure(monkeypatch) -> None:
@@ -1057,7 +1085,60 @@ def test_zdoc_ollama_preview_fake_generate_timeout_returns_stable_failure(monkey
     assert result["status"] == "failure"
     assert result["error_type"] == "timeout"
     assert result["reason"] == "generate_timeout"
-    _assert_zdoc_ollama_guard(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_empty_response_returns_controlled_failure(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "   "}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "invalid_response"
+    assert result["reason"] == "missing_preview_advisory"
+    assert result["advisory"] == ""
+    assert result["suggestions"] == []
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_thinking_only_is_bounded_preview(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    thinking_only = "<think>" + ("只做推理预览。" * 300)
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": thinking_only}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["advisory"].startswith("<think>")
+    assert len(result["advisory"]) <= 1200
+    assert "content" not in result
+    assert "docx" not in result
+    assert "job_id" not in result
+    assert "export_path" not in result
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
 def test_zdoc_ollama_preview_fake_generate_invalid_json_returns_stable_failure(monkeypatch) -> None:
@@ -1080,7 +1161,7 @@ def test_zdoc_ollama_preview_fake_generate_invalid_json_returns_stable_failure(m
     assert result["status"] == "failure"
     assert result["error_type"] == "invalid_response"
     assert result["reason"] == "generate_invalid_response"
-    _assert_zdoc_ollama_guard(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
 def test_zdoc_ollama_preview_fake_generate_error_field_returns_stable_failure(monkeypatch) -> None:
@@ -1103,7 +1184,7 @@ def test_zdoc_ollama_preview_fake_generate_error_field_returns_stable_failure(mo
     assert result["status"] == "failure"
     assert result["error_type"] == "transport_failure"
     assert result["reason"] == "ollama_error"
-    _assert_zdoc_ollama_guard(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
 def test_zdoc_ollama_preview_fake_transport_failure_returns_stable_failure(monkeypatch) -> None:
@@ -1126,7 +1207,7 @@ def test_zdoc_ollama_preview_fake_transport_failure_returns_stable_failure(monke
     assert result["status"] == "failure"
     assert result["error_type"] == "transport_failure"
     assert result["reason"] == "generate_transport_failure"
-    _assert_zdoc_ollama_guard(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
 def test_zdoc_ollama_preview_enabled_without_fake_transport_does_not_access_real_ollama(monkeypatch) -> None:

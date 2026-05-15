@@ -215,6 +215,7 @@ def _zdoc_ollama_response(
     error_type: str | None = None,
     reason: str | None = None,
     preview_type: str = "section_review",
+    calls_ollama: bool = False,
 ) -> dict[str, Any]:
     return {
         "ok": bool(ok),
@@ -237,7 +238,7 @@ def _zdoc_ollama_response(
         "preview_type": preview_type,
         "fake_transport_only": True,
         "real_transport_enabled": False,
-        "calls_ollama": False,
+        "calls_ollama": bool(calls_ollama),
         "calls_external_model_api": False,
         "downloads_models": False,
         "pulls_models": False,
@@ -283,6 +284,7 @@ def build_zdoc_ollama_failure_response(
     model: str = "",
     base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
     preview_type: str = "section_review",
+    calls_ollama: bool = False,
 ) -> dict[str, Any]:
     return _zdoc_ollama_response(
         ok=False,
@@ -295,6 +297,7 @@ def build_zdoc_ollama_failure_response(
         error_type=error_type,
         reason=reason,
         preview_type=preview_type,
+        calls_ollama=calls_ollama,
     )
 
 
@@ -386,24 +389,28 @@ def select_zdoc_local_ollama_model(
             error_type="timeout",
             reason="tags_timeout",
             base_url=resolved_base_url,
+            calls_ollama=True,
         )
     except (urllib.error.URLError, OSError):
         return build_zdoc_ollama_failure_response(
             error_type="ollama_unreachable",
             reason="tags_unreachable",
             base_url=resolved_base_url,
+            calls_ollama=True,
         )
     except ValueError:
         return build_zdoc_ollama_failure_response(
             error_type="invalid_response",
             reason="tags_invalid_response",
             base_url=resolved_base_url,
+            calls_ollama=True,
         )
     except Exception:
         return build_zdoc_ollama_failure_response(
             error_type="transport_failure",
             reason="tags_transport_failure",
             base_url=resolved_base_url,
+            calls_ollama=True,
         )
 
     if not isinstance(tags_response, dict):
@@ -411,6 +418,7 @@ def select_zdoc_local_ollama_model(
             error_type="invalid_response",
             reason="tags_response_must_be_object",
             base_url=resolved_base_url,
+            calls_ollama=True,
         )
 
     model_names = _extract_zdoc_ollama_model_names(tags_response)
@@ -419,6 +427,7 @@ def select_zdoc_local_ollama_model(
             error_type="model_unavailable",
             reason="no_local_ollama_models",
             base_url=resolved_base_url,
+            calls_ollama=True,
         )
 
     requested = _clean_text(requested_model or os.environ.get(LOCAL_LLM_OLLAMA_PREVIEW_MODEL_ENV), limit=120)
@@ -428,6 +437,7 @@ def select_zdoc_local_ollama_model(
             reason="requested_model_unavailable",
             model=requested,
             base_url=resolved_base_url,
+            calls_ollama=True,
         )
 
     selected = requested or model_names[0]
@@ -439,6 +449,7 @@ def select_zdoc_local_ollama_model(
         model=selected,
         base_url=resolved_base_url,
         reason="model_selected",
+        calls_ollama=True,
     )
     result["available_models_count"] = len(model_names)
     result["selection_only"] = True
@@ -478,6 +489,7 @@ def normalize_zdoc_ollama_response(
             model=model,
             base_url=base_url,
             preview_type=preview_type,
+            calls_ollama=True,
         )
 
     error = _clean_text(raw_response.get("error"), limit=300)
@@ -488,6 +500,7 @@ def normalize_zdoc_ollama_response(
             model=model,
             base_url=base_url,
             preview_type=preview_type,
+            calls_ollama=True,
         )
 
     response_text = _clean_text(raw_response.get("response"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
@@ -504,6 +517,7 @@ def normalize_zdoc_ollama_response(
             model=model,
             base_url=base_url,
             preview_type=preview_type,
+            calls_ollama=True,
         )
 
     return _zdoc_ollama_response(
@@ -516,6 +530,7 @@ def normalize_zdoc_ollama_response(
         advisory=response_text,
         suggestions=_zdoc_ollama_suggestions(response_text),
         preview_type=preview_type,
+        calls_ollama=True,
     )
 
 
@@ -590,6 +605,7 @@ def run_zdoc_ollama_preview(
             model=selected_model,
             base_url=resolved_base_url,
             preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+            calls_ollama=True,
         )
     except ValueError:
         return build_zdoc_ollama_failure_response(
@@ -598,6 +614,7 @@ def run_zdoc_ollama_preview(
             model=selected_model,
             base_url=resolved_base_url,
             preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+            calls_ollama=True,
         )
     except Exception:
         return build_zdoc_ollama_failure_response(
@@ -606,6 +623,7 @@ def run_zdoc_ollama_preview(
             model=selected_model,
             base_url=resolved_base_url,
             preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+            calls_ollama=True,
         )
 
     result = normalize_zdoc_ollama_response(

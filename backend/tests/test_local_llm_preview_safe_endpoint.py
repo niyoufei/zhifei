@@ -13,6 +13,8 @@ from backend.app.routers import local_llm_preview_safe
 
 
 SAFE_PATH = "/local-llm/preview-safe"
+REAL_ADAPTER_SOURCE = "zdoc_real_ollama_preview_adapter_fake_transport"
+REAL_ADAPTER_ENTRY_SOURCE = "zdoc_local_llm_preview_isolated_safe_endpoint_real_ollama_adapter"
 FORMAL_RESULT_FIELDS = {
     "content",
     "docx",
@@ -92,19 +94,27 @@ def _assert_no_formal_result_fields(result: dict) -> None:
         assert field not in result
 
 
-def _assert_safe_endpoint_guard(result: dict) -> None:
+def _assert_safe_endpoint_guard(
+    result: dict,
+    *,
+    source: str = "zdoc_local_llm_preview_isolated_safe_endpoint_fake",
+    entry_source: str = "zdoc_local_llm_preview_isolated_safe_endpoint_fake",
+    fake_only: bool = True,
+    calls_ollama: bool = False,
+) -> None:
     assert result["preview_only"] is True
     assert result["no_write"] is True
     assert result["affects_generation"] is False
     assert result["affects_export"] is False
     assert result["affects_zbid_writeback"] is False
-    assert result["source"] == "zdoc_local_llm_preview_isolated_safe_endpoint_fake"
+    assert result["source"] == source
     assert result["entry_type"] == "isolated_safe_endpoint"
-    assert result["entry_source"] == "zdoc_local_llm_preview_isolated_safe_endpoint_fake"
+    assert result["entry_source"] == entry_source
     assert result["endpoint_path"] == SAFE_PATH
     assert result["safe_endpoint_registered"] is True
     assert result["service_started"] is False
-    assert result["fake_only"] is True
+    assert result["fake_only"] is fake_only
+    assert result["real_adapter_bridge"] is (not fake_only)
     assert result["calls_generate_route"] is False
     assert result["calls_export_docx_route"] is False
     assert result["calls_review_apply_route"] is False
@@ -113,12 +123,13 @@ def _assert_safe_endpoint_guard(result: dict) -> None:
     assert result["writes_output"] is False
     assert result["writes_job"] is False
     assert result["writes_export"] is False
-    assert result["calls_ollama"] is False
+    assert result["calls_ollama"] is calls_ollama
     assert result["calls_external_model_api"] is False
     assert result["safety"]["isolated_safe_endpoint"] is True
     assert result["safety"]["safe_endpoint_registered"] is True
     assert result["safety"]["service_started"] is False
-    assert result["safety"]["fake_only"] is True
+    assert result["safety"]["fake_only"] is fake_only
+    assert result["safety"]["real_adapter_bridge"] is (not fake_only)
     assert result["safety"]["preview_only"] is True
     assert result["safety"]["no_write"] is True
     assert result["safety"]["calls_generate_route"] is False
@@ -129,7 +140,7 @@ def _assert_safe_endpoint_guard(result: dict) -> None:
     assert result["safety"]["writes_output"] is False
     assert result["safety"]["writes_job"] is False
     assert result["safety"]["writes_export"] is False
-    assert result["safety"]["calls_ollama"] is False
+    assert result["safety"]["calls_ollama"] is calls_ollama
     assert result["safety"]["calls_external_model_api"] is False
     assert result["safety"]["downloads_models"] is False
     assert result["safety"]["pulls_models"] is False
@@ -149,7 +160,11 @@ def test_safe_endpoint_absent_flag_disabled_does_not_call_helper(monkeypatch) ->
     def fail_helper(_payload):
         raise AssertionError("safe helper must not be called when endpoint is disabled")
 
+    def fail_adapter(_payload):
+        raise AssertionError("real adapter must not be called when endpoint is disabled")
+
     monkeypatch.setattr(local_llm_preview_safe, "run_zdoc_local_llm_preview_safe_service_entry", fail_helper)
+    monkeypatch.setattr(local_llm_preview_safe, "_run_ollama_adapter_bridge", fail_adapter)
 
     response = _client().post(SAFE_PATH, json=_valid_endpoint_payload())
     result = response.json()
@@ -173,7 +188,11 @@ def test_safe_endpoint_false_flags_disabled_without_helper(monkeypatch, flag_val
     def fail_helper(_payload):
         raise AssertionError("safe helper must not be called when endpoint is disabled")
 
+    def fail_adapter(_payload):
+        raise AssertionError("real adapter must not be called when endpoint is disabled")
+
     monkeypatch.setattr(local_llm_preview_safe, "run_zdoc_local_llm_preview_safe_service_entry", fail_helper)
+    monkeypatch.setattr(local_llm_preview_safe, "_run_ollama_adapter_bridge", fail_adapter)
 
     response = _client().post(SAFE_PATH, json=_valid_endpoint_payload())
     result = response.json()
@@ -188,6 +207,7 @@ def test_safe_endpoint_false_flags_disabled_without_helper(monkeypatch, flag_val
 
 def test_safe_endpoint_enabled_calls_fake_only_safe_helper_without_writes(monkeypatch) -> None:
     monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "1")
+    monkeypatch.delenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", raising=False)
     before_counts = _write_surface_counts()
     helper_calls: list[dict] = []
     payload = _valid_endpoint_payload()
@@ -197,7 +217,11 @@ def test_safe_endpoint_enabled_calls_fake_only_safe_helper_without_writes(monkey
         helper_calls.append(copy.deepcopy(helper_payload))
         return _fake_safe_helper_response()
 
+    def fail_adapter(_payload):
+        raise AssertionError("real adapter must not be called when adapter flag is disabled")
+
     monkeypatch.setattr(local_llm_preview_safe, "run_zdoc_local_llm_preview_safe_service_entry", fake_helper)
+    monkeypatch.setattr(local_llm_preview_safe, "_run_ollama_adapter_bridge", fail_adapter)
 
     response = _client().post(SAFE_PATH, json=payload)
     result = response.json()
@@ -226,6 +250,232 @@ def test_safe_endpoint_enabled_calls_fake_only_safe_helper_without_writes(monkey
     assert payload == original_payload
     assert _write_surface_counts() == before_counts
     _assert_safe_endpoint_guard(result)
+
+
+def test_safe_endpoint_double_flags_calls_fake_ollama_adapter_generate_without_writes(monkeypatch) -> None:
+    import backend.zhifei_autoplan.ollama_preview as preview_module
+
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_OLLAMA_PREVIEW_MODEL", "qwen3:0.6b")
+    before_counts = _write_surface_counts()
+    seen = {}
+
+    def fail_helper(_payload):
+        raise AssertionError("safe fake helper must not be called when adapter flag is enabled")
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("real 127.0.0.1:11434 access must not happen in deterministic tests")
+
+    def fake_tags(url, payload, timeout):
+        seen["tags_url"] = url
+        seen["tags_payload"] = copy.deepcopy(payload)
+        seen["tags_timeout"] = timeout
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(url, payload, timeout):
+        seen["generate_url"] = url
+        seen["generate_payload"] = copy.deepcopy(payload)
+        seen["generate_timeout"] = timeout
+        return {"response": "建议补充质量验收记录。\n建议明确责任闭环。"}
+
+    monkeypatch.setattr(preview_module.urllib.request, "urlopen", fail_urlopen)
+    monkeypatch.setattr(local_llm_preview_safe, "run_zdoc_local_llm_preview_safe_service_entry", fail_helper)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    response = _client().post(SAFE_PATH, json=_valid_endpoint_payload())
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["ok"] is True
+    assert result["enabled"] is True
+    assert result["status"] == "ok"
+    assert result["model"] == "qwen3:0.6b"
+    assert result["advisory"] == "建议补充质量验收记录。\n建议明确责任闭环。"
+    assert result["suggestions"] == ["建议补充质量验收记录。", "建议明确责任闭环。"]
+    assert result["fake_transport_only"] is True
+    assert result["real_adapter_bridge"] is True
+    assert seen["tags_url"] == "http://127.0.0.1:11434/api/tags"
+    assert seen["tags_payload"] == {}
+    assert seen["generate_url"] == "http://127.0.0.1:11434/api/generate"
+    assert seen["generate_payload"]["model"] == "qwen3:0.6b"
+    assert seen["generate_payload"]["stream"] is False
+    assert seen["generate_url"] != "http://127.0.0.1:11434/generate"
+    assert seen["generate_url"] != "http://127.0.0.1:11434/export_docx"
+    assert seen["generate_url"] != "http://127.0.0.1:11434/review/apply"
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_requested_model_missing_returns_controlled_failure(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_OLLAMA_PREVIEW_MODEL", "missing-model:latest")
+    before_counts = _write_surface_counts()
+    generate_calls = []
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(*_args, **_kwargs):
+        generate_calls.append(True)
+        raise AssertionError("generate must not be called for a missing model")
+
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    result = _client().post(SAFE_PATH, json=_valid_endpoint_payload()).json()
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "model_unavailable"
+    assert result["reason"] == "requested_model_unavailable"
+    assert result["model"] == "missing-model:latest"
+    assert generate_calls == []
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_empty_generate_response_returns_controlled_failure(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "   "}
+
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    result = _client().post(SAFE_PATH, json=_valid_endpoint_payload()).json()
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "invalid_response"
+    assert result["reason"] == "missing_preview_advisory"
+    assert result["advisory"] == ""
+    assert result["suggestions"] == []
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_thinking_only_response_is_bounded_preview(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+    thinking_only = "<think>" + ("仅作预览推理。" * 300)
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": thinking_only}
+
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    result = _client().post(SAFE_PATH, json=_valid_endpoint_payload()).json()
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["advisory"].startswith("<think>")
+    assert len(result["advisory"]) <= 1200
+    assert "content" not in result
+    assert "docx" not in result
+    assert "job_id" not in result
+    assert "export_path" not in result
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_transport_exception_returns_controlled_failure(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(*_args, **_kwargs):
+        raise RuntimeError("fake transport failed")
+
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    result = _client().post(SAFE_PATH, json=_valid_endpoint_payload()).json()
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "transport_failure"
+    assert result["reason"] == "generate_transport_failure"
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_missing_optional_fields_uses_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+    seen = {}
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, payload, _timeout):
+        seen["prompt"] = payload["prompt"]
+        return {"response": "默认字段预览建议。"}
+
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    result = _client().post(SAFE_PATH, json={"section_text": "只有正文。"}).json()
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["request_id"] == ""
+    assert "Untitled section" in seen["prompt"]
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
 
 
 def test_safe_endpoint_enabled_actual_helper_is_fake_only_and_deterministic(monkeypatch) -> None:
@@ -283,6 +533,46 @@ def test_safe_endpoint_enabled_does_not_call_forbidden_routes_or_chains(monkeypa
     _assert_safe_endpoint_guard(result)
 
 
+def test_safe_endpoint_double_flags_does_not_call_forbidden_routes_or_chains(monkeypatch) -> None:
+    from backend.app.routers import actions_bridge, zhifei_autoplan
+
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "只返回 preview advisory。"}
+
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    forbidden_patches = [
+        patch.object(actions_bridge, "actions_generate", side_effect=AssertionError("/actions/generate must not be called")),
+        patch.object(actions_bridge, "actions_export_docx", side_effect=AssertionError("/actions/export_docx must not be called")),
+        patch.object(actions_bridge, "actions_review_apply", side_effect=AssertionError("/actions/review/apply must not be called")),
+        patch.object(zhifei_autoplan, "generate_plan", side_effect=AssertionError("/autoplan/generate must not be called")),
+        patch.object(zhifei_autoplan, "export_docx", side_effect=AssertionError("/autoplan/export_docx must not be called")),
+    ]
+
+    with ExitStack() as stack:
+        for item in forbidden_patches:
+            stack.enter_context(item)
+        result = _client().post(SAFE_PATH, json=_valid_endpoint_payload()).json()
+
+    assert result["ok"] is True
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
 @pytest.mark.parametrize(
     ("payload", "error_type", "reason"),
     [
@@ -297,8 +587,14 @@ def test_safe_endpoint_enabled_does_not_call_forbidden_routes_or_chains(monkeypa
 )
 def test_safe_endpoint_invalid_inputs_return_stable_failure(monkeypatch, payload: dict, error_type: str, reason: str) -> None:
     monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
     before_counts = _write_surface_counts()
     original_payload = copy.deepcopy(payload)
+
+    def fail_adapter(_payload):
+        raise AssertionError("adapter must not be called for invalid endpoint payload")
+
+    monkeypatch.setattr(local_llm_preview_safe, "_run_ollama_adapter_bridge", fail_adapter)
 
     response = _client().post(SAFE_PATH, json=payload)
     result = response.json()
