@@ -44,6 +44,28 @@ LOCAL_LLM_PREVIEW_ENDPOINT_UI_ALLOWED_FIELDS = LOCAL_LLM_PREVIEW_BRIDGE_ALLOWED_
         "ui_action",
     }
 )
+LOCAL_LLM_PREVIEW_SAFE_SERVICE_SOURCE = "zdoc_local_llm_preview_safe_service_entry_fake"
+LOCAL_LLM_PREVIEW_SAFE_SERVICE_TYPE = "safe_service_entry"
+LOCAL_LLM_PREVIEW_SAFE_SERVICE_ALLOWED_FIELDS = LOCAL_LLM_PREVIEW_BRIDGE_ALLOWED_FIELDS
+LOCAL_LLM_PREVIEW_SAFE_SERVICE_PATH = "/diagnostics/local-llm-preview/safe"
+LOCAL_LLM_PREVIEW_FORMAL_OUTPUT_FIELDS = frozenset(
+    {
+        "content",
+        "docx",
+        "docx_path",
+        "export_path",
+        "generated_sections",
+        "job",
+        "job_id",
+        "json",
+        "json_path",
+        "markdown",
+        "markdown_path",
+        "output",
+        "output_path",
+        "result_path",
+    }
+)
 LOCAL_LLM_PREVIEW_MANUAL_TRIGGERS = frozenset({"manual", "internal_diagnostic"})
 
 
@@ -220,6 +242,67 @@ def _with_local_llm_endpoint_ui_metadata(
             "affects_zbid_writeback": False,
         }
     )
+    out["safety"] = safety
+    return out
+
+
+def _safe_service_safety() -> dict[str, bool]:
+    return {
+        "safe_service_entry": True,
+        "safe_endpoint_isolated": True,
+        "safe_endpoint_registered": False,
+        "service_started": False,
+        "fake_only": True,
+        "calls_generate_route": False,
+        "calls_export_docx_route": False,
+        "calls_review_apply_route": False,
+        "triggers_generation_chain": False,
+        "triggers_export_chain": False,
+        "affects_generation": False,
+        "affects_export": False,
+        "affects_zbid_writeback": False,
+        "writes_output": False,
+        "writes_job": False,
+        "writes_export": False,
+        "calls_ollama": False,
+        "calls_external_model_api": False,
+        "downloads_models": False,
+        "pulls_models": False,
+        "listens_on_0_0_0_0": False,
+    }
+
+
+def _with_local_llm_safe_service_metadata(
+    result: dict[str, Any],
+    *,
+    trigger: str = "manual",
+    caller: str = "",
+) -> dict[str, Any]:
+    out = _with_local_llm_bridge_metadata(result, trigger=trigger, caller=caller)
+    out["entry_type"] = LOCAL_LLM_PREVIEW_SAFE_SERVICE_TYPE
+    out["entry_source"] = LOCAL_LLM_PREVIEW_SAFE_SERVICE_SOURCE
+    out["safe_service_entry_ready"] = True
+    out["safe_endpoint_path"] = LOCAL_LLM_PREVIEW_SAFE_SERVICE_PATH
+    out["safe_endpoint_registered"] = False
+    out["service_started"] = False
+    out["fake_only"] = True
+    out["preview_only"] = True
+    out["no_write"] = True
+    out["affects_generation"] = False
+    out["affects_export"] = False
+    out["affects_zbid_writeback"] = False
+    out["calls_generate_route"] = False
+    out["calls_export_docx_route"] = False
+    out["calls_review_apply_route"] = False
+    out["triggers_generation_chain"] = False
+    out["triggers_export_chain"] = False
+    out["writes_output"] = False
+    out["writes_job"] = False
+    out["writes_export"] = False
+    out["calls_ollama"] = False
+    out["calls_external_model_api"] = False
+    safety = dict(out.get("safety") if isinstance(out.get("safety"), dict) else {})
+    safety.update(_safe_service_safety())
     out["safety"] = safety
     return out
 
@@ -495,6 +578,162 @@ def run_zdoc_local_llm_preview_endpoint_ui_entry(
         trigger=payload.get("trigger") or trigger,
         caller=payload.get("caller") or caller,
         ui_action=ui_action,
+    )
+
+
+def build_zdoc_local_llm_preview_safe_service_payload(request: dict[str, Any]) -> dict[str, Any]:
+    trigger = _clean_text(request.get("trigger"), limit=80) or "manual"
+    return {
+        "section_text": _clean_text(request.get("section_text")),
+        "section_title": _clean_text(request.get("section_title"), limit=200),
+        "review_focus": _clean_text(request.get("review_focus"), limit=1000),
+        "preview_type": _clean_text(request.get("preview_type"), limit=80) or "section_review",
+        "source_context": request.get("source_context") if isinstance(request.get("source_context"), dict) else {},
+        "trigger": trigger,
+        "caller": _clean_text(request.get("caller"), limit=120),
+    }
+
+
+def run_zdoc_local_llm_preview_safe_service_entry(
+    request: dict[str, Any] | None,
+    *,
+    preview_bridge: LocalLLMPreviewHelper | None = None,
+) -> dict[str, Any]:
+    trigger = "manual"
+    caller = ""
+    if isinstance(request, dict):
+        trigger = _clean_text(request.get("trigger"), limit=80) or trigger
+        caller = _clean_text(request.get("caller"), limit=120)
+
+    enabled = _env_bool(LOCAL_LLM_PREVIEW_FLAG, default=False)
+    if not enabled:
+        return _with_local_llm_safe_service_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=False,
+                status="disabled",
+                warning="local_llm_preview_safe_service_entry_disabled",
+                reason="feature_flag_disabled",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    if trigger not in LOCAL_LLM_PREVIEW_MANUAL_TRIGGERS:
+        return _with_local_llm_safe_service_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="invalid_trigger",
+                reason="manual_trigger_required",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    if not isinstance(request, dict):
+        return _with_local_llm_safe_service_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="missing_input",
+                reason="payload_required",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    extra_fields = sorted(set(request) - LOCAL_LLM_PREVIEW_SAFE_SERVICE_ALLOWED_FIELDS)
+    if extra_fields:
+        return _with_local_llm_safe_service_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="illegal_field",
+                reason=f"illegal_field:{extra_fields[0]}",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    if "section_text" not in request:
+        return _with_local_llm_safe_service_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                error_type="missing_field",
+                reason="missing_field:section_text",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    payload = build_zdoc_local_llm_preview_safe_service_payload(request)
+    if not payload["section_text"]:
+        return _with_local_llm_safe_service_metadata(
+            _local_llm_preview_response(
+                ok=False,
+                enabled=True,
+                status="failure",
+                preview_type=payload.get("preview_type") or "section_review",
+                error_type="empty_text",
+                reason="section_text_required",
+            ),
+            trigger=trigger,
+            caller=caller,
+        )
+
+    bridge = preview_bridge or run_zdoc_local_llm_preview_task
+    try:
+        result = bridge(dict(payload))
+    except (TimeoutError, socket.timeout):
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type="safe_service_bridge_timeout",
+            reason="safe_service_bridge_timeout",
+        )
+    except Exception as exc:
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type=f"safe_service_bridge_error:{type(exc).__name__}",
+            reason="safe_service_bridge_error",
+        )
+
+    if not isinstance(result, dict):
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type="invalid_safe_service_bridge_response",
+            reason="safe_service_bridge_response_must_be_dict",
+        )
+
+    forbidden_result_fields = sorted(set(result) & LOCAL_LLM_PREVIEW_FORMAL_OUTPUT_FIELDS)
+    if forbidden_result_fields:
+        result = _local_llm_preview_response(
+            ok=False,
+            enabled=True,
+            status="failure",
+            preview_type=payload.get("preview_type") or "section_review",
+            error_type="forbidden_safe_service_bridge_field",
+            reason=f"forbidden_field:{forbidden_result_fields[0]}",
+        )
+
+    return _with_local_llm_safe_service_metadata(
+        result,
+        trigger=payload.get("trigger") or trigger,
+        caller=payload.get("caller") or caller,
     )
 
 
