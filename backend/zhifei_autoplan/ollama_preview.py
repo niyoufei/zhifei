@@ -12,6 +12,10 @@ DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3:0.6b"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 LOCAL_LLM_PREVIEW_FLAG = "ZDOC_LOCAL_LLM_PREVIEW_ENABLED"
+LOCAL_LLM_OLLAMA_PREVIEW_FLAG = "ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED"
+LOCAL_LLM_OLLAMA_PREVIEW_MODEL_ENV = "ZDOC_OLLAMA_PREVIEW_MODEL"
+LOCAL_LLM_OLLAMA_PREVIEW_TIMEOUT_ENV = "ZDOC_OLLAMA_PREVIEW_TIMEOUT"
+LOCAL_LLM_OLLAMA_PREVIEW_NUM_PREDICT_ENV = "ZDOC_OLLAMA_PREVIEW_NUM_PREDICT"
 LOCAL_LLM_PREVIEW_SOURCE = "zdoc_local_llm_preview_fake"
 LOCAL_LLM_PREVIEW_MODEL = "fake-local-llm"
 LOCAL_LLM_PREVIEW_ALLOWED_FIELDS = frozenset(
@@ -48,6 +52,15 @@ LOCAL_LLM_PREVIEW_SAFE_SERVICE_SOURCE = "zdoc_local_llm_preview_safe_service_ent
 LOCAL_LLM_PREVIEW_SAFE_SERVICE_TYPE = "safe_service_entry"
 LOCAL_LLM_PREVIEW_SAFE_SERVICE_ALLOWED_FIELDS = LOCAL_LLM_PREVIEW_BRIDGE_ALLOWED_FIELDS
 LOCAL_LLM_PREVIEW_SAFE_SERVICE_PATH = "/diagnostics/local-llm-preview/safe"
+LOCAL_LLM_OLLAMA_PREVIEW_SOURCE = "zdoc_real_ollama_preview_adapter_fake_transport"
+LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL = "http://127.0.0.1:11434"
+LOCAL_LLM_OLLAMA_PREVIEW_TAGS_PATH = "/api/tags"
+LOCAL_LLM_OLLAMA_PREVIEW_GENERATE_PATH = "/api/generate"
+LOCAL_LLM_OLLAMA_PREVIEW_DEFAULT_TIMEOUT_SECONDS = 10.0
+LOCAL_LLM_OLLAMA_PREVIEW_MAX_TIMEOUT_SECONDS = 30.0
+LOCAL_LLM_OLLAMA_PREVIEW_DEFAULT_NUM_PREDICT = 256
+LOCAL_LLM_OLLAMA_PREVIEW_MAX_NUM_PREDICT = 768
+LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS = 1200
 LOCAL_LLM_PREVIEW_FORMAL_OUTPUT_FIELDS = frozenset(
     {
         "content",
@@ -138,6 +151,487 @@ def _preview_safety() -> dict[str, bool]:
         "affects_zbid_writeback": False,
         "requires_human_review": True,
     }
+
+
+def is_zdoc_ollama_preview_enabled() -> bool:
+    return _env_bool(LOCAL_LLM_OLLAMA_PREVIEW_FLAG, default=False)
+
+
+def _zdoc_ollama_preview_safety() -> dict[str, bool]:
+    safety = _preview_safety()
+    safety.update(
+        {
+            "fake_transport_only": True,
+            "real_ollama_runtime": False,
+            "local_loopback_only": True,
+            "downloads_models": False,
+            "pulls_models": False,
+            "writes_output": False,
+            "writes_job": False,
+            "writes_export": False,
+        }
+    )
+    return safety
+
+
+def _zdoc_ollama_base_url(value: Any = None) -> str:
+    text = _clean_text(value, limit=120).rstrip("/")
+    if not text:
+        return LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL
+    if text == LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL:
+        return text
+    return ""
+
+
+def _zdoc_ollama_timeout(value: Any = None) -> float:
+    raw = value if value is not None else os.environ.get(LOCAL_LLM_OLLAMA_PREVIEW_TIMEOUT_ENV)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = LOCAL_LLM_OLLAMA_PREVIEW_DEFAULT_TIMEOUT_SECONDS
+    return max(1.0, min(LOCAL_LLM_OLLAMA_PREVIEW_MAX_TIMEOUT_SECONDS, timeout))
+
+
+def _zdoc_ollama_num_predict(value: Any = None) -> int:
+    raw = value if value is not None else os.environ.get(LOCAL_LLM_OLLAMA_PREVIEW_NUM_PREDICT_ENV)
+    try:
+        num_predict = int(raw)
+    except (TypeError, ValueError):
+        num_predict = LOCAL_LLM_OLLAMA_PREVIEW_DEFAULT_NUM_PREDICT
+    return max(1, min(LOCAL_LLM_OLLAMA_PREVIEW_MAX_NUM_PREDICT, num_predict))
+
+
+def _zdoc_ollama_response(
+    *,
+    ok: bool,
+    enabled: bool,
+    adapter_enabled: bool,
+    status: str,
+    model: str = "",
+    base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
+    advisory: str = "",
+    suggestions: list[str] | None = None,
+    warning: str | None = None,
+    error_type: str | None = None,
+    reason: str | None = None,
+    preview_type: str = "section_review",
+) -> dict[str, Any]:
+    return {
+        "ok": bool(ok),
+        "enabled": bool(enabled),
+        "adapter_enabled": bool(adapter_enabled),
+        "status": status,
+        "preview_only": True,
+        "no_write": True,
+        "affects_generation": False,
+        "affects_export": False,
+        "affects_zbid_writeback": False,
+        "source": LOCAL_LLM_OLLAMA_PREVIEW_SOURCE,
+        "entry": "real_ollama_preview_adapter_fake_transport",
+        "provider": "ollama",
+        "model": _clean_text(model, limit=120),
+        "base_url": base_url,
+        "transport_target": "127.0.0.1:11434",
+        "tags_path": LOCAL_LLM_OLLAMA_PREVIEW_TAGS_PATH,
+        "generate_path": LOCAL_LLM_OLLAMA_PREVIEW_GENERATE_PATH,
+        "preview_type": preview_type,
+        "fake_transport_only": True,
+        "real_transport_enabled": False,
+        "calls_ollama": False,
+        "calls_external_model_api": False,
+        "downloads_models": False,
+        "pulls_models": False,
+        "writes_output": False,
+        "writes_job": False,
+        "writes_export": False,
+        "triggers_generation_chain": False,
+        "triggers_export_chain": False,
+        "triggers_zbid_writeback": False,
+        "advisory": _clean_text(advisory, limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS),
+        "suggestions": list(suggestions or []),
+        "warning": warning,
+        "error_type": error_type,
+        "reason": reason,
+        "safety": _zdoc_ollama_preview_safety(),
+    }
+
+
+def build_zdoc_ollama_disabled_response(
+    *,
+    enabled: bool,
+    adapter_enabled: bool,
+    reason: str,
+    error_type: str = "ollama_preview_disabled",
+) -> dict[str, Any]:
+    return _zdoc_ollama_response(
+        ok=False,
+        enabled=enabled,
+        adapter_enabled=adapter_enabled,
+        status="disabled",
+        warning=error_type,
+        error_type=error_type,
+        reason=reason,
+    )
+
+
+def build_zdoc_ollama_failure_response(
+    *,
+    error_type: str,
+    reason: str,
+    enabled: bool = True,
+    adapter_enabled: bool = True,
+    model: str = "",
+    base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
+    preview_type: str = "section_review",
+) -> dict[str, Any]:
+    return _zdoc_ollama_response(
+        ok=False,
+        enabled=enabled,
+        adapter_enabled=adapter_enabled,
+        status="failure",
+        model=model,
+        base_url=base_url,
+        warning=error_type,
+        error_type=error_type,
+        reason=reason,
+        preview_type=preview_type,
+    )
+
+
+def _zdoc_ollama_allowed_request_fields() -> frozenset[str]:
+    return LOCAL_LLM_PREVIEW_ALLOWED_FIELDS | frozenset({"context_summary", "request_id"})
+
+
+def _validate_zdoc_ollama_preview_request(request: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not isinstance(request, dict):
+        return None, build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason="request_must_be_object",
+        )
+
+    keys = set(request)
+    forbidden = sorted((keys & LOCAL_LLM_PREVIEW_FORMAL_OUTPUT_FIELDS) | (keys - _zdoc_ollama_allowed_request_fields()))
+    if forbidden:
+        return None, build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason=f"illegal_field:{','.join(forbidden)}",
+        )
+
+    if "section_text" not in request:
+        return None, build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason="missing_section_text",
+        )
+
+    section_text = _clean_text(request.get("section_text"), limit=2000)
+    if not section_text:
+        return None, build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason="empty_section_text",
+        )
+
+    normalized = {
+        "section_text": section_text,
+        "section_title": _clean_text(request.get("section_title"), limit=200) or "Untitled section",
+        "review_focus": _clean_text(request.get("review_focus"), limit=300) or "preview advisory",
+        "preview_type": _clean_text(request.get("preview_type"), limit=80) or "section_review",
+        "source_context": _clean_text(request.get("source_context") or request.get("context_summary"), limit=1000),
+        "request_id": _clean_text(request.get("request_id"), limit=120),
+    }
+    return normalized, None
+
+
+def _extract_zdoc_ollama_model_names(tags_response: dict[str, Any]) -> list[str]:
+    models = tags_response.get("models")
+    if not isinstance(models, list):
+        return []
+    names: list[str] = []
+    for item in models:
+        if isinstance(item, dict):
+            name = _clean_text(item.get("name") or item.get("model"), limit=120)
+        else:
+            name = _clean_text(item, limit=120)
+        if name:
+            names.append(name)
+    return names
+
+
+def select_zdoc_local_ollama_model(
+    *,
+    tags_transport: Transport | None,
+    requested_model: str | None = None,
+    base_url: str | None = None,
+    timeout: Any = None,
+) -> dict[str, Any]:
+    resolved_base_url = _zdoc_ollama_base_url(base_url)
+    if not resolved_base_url:
+        return build_zdoc_ollama_failure_response(
+            error_type="transport_failure",
+            reason="invalid_local_ollama_base_url",
+        )
+
+    if tags_transport is None:
+        return build_zdoc_ollama_failure_response(
+            error_type="transport_failure",
+            reason="fake_tags_transport_required",
+            base_url=resolved_base_url,
+        )
+
+    resolved_timeout = _zdoc_ollama_timeout(timeout)
+    tags_url = f"{resolved_base_url}{LOCAL_LLM_OLLAMA_PREVIEW_TAGS_PATH}"
+    try:
+        tags_response = tags_transport(tags_url, {}, resolved_timeout)
+    except (TimeoutError, socket.timeout):
+        return build_zdoc_ollama_failure_response(
+            error_type="timeout",
+            reason="tags_timeout",
+            base_url=resolved_base_url,
+        )
+    except (urllib.error.URLError, OSError):
+        return build_zdoc_ollama_failure_response(
+            error_type="ollama_unreachable",
+            reason="tags_unreachable",
+            base_url=resolved_base_url,
+        )
+    except ValueError:
+        return build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason="tags_invalid_response",
+            base_url=resolved_base_url,
+        )
+    except Exception:
+        return build_zdoc_ollama_failure_response(
+            error_type="transport_failure",
+            reason="tags_transport_failure",
+            base_url=resolved_base_url,
+        )
+
+    if not isinstance(tags_response, dict):
+        return build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason="tags_response_must_be_object",
+            base_url=resolved_base_url,
+        )
+
+    model_names = _extract_zdoc_ollama_model_names(tags_response)
+    if not model_names:
+        return build_zdoc_ollama_failure_response(
+            error_type="model_unavailable",
+            reason="no_local_ollama_models",
+            base_url=resolved_base_url,
+        )
+
+    requested = _clean_text(requested_model or os.environ.get(LOCAL_LLM_OLLAMA_PREVIEW_MODEL_ENV), limit=120)
+    if requested and requested not in model_names:
+        return build_zdoc_ollama_failure_response(
+            error_type="model_unavailable",
+            reason="requested_model_unavailable",
+            model=requested,
+            base_url=resolved_base_url,
+        )
+
+    selected = requested or model_names[0]
+    result = _zdoc_ollama_response(
+        ok=True,
+        enabled=True,
+        adapter_enabled=True,
+        status="ok",
+        model=selected,
+        base_url=resolved_base_url,
+        reason="model_selected",
+    )
+    result["available_models_count"] = len(model_names)
+    result["selection_only"] = True
+    return result
+
+
+def _zdoc_ollama_preview_prompt(request: dict[str, Any]) -> str:
+    parts = [
+        "Return preview-only advisory suggestions for the ZDoc section.",
+        f"Section title: {request['section_title']}",
+        f"Review focus: {request['review_focus']}",
+    ]
+    if request.get("source_context"):
+        parts.append(f"Context summary: {request['source_context']}")
+    parts.append(f"Section text: {request['section_text']}")
+    parts.append("Do not write final document content. Do not create export artifacts.")
+    return "\n".join(parts)
+
+
+def _zdoc_ollama_suggestions(advisory: str) -> list[str]:
+    lines = [_clean_text(line, limit=220) for line in advisory.splitlines()]
+    suggestions = [line for line in lines if line][:3]
+    return suggestions or ["Review the preview advisory manually before any future implementation step."]
+
+
+def normalize_zdoc_ollama_response(
+    raw_response: Any,
+    *,
+    model: str,
+    base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
+    preview_type: str = "section_review",
+) -> dict[str, Any]:
+    if not isinstance(raw_response, dict):
+        return build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason="generate_response_must_be_object",
+            model=model,
+            base_url=base_url,
+            preview_type=preview_type,
+        )
+
+    error = _clean_text(raw_response.get("error"), limit=300)
+    if error:
+        return build_zdoc_ollama_failure_response(
+            error_type="transport_failure",
+            reason="ollama_error",
+            model=model,
+            base_url=base_url,
+            preview_type=preview_type,
+        )
+
+    response_text = _clean_text(raw_response.get("response"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
+    message = raw_response.get("message")
+    if not response_text and isinstance(message, dict):
+        response_text = _clean_text(message.get("content"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
+    if not response_text:
+        response_text = _clean_text(raw_response.get("advisory"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
+
+    if not response_text:
+        return build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason="missing_preview_advisory",
+            model=model,
+            base_url=base_url,
+            preview_type=preview_type,
+        )
+
+    return _zdoc_ollama_response(
+        ok=True,
+        enabled=True,
+        adapter_enabled=True,
+        status="ok",
+        model=model,
+        base_url=base_url,
+        advisory=response_text,
+        suggestions=_zdoc_ollama_suggestions(response_text),
+        preview_type=preview_type,
+    )
+
+
+def run_zdoc_ollama_preview(
+    request: dict[str, Any] | None,
+    *,
+    tags_transport: Transport | None = None,
+    generate_transport: Transport | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+    timeout: Any = None,
+    num_predict: Any = None,
+) -> dict[str, Any]:
+    if not _env_bool(LOCAL_LLM_PREVIEW_FLAG, default=False):
+        return build_zdoc_ollama_disabled_response(
+            enabled=False,
+            adapter_enabled=False,
+            reason="preview_feature_flag_disabled",
+        )
+
+    if not is_zdoc_ollama_preview_enabled():
+        return build_zdoc_ollama_disabled_response(
+            enabled=True,
+            adapter_enabled=False,
+            reason="adapter_feature_flag_disabled",
+        )
+
+    normalized_request, failure = _validate_zdoc_ollama_preview_request(request)
+    if failure:
+        return failure
+
+    resolved_base_url = _zdoc_ollama_base_url(base_url)
+    if not resolved_base_url:
+        return build_zdoc_ollama_failure_response(
+            error_type="transport_failure",
+            reason="invalid_local_ollama_base_url",
+        )
+
+    if tags_transport is None or generate_transport is None:
+        return build_zdoc_ollama_failure_response(
+            error_type="transport_failure",
+            reason="fake_transport_required",
+            base_url=resolved_base_url,
+            preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+        )
+
+    selected = select_zdoc_local_ollama_model(
+        tags_transport=tags_transport,
+        requested_model=model,
+        base_url=resolved_base_url,
+        timeout=timeout,
+    )
+    if not selected.get("ok"):
+        selected["preview_type"] = normalized_request["preview_type"] if normalized_request else "section_review"
+        return selected
+
+    selected_model = str(selected.get("model") or "")
+    generate_url = f"{resolved_base_url}{LOCAL_LLM_OLLAMA_PREVIEW_GENERATE_PATH}"
+    generate_payload = {
+        "model": selected_model,
+        "prompt": _zdoc_ollama_preview_prompt(normalized_request or {}),
+        "stream": False,
+        "options": {"num_predict": _zdoc_ollama_num_predict(num_predict)},
+    }
+    resolved_timeout = _zdoc_ollama_timeout(timeout)
+    try:
+        raw_response = generate_transport(generate_url, generate_payload, resolved_timeout)
+    except (TimeoutError, socket.timeout):
+        return build_zdoc_ollama_failure_response(
+            error_type="timeout",
+            reason="generate_timeout",
+            model=selected_model,
+            base_url=resolved_base_url,
+            preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+        )
+    except ValueError:
+        return build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason="generate_invalid_response",
+            model=selected_model,
+            base_url=resolved_base_url,
+            preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+        )
+    except Exception:
+        return build_zdoc_ollama_failure_response(
+            error_type="transport_failure",
+            reason="generate_transport_failure",
+            model=selected_model,
+            base_url=resolved_base_url,
+            preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+        )
+
+    result = normalize_zdoc_ollama_response(
+        raw_response,
+        model=selected_model,
+        base_url=resolved_base_url,
+        preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+    )
+    result["request_id"] = normalized_request.get("request_id", "") if normalized_request else ""
+    result["num_predict"] = _zdoc_ollama_num_predict(num_predict)
+    return result
+
+
+def build_zdoc_ollama_preview_client(
+    *,
+    tags_transport: Transport,
+    generate_transport: Transport,
+) -> LocalLLMPreviewClient:
+    def _client(request: dict[str, Any]) -> dict[str, Any]:
+        return run_zdoc_ollama_preview(
+            request,
+            tags_transport=tags_transport,
+            generate_transport=generate_transport,
+        )
+
+    return _client
 
 
 def _local_llm_preview_response(
