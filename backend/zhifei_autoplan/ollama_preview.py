@@ -53,6 +53,7 @@ LOCAL_LLM_PREVIEW_SAFE_SERVICE_TYPE = "safe_service_entry"
 LOCAL_LLM_PREVIEW_SAFE_SERVICE_ALLOWED_FIELDS = LOCAL_LLM_PREVIEW_BRIDGE_ALLOWED_FIELDS
 LOCAL_LLM_PREVIEW_SAFE_SERVICE_PATH = "/diagnostics/local-llm-preview/safe"
 LOCAL_LLM_OLLAMA_PREVIEW_SOURCE = "zdoc_real_ollama_preview_adapter_fake_transport"
+LOCAL_LLM_OLLAMA_PREVIEW_REAL_TRANSPORT_SOURCE = "zdoc_real_ollama_preview_adapter_real_transport"
 LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL = "http://127.0.0.1:11434"
 LOCAL_LLM_OLLAMA_PREVIEW_TAGS_PATH = "/api/tags"
 LOCAL_LLM_OLLAMA_PREVIEW_GENERATE_PATH = "/api/generate"
@@ -157,12 +158,12 @@ def is_zdoc_ollama_preview_enabled() -> bool:
     return _env_bool(LOCAL_LLM_OLLAMA_PREVIEW_FLAG, default=False)
 
 
-def _zdoc_ollama_preview_safety() -> dict[str, bool]:
+def _zdoc_ollama_preview_safety(*, real_transport_enabled: bool = False) -> dict[str, bool]:
     safety = _preview_safety()
     safety.update(
         {
-            "fake_transport_only": True,
-            "real_ollama_runtime": False,
+            "fake_transport_only": not bool(real_transport_enabled),
+            "real_ollama_runtime": bool(real_transport_enabled),
             "local_loopback_only": True,
             "downloads_models": False,
             "pulls_models": False,
@@ -216,7 +217,10 @@ def _zdoc_ollama_response(
     reason: str | None = None,
     preview_type: str = "section_review",
     calls_ollama: bool = False,
+    real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
+    source = LOCAL_LLM_OLLAMA_PREVIEW_REAL_TRANSPORT_SOURCE if real_transport_enabled else LOCAL_LLM_OLLAMA_PREVIEW_SOURCE
+    entry = "real_ollama_preview_adapter_real_transport" if real_transport_enabled else "real_ollama_preview_adapter_fake_transport"
     return {
         "ok": bool(ok),
         "enabled": bool(enabled),
@@ -227,8 +231,8 @@ def _zdoc_ollama_response(
         "affects_generation": False,
         "affects_export": False,
         "affects_zbid_writeback": False,
-        "source": LOCAL_LLM_OLLAMA_PREVIEW_SOURCE,
-        "entry": "real_ollama_preview_adapter_fake_transport",
+        "source": source,
+        "entry": entry,
         "provider": "ollama",
         "model": _clean_text(model, limit=120),
         "base_url": base_url,
@@ -236,8 +240,8 @@ def _zdoc_ollama_response(
         "tags_path": LOCAL_LLM_OLLAMA_PREVIEW_TAGS_PATH,
         "generate_path": LOCAL_LLM_OLLAMA_PREVIEW_GENERATE_PATH,
         "preview_type": preview_type,
-        "fake_transport_only": True,
-        "real_transport_enabled": False,
+        "fake_transport_only": not bool(real_transport_enabled),
+        "real_transport_enabled": bool(real_transport_enabled),
         "calls_ollama": bool(calls_ollama),
         "calls_external_model_api": False,
         "downloads_models": False,
@@ -253,7 +257,7 @@ def _zdoc_ollama_response(
         "warning": warning,
         "error_type": error_type,
         "reason": reason,
-        "safety": _zdoc_ollama_preview_safety(),
+        "safety": _zdoc_ollama_preview_safety(real_transport_enabled=real_transport_enabled),
     }
 
 
@@ -285,6 +289,7 @@ def build_zdoc_ollama_failure_response(
     base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
     preview_type: str = "section_review",
     calls_ollama: bool = False,
+    real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
     return _zdoc_ollama_response(
         ok=False,
@@ -298,6 +303,7 @@ def build_zdoc_ollama_failure_response(
         reason=reason,
         preview_type=preview_type,
         calls_ollama=calls_ollama,
+        real_transport_enabled=real_transport_enabled,
     )
 
 
@@ -359,18 +365,63 @@ def _extract_zdoc_ollama_model_names(tags_response: dict[str, Any]) -> list[str]
     return names
 
 
+def _read_zdoc_ollama_json_response(response: Any) -> dict[str, Any]:
+    raw = response.read()
+    if not raw:
+        return {}
+    parsed = json.loads(raw.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError("ollama_response_must_be_object")
+    return parsed
+
+
+def build_zdoc_ollama_default_transports(*, base_url: str | None = None) -> tuple[Transport, Transport]:
+    resolved_base_url = _zdoc_ollama_base_url(base_url)
+    if not resolved_base_url:
+        raise ValueError("invalid_local_ollama_base_url")
+
+    tags_url = f"{resolved_base_url}{LOCAL_LLM_OLLAMA_PREVIEW_TAGS_PATH}"
+    generate_url = f"{resolved_base_url}{LOCAL_LLM_OLLAMA_PREVIEW_GENERATE_PATH}"
+
+    def _assert_loopback_url(url: str, expected_url: str) -> None:
+        if url != expected_url:
+            raise ValueError("invalid_local_ollama_transport_url")
+
+    def _tags_transport(url: str, _payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        _assert_loopback_url(url, tags_url)
+        request = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return _read_zdoc_ollama_json_response(response)
+
+    def _generate_transport(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        _assert_loopback_url(url, generate_url)
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return _read_zdoc_ollama_json_response(response)
+
+    return _tags_transport, _generate_transport
+
+
 def select_zdoc_local_ollama_model(
     *,
     tags_transport: Transport | None,
     requested_model: str | None = None,
     base_url: str | None = None,
     timeout: Any = None,
+    real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
     resolved_base_url = _zdoc_ollama_base_url(base_url)
     if not resolved_base_url:
         return build_zdoc_ollama_failure_response(
             error_type="transport_failure",
             reason="invalid_local_ollama_base_url",
+            real_transport_enabled=real_transport_enabled,
         )
 
     if tags_transport is None:
@@ -378,6 +429,7 @@ def select_zdoc_local_ollama_model(
             error_type="transport_failure",
             reason="fake_tags_transport_required",
             base_url=resolved_base_url,
+            real_transport_enabled=real_transport_enabled,
         )
 
     resolved_timeout = _zdoc_ollama_timeout(timeout)
@@ -390,6 +442,7 @@ def select_zdoc_local_ollama_model(
             reason="tags_timeout",
             base_url=resolved_base_url,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
     except (urllib.error.URLError, OSError):
         return build_zdoc_ollama_failure_response(
@@ -397,6 +450,7 @@ def select_zdoc_local_ollama_model(
             reason="tags_unreachable",
             base_url=resolved_base_url,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
     except ValueError:
         return build_zdoc_ollama_failure_response(
@@ -404,6 +458,7 @@ def select_zdoc_local_ollama_model(
             reason="tags_invalid_response",
             base_url=resolved_base_url,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
     except Exception:
         return build_zdoc_ollama_failure_response(
@@ -411,6 +466,7 @@ def select_zdoc_local_ollama_model(
             reason="tags_transport_failure",
             base_url=resolved_base_url,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
 
     if not isinstance(tags_response, dict):
@@ -419,6 +475,7 @@ def select_zdoc_local_ollama_model(
             reason="tags_response_must_be_object",
             base_url=resolved_base_url,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
 
     model_names = _extract_zdoc_ollama_model_names(tags_response)
@@ -428,6 +485,7 @@ def select_zdoc_local_ollama_model(
             reason="no_local_ollama_models",
             base_url=resolved_base_url,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
 
     requested = _clean_text(requested_model or os.environ.get(LOCAL_LLM_OLLAMA_PREVIEW_MODEL_ENV), limit=120)
@@ -438,6 +496,7 @@ def select_zdoc_local_ollama_model(
             model=requested,
             base_url=resolved_base_url,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
 
     selected = requested or model_names[0]
@@ -450,6 +509,7 @@ def select_zdoc_local_ollama_model(
         base_url=resolved_base_url,
         reason="model_selected",
         calls_ollama=True,
+        real_transport_enabled=real_transport_enabled,
     )
     result["available_models_count"] = len(model_names)
     result["selection_only"] = True
@@ -481,6 +541,7 @@ def normalize_zdoc_ollama_response(
     model: str,
     base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
     preview_type: str = "section_review",
+    real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(raw_response, dict):
         return build_zdoc_ollama_failure_response(
@@ -490,6 +551,7 @@ def normalize_zdoc_ollama_response(
             base_url=base_url,
             preview_type=preview_type,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
 
     error = _clean_text(raw_response.get("error"), limit=300)
@@ -501,6 +563,7 @@ def normalize_zdoc_ollama_response(
             base_url=base_url,
             preview_type=preview_type,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
 
     response_text = _clean_text(raw_response.get("response"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
@@ -518,6 +581,7 @@ def normalize_zdoc_ollama_response(
             base_url=base_url,
             preview_type=preview_type,
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
 
     return _zdoc_ollama_response(
@@ -531,6 +595,7 @@ def normalize_zdoc_ollama_response(
         suggestions=_zdoc_ollama_suggestions(response_text),
         preview_type=preview_type,
         calls_ollama=True,
+        real_transport_enabled=real_transport_enabled,
     )
 
 
@@ -569,7 +634,20 @@ def run_zdoc_ollama_preview(
             reason="invalid_local_ollama_base_url",
         )
 
-    if tags_transport is None or generate_transport is None:
+    real_transport_enabled = False
+    if tags_transport is None and generate_transport is None:
+        try:
+            tags_transport, generate_transport = build_zdoc_ollama_default_transports(base_url=resolved_base_url)
+        except Exception:
+            return build_zdoc_ollama_failure_response(
+                error_type="transport_failure",
+                reason="default_transport_builder_failure",
+                base_url=resolved_base_url,
+                preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                real_transport_enabled=True,
+            )
+        real_transport_enabled = True
+    elif tags_transport is None or generate_transport is None:
         return build_zdoc_ollama_failure_response(
             error_type="transport_failure",
             reason="fake_transport_required",
@@ -582,6 +660,7 @@ def run_zdoc_ollama_preview(
         requested_model=model,
         base_url=resolved_base_url,
         timeout=timeout,
+        real_transport_enabled=real_transport_enabled,
     )
     if not selected.get("ok"):
         selected["preview_type"] = normalized_request["preview_type"] if normalized_request else "section_review"
@@ -606,6 +685,7 @@ def run_zdoc_ollama_preview(
             base_url=resolved_base_url,
             preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
     except ValueError:
         return build_zdoc_ollama_failure_response(
@@ -615,6 +695,7 @@ def run_zdoc_ollama_preview(
             base_url=resolved_base_url,
             preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
     except Exception:
         return build_zdoc_ollama_failure_response(
@@ -624,6 +705,7 @@ def run_zdoc_ollama_preview(
             base_url=resolved_base_url,
             preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
             calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
         )
 
     result = normalize_zdoc_ollama_response(
@@ -631,6 +713,7 @@ def run_zdoc_ollama_preview(
         model=selected_model,
         base_url=resolved_base_url,
         preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+        real_transport_enabled=real_transport_enabled,
     )
     result["request_id"] = normalized_request.get("request_id", "") if normalized_request else ""
     result["num_predict"] = _zdoc_ollama_num_predict(num_predict)

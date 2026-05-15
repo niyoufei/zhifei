@@ -14,6 +14,7 @@ from backend.app.routers import local_llm_preview_safe
 
 SAFE_PATH = "/local-llm/preview-safe"
 REAL_ADAPTER_SOURCE = "zdoc_real_ollama_preview_adapter_fake_transport"
+REAL_RUNTIME_ADAPTER_SOURCE = "zdoc_real_ollama_preview_adapter_real_transport"
 REAL_ADAPTER_ENTRY_SOURCE = "zdoc_local_llm_preview_isolated_safe_endpoint_real_ollama_adapter"
 FORMAL_RESULT_FIELDS = {
     "content",
@@ -311,6 +312,112 @@ def test_safe_endpoint_double_flags_calls_fake_ollama_adapter_generate_without_w
         entry_source=REAL_ADAPTER_ENTRY_SOURCE,
         fake_only=False,
         calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_no_injected_transport_uses_default_builder_fake_substitute(
+    monkeypatch,
+) -> None:
+    import backend.zhifei_autoplan.ollama_preview as preview_module
+
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_OLLAMA_PREVIEW_MODEL", "qwen3:0.6b")
+    before_counts = _write_surface_counts()
+    seen = {}
+
+    def fail_helper(_payload):
+        raise AssertionError("safe fake helper must not be called when adapter flag is enabled")
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("real 127.0.0.1:11434 access must not happen in deterministic tests")
+
+    def fake_tags(url, payload, timeout):
+        seen["tags_url"] = url
+        seen["tags_payload"] = copy.deepcopy(payload)
+        seen["tags_timeout"] = timeout
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(url, payload, timeout):
+        seen["generate_url"] = url
+        seen["generate_payload"] = copy.deepcopy(payload)
+        seen["generate_timeout"] = timeout
+        return {"response": "default builder fake transport advisory"}
+
+    def fake_builder(*, base_url=None):
+        seen["builder_base_url"] = base_url
+        return fake_tags, fake_generate
+
+    monkeypatch.setattr(preview_module.urllib.request, "urlopen", fail_urlopen)
+    monkeypatch.setattr(preview_module, "build_zdoc_ollama_default_transports", fake_builder)
+    monkeypatch.setattr(local_llm_preview_safe, "run_zdoc_local_llm_preview_safe_service_entry", fail_helper)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", None)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", None)
+
+    response = _client().post(SAFE_PATH, json=_valid_endpoint_payload())
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["ok"] is True
+    assert result["enabled"] is True
+    assert result["status"] == "ok"
+    assert result["model"] == "qwen3:0.6b"
+    assert result["advisory"] == "default builder fake transport advisory"
+    assert result["real_transport_enabled"] is True
+    assert result["fake_transport_only"] is False
+    assert seen["builder_base_url"] == "http://127.0.0.1:11434"
+    assert seen["tags_url"] == "http://127.0.0.1:11434/api/tags"
+    assert seen["tags_payload"] == {}
+    assert seen["generate_url"] == "http://127.0.0.1:11434/api/generate"
+    assert seen["generate_payload"]["model"] == "qwen3:0.6b"
+    assert seen["generate_payload"]["stream"] is False
+    assert "content" not in result
+    assert "docx" not in result
+    assert "job_id" not in result
+    assert "export_path" not in result
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_RUNTIME_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_default_builder_init_exception_returns_controlled_failure(
+    monkeypatch,
+) -> None:
+    import backend.zhifei_autoplan.ollama_preview as preview_module
+
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+
+    def failing_builder(*, base_url=None):
+        assert base_url == "http://127.0.0.1:11434"
+        raise RuntimeError("builder unavailable")
+
+    monkeypatch.setattr(preview_module, "build_zdoc_ollama_default_transports", failing_builder)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", None)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", None)
+
+    result = _client().post(SAFE_PATH, json=_valid_endpoint_payload()).json()
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "transport_failure"
+    assert result["reason"] == "default_transport_builder_failure"
+    assert result["calls_ollama"] is False
+    assert result["real_transport_enabled"] is True
+    assert result["fake_transport_only"] is False
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_RUNTIME_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=False,
     )
 
 
