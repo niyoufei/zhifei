@@ -7,6 +7,8 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable
 
+from backend.zhifei_autoplan.preview_advisory_quality_gate import attach_preview_advisory_quality_gate
+
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3:0.6b"
@@ -713,29 +715,41 @@ def run_zdoc_ollama_preview(
     timeout: Any = None,
     num_predict: Any = None,
 ) -> dict[str, Any]:
+    quality_context = dict(request) if isinstance(request, dict) else {}
+
+    def _with_quality_gate(result: dict[str, Any]) -> dict[str, Any]:
+        return attach_preview_advisory_quality_gate(result, context=quality_context)
+
     if not _env_bool(LOCAL_LLM_PREVIEW_FLAG, default=False):
-        return build_zdoc_ollama_disabled_response(
-            enabled=False,
-            adapter_enabled=False,
-            reason="preview_feature_flag_disabled",
+        return _with_quality_gate(
+            build_zdoc_ollama_disabled_response(
+                enabled=False,
+                adapter_enabled=False,
+                reason="preview_feature_flag_disabled",
+            )
         )
 
     if not is_zdoc_ollama_preview_enabled():
-        return build_zdoc_ollama_disabled_response(
-            enabled=True,
-            adapter_enabled=False,
-            reason="adapter_feature_flag_disabled",
+        return _with_quality_gate(
+            build_zdoc_ollama_disabled_response(
+                enabled=True,
+                adapter_enabled=False,
+                reason="adapter_feature_flag_disabled",
+            )
         )
 
     normalized_request, failure = _validate_zdoc_ollama_preview_request(request)
     if failure:
-        return failure
+        return _with_quality_gate(failure)
+    quality_context = dict(normalized_request)
 
     resolved_base_url = _zdoc_ollama_base_url(base_url)
     if not resolved_base_url:
-        return build_zdoc_ollama_failure_response(
-            error_type="transport_failure",
-            reason="invalid_local_ollama_base_url",
+        return _with_quality_gate(
+            build_zdoc_ollama_failure_response(
+                error_type="transport_failure",
+                reason="invalid_local_ollama_base_url",
+            )
         )
 
     real_transport_enabled = False
@@ -743,20 +757,24 @@ def run_zdoc_ollama_preview(
         try:
             tags_transport, generate_transport = build_zdoc_ollama_default_transports(base_url=resolved_base_url)
         except Exception:
-            return build_zdoc_ollama_failure_response(
-                error_type="transport_failure",
-                reason="default_transport_builder_failure",
-                base_url=resolved_base_url,
-                preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
-                real_transport_enabled=True,
+            return _with_quality_gate(
+                build_zdoc_ollama_failure_response(
+                    error_type="transport_failure",
+                    reason="default_transport_builder_failure",
+                    base_url=resolved_base_url,
+                    preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                    real_transport_enabled=True,
+                )
             )
         real_transport_enabled = True
     elif tags_transport is None or generate_transport is None:
-        return build_zdoc_ollama_failure_response(
-            error_type="transport_failure",
-            reason="fake_transport_required",
-            base_url=resolved_base_url,
-            preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+        return _with_quality_gate(
+            build_zdoc_ollama_failure_response(
+                error_type="transport_failure",
+                reason="fake_transport_required",
+                base_url=resolved_base_url,
+                preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+            )
         )
 
     selected = select_zdoc_local_ollama_model(
@@ -768,7 +786,7 @@ def run_zdoc_ollama_preview(
     )
     if not selected.get("ok"):
         selected["preview_type"] = normalized_request["preview_type"] if normalized_request else "section_review"
-        return selected
+        return _with_quality_gate(selected)
 
     selected_model = str(selected.get("model") or "")
     generate_url = f"{resolved_base_url}{LOCAL_LLM_OLLAMA_PREVIEW_GENERATE_PATH}"
@@ -782,34 +800,40 @@ def run_zdoc_ollama_preview(
     try:
         raw_response = generate_transport(generate_url, generate_payload, resolved_timeout)
     except (TimeoutError, socket.timeout):
-        return build_zdoc_ollama_failure_response(
-            error_type="timeout",
-            reason="generate_timeout",
-            model=selected_model,
-            base_url=resolved_base_url,
-            preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
-            calls_ollama=True,
-            real_transport_enabled=real_transport_enabled,
+        return _with_quality_gate(
+            build_zdoc_ollama_failure_response(
+                error_type="timeout",
+                reason="generate_timeout",
+                model=selected_model,
+                base_url=resolved_base_url,
+                preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                calls_ollama=True,
+                real_transport_enabled=real_transport_enabled,
+            )
         )
     except ValueError:
-        return build_zdoc_ollama_failure_response(
-            error_type="invalid_response",
-            reason="generate_invalid_response",
-            model=selected_model,
-            base_url=resolved_base_url,
-            preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
-            calls_ollama=True,
-            real_transport_enabled=real_transport_enabled,
+        return _with_quality_gate(
+            build_zdoc_ollama_failure_response(
+                error_type="invalid_response",
+                reason="generate_invalid_response",
+                model=selected_model,
+                base_url=resolved_base_url,
+                preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                calls_ollama=True,
+                real_transport_enabled=real_transport_enabled,
+            )
         )
     except Exception:
-        return build_zdoc_ollama_failure_response(
-            error_type="transport_failure",
-            reason="generate_transport_failure",
-            model=selected_model,
-            base_url=resolved_base_url,
-            preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
-            calls_ollama=True,
-            real_transport_enabled=real_transport_enabled,
+        return _with_quality_gate(
+            build_zdoc_ollama_failure_response(
+                error_type="transport_failure",
+                reason="generate_transport_failure",
+                model=selected_model,
+                base_url=resolved_base_url,
+                preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                calls_ollama=True,
+                real_transport_enabled=real_transport_enabled,
+            )
         )
 
     result = normalize_zdoc_ollama_response(
@@ -821,7 +845,7 @@ def run_zdoc_ollama_preview(
     )
     result["request_id"] = normalized_request.get("request_id", "") if normalized_request else ""
     result["num_predict"] = _zdoc_ollama_num_predict(num_predict)
-    return result
+    return _with_quality_gate(result)
 
 
 def build_zdoc_ollama_preview_client(

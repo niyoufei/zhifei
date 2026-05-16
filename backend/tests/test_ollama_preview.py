@@ -1057,6 +1057,13 @@ def test_zdoc_ollama_preview_fake_generate_success_is_preview_only(monkeypatch) 
     assert first["model"] == "qwen3:0.6b"
     assert first["advisory"] == "建议补充质量验收记录。\n建议明确责任闭环。"
     assert first["suggestions"] == ["建议补充质量验收记录。", "建议明确责任闭环。"]
+    assert first["quality_status"] == "preview_ok"
+    assert first["quality_gate"]["quality_status"] == "preview_ok"
+    assert first["formal_generation_allowed"] is False
+    assert first["shadow_candidate_allowed"] is False
+    assert first["writeback_allowed"] is False
+    assert first["export_allowed"] is False
+    assert first["zbid_writeback_allowed"] is False
     assert "content" not in first
     assert "docx" not in first
     assert "markdown" not in first
@@ -1149,6 +1156,9 @@ def test_zdoc_ollama_preview_fake_generate_thinking_only_is_bounded_preview(monk
     assert len(result["advisory"]) <= 1200
     assert result["advisory"] != thinking_only
     assert result["risk_notes"] == ["thinking_only_fallback"]
+    assert result["quality_status"] == "review_required"
+    assert result["shadow_candidate_allowed"] is False
+    assert "thinking_only_fallback_review_required" in result["review_reasons"]
     assert "content" not in result
     assert "docx" not in result
     assert "job_id" not in result
