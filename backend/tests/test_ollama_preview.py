@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -1117,7 +1118,7 @@ def test_zdoc_ollama_preview_fake_generate_empty_response_returns_controlled_fai
     assert result["ok"] is False
     assert result["status"] == "failure"
     assert result["error_type"] == "invalid_response"
-    assert result["reason"] == "missing_preview_advisory"
+    assert result["reason"] == "empty_response_and_thinking"
     assert result["advisory"] == ""
     assert result["suggestions"] == []
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
@@ -1142,12 +1143,228 @@ def test_zdoc_ollama_preview_fake_generate_thinking_only_is_bounded_preview(monk
 
     assert result["ok"] is True
     assert result["status"] == "ok"
-    assert result["advisory"].startswith("<think>")
+    assert result["preview_mode"] == "thinking_only_fallback"
+    assert result["content_source"] == "thinking"
+    assert result["advisory"].startswith("模型仅返回推理预览内容")
     assert len(result["advisory"]) <= 1200
+    assert result["advisory"] != thinking_only
+    assert result["risk_notes"] == ["thinking_only_fallback"]
     assert "content" not in result
     assert "docx" not in result
     assert "job_id" not in result
     assert "export_path" not in result
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_json_text_extracts_bounded_advisory(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {
+            "response": json.dumps(
+                {
+                    "advisory": "建议补充材料验收记录。",
+                    "suggestions": ["建议一", "建议二", "建议三", "建议四"],
+                    "risk_notes": ["风险一", "风险二", "风险三", "风险四"],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["preview_mode"] == "structured_json"
+    assert result["content_source"] == "response"
+    assert result["advisory"] == "建议补充材料验收记录。"
+    assert result["suggestions"] == ["建议一", "建议二", "建议三"]
+    assert result["risk_notes"] == ["风险一", "风险二", "风险三"]
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_non_json_text_is_advisory(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "技术建议：补充隐蔽验收记录，并明确整改闭环。"}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["preview_mode"] == "text_fallback"
+    assert result["content_source"] == "response"
+    assert result["advisory"] == "技术建议：补充隐蔽验收记录，并明确整改闭环。"
+    assert result["suggestions"] == ["技术建议：补充隐蔽验收记录，并明确整改闭环。"]
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_empty_response_with_thinking_uses_bounded_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    thinking = "分析：" + ("只做预览推理，不写正式正文。" * 120)
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "", "thinking": thinking}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["preview_mode"] == "thinking_only_fallback"
+    assert result["content_source"] == "thinking"
+    assert result["advisory"].startswith("模型仅返回推理预览内容")
+    assert len(result["advisory"]) <= 1200
+    assert result["advisory"] != thinking
+    assert result["risk_notes"] == ["thinking_only_fallback"]
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_message_content_is_advisory(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"message": {"content": "需补充检验批验收频次。"}}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["content_source"] == "message.content"
+    assert result["advisory"] == "需补充检验批验收频次。"
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_long_text_is_bounded(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    long_text = "建议补充质量记录。" * 200
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": long_text}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert len(result["advisory"]) <= 1200
+    assert result["advisory"] != long_text
+    assert len(result["suggestions"]) <= 3
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_missing_json_advisory_is_controlled_failure(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": json.dumps({"suggestions": ["建议一"]}, ensure_ascii=False)}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "invalid_response"
+    assert result["reason"] == "missing_preview_advisory"
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_malformed_json_is_controlled_failure(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "{\"advisory\": "}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "invalid_response"
+    assert result["reason"] == "malformed_json"
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_normalization_exception_is_controlled_failure(monkeypatch) -> None:
+    import backend.zhifei_autoplan.ollama_preview as preview_module
+
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "建议补充质量记录。"}
+
+    def fail_extract(_raw_response):
+        raise RuntimeError("normalizer exploded")
+
+    monkeypatch.setattr(preview_module, "_extract_zdoc_ollama_advisory_payload", fail_extract)
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "invalid_response"
+    assert result["reason"] == "normalization_failure"
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 

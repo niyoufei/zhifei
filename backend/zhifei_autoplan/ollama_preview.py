@@ -62,6 +62,9 @@ LOCAL_LLM_OLLAMA_PREVIEW_MAX_TIMEOUT_SECONDS = 30.0
 LOCAL_LLM_OLLAMA_PREVIEW_DEFAULT_NUM_PREDICT = 256
 LOCAL_LLM_OLLAMA_PREVIEW_MAX_NUM_PREDICT = 768
 LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS = 1200
+LOCAL_LLM_OLLAMA_PREVIEW_THINKING_CHARS = 360
+LOCAL_LLM_OLLAMA_PREVIEW_MAX_LIST_ITEMS = 3
+LOCAL_LLM_OLLAMA_PREVIEW_LIST_ITEM_CHARS = 220
 LOCAL_LLM_PREVIEW_FORMAL_OUTPUT_FIELDS = frozenset(
     {
         "content",
@@ -212,10 +215,13 @@ def _zdoc_ollama_response(
     base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
     advisory: str = "",
     suggestions: list[str] | None = None,
+    risk_notes: list[str] | None = None,
     warning: str | None = None,
     error_type: str | None = None,
     reason: str | None = None,
     preview_type: str = "section_review",
+    preview_mode: str = "advisory",
+    content_source: str = "",
     calls_ollama: bool = False,
     real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
@@ -254,9 +260,12 @@ def _zdoc_ollama_response(
         "triggers_zbid_writeback": False,
         "advisory": _clean_text(advisory, limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS),
         "suggestions": list(suggestions or []),
+        "risk_notes": list(risk_notes or ([warning] if warning else [])),
         "warning": warning,
         "error_type": error_type,
         "reason": reason,
+        "preview_mode": preview_mode,
+        "content_source": content_source,
         "safety": _zdoc_ollama_preview_safety(real_transport_enabled=real_transport_enabled),
     }
 
@@ -535,6 +544,93 @@ def _zdoc_ollama_suggestions(advisory: str) -> list[str]:
     return suggestions or ["Review the preview advisory manually before any future implementation step."]
 
 
+def _zdoc_ollama_bounded_items(value: Any, *, fallback: list[str] | None = None) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = value.splitlines()
+    else:
+        raw_items = []
+    items = [
+        _clean_text(item, limit=LOCAL_LLM_OLLAMA_PREVIEW_LIST_ITEM_CHARS)
+        for item in raw_items
+    ]
+    bounded = [item for item in items if item][:LOCAL_LLM_OLLAMA_PREVIEW_MAX_LIST_ITEMS]
+    if bounded:
+        return bounded
+    return list(fallback or [])[:LOCAL_LLM_OLLAMA_PREVIEW_MAX_LIST_ITEMS]
+
+
+def _zdoc_ollama_json_like(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith("{") or stripped.startswith("[")
+
+
+def _zdoc_ollama_thinking_fallback(thinking_text: str) -> dict[str, Any]:
+    excerpt = _clean_text(thinking_text, limit=LOCAL_LLM_OLLAMA_PREVIEW_THINKING_CHARS)
+    advisory = (
+        "模型仅返回推理预览内容，以下为截断摘要，需人工复核："
+        f"{excerpt}"
+    )
+    return {
+        "advisory": _clean_text(advisory, limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS),
+        "suggestions": ["人工复核该 thinking-only preview 后再决定是否采纳。"],
+        "risk_notes": ["thinking_only_fallback"],
+        "preview_mode": "thinking_only_fallback",
+        "content_source": "thinking",
+    }
+
+
+def _extract_zdoc_ollama_advisory_payload(raw_response: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    response_text = _clean_text(raw_response.get("response"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
+    content_source = "response" if response_text else ""
+    message = raw_response.get("message")
+    if not response_text and isinstance(message, dict):
+        response_text = _clean_text(message.get("content"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
+        content_source = "message.content" if response_text else ""
+    if not response_text:
+        response_text = _clean_text(raw_response.get("advisory"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
+        content_source = "advisory" if response_text else ""
+
+    thinking_text = _clean_text(raw_response.get("thinking"), limit=LOCAL_LLM_OLLAMA_PREVIEW_THINKING_CHARS)
+    if response_text:
+        if _zdoc_ollama_json_like(response_text):
+            try:
+                parsed = json.loads(response_text)
+            except (TypeError, ValueError):
+                return None, "malformed_json"
+            if not isinstance(parsed, dict):
+                return None, "malformed_response"
+            advisory = _clean_text(parsed.get("advisory"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
+            if not advisory:
+                return None, "missing_preview_advisory"
+            suggestions = _zdoc_ollama_bounded_items(parsed.get("suggestions"), fallback=_zdoc_ollama_suggestions(advisory))
+            risk_notes = _zdoc_ollama_bounded_items(parsed.get("risk_notes"))
+            return {
+                "advisory": advisory,
+                "suggestions": suggestions,
+                "risk_notes": risk_notes,
+                "preview_mode": "structured_json",
+                "content_source": content_source,
+            }, None
+        if response_text.startswith("<think"):
+            return _zdoc_ollama_thinking_fallback(response_text), None
+        return {
+            "advisory": response_text,
+            "suggestions": _zdoc_ollama_suggestions(response_text),
+            "risk_notes": [],
+            "preview_mode": "text_fallback",
+            "content_source": content_source,
+        }, None
+
+    if thinking_text:
+        return _zdoc_ollama_thinking_fallback(thinking_text), None
+
+    if "response" in raw_response or "thinking" in raw_response:
+        return None, "empty_response_and_thinking"
+    return None, "missing_preview_advisory"
+
+
 def normalize_zdoc_ollama_response(
     raw_response: Any,
     *,
@@ -546,7 +642,7 @@ def normalize_zdoc_ollama_response(
     if not isinstance(raw_response, dict):
         return build_zdoc_ollama_failure_response(
             error_type="invalid_response",
-            reason="generate_response_must_be_object",
+            reason="malformed_response",
             model=model,
             base_url=base_url,
             preview_type=preview_type,
@@ -566,17 +662,22 @@ def normalize_zdoc_ollama_response(
             real_transport_enabled=real_transport_enabled,
         )
 
-    response_text = _clean_text(raw_response.get("response"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
-    message = raw_response.get("message")
-    if not response_text and isinstance(message, dict):
-        response_text = _clean_text(message.get("content"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
-    if not response_text:
-        response_text = _clean_text(raw_response.get("advisory"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
-
-    if not response_text:
+    try:
+        normalized_payload, failure_reason = _extract_zdoc_ollama_advisory_payload(raw_response)
+    except Exception:
         return build_zdoc_ollama_failure_response(
             error_type="invalid_response",
-            reason="missing_preview_advisory",
+            reason="normalization_failure",
+            model=model,
+            base_url=base_url,
+            preview_type=preview_type,
+            calls_ollama=True,
+            real_transport_enabled=real_transport_enabled,
+        )
+    if not normalized_payload:
+        return build_zdoc_ollama_failure_response(
+            error_type="invalid_response",
+            reason=failure_reason or "missing_preview_advisory",
             model=model,
             base_url=base_url,
             preview_type=preview_type,
@@ -591,9 +692,12 @@ def normalize_zdoc_ollama_response(
         status="ok",
         model=model,
         base_url=base_url,
-        advisory=response_text,
-        suggestions=_zdoc_ollama_suggestions(response_text),
+        advisory=normalized_payload["advisory"],
+        suggestions=normalized_payload.get("suggestions") or _zdoc_ollama_suggestions(normalized_payload["advisory"]),
+        risk_notes=normalized_payload.get("risk_notes") or [],
         preview_type=preview_type,
+        preview_mode=normalized_payload.get("preview_mode") or "advisory",
+        content_source=normalized_payload.get("content_source") or "",
         calls_ollama=True,
         real_transport_enabled=real_transport_enabled,
     )

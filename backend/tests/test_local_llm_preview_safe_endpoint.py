@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
@@ -475,7 +476,7 @@ def test_safe_endpoint_double_flags_empty_generate_response_returns_controlled_f
     assert result["ok"] is False
     assert result["status"] == "failure"
     assert result["error_type"] == "invalid_response"
-    assert result["reason"] == "missing_preview_advisory"
+    assert result["reason"] == "empty_response_and_thinking"
     assert result["advisory"] == ""
     assert result["suggestions"] == []
     assert _write_surface_counts() == before_counts
@@ -507,12 +508,91 @@ def test_safe_endpoint_double_flags_thinking_only_response_is_bounded_preview(mo
 
     assert result["ok"] is True
     assert result["status"] == "ok"
-    assert result["advisory"].startswith("<think>")
+    assert result["preview_mode"] == "thinking_only_fallback"
+    assert result["content_source"] == "thinking"
+    assert result["advisory"].startswith("模型仅返回推理预览内容")
     assert len(result["advisory"]) <= 1200
+    assert result["advisory"] != thinking_only
+    assert result["risk_notes"] == ["thinking_only_fallback"]
     assert "content" not in result
     assert "docx" not in result
     assert "job_id" not in result
     assert "export_path" not in result
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_json_response_keeps_bounded_lists(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {
+            "response": json.dumps(
+                {
+                    "advisory": "建议补充样板验收资料。",
+                    "suggestions": ["建议一", "建议二", "建议三", "建议四"],
+                    "risk_notes": ["风险一", "风险二", "风险三", "风险四"],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    result = _client().post(SAFE_PATH, json=_valid_endpoint_payload()).json()
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["preview_mode"] == "structured_json"
+    assert result["advisory"] == "建议补充样板验收资料。"
+    assert result["suggestions"] == ["建议一", "建议二", "建议三"]
+    assert result["risk_notes"] == ["风险一", "风险二", "风险三"]
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
+def test_safe_endpoint_double_flags_empty_response_with_thinking_is_bounded_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+    thinking = "分析：" + ("仅作预览推理。" * 240)
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "", "thinking": thinking}
+
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", fake_tags)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", fake_generate)
+
+    result = _client().post(SAFE_PATH, json=_valid_endpoint_payload()).json()
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["preview_mode"] == "thinking_only_fallback"
+    assert result["content_source"] == "thinking"
+    assert result["advisory"].startswith("模型仅返回推理预览内容")
+    assert result["advisory"] != thinking
+    assert result["risk_notes"] == ["thinking_only_fallback"]
     assert _write_surface_counts() == before_counts
     _assert_safe_endpoint_guard(
         result,
