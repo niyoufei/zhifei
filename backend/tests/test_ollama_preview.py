@@ -1059,6 +1059,8 @@ def test_zdoc_ollama_preview_fake_generate_success_is_preview_only(monkeypatch) 
     assert first["suggestions"] == ["建议补充质量验收记录。", "建议明确责任闭环。"]
     assert first["quality_status"] == "preview_ok"
     assert first["quality_gate"]["quality_status"] == "preview_ok"
+    assert first["evidence_anchor_status"] == "not_required"
+    assert first["evidence_anchor_required"] is False
     assert first["formal_generation_allowed"] is False
     assert first["shadow_candidate_allowed"] is False
     assert first["writeback_allowed"] is False
@@ -1115,6 +1117,9 @@ def test_zdoc_ollama_preview_quality_gate_blocks_input_risk_even_with_clean_outp
         or "suspicious_quantity_claim" in result["input_risk_flags"]
     )
     assert any(item.startswith("input_risk:") for item in result["blockers"])
+    assert result["evidence_anchor_required"] is True
+    assert result["evidence_anchor_status"] == "invalid_anchor"
+    assert result["evidence_blocked"] is True
     assert result["formal_generation_allowed"] is False
     assert result["shadow_candidate_allowed"] is False
     assert result["writeback_allowed"] is False
@@ -1157,6 +1162,9 @@ def test_zdoc_ollama_preview_quality_gate_flags_unsupported_project_fact_input(m
     assert result["unsupported_project_fact_detected"] is True
     assert result["project_fact_without_evidence"] is True
     assert result["evidence_source_missing"] is True
+    assert result["evidence_anchor_required"] is True
+    assert result["evidence_anchor_status"] == "missing"
+    assert result["evidence_review_required"] is True
     assert result["formal_generation_allowed"] is False
     assert result["shadow_candidate_allowed"] is False
     assert result["writeback_allowed"] is False

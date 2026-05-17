@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from backend.zhifei_autoplan.evidence_anchor import evaluate_evidence_anchor
+
 
 QUALITY_STATUS_BLOCKED = "blocked"
 QUALITY_STATUS_REVIEW_REQUIRED = "review_required"
@@ -505,8 +507,10 @@ def _base_gate(
     quality_score: int = 0,
     score_dimensions: dict[str, int] | None = None,
     input_risk: dict[str, Any] | None = None,
+    evidence_anchor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     input_risk_data = dict(input_risk or {})
+    evidence_data = dict(evidence_anchor or {})
     return {
         "quality_status": quality_status,
         "quality_score": max(0, min(100, int(quality_score))),
@@ -542,7 +546,35 @@ def _base_gate(
         "evidence_required_reasons": list(input_risk_data.get("evidence_required_reasons") or []),
         "input_risk_review_required": bool(input_risk_data.get("input_risk_review_required", False)),
         "input_risk_blocked": bool(input_risk_data.get("input_risk_blocked", False)),
-        "evidence_anchor_required": bool(input_risk_data.get("evidence_anchor_required", False)),
+        "evidence_anchor_required": bool(
+            evidence_data.get(
+                "evidence_anchor_required",
+                input_risk_data.get("evidence_anchor_required", False),
+            )
+        ),
+        "evidence_anchor_status": str(evidence_data.get("evidence_anchor_status", "not_required")),
+        "evidence_anchor_level": str(evidence_data.get("evidence_anchor_level", "P4")),
+        "evidence_sources": list(evidence_data.get("evidence_sources") or []),
+        "evidence_source_type": str(evidence_data.get("evidence_source_type") or ""),
+        "evidence_source_id": str(evidence_data.get("evidence_source_id") or ""),
+        "evidence_source_title": str(evidence_data.get("evidence_source_title") or ""),
+        "evidence_location": str(evidence_data.get("evidence_location") or ""),
+        "evidence_page": str(evidence_data.get("evidence_page") or ""),
+        "evidence_clause": str(evidence_data.get("evidence_clause") or ""),
+        "evidence_quote_excerpt": str(evidence_data.get("evidence_quote_excerpt") or ""),
+        "evidence_confidence": int(evidence_data.get("evidence_confidence", 0)),
+        "evidence_missing_reasons": list(evidence_data.get("evidence_missing_reasons") or []),
+        "unsupported_claims": list(evidence_data.get("unsupported_claims") or []),
+        "unsupported_project_facts": list(evidence_data.get("unsupported_project_facts") or []),
+        "unverified_parameters": list(evidence_data.get("unverified_parameters") or []),
+        "evidence_review_required": bool(evidence_data.get("evidence_review_required", False)),
+        "evidence_blocked": bool(evidence_data.get("evidence_blocked", False)),
+        "trace_id": str(evidence_data.get("trace_id") or ""),
+        "source_snapshot_id": str(evidence_data.get("source_snapshot_id") or ""),
+        "generated_from_model": bool(evidence_data.get("generated_from_model", False)),
+        "generated_content_must_not_be_evidence": bool(
+            evidence_data.get("generated_content_must_not_be_evidence", False)
+        ),
         "unsupported_project_fact_detected": bool(
             input_risk_data.get("unsupported_project_fact_detected", False)
         ),
@@ -678,6 +710,48 @@ def _evaluate_preview_advisory_quality_gate(
         _append_unique(review_reasons, "construction_specificity_review_required")
         _append_unique(failed_checks, "construction_specificity_guard")
 
+    evidence_anchor = evaluate_evidence_anchor(
+        {
+            "advisory": advisory,
+            "preview_mode": preview_mode,
+            "response_source": response_source,
+            "evidence_anchor_required": bool(input_risk.get("evidence_anchor_required", False))
+            or bool(preview_response.get("evidence_anchor_required", False)),
+            "evidence_sources": preview_response.get("evidence_sources"),
+            "unsupported_claims": list(input_risk.get("input_risk_blockers") or []),
+            "unsupported_project_facts": [
+                item
+                for item in input_risk.get("input_risk_flags", [])
+                if item in {"unsupported_project_fact", "project_fact_without_evidence"}
+            ],
+            "unverified_parameters": list(input_risk.get("evidence_required_reasons") or []),
+            "input_risk": input_risk,
+            "trace_id": preview_response.get("request_id") or context.get("request_id"),
+            "source_snapshot_id": preview_response.get("source_snapshot_id")
+            or context.get("source_snapshot_id"),
+            "generated_from_model": bool(preview_response.get("calls_ollama"))
+            or response_source in {"thinking", "response", "message.content", "advisory"},
+            "zbid_writeback_attempted": preview_response.get("calls_zbid_writeback")
+            or preview_response.get("zbid_writeback_requested")
+            or preview_response.get("zbid_writeback_allowed"),
+            "docx_export_attempted": preview_response.get("calls_export_docx_route")
+            or preview_response.get("docx_export_requested")
+            or preview_response.get("export_allowed"),
+            "candidate_patch_attempted": preview_response.get("candidate_patch_requested")
+            or preview_response.get("shadow_candidate_allowed"),
+        },
+        context=context,
+    )
+    if evidence_anchor.get("evidence_blocked"):
+        _append_unique(blockers, f"evidence_anchor:{evidence_anchor.get('evidence_anchor_status')}")
+        _append_unique(failed_checks, f"evidence_anchor:{evidence_anchor.get('evidence_anchor_status')}")
+    elif evidence_anchor.get("evidence_review_required"):
+        _append_unique(warnings, f"evidence_anchor:{evidence_anchor.get('evidence_anchor_status')}")
+        _append_unique(review_reasons, f"evidence_anchor:{evidence_anchor.get('evidence_anchor_status')}")
+        _append_unique(failed_checks, f"evidence_anchor:{evidence_anchor.get('evidence_anchor_status')}")
+    else:
+        _append_unique(passed_checks, f"evidence_anchor:{evidence_anchor.get('evidence_anchor_status')}")
+
     for item in input_risk["input_risk_blockers"]:
         _append_unique(blockers, f"input_risk:{item}")
         _append_unique(failed_checks, f"input_risk:{item}")
@@ -742,6 +816,7 @@ def _evaluate_preview_advisory_quality_gate(
         suggestions_count=len(suggestions),
         risk_notes_count=len(risk_notes),
         input_risk=input_risk,
+        evidence_anchor=evidence_anchor,
     )
 
 
@@ -802,6 +877,27 @@ _QUALITY_GATE_PUBLIC_FIELDS = (
     "input_risk_review_required",
     "input_risk_blocked",
     "evidence_anchor_required",
+    "evidence_anchor_status",
+    "evidence_anchor_level",
+    "evidence_sources",
+    "evidence_source_type",
+    "evidence_source_id",
+    "evidence_source_title",
+    "evidence_location",
+    "evidence_page",
+    "evidence_clause",
+    "evidence_quote_excerpt",
+    "evidence_confidence",
+    "evidence_missing_reasons",
+    "unsupported_claims",
+    "unsupported_project_facts",
+    "unverified_parameters",
+    "evidence_review_required",
+    "evidence_blocked",
+    "trace_id",
+    "source_snapshot_id",
+    "generated_from_model",
+    "generated_content_must_not_be_evidence",
     "unsupported_project_fact_detected",
     "evidence_source_missing",
     "project_fact_without_evidence",

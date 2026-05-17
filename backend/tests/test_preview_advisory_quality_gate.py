@@ -92,6 +92,8 @@ def test_quality_gate_high_quality_advisory_preview_ok_but_formal_ineligible() -
     assert gate["evidence_source_missing"] is False
     assert gate["project_fact_without_evidence"] is False
     assert gate["evidence_anchor_required"] is False
+    assert gate["evidence_anchor_status"] == "not_required"
+    assert gate["evidence_blocked"] is False
     _assert_formal_chain_blocked(gate)
 
 
@@ -373,6 +375,8 @@ def test_quality_gate_input_ir_d_equivalent_unsupported_project_fact_requires_re
     assert gate["evidence_source_missing"] is True
     assert gate["input_evidence_required"] is True
     assert gate["evidence_anchor_required"] is True
+    assert gate["evidence_anchor_status"] == "missing"
+    assert gate["evidence_review_required"] is True
     _assert_formal_chain_blocked(gate)
 
 
@@ -523,6 +527,55 @@ def test_quality_gate_output_clean_but_unsupported_project_fact_input_is_not_pre
     assert "unsupported_project_fact" in gate["input_risk_flags"]
     assert gate["unsupported_project_fact_detected"] is True
     assert gate["input_evidence_required"] is True
+    _assert_formal_chain_blocked(gate)
+
+
+def test_quality_gate_anchored_evidence_metadata_does_not_enable_formal_chain() -> None:
+    gate = evaluate_preview_advisory_quality_gate(
+        _preview_response(
+            evidence_anchor_required=True,
+            evidence_sources=[
+                {
+                    "source_type": "tender_document",
+                    "source_id": "TD-001",
+                    "title": "测试招标文件",
+                    "page": "12",
+                    "clause": "3.2",
+                    "confidence": 90,
+                }
+            ],
+        ),
+        context=_quality_context(),
+    )
+
+    assert gate["quality_status"] == "preview_ok"
+    assert gate["evidence_anchor_status"] == "anchored"
+    assert gate["evidence_source_type"] == "tender_document"
+    assert gate["evidence_confidence"] >= 80
+    assert gate["evidence_blocked"] is False
+    _assert_formal_chain_blocked(gate)
+
+
+def test_quality_gate_model_generated_preview_as_evidence_is_blocked() -> None:
+    gate = evaluate_preview_advisory_quality_gate(
+        _preview_response(
+            evidence_anchor_required=True,
+            evidence_sources=[
+                {
+                    "source_type": "system_generated_preview",
+                    "source_id": "preview-1",
+                    "title": "模型预览建议",
+                    "location": "advisory",
+                }
+            ],
+        ),
+        context=_quality_context(),
+    )
+
+    assert gate["quality_status"] == "blocked"
+    assert gate["evidence_anchor_status"] == "invalid_anchor"
+    assert gate["evidence_blocked"] is True
+    assert "evidence_anchor:invalid_anchor" in gate["blockers"]
     _assert_formal_chain_blocked(gate)
 
 

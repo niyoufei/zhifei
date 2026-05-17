@@ -434,6 +434,9 @@ def test_safe_endpoint_double_flags_preserves_input_risk_quality_gate_metadata(m
         "suspicious_duration_claim" in result["input_risk_flags"]
         or "suspicious_quantity_claim" in result["input_risk_flags"]
     )
+    assert result["evidence_anchor_required"] is True
+    assert result["evidence_anchor_status"] == "invalid_anchor"
+    assert result["evidence_blocked"] is True
     assert result["formal_generation_allowed"] is False
     assert result["shadow_candidate_allowed"] is False
     assert result["writeback_allowed"] is False
@@ -499,6 +502,9 @@ def test_safe_endpoint_double_flags_preserves_unsupported_project_fact_metadata(
     assert result["unsupported_project_fact_detected"] is True
     assert result["project_fact_without_evidence"] is True
     assert result["evidence_source_missing"] is True
+    assert result["evidence_anchor_required"] is True
+    assert result["evidence_anchor_status"] == "missing"
+    assert result["evidence_review_required"] is True
     assert result["formal_generation_allowed"] is False
     assert result["shadow_candidate_allowed"] is False
     assert result["writeback_allowed"] is False
