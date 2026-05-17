@@ -1124,6 +1124,48 @@ def test_zdoc_ollama_preview_quality_gate_blocks_input_risk_even_with_clean_outp
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
+def test_zdoc_ollama_preview_quality_gate_flags_unsupported_project_fact_input(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "section_text": (
+            "本项目现场已有3台塔吊、2座拌合站和5个固定材料堆场。"
+            "No drawings or site records are provided."
+        ),
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "建议补充责任岗位、检查频次、整改闭环和资料归档要求。"}
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["quality_status"] == "review_required"
+    assert result["quality_status"] != "preview_ok"
+    assert result["input_risk_status"] != "clear"
+    assert "unsupported_project_fact" in result["input_risk_flags"]
+    assert result["unsupported_project_fact_detected"] is True
+    assert result["project_fact_without_evidence"] is True
+    assert result["evidence_source_missing"] is True
+    assert result["formal_generation_allowed"] is False
+    assert result["shadow_candidate_allowed"] is False
+    assert result["writeback_allowed"] is False
+    assert result["export_allowed"] is False
+    assert result["zbid_writeback_allowed"] is False
+    assert _write_surface_counts() == before_counts
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
 def test_zdoc_ollama_preview_fake_generate_timeout_returns_stable_failure(monkeypatch) -> None:
     monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
     monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")

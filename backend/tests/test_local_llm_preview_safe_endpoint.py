@@ -449,6 +449,71 @@ def test_safe_endpoint_double_flags_preserves_input_risk_quality_gate_metadata(m
     )
 
 
+def test_safe_endpoint_double_flags_preserves_unsupported_project_fact_metadata(monkeypatch) -> None:
+    import backend.zhifei_autoplan.ollama_preview as preview_module
+
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_OLLAMA_PREVIEW_MODEL", "qwen3:0.6b")
+    before_counts = _write_surface_counts()
+
+    def fail_helper(_payload):
+        raise AssertionError("safe fake helper must not be called when adapter flag is enabled")
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("real 127.0.0.1:11434 access must not happen in deterministic tests")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "建议补充责任岗位、检查频次、整改闭环和资料归档要求。"}
+
+    def fake_builder(*, base_url=None):
+        assert base_url == "http://127.0.0.1:11434"
+        return fake_tags, fake_generate
+
+    monkeypatch.setattr(preview_module.urllib.request, "urlopen", fail_urlopen)
+    monkeypatch.setattr(preview_module, "build_zdoc_ollama_default_transports", fake_builder)
+    monkeypatch.setattr(local_llm_preview_safe, "run_zdoc_local_llm_preview_safe_service_entry", fail_helper)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_TAGS_TRANSPORT", None)
+    monkeypatch.setattr(local_llm_preview_safe, "SAFE_ENDPOINT_OLLAMA_GENERATE_TRANSPORT", None)
+
+    payload = {
+        **_valid_endpoint_payload(),
+        "section_text": (
+            "本项目现场已有3台塔吊、2座拌合站和5个固定材料堆场。"
+            "No drawings or site records are provided."
+        ),
+    }
+    response = _client().post(SAFE_PATH, json=payload)
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["quality_status"] == "review_required"
+    assert result["quality_status"] != "preview_ok"
+    assert result["input_risk_status"] != "clear"
+    assert "unsupported_project_fact" in result["input_risk_flags"]
+    assert result["unsupported_project_fact_detected"] is True
+    assert result["project_fact_without_evidence"] is True
+    assert result["evidence_source_missing"] is True
+    assert result["formal_generation_allowed"] is False
+    assert result["shadow_candidate_allowed"] is False
+    assert result["writeback_allowed"] is False
+    assert result["export_allowed"] is False
+    assert result["zbid_writeback_allowed"] is False
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(
+        result,
+        source=REAL_RUNTIME_ADAPTER_SOURCE,
+        entry_source=REAL_ADAPTER_ENTRY_SOURCE,
+        fake_only=False,
+        calls_ollama=True,
+    )
+
+
 def test_safe_endpoint_double_flags_default_builder_init_exception_returns_controlled_failure(
     monkeypatch,
 ) -> None:

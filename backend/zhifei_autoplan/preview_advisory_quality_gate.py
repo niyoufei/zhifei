@@ -139,6 +139,10 @@ _INPUT_EVIDENCE_MARKERS = (
     "待确认",
     "待资料确认",
     "以招标文件为准",
+    "待图纸",
+    "待清单",
+    "待踏勘记录",
+    "不得作为正式响应依据",
 )
 _INPUT_CLAUSE_PATTERNS = (
     re.compile(r"(?:招标文件|招标|评分(?:办法|项|标准)|补疑|澄清)\s*第\s*[\d.一二三四五六七八九十]+\s*[条款]?", re.I),
@@ -159,6 +163,36 @@ _INPUT_COST_PATTERNS = (
 )
 _INPUT_UNSUPPORTED_FACT_PATTERNS = (
     re.compile(r"本项目[^。；;]{0,60}(?:必须|要求|采用|位于|包含|设置|配置)", re.I),
+)
+_INPUT_EVIDENCE_MISSING_PATTERNS = (
+    re.compile(
+        r"(?:no|without)\s+(?:drawings?|site\s+records?|site\s+survey|boq|tender\s+documents?|evidence)",
+        re.I,
+    ),
+    re.compile(r"(?:未提供|无|缺少|没有)[^。；;]{0,20}(?:图纸|清单|踏勘记录|现场记录|招标文件|资料|依据|证据)", re.I),
+)
+_INPUT_PROJECT_FACT_PATTERNS = (
+    re.compile(
+        r"(?:本项目|现场|施工现场|项目现场)[^。；;]{0,100}"
+        r"(?:已有|已设置|已确认|已具备|全部无误|达到满分|确定|包含|设置|配置|采用|必须达到)"
+        r"[^。；;]{0,100}"
+        r"(?:塔吊|拌合站|材料堆场|道路|管线|临建|作业面|加工棚|设备|机械|清单|工程量|设计参数|评分项)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:本项目|现场|施工现场|项目现场)[^。；;]{0,100}"
+        r"(?:塔吊|拌合站|材料堆场|道路|管线|临建|作业面|加工棚|设备|机械|清单|工程量|设计参数|评分项)"
+        r"[^。；;]{0,100}"
+        r"(?:已有|已设置|已确认|已具备|全部无误|达到满分|确定|包含|设置|配置|采用|必须达到)",
+        re.I,
+    ),
+)
+_INPUT_PROJECT_FACT_QUANTITY_PATTERNS = (
+    re.compile(
+        r"\d+(?:\.\d+)?\s*(?:台|座|个|处|套|条|平方米|m2|㎡|米|吨)"
+        r"\s*(?:塔吊|拌合站|材料堆场|道路|管线|临建|作业面|加工棚|设备|机械|清单|工程量)?",
+        re.I,
+    ),
 )
 _INPUT_TENDER_EVIDENCE_PATTERNS = (
     re.compile(r"(?:招标文件|评分项|评分标准|补疑|澄清|质量目标|工期)", re.I),
@@ -247,6 +281,9 @@ def _input_risk_gate(context: dict[str, Any]) -> dict[str, Any]:
     evidence_reasons: list[str] = []
     suspicious_references: list[str] = []
     evidence_marker = _has_input_evidence_marker(text)
+    evidence_source_missing = False
+    project_fact_without_evidence = False
+    unsupported_project_fact_detected = False
 
     def mark(flag: str, *, block: bool = True, reference: bool = False) -> None:
         _append_unique(flags, flag)
@@ -261,6 +298,12 @@ def _input_risk_gate(context: dict[str, Any]) -> dict[str, Any]:
             _append_unique(warnings, flag)
 
     if text:
+        evidence_source_missing = _match_any_input_risk(text, _INPUT_EVIDENCE_MISSING_PATTERNS)
+        project_fact_detected = _match_any_input_risk(text, _INPUT_PROJECT_FACT_PATTERNS)
+        project_fact_quantity_detected = _match_any_input_risk(text, _INPUT_PROJECT_FACT_QUANTITY_PATTERNS)
+        project_fact_without_evidence = evidence_source_missing and (
+            project_fact_detected or project_fact_quantity_detected
+        )
         if _match_any_input_risk(text, _INPUT_CLAUSE_PATTERNS):
             mark("suspicious_clause_reference", reference=True)
             if not evidence_marker:
@@ -277,8 +320,20 @@ def _input_risk_gate(context: dict[str, Any]) -> dict[str, Any]:
                 _append_unique(warnings, "tender_evidence_missing")
         if _match_any_input_risk(text, _INPUT_COST_PATTERNS):
             mark("suspicious_cost_claim")
-        if _match_any_input_risk(text, _INPUT_UNSUPPORTED_FACT_PATTERNS):
+        unsupported_project_fact_detected = (
+            _match_any_input_risk(text, _INPUT_UNSUPPORTED_FACT_PATTERNS)
+            or project_fact_without_evidence
+        )
+        if unsupported_project_fact_detected:
             mark("unsupported_project_fact", block=False)
+        if evidence_source_missing:
+            _append_unique(flags, "evidence_source_missing")
+            _append_unique(warnings, "evidence_source_missing")
+            _append_unique(evidence_reasons, "evidence_source_missing")
+        if project_fact_without_evidence:
+            _append_unique(flags, "project_fact_without_evidence")
+            _append_unique(warnings, "project_fact_without_evidence")
+            _append_unique(evidence_reasons, "project_fact_without_evidence")
         if _match_any_input_risk(text, _INPUT_TENDER_EVIDENCE_PATTERNS) and not evidence_marker:
             _append_unique(warnings, "tender_evidence_missing")
         if _match_any_input_risk(text, _INPUT_DRAWING_BOQ_PATTERNS) and not evidence_marker:
@@ -314,6 +369,7 @@ def _input_risk_gate(context: dict[str, Any]) -> dict[str, Any]:
                 "suspicious_duration_claim",
                 "suspicious_cost_claim",
                 "unsupported_project_fact",
+                "project_fact_without_evidence",
             }
         ),
         "suspicious_references": suspicious_references,
@@ -321,6 +377,9 @@ def _input_risk_gate(context: dict[str, Any]) -> dict[str, Any]:
         "input_risk_review_required": review_required,
         "input_risk_blocked": blocked,
         "evidence_anchor_required": bool(flags and status != "clear"),
+        "unsupported_project_fact_detected": bool(unsupported_project_fact_detected),
+        "evidence_source_missing": bool(evidence_source_missing),
+        "project_fact_without_evidence": bool(project_fact_without_evidence),
     }
 
 
@@ -484,6 +543,11 @@ def _base_gate(
         "input_risk_review_required": bool(input_risk_data.get("input_risk_review_required", False)),
         "input_risk_blocked": bool(input_risk_data.get("input_risk_blocked", False)),
         "evidence_anchor_required": bool(input_risk_data.get("evidence_anchor_required", False)),
+        "unsupported_project_fact_detected": bool(
+            input_risk_data.get("unsupported_project_fact_detected", False)
+        ),
+        "evidence_source_missing": bool(input_risk_data.get("evidence_source_missing", False)),
+        "project_fact_without_evidence": bool(input_risk_data.get("project_fact_without_evidence", False)),
     }
 
 
@@ -738,6 +802,9 @@ _QUALITY_GATE_PUBLIC_FIELDS = (
     "input_risk_review_required",
     "input_risk_blocked",
     "evidence_anchor_required",
+    "unsupported_project_fact_detected",
+    "evidence_source_missing",
+    "project_fact_without_evidence",
 )
 
 

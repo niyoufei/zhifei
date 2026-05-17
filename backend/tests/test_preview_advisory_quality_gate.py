@@ -88,6 +88,9 @@ def test_quality_gate_high_quality_advisory_preview_ok_but_formal_ineligible() -
     assert gate["input_risk_blocked"] is False
     assert gate["input_risk_review_required"] is False
     assert gate["unsupported_claims_detected"] is False
+    assert gate["unsupported_project_fact_detected"] is False
+    assert gate["evidence_source_missing"] is False
+    assert gate["project_fact_without_evidence"] is False
     assert gate["evidence_anchor_required"] is False
     _assert_formal_chain_blocked(gate)
 
@@ -348,6 +351,49 @@ def test_quality_gate_input_unsupported_project_fact_requires_review() -> None:
     _assert_formal_chain_blocked(gate)
 
 
+def test_quality_gate_input_ir_d_equivalent_unsupported_project_fact_requires_review() -> None:
+    gate = evaluate_preview_advisory_quality_gate(
+        _preview_response(),
+        context=_input_context(
+            "本项目现场已有3台塔吊、2座拌合站和5个固定材料堆场。"
+            "No drawings or site records are provided."
+        ),
+    )
+
+    assert gate["quality_status"] == "review_required"
+    assert gate["quality_status"] != "preview_ok"
+    assert gate["input_risk_status"] == "review_required"
+    assert "unsupported_project_fact" in gate["input_risk_flags"]
+    assert "project_fact_without_evidence" in gate["input_risk_flags"]
+    assert "evidence_source_missing" in gate["input_risk_flags"]
+    assert "input_risk:unsupported_project_fact" in gate["review_reasons"]
+    assert "input_risk:project_fact_without_evidence" in gate["review_reasons"]
+    assert gate["unsupported_project_fact_detected"] is True
+    assert gate["project_fact_without_evidence"] is True
+    assert gate["evidence_source_missing"] is True
+    assert gate["input_evidence_required"] is True
+    assert gate["evidence_anchor_required"] is True
+    _assert_formal_chain_blocked(gate)
+
+
+def test_quality_gate_input_unsupported_project_fact_with_specific_quantities_requires_review() -> None:
+    gate = evaluate_preview_advisory_quality_gate(
+        _preview_response(),
+        context=_input_context("未提供图纸和清单，但现场道路、材料堆场和3个作业面均已具备。"),
+    )
+
+    assert gate["quality_status"] == "review_required"
+    assert gate["input_risk_status"] == "review_required"
+    assert "unsupported_project_fact" in gate["input_risk_flags"]
+    assert "project_fact_without_evidence" in gate["input_risk_flags"]
+    assert gate["unsupported_project_fact_detected"] is True
+    assert gate["project_fact_without_evidence"] is True
+    assert gate["evidence_source_missing"] is True
+    assert gate["input_evidence_required"] is True
+    assert gate["evidence_anchor_required"] is True
+    _assert_formal_chain_blocked(gate)
+
+
 def test_quality_gate_input_evidence_required_marker_downgrades_to_review_required() -> None:
     gate = evaluate_preview_advisory_quality_gate(
         _preview_response(),
@@ -363,6 +409,22 @@ def test_quality_gate_input_evidence_required_marker_downgrades_to_review_requir
     assert "evidence_required_marker" in gate["evidence_required_reasons"]
     assert "suspicious_clause_reference" in gate["input_risk_warnings"]
     assert "suspicious_standard_reference" in gate["input_risk_warnings"]
+    assert gate["input_evidence_required"] is True
+    assert gate["evidence_anchor_required"] is True
+    _assert_formal_chain_blocked(gate)
+
+
+def test_quality_gate_unsupported_project_fact_safe_expression_requires_review_not_blocked() -> None:
+    gate = evaluate_preview_advisory_quality_gate(
+        _preview_response(),
+        context=_input_context("涉及现场机械、材料堆场、工程量、作业面等项目事实，需资料核验，未查明前不得作为正式响应依据。"),
+    )
+
+    assert gate["quality_status"] == "review_required"
+    assert gate["quality_status"] != "preview_ok"
+    assert gate["input_risk_status"] == "review_required"
+    assert gate["input_risk_blockers"] == []
+    assert "evidence_required_marker" in gate["input_risk_flags"]
     assert gate["input_evidence_required"] is True
     assert gate["evidence_anchor_required"] is True
     _assert_formal_chain_blocked(gate)
@@ -407,6 +469,31 @@ def test_quality_gate_input_risk_with_thinking_fallback_is_more_conservative() -
     _assert_formal_chain_blocked(gate)
 
 
+def test_quality_gate_unsupported_project_fact_with_thinking_fallback_is_more_conservative() -> None:
+    gate = evaluate_preview_advisory_quality_gate(
+        _preview_response(
+            preview_mode="thinking_only_fallback",
+            content_source="thinking",
+            advisory="模型仅返回推理预览内容，以下为截断摘要：需核验现场事实依据。",
+            risk_notes=["thinking_only_fallback"],
+        ),
+        context=_input_context(
+            "本项目现场已有3台塔吊、2座拌合站和5个固定材料堆场。"
+            "No drawings or site records are provided."
+        ),
+    )
+
+    assert gate["quality_status"] == "review_required"
+    assert gate["quality_status"] != "preview_ok"
+    assert gate["input_risk_status"] == "review_required"
+    assert "thinking_only_fallback_review_required" in gate["review_reasons"]
+    assert "input_risk:unsupported_project_fact" in gate["review_reasons"]
+    assert gate["unsupported_project_fact_detected"] is True
+    assert gate["project_fact_without_evidence"] is True
+    assert gate["shadow_candidate_allowed"] is False
+    _assert_formal_chain_blocked(gate)
+
+
 def test_quality_gate_output_clean_but_input_high_risk_is_not_preview_ok() -> None:
     gate = evaluate_preview_advisory_quality_gate(
         _preview_response(advisory="建议补充责任岗位、检查频次、整改闭环和资料归档要求。"),
@@ -418,6 +505,24 @@ def test_quality_gate_output_clean_but_input_high_risk_is_not_preview_ok() -> No
     assert gate["input_risk_blocked"] is True
     assert "suspicious_clause_reference" in gate["input_risk_blockers"]
     assert "suspicious_duration_claim" in gate["input_risk_blockers"]
+    _assert_formal_chain_blocked(gate)
+
+
+def test_quality_gate_output_clean_but_unsupported_project_fact_input_is_not_preview_ok() -> None:
+    gate = evaluate_preview_advisory_quality_gate(
+        _preview_response(advisory="建议补充责任岗位、检查频次、整改闭环和资料归档要求。"),
+        context=_input_context(
+            "本项目现场已有3台塔吊、2座拌合站和5个固定材料堆场。"
+            "No drawings or site records are provided."
+        ),
+    )
+
+    assert gate["quality_status"] == "review_required"
+    assert gate["quality_status"] != "preview_ok"
+    assert gate["input_risk_status"] != "clear"
+    assert "unsupported_project_fact" in gate["input_risk_flags"]
+    assert gate["unsupported_project_fact_detected"] is True
+    assert gate["input_evidence_required"] is True
     _assert_formal_chain_blocked(gate)
 
 
