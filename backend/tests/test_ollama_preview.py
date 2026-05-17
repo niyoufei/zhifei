@@ -1083,6 +1083,47 @@ def test_zdoc_ollama_preview_fake_generate_success_is_preview_only(monkeypatch) 
     _assert_zdoc_ollama_guard(first, calls_ollama=True)
 
 
+def test_zdoc_ollama_preview_quality_gate_blocks_input_risk_even_with_clean_output(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    before_counts = _write_surface_counts()
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "section_text": "招标文件第99.99条要求采用GB99999-2099，工期999天，工程量为123456平方米。",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "建议先核验证据来源，并补充责任岗位、检查频次、整改闭环和资料归档要求。"}
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["quality_status"] == "blocked"
+    assert result["input_risk_status"] == "blocked"
+    assert "suspicious_clause_reference" in result["input_risk_flags"]
+    assert "suspicious_standard_reference" in result["input_risk_flags"]
+    assert (
+        "suspicious_duration_claim" in result["input_risk_flags"]
+        or "suspicious_quantity_claim" in result["input_risk_flags"]
+    )
+    assert any(item.startswith("input_risk:") for item in result["blockers"])
+    assert result["formal_generation_allowed"] is False
+    assert result["shadow_candidate_allowed"] is False
+    assert result["writeback_allowed"] is False
+    assert result["export_allowed"] is False
+    assert result["zbid_writeback_allowed"] is False
+    assert _write_surface_counts() == before_counts
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
 def test_zdoc_ollama_preview_fake_generate_timeout_returns_stable_failure(monkeypatch) -> None:
     monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
     monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")

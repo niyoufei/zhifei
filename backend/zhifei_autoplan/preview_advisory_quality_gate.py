@@ -119,6 +119,62 @@ _HALLUCINATION_PATTERNS = (
     re.compile(r"\b(?:GB|JGJ|CJJ|DBJ)[\s/-]?\d{3,6}(?:-\d{2,4})?\b", re.I),
     re.compile(r"\d+(?:\.\d+)?\s*(?:万元|亿元|日历天|平方米|m2|㎡)", re.I),
 )
+_INPUT_CONTEXT_FIELDS = (
+    "section_text",
+    "section_title",
+    "review_focus",
+    "source_context",
+    "context_summary",
+    "content",
+    "title",
+    "section",
+    "input_context",
+    "original_payload",
+)
+_INPUT_EVIDENCE_MARKERS = (
+    "需资料核验",
+    "需资料复核",
+    "未查明",
+    "待招标文件确认",
+    "待确认",
+    "待资料确认",
+    "以招标文件为准",
+)
+_INPUT_CLAUSE_PATTERNS = (
+    re.compile(r"(?:招标文件|招标|评分(?:办法|项|标准)|补疑|澄清)\s*第\s*[\d.一二三四五六七八九十]+\s*[条款]?", re.I),
+)
+_INPUT_STANDARD_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9])(?:GB|JGJ|CJJ|DBJ)[\s/-]?\d{3,6}(?:-\d{2,4})?(?![A-Za-z0-9])", re.I),
+)
+_INPUT_QUANTITY_PATTERNS = (
+    re.compile(r"(?:工程量|面积|数量|材料数量)[^，。；;,.]{0,12}\d+(?:\.\d+)?\s*(?:平方米|m2|㎡|立方米|m3|m³|米|吨|台|套)", re.I),
+)
+_INPUT_DURATION_PATTERNS = (
+    re.compile(r"(?:工期|总工期|计划工期)[^，。；;,.]{0,12}\d+(?:\.\d+)?\s*(?:日历天|天|个月|月)", re.I),
+    re.compile(r"\d+(?:\.\d+)?\s*日历天", re.I),
+)
+_INPUT_COST_PATTERNS = (
+    re.compile(r"(?:金额|造价|费用|投资|合同价|报价)[^，。；;,.]{0,12}\d+(?:\.\d+)?\s*(?:万元|亿元|元)", re.I),
+    re.compile(r"\d+(?:\.\d+)?\s*(?:万元|亿元)", re.I),
+)
+_INPUT_UNSUPPORTED_FACT_PATTERNS = (
+    re.compile(r"本项目[^。；;]{0,60}(?:必须|要求|采用|位于|包含|设置|配置)", re.I),
+)
+_INPUT_TENDER_EVIDENCE_PATTERNS = (
+    re.compile(r"(?:招标文件|评分项|评分标准|补疑|澄清|质量目标|工期)", re.I),
+)
+_INPUT_DRAWING_BOQ_PATTERNS = (
+    re.compile(r"(?:图纸|清单|工程量|材料数量|系统参数|设备参数)", re.I),
+)
+_INPUT_DIRECT_WRITE_PATTERNS = (
+    re.compile(r"(?:请|直接|立即)?(?:写入|写回|替换)(?:正式)?(?:章节|正文|方案|ZBid)", re.I),
+    re.compile(r"(?:导出|生成)(?:\s*DOCX|正式文档|正式正文)", re.I),
+    re.compile(r"写回\s*ZBid", re.I),
+)
+_INPUT_FORMAL_CONTENT_PATTERNS = (
+    re.compile(r"(?:请|直接|立即)?生成(?:正式)?(?:正文|章节正文|方案内容)", re.I),
+)
+_INPUT_NEGATION_MARKERS = ("不得", "不要", "禁止", "不应", "不可", "do not")
 
 
 def _text(value: Any, *, limit: int = 12000) -> str:
@@ -139,6 +195,133 @@ def _list_value(value: Any) -> list[Any]:
 def _append_unique(items: list[str], item: str) -> None:
     if item and item not in items:
         items.append(item)
+
+
+def _flatten_input_text(value: Any) -> str:
+    if isinstance(value, dict):
+        parts = []
+        for key in _INPUT_CONTEXT_FIELDS:
+            if key in value:
+                parts.append(_flatten_input_text(value.get(key)))
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, (list, tuple, set)):
+        return "\n".join(_flatten_input_text(item) for item in value)
+    return _text(value)
+
+
+def _context_input_text(context: dict[str, Any]) -> str:
+    parts = []
+    for key in _INPUT_CONTEXT_FIELDS:
+        if key in context:
+            parts.append(_flatten_input_text(context.get(key)))
+    return "\n".join(part for part in parts if part)
+
+
+def _has_input_evidence_marker(text: str) -> bool:
+    return any(marker in text for marker in _INPUT_EVIDENCE_MARKERS)
+
+
+def _has_negated_input_match(text: str, match: re.Match[str]) -> bool:
+    start = max(0, match.start() - 12)
+    prefix = text[start : match.start()].lower()
+    return any(marker in prefix for marker in _INPUT_NEGATION_MARKERS)
+
+
+def _has_unsafe_input_request(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            if not _has_negated_input_match(text, match):
+                return True
+    return False
+
+
+def _match_any_input_risk(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
+
+
+def _input_risk_gate(context: dict[str, Any]) -> dict[str, Any]:
+    text = _context_input_text(context)
+    flags: list[str] = []
+    blockers: list[str] = []
+    warnings: list[str] = []
+    evidence_reasons: list[str] = []
+    suspicious_references: list[str] = []
+    evidence_marker = _has_input_evidence_marker(text)
+
+    def mark(flag: str, *, block: bool = True, reference: bool = False) -> None:
+        _append_unique(flags, flag)
+        if reference:
+            _append_unique(suspicious_references, flag)
+        if evidence_marker and block:
+            _append_unique(warnings, flag)
+            _append_unique(evidence_reasons, "evidence_required_marker")
+        elif block:
+            _append_unique(blockers, flag)
+        else:
+            _append_unique(warnings, flag)
+
+    if text:
+        if _match_any_input_risk(text, _INPUT_CLAUSE_PATTERNS):
+            mark("suspicious_clause_reference", reference=True)
+            if not evidence_marker:
+                _append_unique(warnings, "tender_evidence_missing")
+        if _match_any_input_risk(text, _INPUT_STANDARD_PATTERNS):
+            mark("suspicious_standard_reference", reference=True)
+        if _match_any_input_risk(text, _INPUT_QUANTITY_PATTERNS):
+            mark("suspicious_quantity_claim")
+            if not evidence_marker:
+                _append_unique(warnings, "drawing_or_boq_evidence_missing")
+        if _match_any_input_risk(text, _INPUT_DURATION_PATTERNS):
+            mark("suspicious_duration_claim")
+            if not evidence_marker:
+                _append_unique(warnings, "tender_evidence_missing")
+        if _match_any_input_risk(text, _INPUT_COST_PATTERNS):
+            mark("suspicious_cost_claim")
+        if _match_any_input_risk(text, _INPUT_UNSUPPORTED_FACT_PATTERNS):
+            mark("unsupported_project_fact", block=False)
+        if _match_any_input_risk(text, _INPUT_TENDER_EVIDENCE_PATTERNS) and not evidence_marker:
+            _append_unique(warnings, "tender_evidence_missing")
+        if _match_any_input_risk(text, _INPUT_DRAWING_BOQ_PATTERNS) and not evidence_marker:
+            _append_unique(warnings, "drawing_or_boq_evidence_missing")
+        if evidence_marker:
+            _append_unique(flags, "evidence_required_marker")
+            _append_unique(warnings, "evidence_required_marker")
+            _append_unique(evidence_reasons, "evidence_required_marker")
+        if _has_unsafe_input_request(text, _INPUT_FORMAL_CONTENT_PATTERNS):
+            _append_unique(flags, "formal_content_request_without_evidence")
+            _append_unique(blockers, "formal_content_request_without_evidence")
+        if _has_unsafe_input_request(text, _INPUT_DIRECT_WRITE_PATTERNS):
+            _append_unique(flags, "direct_write_request_detected")
+            _append_unique(blockers, "direct_write_request_detected")
+
+    blocked = bool(blockers)
+    review_required = bool(warnings or evidence_reasons) and not blocked
+    status = "blocked" if blocked else "review_required" if review_required else "clear"
+    score = 0 if blocked else 45 if review_required else 100
+    return {
+        "input_risk_status": status,
+        "input_risk_score": score,
+        "input_risk_flags": flags,
+        "input_risk_blockers": blockers,
+        "input_risk_warnings": warnings,
+        "input_evidence_required": bool(evidence_reasons or warnings or blockers),
+        "unsupported_claims_detected": bool(
+            set(flags)
+            & {
+                "suspicious_clause_reference",
+                "suspicious_standard_reference",
+                "suspicious_quantity_claim",
+                "suspicious_duration_claim",
+                "suspicious_cost_claim",
+                "unsupported_project_fact",
+            }
+        ),
+        "suspicious_references": suspicious_references,
+        "evidence_required_reasons": evidence_reasons,
+        "input_risk_review_required": review_required,
+        "input_risk_blocked": blocked,
+        "evidence_anchor_required": bool(flags and status != "clear"),
+    }
 
 
 def _has_forbidden_route_trace(value: Any) -> bool:
@@ -262,7 +445,9 @@ def _base_gate(
     risk_notes_count: int = 0,
     quality_score: int = 0,
     score_dimensions: dict[str, int] | None = None,
+    input_risk: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    input_risk_data = dict(input_risk or {})
     return {
         "quality_status": quality_status,
         "quality_score": max(0, min(100, int(quality_score))),
@@ -287,6 +472,18 @@ def _base_gate(
         "writeback_allowed": WRITEBACK_ALLOWED,
         "export_allowed": EXPORT_ALLOWED,
         "zbid_writeback_allowed": ZBID_WRITEBACK_ALLOWED,
+        "input_risk_status": input_risk_data.get("input_risk_status", "clear"),
+        "input_risk_score": int(input_risk_data.get("input_risk_score", 100)),
+        "input_risk_flags": list(input_risk_data.get("input_risk_flags") or []),
+        "input_risk_blockers": list(input_risk_data.get("input_risk_blockers") or []),
+        "input_risk_warnings": list(input_risk_data.get("input_risk_warnings") or []),
+        "input_evidence_required": bool(input_risk_data.get("input_evidence_required", False)),
+        "unsupported_claims_detected": bool(input_risk_data.get("unsupported_claims_detected", False)),
+        "suspicious_references": list(input_risk_data.get("suspicious_references") or []),
+        "evidence_required_reasons": list(input_risk_data.get("evidence_required_reasons") or []),
+        "input_risk_review_required": bool(input_risk_data.get("input_risk_review_required", False)),
+        "input_risk_blocked": bool(input_risk_data.get("input_risk_blocked", False)),
+        "evidence_anchor_required": bool(input_risk_data.get("evidence_anchor_required", False)),
     }
 
 
@@ -296,6 +493,7 @@ def _evaluate_preview_advisory_quality_gate(
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = dict(context or {})
+    input_risk = _input_risk_gate(context)
     blockers: list[str] = []
     warnings: list[str] = []
     review_reasons: list[str] = []
@@ -416,6 +614,16 @@ def _evaluate_preview_advisory_quality_gate(
         _append_unique(review_reasons, "construction_specificity_review_required")
         _append_unique(failed_checks, "construction_specificity_guard")
 
+    for item in input_risk["input_risk_blockers"]:
+        _append_unique(blockers, f"input_risk:{item}")
+        _append_unique(failed_checks, f"input_risk:{item}")
+    for item in input_risk["input_risk_warnings"]:
+        _append_unique(warnings, f"input_risk:{item}")
+        _append_unique(review_reasons, f"input_risk:{item}")
+        _append_unique(failed_checks, f"input_risk:{item}")
+    if input_risk["input_risk_status"] == "clear":
+        _append_unique(passed_checks, "input_risk_guard")
+
     score_dimensions = _score_dimensions(
         advisory=advisory,
         context=context,
@@ -429,7 +637,17 @@ def _evaluate_preview_advisory_quality_gate(
 
     if blockers:
         status = QUALITY_STATUS_BLOCKED
-        gate_level = "P0" if any(item.endswith("_unsafe") or item.startswith("forbidden") for item in blockers) else "P3"
+        gate_level = (
+            "P0"
+            if any(
+                item.endswith("_unsafe")
+                or item.startswith("forbidden")
+                or "direct_write_request_detected" in item
+                or "formal_content_request_without_evidence" in item
+                for item in blockers
+            )
+            else "P3"
+        )
     elif review_reasons:
         status = QUALITY_STATUS_REVIEW_REQUIRED
         if any("thinking_only" in item for item in review_reasons):
@@ -459,6 +677,7 @@ def _evaluate_preview_advisory_quality_gate(
         advisory_length=advisory_length,
         suggestions_count=len(suggestions),
         risk_notes_count=len(risk_notes),
+        input_risk=input_risk,
     )
 
 
@@ -507,6 +726,18 @@ _QUALITY_GATE_PUBLIC_FIELDS = (
     "writeback_allowed",
     "export_allowed",
     "zbid_writeback_allowed",
+    "input_risk_status",
+    "input_risk_score",
+    "input_risk_flags",
+    "input_risk_blockers",
+    "input_risk_warnings",
+    "input_evidence_required",
+    "unsupported_claims_detected",
+    "suspicious_references",
+    "evidence_required_reasons",
+    "input_risk_review_required",
+    "input_risk_blocked",
+    "evidence_anchor_required",
 )
 
 
