@@ -60,6 +60,11 @@ FACTUAL_PATTERNS = (
     re.compile(r"(?:现场|施工现场|项目现场|本项目)[^。；;]{0,80}(?:塔吊|拌合站|材料堆场|道路|管线|作业面|设备|机械|清单|图纸|评分项)", re.I),
     re.compile(r"(?:质量目标|安全文明目标|验收标准|检查频次|建设单位|工期节点|专业系统|施工参数)", re.I),
 )
+GENERATED_PREVIEW_EVIDENCE_PATTERNS = (
+    re.compile(r"(?:模型|本地模型|AI|系统生成|生成(?:的)?建议|preview|预览)[^。；;]{0,40}(?:作为|当作|充当)[^。；;]{0,30}(?:证据|依据|来源)", re.I),
+    re.compile(r"(?:模型已证明|本地模型依据显示|AI\s*建议可作为证据)", re.I),
+    re.compile(r"system_generated_preview", re.I),
+)
 
 
 def _text(value: Any, *, limit: int = 12000) -> str:
@@ -167,6 +172,11 @@ def _has_factual_content(value: Any) -> bool:
     return any(pattern.search(text) for pattern in FACTUAL_PATTERNS)
 
 
+def _has_generated_preview_as_evidence(value: Any) -> bool:
+    text = _flatten_text(value)
+    return any(pattern.search(text) for pattern in GENERATED_PREVIEW_EVIDENCE_PATTERNS)
+
+
 def _first_source_value(sources: list[dict[str, Any]], key: str) -> Any:
     for source in sources:
         if source.get(key):
@@ -197,6 +207,9 @@ def _base_result(
     source_snapshot_id: str = "",
     generated_from_model: bool = False,
     generated_content_must_not_be_evidence: bool = False,
+    generated_preview_as_evidence_detected: bool = False,
+    generated_content_evidence_blocked: bool = False,
+    invalid_anchor_reason: str = "",
     confidence: int | None = None,
 ) -> dict[str, Any]:
     source_list = list(sources or [])
@@ -255,6 +268,9 @@ def _base_result(
         "source_snapshot_id": source_snapshot_id,
         "generated_from_model": bool(generated_from_model),
         "generated_content_must_not_be_evidence": bool(generated_content_must_not_be_evidence),
+        "generated_preview_as_evidence_detected": bool(generated_preview_as_evidence_detected),
+        "generated_content_evidence_blocked": bool(generated_content_evidence_blocked),
+        "invalid_anchor_reason": invalid_anchor_reason,
         **_formal_chain_flags(),
     }
 
@@ -302,6 +318,17 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
         source_snapshot_id = _text(payload.get("source_snapshot_id") or context.get("source_snapshot_id"), limit=120)
         generated_from_model = bool(payload.get("generated_from_model", False))
         preview_mode = _text(payload.get("preview_mode"), limit=80)
+        generated_preview_as_evidence = bool(
+            payload.get("generated_preview_as_evidence_detected")
+            or _has_generated_preview_as_evidence(
+                {
+                    "claim_text": payload.get("claim_text"),
+                    "advisory": payload.get("advisory"),
+                    "context": context,
+                    "evidence_sources": sources,
+                }
+            )
+        )
         factual_content = _has_factual_content(
             {
                 "claim_text": payload.get("claim_text"),
@@ -328,6 +355,7 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
             or unsupported_project_facts
             or unverified_parameters
             or factual_content
+            or generated_preview_as_evidence
             or future_formal_attempt
         )
         if preview_mode == "thinking_only_fallback" and factual_content:
@@ -355,6 +383,8 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                 source_snapshot_id=source_snapshot_id,
                 generated_from_model=generated_from_model,
                 generated_content_must_not_be_evidence=generated_from_model,
+                generated_preview_as_evidence_detected=generated_preview_as_evidence,
+                generated_content_evidence_blocked=generated_preview_as_evidence,
             )
 
         for source in sources:
@@ -364,6 +394,7 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                 continue
             if source_type in MODEL_GENERATED_SOURCE_TYPES or source.get("generated_from_model"):
                 _append_unique(invalid_reasons, "model_generated_preview_as_evidence")
+                generated_preview_as_evidence = True
                 continue
             if source_type in UNVERIFIED_SOURCE_TYPES:
                 _append_unique(unverified_reasons, "unknown_or_unverified_source")
@@ -389,6 +420,9 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                     continue
                 anchored_sources += 1
 
+        if generated_preview_as_evidence:
+            _append_unique(invalid_reasons, "generated_preview_as_evidence")
+
         if invalid_reasons:
             return _base_result(
                 required=required or bool(sources),
@@ -402,6 +436,9 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                 source_snapshot_id=source_snapshot_id,
                 generated_from_model=generated_from_model,
                 generated_content_must_not_be_evidence=True,
+                generated_preview_as_evidence_detected=generated_preview_as_evidence,
+                generated_content_evidence_blocked=generated_preview_as_evidence,
+                invalid_anchor_reason=invalid_reasons[0],
             )
 
         if future_formal_attempt and not anchored_sources:
@@ -417,6 +454,9 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                 source_snapshot_id=source_snapshot_id,
                 generated_from_model=generated_from_model,
                 generated_content_must_not_be_evidence=generated_from_model,
+                generated_preview_as_evidence_detected=generated_preview_as_evidence,
+                generated_content_evidence_blocked=False,
+                invalid_anchor_reason="formal_chain_attempt_without_evidence",
             )
 
         if unverified_reasons:
@@ -432,6 +472,7 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                 source_snapshot_id=source_snapshot_id,
                 generated_from_model=generated_from_model,
                 generated_content_must_not_be_evidence=generated_from_model,
+                generated_preview_as_evidence_detected=generated_preview_as_evidence,
             )
 
         if required and not sources:
@@ -451,6 +492,8 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                 source_snapshot_id=source_snapshot_id,
                 generated_from_model=generated_from_model,
                 generated_content_must_not_be_evidence=generated_from_model,
+                generated_preview_as_evidence_detected=generated_preview_as_evidence,
+                invalid_anchor_reason=status == EVIDENCE_STATUS_INVALID_ANCHOR and missing_reasons[0] or "",
             )
 
         if required and anchored_sources and not (partial_sources or partial_reasons or missing_reasons):
@@ -466,6 +509,7 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                 source_snapshot_id=source_snapshot_id,
                 generated_from_model=generated_from_model,
                 generated_content_must_not_be_evidence=generated_from_model,
+                generated_preview_as_evidence_detected=generated_preview_as_evidence,
                 confidence=confidence,
             )
 
@@ -485,6 +529,7 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                 source_snapshot_id=source_snapshot_id,
                 generated_from_model=generated_from_model,
                 generated_content_must_not_be_evidence=generated_from_model,
+                generated_preview_as_evidence_detected=generated_preview_as_evidence,
             )
 
         if source_types and not required:
@@ -498,6 +543,7 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                     source_snapshot_id=source_snapshot_id,
                     generated_from_model=generated_from_model,
                     generated_content_must_not_be_evidence=generated_from_model,
+                    generated_preview_as_evidence_detected=generated_preview_as_evidence,
                 )
             if anchored_sources:
                 return _base_result(
@@ -508,6 +554,7 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
                     source_snapshot_id=source_snapshot_id,
                     generated_from_model=generated_from_model,
                     generated_content_must_not_be_evidence=generated_from_model,
+                    generated_preview_as_evidence_detected=generated_preview_as_evidence,
                 )
 
         return _base_result(
@@ -518,6 +565,7 @@ def evaluate_evidence_anchor(anchor_input: Any, *, context: dict[str, Any] | Non
             source_snapshot_id=source_snapshot_id,
             generated_from_model=generated_from_model,
             generated_content_must_not_be_evidence=generated_from_model,
+            generated_preview_as_evidence_detected=generated_preview_as_evidence,
         )
     except Exception:
         return _base_result(

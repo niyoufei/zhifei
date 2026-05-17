@@ -643,6 +643,9 @@ def test_safe_endpoint_double_flags_thinking_only_response_is_bounded_preview(mo
     assert result["ok"] is True
     assert result["status"] == "ok"
     assert result["preview_mode"] == "thinking_only_fallback"
+    assert result["response_mode"] == "thinking_only_fallback"
+    assert result["thinking_fallback_detected"] is True
+    assert result["response_mode_review_required"] is True
     assert result["content_source"] == "thinking"
     assert result["advisory"].startswith("模型仅返回推理预览内容")
     assert len(result["advisory"]) <= 1200
@@ -690,6 +693,8 @@ def test_safe_endpoint_double_flags_json_response_keeps_bounded_lists(monkeypatc
     assert result["ok"] is True
     assert result["status"] == "ok"
     assert result["preview_mode"] == "structured_json"
+    assert result["response_mode"] == "json_advisory"
+    assert result["response_source"] == "response"
     assert result["advisory"] == "建议补充样板验收资料。"
     assert result["suggestions"] == ["建议一", "建议二", "建议三"]
     assert result["risk_notes"] == ["风险一", "风险二", "风险三"]
@@ -723,6 +728,8 @@ def test_safe_endpoint_double_flags_empty_response_with_thinking_is_bounded_fall
     assert result["ok"] is True
     assert result["status"] == "ok"
     assert result["preview_mode"] == "thinking_only_fallback"
+    assert result["response_mode"] == "thinking_only_fallback"
+    assert result["thinking_fallback_detected"] is True
     assert result["content_source"] == "thinking"
     assert result["advisory"].startswith("模型仅返回推理预览内容")
     assert result["advisory"] != thinking

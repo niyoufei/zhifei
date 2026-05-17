@@ -67,6 +67,14 @@ LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS = 1200
 LOCAL_LLM_OLLAMA_PREVIEW_THINKING_CHARS = 360
 LOCAL_LLM_OLLAMA_PREVIEW_MAX_LIST_ITEMS = 3
 LOCAL_LLM_OLLAMA_PREVIEW_LIST_ITEM_CHARS = 220
+RESPONSE_MODE_RESPONSE_ADVISORY = "response_advisory"
+RESPONSE_MODE_JSON_ADVISORY = "json_advisory"
+RESPONSE_MODE_TEXT_FALLBACK = "text_fallback"
+RESPONSE_MODE_THINKING_ONLY_FALLBACK = "thinking_only_fallback"
+RESPONSE_MODE_EMPTY_RESPONSE = "empty_response"
+RESPONSE_MODE_MALFORMED_RESPONSE = "malformed_response"
+RESPONSE_MODE_NORMALIZATION_FAILURE = "normalization_failure"
+RESPONSE_MODE_SYSTEM_ERROR = "system_error"
 LOCAL_LLM_PREVIEW_FORMAL_OUTPUT_FIELDS = frozenset(
     {
         "content",
@@ -207,6 +215,58 @@ def _zdoc_ollama_num_predict(value: Any = None) -> int:
     return max(1, min(LOCAL_LLM_OLLAMA_PREVIEW_MAX_NUM_PREDICT, num_predict))
 
 
+def _zdoc_ollama_response_mode_from_preview_mode(preview_mode: str) -> str:
+    if preview_mode == "structured_json":
+        return RESPONSE_MODE_JSON_ADVISORY
+    if preview_mode == RESPONSE_MODE_THINKING_ONLY_FALLBACK:
+        return RESPONSE_MODE_THINKING_ONLY_FALLBACK
+    if preview_mode == RESPONSE_MODE_TEXT_FALLBACK:
+        return RESPONSE_MODE_TEXT_FALLBACK
+    return RESPONSE_MODE_RESPONSE_ADVISORY
+
+
+def _zdoc_ollama_response_mode_metadata(
+    *,
+    response_mode: str,
+    response_source: str = "",
+    fallback_reason: str = "",
+) -> dict[str, Any]:
+    mode = _clean_text(response_mode, limit=80) or RESPONSE_MODE_RESPONSE_ADVISORY
+    source = _clean_text(response_source, limit=120)
+    reason = _clean_text(fallback_reason, limit=180)
+    confidence_by_mode = {
+        RESPONSE_MODE_RESPONSE_ADVISORY: 90,
+        RESPONSE_MODE_JSON_ADVISORY: 95,
+        RESPONSE_MODE_TEXT_FALLBACK: 65,
+        RESPONSE_MODE_THINKING_ONLY_FALLBACK: 30,
+        RESPONSE_MODE_EMPTY_RESPONSE: 0,
+        RESPONSE_MODE_MALFORMED_RESPONSE: 0,
+        RESPONSE_MODE_NORMALIZATION_FAILURE: 0,
+        RESPONSE_MODE_SYSTEM_ERROR: 0,
+    }
+    review_modes = {
+        RESPONSE_MODE_THINKING_ONLY_FALLBACK,
+        RESPONSE_MODE_EMPTY_RESPONSE,
+        RESPONSE_MODE_MALFORMED_RESPONSE,
+        RESPONSE_MODE_NORMALIZATION_FAILURE,
+        RESPONSE_MODE_SYSTEM_ERROR,
+    }
+    warnings: list[str] = []
+    if mode in review_modes:
+        warnings.append(mode)
+    if reason and reason not in warnings:
+        warnings.append(reason)
+    return {
+        "response_mode": mode,
+        "response_source": source,
+        "fallback_reason": reason,
+        "response_mode_confidence": confidence_by_mode.get(mode, 0),
+        "response_mode_warnings": warnings,
+        "response_mode_review_required": mode in review_modes,
+        "thinking_fallback_detected": mode == RESPONSE_MODE_THINKING_ONLY_FALLBACK,
+    }
+
+
 def _zdoc_ollama_response(
     *,
     ok: bool,
@@ -224,11 +284,20 @@ def _zdoc_ollama_response(
     preview_type: str = "section_review",
     preview_mode: str = "advisory",
     content_source: str = "",
+    response_mode: str = "",
+    response_source: str = "",
+    fallback_reason: str = "",
     calls_ollama: bool = False,
     real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
     source = LOCAL_LLM_OLLAMA_PREVIEW_REAL_TRANSPORT_SOURCE if real_transport_enabled else LOCAL_LLM_OLLAMA_PREVIEW_SOURCE
     entry = "real_ollama_preview_adapter_real_transport" if real_transport_enabled else "real_ollama_preview_adapter_fake_transport"
+    response_source = _clean_text(response_source or content_source, limit=120)
+    response_mode_data = _zdoc_ollama_response_mode_metadata(
+        response_mode=response_mode or _zdoc_ollama_response_mode_from_preview_mode(preview_mode),
+        response_source=response_source,
+        fallback_reason=fallback_reason,
+    )
     return {
         "ok": bool(ok),
         "enabled": bool(enabled),
@@ -268,6 +337,7 @@ def _zdoc_ollama_response(
         "reason": reason,
         "preview_mode": preview_mode,
         "content_source": content_source,
+        **response_mode_data,
         "safety": _zdoc_ollama_preview_safety(real_transport_enabled=real_transport_enabled),
     }
 
@@ -299,6 +369,8 @@ def build_zdoc_ollama_failure_response(
     model: str = "",
     base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
     preview_type: str = "section_review",
+    response_mode: str = RESPONSE_MODE_SYSTEM_ERROR,
+    fallback_reason: str = "",
     calls_ollama: bool = False,
     real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
@@ -313,6 +385,8 @@ def build_zdoc_ollama_failure_response(
         error_type=error_type,
         reason=reason,
         preview_type=preview_type,
+        response_mode=response_mode,
+        fallback_reason=fallback_reason or reason,
         calls_ollama=calls_ollama,
         real_transport_enabled=real_transport_enabled,
     )
@@ -580,6 +654,9 @@ def _zdoc_ollama_thinking_fallback(thinking_text: str) -> dict[str, Any]:
         "risk_notes": ["thinking_only_fallback"],
         "preview_mode": "thinking_only_fallback",
         "content_source": "thinking",
+        "response_mode": RESPONSE_MODE_THINKING_ONLY_FALLBACK,
+        "response_source": "thinking",
+        "fallback_reason": "thinking_only_fallback",
     }
 
 
@@ -614,15 +691,24 @@ def _extract_zdoc_ollama_advisory_payload(raw_response: dict[str, Any]) -> tuple
                 "risk_notes": risk_notes,
                 "preview_mode": "structured_json",
                 "content_source": content_source,
+                "response_mode": RESPONSE_MODE_JSON_ADVISORY,
+                "response_source": content_source,
             }, None
         if response_text.startswith("<think"):
             return _zdoc_ollama_thinking_fallback(response_text), None
+        response_mode = (
+            RESPONSE_MODE_RESPONSE_ADVISORY
+            if content_source in {"advisory", "message.content"}
+            else RESPONSE_MODE_TEXT_FALLBACK
+        )
         return {
             "advisory": response_text,
             "suggestions": _zdoc_ollama_suggestions(response_text),
             "risk_notes": [],
             "preview_mode": "text_fallback",
             "content_source": content_source,
+            "response_mode": response_mode,
+            "response_source": content_source,
         }, None
 
     if thinking_text:
@@ -648,6 +734,8 @@ def normalize_zdoc_ollama_response(
             model=model,
             base_url=base_url,
             preview_type=preview_type,
+            response_mode=RESPONSE_MODE_MALFORMED_RESPONSE,
+            fallback_reason="malformed_response",
             calls_ollama=True,
             real_transport_enabled=real_transport_enabled,
         )
@@ -673,16 +761,23 @@ def normalize_zdoc_ollama_response(
             model=model,
             base_url=base_url,
             preview_type=preview_type,
+            response_mode=RESPONSE_MODE_NORMALIZATION_FAILURE,
+            fallback_reason="normalization_failure",
             calls_ollama=True,
             real_transport_enabled=real_transport_enabled,
         )
     if not normalized_payload:
+        response_mode = RESPONSE_MODE_MALFORMED_RESPONSE
+        if failure_reason == "empty_response_and_thinking":
+            response_mode = RESPONSE_MODE_EMPTY_RESPONSE
         return build_zdoc_ollama_failure_response(
             error_type="invalid_response",
             reason=failure_reason or "missing_preview_advisory",
             model=model,
             base_url=base_url,
             preview_type=preview_type,
+            response_mode=response_mode,
+            fallback_reason=failure_reason or "missing_preview_advisory",
             calls_ollama=True,
             real_transport_enabled=real_transport_enabled,
         )
@@ -700,6 +795,9 @@ def normalize_zdoc_ollama_response(
         preview_type=preview_type,
         preview_mode=normalized_payload.get("preview_mode") or "advisory",
         content_source=normalized_payload.get("content_source") or "",
+        response_mode=normalized_payload.get("response_mode") or "",
+        response_source=normalized_payload.get("response_source") or normalized_payload.get("content_source") or "",
+        fallback_reason=normalized_payload.get("fallback_reason") or "",
         calls_ollama=True,
         real_transport_enabled=real_transport_enabled,
     )

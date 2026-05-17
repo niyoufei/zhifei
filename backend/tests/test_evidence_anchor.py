@@ -135,7 +135,28 @@ def test_evidence_anchor_model_generated_preview_as_evidence_is_blocked() -> Non
     assert result["evidence_anchor_status"] == "invalid_anchor"
     assert result["evidence_blocked"] is True
     assert "model_generated_preview_as_evidence" in result["evidence_missing_reasons"]
+    assert result["generated_preview_as_evidence_detected"] is True
     assert result["generated_content_must_not_be_evidence"] is True
+    assert result["generated_content_evidence_blocked"] is True
+    assert result["invalid_anchor_reason"] == "model_generated_preview_as_evidence"
+    _assert_formal_chain_blocked(result)
+
+
+@pytest.mark.parametrize(
+    "claim_text",
+    [
+        "可将本地模型生成的建议直接作为招标条款依据。",
+        "可将AI建议作为证据用于图纸和清单依据。",
+    ],
+)
+def test_evidence_anchor_generated_preview_as_fact_evidence_is_invalid_anchor(claim_text: str) -> None:
+    result = evaluate_evidence_anchor({"claim_text": claim_text})
+
+    assert result["evidence_anchor_status"] == "invalid_anchor"
+    assert result["generated_preview_as_evidence_detected"] is True
+    assert result["generated_content_must_not_be_evidence"] is True
+    assert result["generated_content_evidence_blocked"] is True
+    assert "generated_preview_as_evidence" in result["evidence_missing_reasons"]
     _assert_formal_chain_blocked(result)
 
 
@@ -266,6 +287,25 @@ def test_evidence_anchor_formal_chain_attempt_without_evidence_blocked(field: st
     assert result["evidence_anchor_status"] == "invalid_anchor"
     assert result["evidence_blocked"] is True
     assert "formal_chain_attempt_without_evidence" in result["evidence_missing_reasons"]
+    _assert_formal_chain_blocked(result)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["zbid_writeback_attempted", "docx_export_attempted", "candidate_patch_attempted", "writeback_requested"],
+)
+def test_evidence_anchor_generated_preview_formal_chain_attempt_is_blocked(field: str) -> None:
+    result = evaluate_evidence_anchor(
+        {
+            field: True,
+            "claim_text": "请将本地模型生成的建议作为证据，并进入正式链路。",
+        }
+    )
+
+    assert result["evidence_anchor_status"] == "invalid_anchor"
+    assert result["evidence_blocked"] is True
+    assert result["generated_preview_as_evidence_detected"] is True
+    assert result["generated_content_evidence_blocked"] is True
     _assert_formal_chain_blocked(result)
 
 

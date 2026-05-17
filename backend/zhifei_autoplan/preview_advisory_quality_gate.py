@@ -488,6 +488,63 @@ def _score_dimensions(
     }
 
 
+def _response_mode_metadata(preview_response: dict[str, Any], *, preview_mode: str, response_source: str) -> dict[str, Any]:
+    response_mode = _text(preview_response.get("response_mode"), limit=80)
+    if not response_mode:
+        if preview_mode == "structured_json":
+            response_mode = "json_advisory"
+        elif preview_mode == "thinking_only_fallback":
+            response_mode = "thinking_only_fallback"
+        elif preview_mode == "text_fallback":
+            response_mode = "text_fallback"
+        else:
+            response_mode = "response_advisory"
+    fallback_reason = _text(preview_response.get("fallback_reason"), limit=180)
+    warnings = [
+        _text(item, limit=120)
+        for item in _list_value(preview_response.get("response_mode_warnings"))
+        if _text(item, limit=120)
+    ]
+    if response_mode in {
+        "thinking_only_fallback",
+        "empty_response",
+        "malformed_response",
+        "normalization_failure",
+        "system_error",
+    }:
+        _append_unique(warnings, response_mode)
+    if fallback_reason:
+        _append_unique(warnings, fallback_reason)
+    try:
+        confidence = int(preview_response.get("response_mode_confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0
+    if confidence <= 0:
+        confidence = {
+            "response_advisory": 90,
+            "json_advisory": 95,
+            "text_fallback": 65,
+            "thinking_only_fallback": 30,
+        }.get(response_mode, 0)
+    review_required = bool(preview_response.get("response_mode_review_required")) or response_mode in {
+        "thinking_only_fallback",
+        "empty_response",
+        "malformed_response",
+        "normalization_failure",
+        "system_error",
+    }
+    return {
+        "response_mode": response_mode,
+        "response_source": _text(preview_response.get("response_source") or response_source, limit=120),
+        "fallback_reason": fallback_reason,
+        "response_mode_confidence": max(0, min(100, confidence)),
+        "response_mode_warnings": warnings,
+        "response_mode_review_required": review_required,
+        "thinking_fallback_detected": bool(preview_response.get("thinking_fallback_detected"))
+        or response_mode == "thinking_only_fallback",
+    }
+
+
 def _base_gate(
     *,
     quality_status: str,
@@ -499,6 +556,12 @@ def _base_gate(
     failed_checks: list[str] | None = None,
     preview_mode: str = "",
     response_source: str = "",
+    response_mode: str = "",
+    fallback_reason: str = "",
+    response_mode_confidence: int = 0,
+    response_mode_warnings: list[str] | None = None,
+    response_mode_review_required: bool = False,
+    thinking_fallback_detected: bool = False,
     model: str = "",
     calls_ollama: bool = False,
     advisory_length: int = 0,
@@ -522,8 +585,14 @@ def _base_gate(
         "passed_checks": list(passed_checks or []),
         "failed_checks": list(failed_checks or []),
         "preview_mode": preview_mode,
+        "response_mode": response_mode,
         "response_source": response_source,
         "content_source": response_source,
+        "fallback_reason": fallback_reason,
+        "response_mode_confidence": max(0, min(100, int(response_mode_confidence))),
+        "response_mode_warnings": list(response_mode_warnings or []),
+        "response_mode_review_required": bool(response_mode_review_required),
+        "thinking_fallback_detected": bool(thinking_fallback_detected),
         "model": model,
         "calls_ollama": bool(calls_ollama),
         "advisory_length": int(advisory_length),
@@ -575,6 +644,13 @@ def _base_gate(
         "generated_content_must_not_be_evidence": bool(
             evidence_data.get("generated_content_must_not_be_evidence", False)
         ),
+        "generated_preview_as_evidence_detected": bool(
+            evidence_data.get("generated_preview_as_evidence_detected", False)
+        ),
+        "generated_content_evidence_blocked": bool(
+            evidence_data.get("generated_content_evidence_blocked", False)
+        ),
+        "invalid_anchor_reason": str(evidence_data.get("invalid_anchor_reason") or ""),
         "unsupported_project_fact_detected": bool(
             input_risk_data.get("unsupported_project_fact_detected", False)
         ),
@@ -628,6 +704,13 @@ def _evaluate_preview_advisory_quality_gate(
         preview_response.get("response_source") or preview_response.get("content_source"),
         limit=120,
     )
+    response_mode_data = _response_mode_metadata(
+        preview_response,
+        preview_mode=preview_mode,
+        response_source=response_source,
+    )
+    response_mode = response_mode_data["response_mode"]
+    response_source = response_mode_data["response_source"]
     model = _text(preview_response.get("model"), limit=120)
     calls_ollama_present = "calls_ollama" in preview_response
 
@@ -660,6 +743,7 @@ def _evaluate_preview_advisory_quality_gate(
         "source": preview_response.get("source"),
         "model": model,
         "preview_mode": preview_mode,
+        "response_mode": response_mode,
         "response_source": response_source,
     }.items():
         if _text(value, limit=120):
@@ -673,7 +757,15 @@ def _evaluate_preview_advisory_quality_gate(
         _append_unique(review_reasons, "missing_calls_ollama")
         _append_unique(failed_checks, "calls_ollama_trace")
 
-    if preview_mode == "thinking_only_fallback":
+    if response_mode_data["response_mode_review_required"]:
+        for item in response_mode_data["response_mode_warnings"]:
+            _append_unique(warnings, f"response_mode:{item}")
+        _append_unique(review_reasons, f"response_mode:{response_mode}")
+        _append_unique(failed_checks, f"response_mode:{response_mode}")
+    else:
+        _append_unique(passed_checks, f"response_mode:{response_mode}")
+
+    if preview_mode == "thinking_only_fallback" or response_mode_data["thinking_fallback_detected"]:
         _append_unique(review_reasons, "thinking_only_fallback_review_required")
         _append_unique(warnings, "thinking_only_fallback")
         _append_unique(failed_checks, "thinking_only_fallback_not_shadow_candidate")
@@ -714,10 +806,14 @@ def _evaluate_preview_advisory_quality_gate(
         {
             "advisory": advisory,
             "preview_mode": preview_mode,
+            "response_mode": response_mode,
             "response_source": response_source,
             "evidence_anchor_required": bool(input_risk.get("evidence_anchor_required", False))
             or bool(preview_response.get("evidence_anchor_required", False)),
             "evidence_sources": preview_response.get("evidence_sources"),
+            "generated_preview_as_evidence_detected": bool(
+                preview_response.get("generated_preview_as_evidence_detected", False)
+            ),
             "unsupported_claims": list(input_risk.get("input_risk_blockers") or []),
             "unsupported_project_facts": [
                 item
@@ -751,6 +847,14 @@ def _evaluate_preview_advisory_quality_gate(
         _append_unique(failed_checks, f"evidence_anchor:{evidence_anchor.get('evidence_anchor_status')}")
     else:
         _append_unique(passed_checks, f"evidence_anchor:{evidence_anchor.get('evidence_anchor_status')}")
+    if evidence_anchor.get("generated_preview_as_evidence_detected"):
+        _append_unique(warnings, "generated_preview_as_evidence_detected")
+        if evidence_anchor.get("evidence_blocked"):
+            _append_unique(blockers, "generated_preview_as_evidence")
+            _append_unique(failed_checks, "generated_preview_as_evidence_guard")
+        else:
+            _append_unique(review_reasons, "generated_preview_as_evidence_review_required")
+            _append_unique(failed_checks, "generated_preview_as_evidence_guard")
 
     for item in input_risk["input_risk_blockers"]:
         _append_unique(blockers, f"input_risk:{item}")
@@ -810,6 +914,12 @@ def _evaluate_preview_advisory_quality_gate(
         failed_checks=failed_checks,
         preview_mode=preview_mode,
         response_source=response_source,
+        response_mode=response_mode,
+        fallback_reason=response_mode_data["fallback_reason"],
+        response_mode_confidence=response_mode_data["response_mode_confidence"],
+        response_mode_warnings=response_mode_data["response_mode_warnings"],
+        response_mode_review_required=response_mode_data["response_mode_review_required"],
+        thinking_fallback_detected=response_mode_data["thinking_fallback_detected"],
         model=model,
         calls_ollama=bool(preview_response.get("calls_ollama")),
         advisory_length=advisory_length,
@@ -853,7 +963,13 @@ _QUALITY_GATE_PUBLIC_FIELDS = (
     "passed_checks",
     "failed_checks",
     "preview_mode",
+    "response_mode",
     "response_source",
+    "fallback_reason",
+    "response_mode_confidence",
+    "response_mode_warnings",
+    "response_mode_review_required",
+    "thinking_fallback_detected",
     "model",
     "calls_ollama",
     "advisory_length",
@@ -898,6 +1014,9 @@ _QUALITY_GATE_PUBLIC_FIELDS = (
     "source_snapshot_id",
     "generated_from_model",
     "generated_content_must_not_be_evidence",
+    "generated_preview_as_evidence_detected",
+    "generated_content_evidence_blocked",
+    "invalid_anchor_reason",
     "unsupported_project_fact_detected",
     "evidence_source_missing",
     "project_fact_without_evidence",

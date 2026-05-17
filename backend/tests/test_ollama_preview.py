@@ -8,6 +8,7 @@ import pytest
 
 from backend.zhifei_autoplan.ollama_preview import (
     build_zdoc_local_llm_preview_ui_view,
+    normalize_zdoc_ollama_response,
     run_ollama_preview,
     run_ollama_section_review,
     run_zdoc_ollama_preview,
@@ -1217,6 +1218,9 @@ def test_zdoc_ollama_preview_fake_generate_empty_response_returns_controlled_fai
     assert result["status"] == "failure"
     assert result["error_type"] == "invalid_response"
     assert result["reason"] == "empty_response_and_thinking"
+    assert result["response_mode"] == "empty_response"
+    assert result["fallback_reason"] == "empty_response_and_thinking"
+    assert result["response_mode_review_required"] is True
     assert result["advisory"] == ""
     assert result["suggestions"] == []
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
@@ -1242,6 +1246,11 @@ def test_zdoc_ollama_preview_fake_generate_thinking_only_is_bounded_preview(monk
     assert result["ok"] is True
     assert result["status"] == "ok"
     assert result["preview_mode"] == "thinking_only_fallback"
+    assert result["response_mode"] == "thinking_only_fallback"
+    assert result["response_source"] == "thinking"
+    assert result["fallback_reason"] == "thinking_only_fallback"
+    assert result["thinking_fallback_detected"] is True
+    assert result["response_mode_review_required"] is True
     assert result["content_source"] == "thinking"
     assert result["advisory"].startswith("模型仅返回推理预览内容")
     assert len(result["advisory"]) <= 1200
@@ -1285,6 +1294,10 @@ def test_zdoc_ollama_preview_fake_generate_json_text_extracts_bounded_advisory(m
     assert result["ok"] is True
     assert result["status"] == "ok"
     assert result["preview_mode"] == "structured_json"
+    assert result["response_mode"] == "json_advisory"
+    assert result["response_source"] == "response"
+    assert result["response_mode_confidence"] >= 90
+    assert result["response_mode_review_required"] is False
     assert result["content_source"] == "response"
     assert result["advisory"] == "建议补充材料验收记录。"
     assert result["suggestions"] == ["建议一", "建议二", "建议三"]
@@ -1311,6 +1324,8 @@ def test_zdoc_ollama_preview_fake_generate_non_json_text_is_advisory(monkeypatch
     assert result["ok"] is True
     assert result["status"] == "ok"
     assert result["preview_mode"] == "text_fallback"
+    assert result["response_mode"] == "text_fallback"
+    assert result["response_source"] == "response"
     assert result["content_source"] == "response"
     assert result["advisory"] == "技术建议：补充隐蔽验收记录，并明确整改闭环。"
     assert result["suggestions"] == ["技术建议：补充隐蔽验收记录，并明确整改闭环。"]
@@ -1337,6 +1352,8 @@ def test_zdoc_ollama_preview_fake_generate_empty_response_with_thinking_uses_bou
     assert result["ok"] is True
     assert result["status"] == "ok"
     assert result["preview_mode"] == "thinking_only_fallback"
+    assert result["response_mode"] == "thinking_only_fallback"
+    assert result["thinking_fallback_detected"] is True
     assert result["content_source"] == "thinking"
     assert result["advisory"].startswith("模型仅返回推理预览内容")
     assert len(result["advisory"]) <= 1200
@@ -1364,7 +1381,33 @@ def test_zdoc_ollama_preview_fake_generate_message_content_is_advisory(monkeypat
     assert result["ok"] is True
     assert result["status"] == "ok"
     assert result["content_source"] == "message.content"
+    assert result["response_mode"] == "response_advisory"
+    assert result["response_source"] == "message.content"
     assert result["advisory"] == "需补充检验批验收频次。"
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_fake_generate_advisory_field_is_response_advisory(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"advisory": "建议补充质量责任岗位和资料归档要求。"}
+
+    result = run_zdoc_ollama_preview(
+        _valid_zdoc_ollama_preview_request(),
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["response_mode"] == "response_advisory"
+    assert result["response_source"] == "advisory"
+    assert result["advisory"] == "建议补充质量责任岗位和资料归档要求。"
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
@@ -1413,6 +1456,7 @@ def test_zdoc_ollama_preview_fake_generate_missing_json_advisory_is_controlled_f
     assert result["status"] == "failure"
     assert result["error_type"] == "invalid_response"
     assert result["reason"] == "missing_preview_advisory"
+    assert result["response_mode"] == "malformed_response"
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
@@ -1436,6 +1480,7 @@ def test_zdoc_ollama_preview_fake_generate_malformed_json_is_controlled_failure(
     assert result["status"] == "failure"
     assert result["error_type"] == "invalid_response"
     assert result["reason"] == "malformed_json"
+    assert result["response_mode"] == "malformed_response"
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
@@ -1466,6 +1511,19 @@ def test_zdoc_ollama_preview_normalization_exception_is_controlled_failure(monke
     assert result["status"] == "failure"
     assert result["error_type"] == "invalid_response"
     assert result["reason"] == "normalization_failure"
+    assert result["response_mode"] == "normalization_failure"
+    assert result["response_mode_review_required"] is True
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_normalize_non_object_response_is_malformed_response() -> None:
+    result = normalize_zdoc_ollama_response(["bad"], model="qwen3:0.6b")
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["reason"] == "malformed_response"
+    assert result["response_mode"] == "malformed_response"
+    assert result["response_mode_review_required"] is True
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 

@@ -88,6 +88,9 @@ def test_quality_gate_high_quality_advisory_preview_ok_but_formal_ineligible() -
     assert gate["input_risk_blocked"] is False
     assert gate["input_risk_review_required"] is False
     assert gate["unsupported_claims_detected"] is False
+    assert gate["response_mode"] == "text_fallback"
+    assert gate["response_mode_review_required"] is False
+    assert gate["thinking_fallback_detected"] is False
     assert gate["unsupported_project_fact_detected"] is False
     assert gate["evidence_source_missing"] is False
     assert gate["project_fact_without_evidence"] is False
@@ -132,6 +135,9 @@ def test_quality_gate_thinking_only_fallback_is_review_required_and_not_shadow_c
     assert gate["quality_status"] == "review_required"
     assert "thinking_only_fallback_review_required" in gate["review_reasons"]
     assert "thinking_only_fallback" in gate["warnings"]
+    assert gate["response_mode"] == "thinking_only_fallback"
+    assert gate["response_mode_review_required"] is True
+    assert gate["thinking_fallback_detected"] is True
     assert gate["shadow_candidate_allowed"] is False
     _assert_formal_chain_blocked(gate)
 
@@ -575,7 +581,26 @@ def test_quality_gate_model_generated_preview_as_evidence_is_blocked() -> None:
     assert gate["quality_status"] == "blocked"
     assert gate["evidence_anchor_status"] == "invalid_anchor"
     assert gate["evidence_blocked"] is True
+    assert gate["generated_preview_as_evidence_detected"] is True
+    assert gate["generated_content_evidence_blocked"] is True
     assert "evidence_anchor:invalid_anchor" in gate["blockers"]
+    _assert_formal_chain_blocked(gate)
+
+
+def test_quality_gate_generated_preview_as_tender_evidence_is_blocked() -> None:
+    gate = evaluate_preview_advisory_quality_gate(
+        _preview_response(
+            advisory="可将本地模型生成的建议直接作为招标条款和图纸依据。",
+        ),
+        context=_quality_context(),
+    )
+
+    assert gate["quality_status"] == "blocked"
+    assert gate["evidence_anchor_status"] == "invalid_anchor"
+    assert gate["generated_preview_as_evidence_detected"] is True
+    assert gate["generated_content_must_not_be_evidence"] is True
+    assert gate["generated_content_evidence_blocked"] is True
+    assert "generated_preview_as_evidence" in gate["blockers"]
     _assert_formal_chain_blocked(gate)
 
 
