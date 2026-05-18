@@ -150,6 +150,19 @@ def _assert_safe_endpoint_guard(
     _assert_no_formal_result_fields(result)
 
 
+def _assert_safe_endpoint_prompt_metadata(result: dict, prompt_mode: str) -> None:
+    assert result["prompt_mode"] == prompt_mode
+    assert result["prompt_profile"] == "second_round_response_mode_tuning"
+    assert result["prompt_version"] == "zdoc_response_mode_prompt_v2"
+    assert result["prompt_tuning_applied"] is True
+    assert isinstance(result["prompt_tuning_warnings"], list)
+    assert result["json_mode_requested"] is (prompt_mode == "json_first")
+    assert result["response_first_requested"] is (prompt_mode == "response_first")
+    assert result["text_fallback_allowed"] is True
+    assert result["evidence_aware_prompt_applied"] is True
+    assert result["adapter_schema_mode"] == "compatible"
+
+
 def test_safe_endpoint_exists() -> None:
     paths = {getattr(route, "path", "") for route in app.routes}
     assert SAFE_PATH in paths
@@ -535,6 +548,7 @@ def test_safe_endpoint_double_flags_preserves_unsupported_project_fact_metadata(
     assert result["evidence_anchor_required"] is True
     assert result["evidence_anchor_status"] == "missing"
     assert result["evidence_review_required"] is True
+    _assert_safe_endpoint_prompt_metadata(result, "response_first")
     assert result["formal_generation_allowed"] is False
     assert result["shadow_candidate_allowed"] is False
     assert result["writeback_allowed"] is False
@@ -725,6 +739,7 @@ def test_safe_endpoint_double_flags_json_response_keeps_bounded_lists(monkeypatc
     assert result["preview_mode"] == "structured_json"
     assert result["response_mode"] == "json_advisory"
     assert result["response_source"] == "response"
+    _assert_safe_endpoint_prompt_metadata(result, "response_first")
     assert result["advisory"] == "建议补充样板验收资料。"
     assert result["suggestions"] == ["建议一", "建议二", "建议三"]
     assert result["risk_notes"] == ["风险一", "风险二", "风险三"]
@@ -826,6 +841,8 @@ def test_safe_endpoint_double_flags_missing_optional_fields_uses_defaults(monkey
     assert result["status"] == "ok"
     assert result["request_id"] == ""
     assert "Untitled section" in seen["prompt"]
+    assert result["response_mode"] == "response_advisory"
+    _assert_safe_endpoint_prompt_metadata(result, "response_first")
     assert _write_surface_counts() == before_counts
     _assert_safe_endpoint_guard(
         result,

@@ -210,6 +210,19 @@ def _assert_zdoc_formal_chain_flags_false(result: dict) -> None:
     assert result["zbid_writeback_allowed"] is False
 
 
+def _assert_zdoc_prompt_metadata(result: dict, prompt_mode: str) -> None:
+    assert result["prompt_mode"] == prompt_mode
+    assert result["prompt_profile"] == "second_round_response_mode_tuning"
+    assert result["prompt_version"] == "zdoc_response_mode_prompt_v2"
+    assert result["prompt_tuning_applied"] is True
+    assert isinstance(result["prompt_tuning_warnings"], list)
+    assert result["json_mode_requested"] is (prompt_mode == "json_first")
+    assert result["response_first_requested"] is (prompt_mode == "response_first")
+    assert result["text_fallback_allowed"] is True
+    assert result["evidence_aware_prompt_applied"] is True
+    assert result["adapter_schema_mode"] == "compatible"
+
+
 def test_zdoc_local_llm_preview_absent_flag_disabled_does_not_call_fake_client(monkeypatch) -> None:
     monkeypatch.delenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", raising=False)
 
@@ -1197,7 +1210,7 @@ def test_zdoc_ollama_preview_response_first_prompt_prefers_response_advisory(mon
 
     def fake_generate(_url, payload, _timeout):
         seen["prompt"] = payload["prompt"]
-        return {"advisory": "建议补充验收责任和资料闭环。"}
+        return {"response": "建议补充验收责任和资料闭环。"}
 
     result = run_zdoc_ollama_preview(
         request,
@@ -1206,14 +1219,21 @@ def test_zdoc_ollama_preview_response_first_prompt_prefers_response_advisory(mon
     )
 
     assert "Prompt mode: response_first." in seen["prompt"]
-    assert "Return only one short user-visible advisory in the normal response." in seen["prompt"]
-    assert "Do not include reasoning" in seen["prompt"]
+    assert "Prompt profile: second_round_response_mode_tuning." in seen["prompt"]
+    assert "Prompt version: zdoc_response_mode_prompt_v2." in seen["prompt"]
+    assert "Return only one short advisory sentence." in seen["prompt"]
+    assert "Do not explain reasoning." in seen["prompt"]
+    assert "Do not include chain-of-thought." in seen["prompt"]
     assert "do not write final document content" in seen["prompt"].lower()
     assert "Do not export, patch, apply, write back" in seen["prompt"]
     assert "Do not invent tender clauses" in seen["prompt"]
+    assert "Do not cite unprovided evidence." in seen["prompt"]
+    assert "If evidence is missing, say it needs verification" in seen["prompt"]
     assert result["ok"] is True
     assert result["response_mode"] == "response_advisory"
-    assert result["response_source"] == "advisory"
+    assert result["preview_mode"] == "advisory"
+    assert result["response_source"] == "response"
+    _assert_zdoc_prompt_metadata(result, "response_first")
     _assert_zdoc_formal_chain_flags_false(result)
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
@@ -1250,12 +1270,17 @@ def test_zdoc_ollama_preview_json_first_prompt_guides_json_advisory(monkeypatch)
     )
 
     assert "Prompt mode: json_first." in seen["prompt"]
-    assert "Return only a compact JSON object with keys: advisory, suggestions, risk_notes." in seen["prompt"]
-    assert "Do not wrap JSON in Markdown fences" in seen["prompt"]
+    assert "Return only one single-line JSON object." in seen["prompt"]
+    assert "Do not use Markdown code fences." in seen["prompt"]
+    assert "Do not add explanatory text before or after JSON." in seen["prompt"]
+    assert "Use exactly these keys: advisory, suggestions, risk_notes." in seen["prompt"]
+    assert "suggestions and risk_notes may be empty arrays." in seen["prompt"]
+    assert "advisory must be a short string." in seen["prompt"]
     assert "do not write final document content" in seen["prompt"].lower()
     assert result["ok"] is True
     assert result["response_mode"] == "json_advisory"
     assert result["preview_mode"] == "structured_json"
+    _assert_zdoc_prompt_metadata(result, "json_first")
     _assert_zdoc_formal_chain_flags_false(result)
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
@@ -1283,11 +1308,13 @@ def test_zdoc_ollama_preview_text_fallback_prompt_guides_text_fallback(monkeypat
     )
 
     assert "Prompt mode: text_fallback." in seen["prompt"]
-    assert "Return a short non-JSON technical advisory text only." in seen["prompt"]
+    assert "Return short non-JSON technical advisory text only." in seen["prompt"]
     assert "Use plain visible advisory wording, not formal section prose." in seen["prompt"]
+    assert "If the advisory touches facts, say verification is required." in seen["prompt"]
     assert result["ok"] is True
     assert result["response_mode"] == "text_fallback"
     assert result["content_source"] == "response"
+    _assert_zdoc_prompt_metadata(result, "text_fallback")
     _assert_zdoc_formal_chain_flags_false(result)
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
@@ -1315,10 +1342,11 @@ def test_zdoc_ollama_preview_evidence_aware_prompt_missing_source_requires_revie
         generate_transport=fake_generate,
     )
 
-    assert "requires source verification / 未查明" in seen["prompt"]
+    assert "needs verification / 需资料核验 / 未查明" in seen["prompt"]
     assert "Model-generated advice is a suggestion source only" in seen["prompt"]
     assert "Do not invent tender clauses" in seen["prompt"]
     assert result["ok"] is True
+    _assert_zdoc_prompt_metadata(result, "response_first")
     assert result["quality_status"] == "review_required"
     assert result["evidence_anchor_required"] is True
     assert result["evidence_anchor_status"] == "missing"
@@ -1355,6 +1383,7 @@ def test_zdoc_ollama_preview_generated_preview_evidence_prompt_is_invalid_anchor
     assert result["generated_content_evidence_blocked"] is True
     assert result["evidence_anchor_status"] == "invalid_anchor"
     assert result["evidence_blocked"] is True
+    _assert_zdoc_prompt_metadata(result, "response_first")
     _assert_zdoc_formal_chain_flags_false(result)
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
@@ -1387,6 +1416,7 @@ def test_zdoc_ollama_preview_formal_chain_prompt_attempt_is_blocked(monkeypatch)
     assert result["evidence_anchor_required"] is True
     assert result["evidence_anchor_status"] in {"missing", "invalid_anchor"}
     assert result["evidence_blocked"] is True
+    _assert_zdoc_prompt_metadata(result, "response_first")
     _assert_zdoc_formal_chain_flags_false(result)
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
@@ -1521,7 +1551,7 @@ def test_zdoc_ollama_preview_fake_generate_json_text_extracts_bounded_advisory(m
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
-def test_zdoc_ollama_preview_fake_generate_non_json_text_is_advisory(monkeypatch) -> None:
+def test_zdoc_ollama_preview_fake_generate_response_first_non_json_text_is_advisory(monkeypatch) -> None:
     monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
     monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
 
@@ -1539,12 +1569,13 @@ def test_zdoc_ollama_preview_fake_generate_non_json_text_is_advisory(monkeypatch
 
     assert result["ok"] is True
     assert result["status"] == "ok"
-    assert result["preview_mode"] == "text_fallback"
-    assert result["response_mode"] == "text_fallback"
+    assert result["preview_mode"] == "advisory"
+    assert result["response_mode"] == "response_advisory"
     assert result["response_source"] == "response"
     assert result["content_source"] == "response"
     assert result["advisory"] == "技术建议：补充隐蔽验收记录，并明确整改闭环。"
     assert result["suggestions"] == ["技术建议：补充隐蔽验收记录，并明确整改闭环。"]
+    _assert_zdoc_prompt_metadata(result, "response_first")
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
@@ -1700,6 +1731,74 @@ def test_zdoc_ollama_preview_fake_generate_malformed_json_is_controlled_failure(
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
+def test_zdoc_ollama_preview_json_first_fenced_json_is_controlled_malformed(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "review_focus": "json_first prompt tuning",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {
+            "response": (
+                "```json\n"
+                "{\"advisory\":\"建议补充检查频次。\",\"suggestions\":[],\"risk_notes\":[]}\n"
+                "```"
+            )
+        }
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "failure"
+    assert result["error_type"] == "invalid_response"
+    assert result["reason"] == "json_markdown_fence"
+    assert result["response_mode"] == "malformed_response"
+    assert result["response_mode_review_required"] is True
+    assert "json_markdown_fence" in result["prompt_tuning_warnings"]
+    _assert_zdoc_prompt_metadata(result, "json_first")
+    _assert_zdoc_formal_chain_flags_false(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_json_first_explanatory_text_uses_text_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "review_focus": "json_first prompt tuning",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"response": "Here is the JSON: {\"advisory\":\"建议补充检查频次。\"}"}
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "ok"
+    assert result["response_mode"] == "text_fallback"
+    assert result["preview_mode"] == "text_fallback"
+    assert result["response_source"] == "response"
+    _assert_zdoc_prompt_metadata(result, "json_first")
+    _assert_zdoc_formal_chain_flags_false(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
 def test_zdoc_ollama_preview_normalization_exception_is_controlled_failure(monkeypatch) -> None:
     import backend.zhifei_autoplan.ollama_preview as preview_module
 
@@ -1712,7 +1811,7 @@ def test_zdoc_ollama_preview_normalization_exception_is_controlled_failure(monke
     def fake_generate(_url, _payload, _timeout):
         return {"response": "建议补充质量记录。"}
 
-    def fail_extract(_raw_response):
+    def fail_extract(_raw_response, **_kwargs):
         raise RuntimeError("normalizer exploded")
 
     monkeypatch.setattr(preview_module, "_extract_zdoc_ollama_advisory_payload", fail_extract)

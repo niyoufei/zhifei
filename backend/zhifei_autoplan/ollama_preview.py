@@ -78,6 +78,11 @@ RESPONSE_MODE_SYSTEM_ERROR = "system_error"
 PROMPT_MODE_RESPONSE_FIRST = "response_first"
 PROMPT_MODE_JSON_FIRST = "json_first"
 PROMPT_MODE_TEXT_FALLBACK = "text_fallback"
+PROMPT_PROFILE_SECOND_ROUND = "second_round_response_mode_tuning"
+PROMPT_VERSION_SECOND_ROUND = "zdoc_response_mode_prompt_v2"
+ADAPTER_SCHEMA_MODE_COMPATIBLE = "compatible"
+ADAPTER_SCHEMA_MODE_ILLEGAL_FIELD = "illegal_field"
+ADAPTER_SCHEMA_MODE_UNVALIDATED = "unvalidated"
 LOCAL_LLM_PREVIEW_FORMAL_OUTPUT_FIELDS = frozenset(
     {
         "content",
@@ -270,6 +275,49 @@ def _zdoc_ollama_response_mode_metadata(
     }
 
 
+def _zdoc_ollama_prompt_mode_metadata(
+    *,
+    prompt_mode: str = "",
+    prompt_profile: str = "",
+    prompt_version: str = "",
+    prompt_tuning_warnings: list[str] | None = None,
+    evidence_aware_prompt_applied: bool = False,
+    adapter_schema_mode: str = "",
+) -> dict[str, Any]:
+    mode = _clean_text(prompt_mode, limit=80)
+    if mode not in {PROMPT_MODE_RESPONSE_FIRST, PROMPT_MODE_JSON_FIRST, PROMPT_MODE_TEXT_FALLBACK}:
+        mode = ""
+    profile = _clean_text(prompt_profile, limit=120) or (
+        PROMPT_PROFILE_SECOND_ROUND if mode else ""
+    )
+    version = _clean_text(prompt_version, limit=120) or (
+        PROMPT_VERSION_SECOND_ROUND if mode else ""
+    )
+    tuning_applied = bool(mode)
+    schema_mode = _clean_text(adapter_schema_mode, limit=80) or ADAPTER_SCHEMA_MODE_UNVALIDATED
+    warnings = [
+        _clean_text(item, limit=160)
+        for item in list(prompt_tuning_warnings or [])
+        if _clean_text(item, limit=160)
+    ]
+    return {
+        "prompt_mode": mode,
+        "prompt_profile": profile,
+        "prompt_version": version,
+        "prompt_tuning_applied": tuning_applied,
+        "prompt_tuning_warnings": warnings,
+        "json_mode_requested": mode == PROMPT_MODE_JSON_FIRST,
+        "response_first_requested": mode == PROMPT_MODE_RESPONSE_FIRST,
+        "text_fallback_allowed": mode in {
+            PROMPT_MODE_RESPONSE_FIRST,
+            PROMPT_MODE_JSON_FIRST,
+            PROMPT_MODE_TEXT_FALLBACK,
+        },
+        "evidence_aware_prompt_applied": bool(evidence_aware_prompt_applied or mode),
+        "adapter_schema_mode": schema_mode,
+    }
+
+
 def _zdoc_ollama_response(
     *,
     ok: bool,
@@ -290,6 +338,12 @@ def _zdoc_ollama_response(
     response_mode: str = "",
     response_source: str = "",
     fallback_reason: str = "",
+    prompt_mode: str = "",
+    prompt_profile: str = "",
+    prompt_version: str = "",
+    prompt_tuning_warnings: list[str] | None = None,
+    evidence_aware_prompt_applied: bool = False,
+    adapter_schema_mode: str = ADAPTER_SCHEMA_MODE_UNVALIDATED,
     calls_ollama: bool = False,
     real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
@@ -300,6 +354,14 @@ def _zdoc_ollama_response(
         response_mode=response_mode or _zdoc_ollama_response_mode_from_preview_mode(preview_mode),
         response_source=response_source,
         fallback_reason=fallback_reason,
+    )
+    prompt_mode_data = _zdoc_ollama_prompt_mode_metadata(
+        prompt_mode=prompt_mode,
+        prompt_profile=prompt_profile,
+        prompt_version=prompt_version,
+        prompt_tuning_warnings=prompt_tuning_warnings,
+        evidence_aware_prompt_applied=evidence_aware_prompt_applied,
+        adapter_schema_mode=adapter_schema_mode,
     )
     return {
         "ok": bool(ok),
@@ -341,6 +403,7 @@ def _zdoc_ollama_response(
         "preview_mode": preview_mode,
         "content_source": content_source,
         **response_mode_data,
+        **prompt_mode_data,
         "safety": _zdoc_ollama_preview_safety(real_transport_enabled=real_transport_enabled),
     }
 
@@ -374,6 +437,10 @@ def build_zdoc_ollama_failure_response(
     preview_type: str = "section_review",
     response_mode: str = RESPONSE_MODE_SYSTEM_ERROR,
     fallback_reason: str = "",
+    prompt_mode: str = "",
+    prompt_tuning_warnings: list[str] | None = None,
+    evidence_aware_prompt_applied: bool = False,
+    adapter_schema_mode: str = ADAPTER_SCHEMA_MODE_UNVALIDATED,
     calls_ollama: bool = False,
     real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
@@ -390,6 +457,10 @@ def build_zdoc_ollama_failure_response(
         preview_type=preview_type,
         response_mode=response_mode,
         fallback_reason=fallback_reason or reason,
+        prompt_mode=prompt_mode,
+        prompt_tuning_warnings=prompt_tuning_warnings,
+        evidence_aware_prompt_applied=evidence_aware_prompt_applied,
+        adapter_schema_mode=adapter_schema_mode,
         calls_ollama=calls_ollama,
         real_transport_enabled=real_transport_enabled,
     )
@@ -412,6 +483,7 @@ def _validate_zdoc_ollama_preview_request(request: dict[str, Any] | None) -> tup
         return None, build_zdoc_ollama_failure_response(
             error_type="invalid_response",
             reason=f"illegal_field:{','.join(forbidden)}",
+            adapter_schema_mode=ADAPTER_SCHEMA_MODE_ILLEGAL_FIELD,
         )
 
     if "section_text" not in request:
@@ -645,34 +717,46 @@ def _zdoc_ollama_prompt_mode(request: dict[str, Any]) -> str:
 def _zdoc_ollama_preview_prompt(request: dict[str, Any]) -> str:
     prompt_mode = _zdoc_ollama_prompt_mode(request)
     parts = [
-        "Return preview-only advisory suggestions for the ZDoc section.",
+        "Return preview-only advisory for the ZDoc section.",
         f"Prompt mode: {prompt_mode}.",
+        f"Prompt profile: {PROMPT_PROFILE_SECOND_ROUND}.",
+        f"Prompt version: {PROMPT_VERSION_SECOND_ROUND}.",
         "Keep all output preview-only; do not write final document content.",
         "Do not export, patch, apply, write back, or create DOCX/Markdown/JSON files.",
-        "Do not include reasoning, hidden thinking, chain-of-thought, or drafting process.",
+        "Do not explain reasoning.",
+        "Do not include chain-of-thought.",
+        "Do not include hidden thinking or drafting process.",
         "Do not invent tender clauses, drawings, BOQ quantities, standards, project facts, or evidence.",
-        "If evidence is missing, state that the item requires source verification / 未查明 before use.",
+        "Do not cite unprovided evidence.",
+        "If evidence is missing, say it needs verification / 需资料核验 / 未查明 before use.",
         "Model-generated advice is a suggestion source only and must not be treated as evidence.",
     ]
     if prompt_mode == PROMPT_MODE_JSON_FIRST:
         parts.extend(
             [
-                "Return only a compact JSON object with keys: advisory, suggestions, risk_notes.",
-                "Do not wrap JSON in Markdown fences and do not add prose outside the JSON object.",
+                "Return only one single-line JSON object.",
+                "Do not use Markdown code fences.",
+                "Do not add explanatory text before or after JSON.",
+                "Use exactly these keys: advisory, suggestions, risk_notes.",
+                "suggestions and risk_notes may be empty arrays.",
+                "advisory must be a short string.",
+                "JSON must not contain formal section prose or unverified evidence.",
             ]
         )
     elif prompt_mode == PROMPT_MODE_TEXT_FALLBACK:
         parts.extend(
             [
-                "Return a short non-JSON technical advisory text only.",
+                "Return short non-JSON technical advisory text only.",
                 "Use plain visible advisory wording, not formal section prose.",
+                "If the advisory touches facts, say verification is required.",
             ]
         )
     else:
         parts.extend(
             [
-                "Return only one short user-visible advisory in the normal response.",
-                "Avoid lists unless the response must include one concise risk note.",
+                "Return only one short advisory sentence.",
+                "Return it in the normal response.",
+                "Do not include lists, headings, explanations, or formal section prose.",
             ]
         )
     parts.extend(
@@ -733,7 +817,16 @@ def _zdoc_ollama_thinking_fallback(thinking_text: str) -> dict[str, Any]:
     }
 
 
-def _extract_zdoc_ollama_advisory_payload(raw_response: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+def _zdoc_ollama_markdown_fenced_json(text: str) -> bool:
+    stripped = text.strip().lower()
+    return stripped.startswith("```json") or stripped.startswith("```{")
+
+
+def _extract_zdoc_ollama_advisory_payload(
+    raw_response: dict[str, Any],
+    *,
+    prompt_mode: str = "",
+) -> tuple[dict[str, Any] | None, str | None]:
     response_text = _clean_text(raw_response.get("response"), limit=LOCAL_LLM_OLLAMA_PREVIEW_ADVISORY_CHARS)
     content_source = "response" if response_text else ""
     message = raw_response.get("message")
@@ -746,6 +839,8 @@ def _extract_zdoc_ollama_advisory_payload(raw_response: dict[str, Any]) -> tuple
 
     thinking_text = _clean_text(raw_response.get("thinking"), limit=LOCAL_LLM_OLLAMA_PREVIEW_THINKING_CHARS)
     if response_text:
+        if _zdoc_ollama_markdown_fenced_json(response_text):
+            return None, "json_markdown_fence"
         if _zdoc_ollama_json_like(response_text):
             try:
                 parsed = json.loads(response_text)
@@ -771,14 +866,14 @@ def _extract_zdoc_ollama_advisory_payload(raw_response: dict[str, Any]) -> tuple
             return _zdoc_ollama_thinking_fallback(response_text), None
         response_mode = (
             RESPONSE_MODE_RESPONSE_ADVISORY
-            if content_source in {"advisory", "message.content"}
+            if content_source in {"advisory", "message.content"} or prompt_mode == PROMPT_MODE_RESPONSE_FIRST
             else RESPONSE_MODE_TEXT_FALLBACK
         )
         return {
             "advisory": response_text,
             "suggestions": _zdoc_ollama_suggestions(response_text),
             "risk_notes": [],
-            "preview_mode": "text_fallback",
+            "preview_mode": "advisory" if response_mode == RESPONSE_MODE_RESPONSE_ADVISORY else "text_fallback",
             "content_source": content_source,
             "response_mode": response_mode,
             "response_source": content_source,
@@ -798,6 +893,7 @@ def normalize_zdoc_ollama_response(
     model: str,
     base_url: str = LOCAL_LLM_OLLAMA_PREVIEW_BASE_URL,
     preview_type: str = "section_review",
+    prompt_mode: str = "",
     real_transport_enabled: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(raw_response, dict):
@@ -809,6 +905,9 @@ def normalize_zdoc_ollama_response(
             preview_type=preview_type,
             response_mode=RESPONSE_MODE_MALFORMED_RESPONSE,
             fallback_reason="malformed_response",
+            prompt_mode=prompt_mode,
+            evidence_aware_prompt_applied=bool(prompt_mode),
+            adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE if prompt_mode else ADAPTER_SCHEMA_MODE_UNVALIDATED,
             calls_ollama=True,
             real_transport_enabled=real_transport_enabled,
         )
@@ -821,12 +920,18 @@ def normalize_zdoc_ollama_response(
             model=model,
             base_url=base_url,
             preview_type=preview_type,
+            prompt_mode=prompt_mode,
+            evidence_aware_prompt_applied=bool(prompt_mode),
+            adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE if prompt_mode else ADAPTER_SCHEMA_MODE_UNVALIDATED,
             calls_ollama=True,
             real_transport_enabled=real_transport_enabled,
         )
 
     try:
-        normalized_payload, failure_reason = _extract_zdoc_ollama_advisory_payload(raw_response)
+        normalized_payload, failure_reason = _extract_zdoc_ollama_advisory_payload(
+            raw_response,
+            prompt_mode=prompt_mode,
+        )
     except Exception:
         return build_zdoc_ollama_failure_response(
             error_type="invalid_response",
@@ -836,6 +941,9 @@ def normalize_zdoc_ollama_response(
             preview_type=preview_type,
             response_mode=RESPONSE_MODE_NORMALIZATION_FAILURE,
             fallback_reason="normalization_failure",
+            prompt_mode=prompt_mode,
+            evidence_aware_prompt_applied=bool(prompt_mode),
+            adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE if prompt_mode else ADAPTER_SCHEMA_MODE_UNVALIDATED,
             calls_ollama=True,
             real_transport_enabled=real_transport_enabled,
         )
@@ -851,6 +959,10 @@ def normalize_zdoc_ollama_response(
             preview_type=preview_type,
             response_mode=response_mode,
             fallback_reason=failure_reason or "missing_preview_advisory",
+            prompt_mode=prompt_mode,
+            prompt_tuning_warnings=[failure_reason] if failure_reason else [],
+            evidence_aware_prompt_applied=bool(prompt_mode),
+            adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE if prompt_mode else ADAPTER_SCHEMA_MODE_UNVALIDATED,
             calls_ollama=True,
             real_transport_enabled=real_transport_enabled,
         )
@@ -871,6 +983,9 @@ def normalize_zdoc_ollama_response(
         response_mode=normalized_payload.get("response_mode") or "",
         response_source=normalized_payload.get("response_source") or normalized_payload.get("content_source") or "",
         fallback_reason=normalized_payload.get("fallback_reason") or "",
+        prompt_mode=prompt_mode,
+        evidence_aware_prompt_applied=bool(prompt_mode),
+        adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE if prompt_mode else ADAPTER_SCHEMA_MODE_UNVALIDATED,
         calls_ollama=True,
         real_transport_enabled=real_transport_enabled,
     )
@@ -913,6 +1028,7 @@ def run_zdoc_ollama_preview(
     if failure:
         return _with_quality_gate(failure)
     quality_context = dict(normalized_request)
+    prompt_mode = _zdoc_ollama_prompt_mode(normalized_request)
 
     resolved_base_url = _zdoc_ollama_base_url(base_url)
     if not resolved_base_url:
@@ -920,6 +1036,9 @@ def run_zdoc_ollama_preview(
             build_zdoc_ollama_failure_response(
                 error_type="transport_failure",
                 reason="invalid_local_ollama_base_url",
+                prompt_mode=prompt_mode,
+                evidence_aware_prompt_applied=True,
+                adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE,
             )
         )
 
@@ -934,6 +1053,9 @@ def run_zdoc_ollama_preview(
                     reason="default_transport_builder_failure",
                     base_url=resolved_base_url,
                     preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                    prompt_mode=prompt_mode,
+                    evidence_aware_prompt_applied=True,
+                    adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE,
                     real_transport_enabled=True,
                 )
             )
@@ -945,6 +1067,9 @@ def run_zdoc_ollama_preview(
                 reason="fake_transport_required",
                 base_url=resolved_base_url,
                 preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                prompt_mode=prompt_mode,
+                evidence_aware_prompt_applied=True,
+                adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE,
             )
         )
 
@@ -957,6 +1082,13 @@ def run_zdoc_ollama_preview(
     )
     if not selected.get("ok"):
         selected["preview_type"] = normalized_request["preview_type"] if normalized_request else "section_review"
+        selected.update(
+            _zdoc_ollama_prompt_mode_metadata(
+                prompt_mode=prompt_mode,
+                evidence_aware_prompt_applied=True,
+                adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE,
+            )
+        )
         return _with_quality_gate(selected)
 
     selected_model = str(selected.get("model") or "")
@@ -978,6 +1110,9 @@ def run_zdoc_ollama_preview(
                 model=selected_model,
                 base_url=resolved_base_url,
                 preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                prompt_mode=prompt_mode,
+                evidence_aware_prompt_applied=True,
+                adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE,
                 calls_ollama=True,
                 real_transport_enabled=real_transport_enabled,
             )
@@ -990,6 +1125,9 @@ def run_zdoc_ollama_preview(
                 model=selected_model,
                 base_url=resolved_base_url,
                 preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                prompt_mode=prompt_mode,
+                evidence_aware_prompt_applied=True,
+                adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE,
                 calls_ollama=True,
                 real_transport_enabled=real_transport_enabled,
             )
@@ -1002,6 +1140,9 @@ def run_zdoc_ollama_preview(
                 model=selected_model,
                 base_url=resolved_base_url,
                 preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+                prompt_mode=prompt_mode,
+                evidence_aware_prompt_applied=True,
+                adapter_schema_mode=ADAPTER_SCHEMA_MODE_COMPATIBLE,
                 calls_ollama=True,
                 real_transport_enabled=real_transport_enabled,
             )
@@ -1012,6 +1153,7 @@ def run_zdoc_ollama_preview(
         model=selected_model,
         base_url=resolved_base_url,
         preview_type=normalized_request["preview_type"] if normalized_request else "section_review",
+        prompt_mode=prompt_mode,
         real_transport_enabled=real_transport_enabled,
     )
     result["request_id"] = normalized_request.get("request_id", "") if normalized_request else ""
