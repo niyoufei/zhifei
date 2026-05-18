@@ -4,6 +4,10 @@ import re
 from typing import Any
 
 from backend.zhifei_autoplan.evidence_anchor import evaluate_evidence_anchor
+from backend.zhifei_autoplan.shadow_generation_readiness import (
+    SHADOW_READINESS_PUBLIC_FIELDS,
+    evaluate_shadow_generation_readiness,
+)
 
 
 QUALITY_STATUS_BLOCKED = "blocked"
@@ -571,10 +575,15 @@ def _base_gate(
     score_dimensions: dict[str, int] | None = None,
     input_risk: dict[str, Any] | None = None,
     evidence_anchor: dict[str, Any] | None = None,
+    preview_only: bool = True,
+    no_write: bool = True,
+    affects_generation: bool = False,
+    affects_export: bool = False,
+    affects_zbid_writeback: bool = False,
 ) -> dict[str, Any]:
     input_risk_data = dict(input_risk or {})
     evidence_data = dict(evidence_anchor or {})
-    return {
+    result = {
         "quality_status": quality_status,
         "quality_score": max(0, min(100, int(quality_score))),
         "score_dimensions": dict(score_dimensions or {}),
@@ -656,7 +665,17 @@ def _base_gate(
         ),
         "evidence_source_missing": bool(input_risk_data.get("evidence_source_missing", False)),
         "project_fact_without_evidence": bool(input_risk_data.get("project_fact_without_evidence", False)),
+        "preview_only": bool(preview_only),
+        "no_write": bool(no_write),
+        "affects_generation": bool(affects_generation),
+        "affects_export": bool(affects_export),
+        "affects_zbid_writeback": bool(affects_zbid_writeback),
     }
+    shadow_readiness = evaluate_shadow_generation_readiness(result)
+    result["shadow_readiness"] = shadow_readiness
+    for field in SHADOW_READINESS_PUBLIC_FIELDS:
+        result[field] = shadow_readiness[field]
+    return result
 
 
 def _evaluate_preview_advisory_quality_gate(
@@ -927,6 +946,11 @@ def _evaluate_preview_advisory_quality_gate(
         risk_notes_count=len(risk_notes),
         input_risk=input_risk,
         evidence_anchor=evidence_anchor,
+        preview_only=preview_response.get("preview_only") is True,
+        no_write=preview_response.get("no_write") is True,
+        affects_generation=preview_response.get("affects_generation") is True,
+        affects_export=preview_response.get("affects_export") is True,
+        affects_zbid_writeback=preview_response.get("affects_zbid_writeback") is True,
     )
 
 
@@ -1020,6 +1044,8 @@ _QUALITY_GATE_PUBLIC_FIELDS = (
     "unsupported_project_fact_detected",
     "evidence_source_missing",
     "project_fact_without_evidence",
+    "shadow_readiness",
+    *SHADOW_READINESS_PUBLIC_FIELDS,
 )
 
 
