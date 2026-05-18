@@ -254,6 +254,36 @@ def test_safe_endpoint_enabled_calls_fake_only_safe_helper_without_writes(monkey
     _assert_safe_endpoint_guard(result)
 
 
+def test_safe_endpoint_adapter_off_illegal_content_field_is_controlled_failure(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.delenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", raising=False)
+    before_counts = _write_surface_counts()
+    payload = {**_valid_endpoint_payload(), "content": "literal formal content must be rejected"}
+    original_payload = copy.deepcopy(payload)
+
+    def fail_helper(_payload):
+        raise AssertionError("safe helper must not be called for illegal adapter-off payload")
+
+    def fail_adapter(_payload):
+        raise AssertionError("real adapter must not be called when adapter flag is disabled")
+
+    monkeypatch.setattr(local_llm_preview_safe, "run_zdoc_local_llm_preview_safe_service_entry", fail_helper)
+    monkeypatch.setattr(local_llm_preview_safe, "_run_ollama_adapter_bridge", fail_adapter)
+
+    response = _client().post(SAFE_PATH, json=payload)
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["ok"] is False
+    assert result["enabled"] is True
+    assert result["status"] == "failure"
+    assert result["error_type"] == "illegal_field"
+    assert result["reason"] == "illegal_field:content"
+    assert payload == original_payload
+    assert _write_surface_counts() == before_counts
+    _assert_safe_endpoint_guard(result)
+
+
 def test_safe_endpoint_double_flags_calls_fake_ollama_adapter_generate_without_writes(monkeypatch) -> None:
     import backend.zhifei_autoplan.ollama_preview as preview_module
 

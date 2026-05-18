@@ -75,6 +75,9 @@ RESPONSE_MODE_EMPTY_RESPONSE = "empty_response"
 RESPONSE_MODE_MALFORMED_RESPONSE = "malformed_response"
 RESPONSE_MODE_NORMALIZATION_FAILURE = "normalization_failure"
 RESPONSE_MODE_SYSTEM_ERROR = "system_error"
+PROMPT_MODE_RESPONSE_FIRST = "response_first"
+PROMPT_MODE_JSON_FIRST = "json_first"
+PROMPT_MODE_TEXT_FALLBACK = "text_fallback"
 LOCAL_LLM_PREVIEW_FORMAL_OUTPUT_FIELDS = frozenset(
     {
         "content",
@@ -601,16 +604,86 @@ def select_zdoc_local_ollama_model(
     return result
 
 
+def _zdoc_ollama_prompt_mode_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_zdoc_ollama_prompt_mode_text(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_zdoc_ollama_prompt_mode_text(item) for item in value)
+    return _clean_text(value, limit=1200)
+
+
+def _zdoc_ollama_prompt_mode(request: dict[str, Any]) -> str:
+    mode_text = " ".join(
+        _zdoc_ollama_prompt_mode_text(request.get(field))
+        for field in ("review_focus", "preview_type", "source_context")
+    )
+    normalized = mode_text.lower().replace("_", "-")
+    if any(
+        marker in normalized
+        for marker in (
+            "json-first",
+            "json advisory",
+            "json-advisory",
+            "return json",
+            "only json",
+        )
+    ):
+        return PROMPT_MODE_JSON_FIRST
+    if any(
+        marker in normalized
+        for marker in (
+            "text-fallback",
+            "text fallback",
+            "non-json",
+            "plain text",
+        )
+    ):
+        return PROMPT_MODE_TEXT_FALLBACK
+    return PROMPT_MODE_RESPONSE_FIRST
+
+
 def _zdoc_ollama_preview_prompt(request: dict[str, Any]) -> str:
+    prompt_mode = _zdoc_ollama_prompt_mode(request)
     parts = [
         "Return preview-only advisory suggestions for the ZDoc section.",
-        f"Section title: {request['section_title']}",
-        f"Review focus: {request['review_focus']}",
+        f"Prompt mode: {prompt_mode}.",
+        "Keep all output preview-only; do not write final document content.",
+        "Do not export, patch, apply, write back, or create DOCX/Markdown/JSON files.",
+        "Do not include reasoning, hidden thinking, chain-of-thought, or drafting process.",
+        "Do not invent tender clauses, drawings, BOQ quantities, standards, project facts, or evidence.",
+        "If evidence is missing, state that the item requires source verification / 未查明 before use.",
+        "Model-generated advice is a suggestion source only and must not be treated as evidence.",
     ]
+    if prompt_mode == PROMPT_MODE_JSON_FIRST:
+        parts.extend(
+            [
+                "Return only a compact JSON object with keys: advisory, suggestions, risk_notes.",
+                "Do not wrap JSON in Markdown fences and do not add prose outside the JSON object.",
+            ]
+        )
+    elif prompt_mode == PROMPT_MODE_TEXT_FALLBACK:
+        parts.extend(
+            [
+                "Return a short non-JSON technical advisory text only.",
+                "Use plain visible advisory wording, not formal section prose.",
+            ]
+        )
+    else:
+        parts.extend(
+            [
+                "Return only one short user-visible advisory in the normal response.",
+                "Avoid lists unless the response must include one concise risk note.",
+            ]
+        )
+    parts.extend(
+        [
+            f"Section title: {request['section_title']}",
+            f"Review focus: {request['review_focus']}",
+        ]
+    )
     if request.get("source_context"):
         parts.append(f"Context summary: {request['source_context']}")
     parts.append(f"Section text: {request['section_text']}")
-    parts.append("Do not write final document content. Do not create export artifacts.")
     return "\n".join(parts)
 
 

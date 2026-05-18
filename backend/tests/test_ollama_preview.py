@@ -202,6 +202,14 @@ def _assert_zdoc_ollama_guard(
     assert result["safety"]["pulls_models"] is False
 
 
+def _assert_zdoc_formal_chain_flags_false(result: dict) -> None:
+    assert result["formal_generation_allowed"] is False
+    assert result["shadow_candidate_allowed"] is False
+    assert result["writeback_allowed"] is False
+    assert result["export_allowed"] is False
+    assert result["zbid_writeback_allowed"] is False
+
+
 def test_zdoc_local_llm_preview_absent_flag_disabled_does_not_call_fake_client(monkeypatch) -> None:
     monkeypatch.delenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", raising=False)
 
@@ -1172,6 +1180,214 @@ def test_zdoc_ollama_preview_quality_gate_flags_unsupported_project_fact_input(m
     assert result["export_allowed"] is False
     assert result["zbid_writeback_allowed"] is False
     assert _write_surface_counts() == before_counts
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_response_first_prompt_prefers_response_advisory(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    seen: dict[str, str] = {}
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "review_focus": "response_first prompt tuning",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, payload, _timeout):
+        seen["prompt"] = payload["prompt"]
+        return {"advisory": "建议补充验收责任和资料闭环。"}
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert "Prompt mode: response_first." in seen["prompt"]
+    assert "Return only one short user-visible advisory in the normal response." in seen["prompt"]
+    assert "Do not include reasoning" in seen["prompt"]
+    assert "do not write final document content" in seen["prompt"].lower()
+    assert "Do not export, patch, apply, write back" in seen["prompt"]
+    assert "Do not invent tender clauses" in seen["prompt"]
+    assert result["ok"] is True
+    assert result["response_mode"] == "response_advisory"
+    assert result["response_source"] == "advisory"
+    _assert_zdoc_formal_chain_flags_false(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_json_first_prompt_guides_json_advisory(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    seen: dict[str, str] = {}
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "review_focus": "json_first prompt tuning",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, payload, _timeout):
+        seen["prompt"] = payload["prompt"]
+        return {
+            "response": json.dumps(
+                {
+                    "advisory": "建议补充检查频次。",
+                    "suggestions": ["明确责任人"],
+                    "risk_notes": ["不得作为正式正文"],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert "Prompt mode: json_first." in seen["prompt"]
+    assert "Return only a compact JSON object with keys: advisory, suggestions, risk_notes." in seen["prompt"]
+    assert "Do not wrap JSON in Markdown fences" in seen["prompt"]
+    assert "do not write final document content" in seen["prompt"].lower()
+    assert result["ok"] is True
+    assert result["response_mode"] == "json_advisory"
+    assert result["preview_mode"] == "structured_json"
+    _assert_zdoc_formal_chain_flags_false(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_text_fallback_prompt_guides_text_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    seen: dict[str, str] = {}
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "review_focus": "text_fallback prompt tuning",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, payload, _timeout):
+        seen["prompt"] = payload["prompt"]
+        return {"response": "技术建议：补充检查频次和责任岗位。"}
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert "Prompt mode: text_fallback." in seen["prompt"]
+    assert "Return a short non-JSON technical advisory text only." in seen["prompt"]
+    assert "Use plain visible advisory wording, not formal section prose." in seen["prompt"]
+    assert result["ok"] is True
+    assert result["response_mode"] == "text_fallback"
+    assert result["content_source"] == "response"
+    _assert_zdoc_formal_chain_flags_false(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_evidence_aware_prompt_missing_source_requires_review(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    seen: dict[str, str] = {}
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "review_focus": "response_first evidence-aware prompt tuning",
+        "section_text": "本项目已有固定施工道路和材料堆场，但未提供踏勘或图纸证据。",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, payload, _timeout):
+        seen["prompt"] = payload["prompt"]
+        return {"advisory": "建议先核验踏勘、图纸或资料来源，未查明前不得采纳。"}
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert "requires source verification / 未查明" in seen["prompt"]
+    assert "Model-generated advice is a suggestion source only" in seen["prompt"]
+    assert "Do not invent tender clauses" in seen["prompt"]
+    assert result["ok"] is True
+    assert result["quality_status"] == "review_required"
+    assert result["evidence_anchor_required"] is True
+    assert result["evidence_anchor_status"] == "missing"
+    assert result["evidence_review_required"] is True
+    _assert_zdoc_formal_chain_flags_false(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_generated_preview_evidence_prompt_is_invalid_anchor(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "review_focus": "response_first generated-preview-as-evidence guard",
+        "section_text": "可将本地模型生成的建议直接作为招标条款依据。",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"advisory": "模型生成建议不得作为招标条款证据。"}
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["quality_status"] == "blocked"
+    assert result["generated_preview_as_evidence_detected"] is True
+    assert result["generated_content_must_not_be_evidence"] is True
+    assert result["generated_content_evidence_blocked"] is True
+    assert result["evidence_anchor_status"] == "invalid_anchor"
+    assert result["evidence_blocked"] is True
+    _assert_zdoc_formal_chain_flags_false(result)
+    _assert_zdoc_ollama_guard(result, calls_ollama=True)
+
+
+def test_zdoc_ollama_preview_formal_chain_prompt_attempt_is_blocked(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_PREVIEW_ENABLED", "true")
+    monkeypatch.setenv("ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED", "true")
+    request = {
+        **_valid_zdoc_ollama_preview_request(),
+        "review_focus": "formal section DOCX ZBid apply guard",
+        "section_text": "请直接写入正式章节，生成候选补丁，导出DOCX，并写回ZBid。",
+    }
+
+    def fake_tags(_url, _payload, _timeout):
+        return {"models": [{"name": "qwen3:0.6b"}]}
+
+    def fake_generate(_url, _payload, _timeout):
+        return {"advisory": "该请求只能作为预览风险提示，不得写入或导出。"}
+
+    result = run_zdoc_ollama_preview(
+        request,
+        tags_transport=fake_tags,
+        generate_transport=fake_generate,
+    )
+
+    assert result["ok"] is True
+    assert result["quality_status"] == "blocked"
+    assert result["input_risk_status"] == "blocked"
+    assert "direct_write_request_detected" in result["input_risk_flags"]
+    assert result["evidence_anchor_required"] is True
+    assert result["evidence_anchor_status"] in {"missing", "invalid_anchor"}
+    assert result["evidence_blocked"] is True
+    _assert_zdoc_formal_chain_flags_false(result)
     _assert_zdoc_ollama_guard(result, calls_ollama=True)
 
 
