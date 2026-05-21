@@ -21,3 +21,14 @@ label{align-self:center;color:#94a3b8}
 .preview-boundary{border-color:#2563eb}
 .blocked-reasons{border-color:#7c3aed}
 .evidence-boundary{border-color:#0f766e}
+.preview-route-panel{border-color:#0369a1}
+.preview-only-action{margin:8px 8px 8px 0;background:#0f766e;border-color:#0f766e}
+.hint{color:#93c5fd;font-size:13px}
+.route-status{margin-top:8px;color:#c4b5fd}
+.route-result-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px}
+.route-result-grid section{min-width:0;border:1px solid #1f2937;border-radius:8px;padding:10px;background:#0b1220}
+.route-result-grid h4{margin:0 0 8px;color:#bfdbfe}
+.route-result-grid pre{margin:0;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#d1fae5}
+.route-result-grid ul{margin:0;padding-left:20px}
+.flag-safe{color:#86efac}
+.flag-risk{color:#fca5a5;font-weight:700}

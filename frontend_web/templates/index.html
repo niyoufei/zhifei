@@ -71,10 +71,139 @@
       <strong>证据边界</strong>
       <p>AI advisory 不是 evidence；preview 不是正式正文。证据必须来自可验证资料锚点，不能由预览建议、候选补丁、diff、rollback 或 dry-run 结果替代。</p>
     </div>
+    <div class="notice preview-route-panel" aria-label="local trial preview-only route integration">
+      <strong>/local-trial/preview-only 元数据预览</strong>
+      <p>仅调用 preview-only / no-write route，展示 metadata-only 结果；不会触发正式生成、DOCX 导出、review/apply 或 ZBid 写回。</p>
+      <button
+        type="button"
+        id="loadPreviewOnlyRoute"
+        class="preview-only-action"
+        aria-describedby="previewOnlyRouteHelp"
+      >加载 preview-only 元数据</button>
+      <span id="previewOnlyRouteHelp" class="hint">失败时只显示错误，不 fallback 到正式接口。</span>
+      <div id="previewOnlyRouteStatus" class="route-status" role="status">尚未请求 /local-trial/preview-only。</div>
+      <div class="route-result-grid" aria-label="preview-only route metadata results">
+        <section>
+          <h4>preview_packet</h4>
+          <pre id="previewPacketResult">等待加载</pre>
+        </section>
+        <section>
+          <h4>validator_result</h4>
+          <pre id="validatorResult">等待加载</pre>
+        </section>
+        <section>
+          <h4>blocked_reasons</h4>
+          <ul id="blockedReasonsResult">
+            <li>等待加载</li>
+          </ul>
+        </section>
+        <section>
+          <h4>正式链 false flags</h4>
+          <ul id="formalRouteFlags">
+            <li>generate_called=false</li>
+            <li>export_docx_called=false</li>
+            <li>review_apply_called=false</li>
+            <li>zbid_writeback_called=false</li>
+            <li>output_job_export_written=false</li>
+          </ul>
+        </section>
+      </div>
+    </div>
     {% with messages = get_flashed_messages() %}
       {% if messages %}<div class="msg">{{ messages[0] }}</div>{% endif %}
     {% endwith %}
   </section>
 </main>
+<script>
+(() => {
+  const route = "/local-trial/preview-only";
+  const statusEl = document.getElementById("previewOnlyRouteStatus");
+  const previewPacketEl = document.getElementById("previewPacketResult");
+  const validatorResultEl = document.getElementById("validatorResult");
+  const blockedReasonsEl = document.getElementById("blockedReasonsResult");
+  const formalFlagsEl = document.getElementById("formalRouteFlags");
+  const button = document.getElementById("loadPreviewOnlyRoute");
+
+  const safePayload = {
+    integration_request_id: "frontend-preview-only-smoke",
+    source_system: "zdoc",
+    target_system: "zbid",
+    project_id: "frontend-local-trial",
+    document_id: "frontend-local-trial-doc",
+    section_id: "frontend-local-trial-section",
+    section_title: "Frontend Preview Only Metadata",
+    section_hash: "sha256:frontend-preview-only",
+    section_version: "v1",
+    tender_file_refs: ["frontend:tender:file:001"],
+    scoring_clause_refs: ["frontend:scoring-clause:001"],
+    evidence_anchor_refs: ["frontend:evidence-anchor:001"],
+    evidence_anchor_status: "source_verified",
+    evidence_binding_status: "bound_to_source_verified_evidence",
+    response_mode: "preview_advisory",
+    input_risk_level: "low",
+    advisory_quality_gate_status: "preview_ok",
+    preview_advisory_summary: "Frontend metadata-only preview; not evidence and not formal正文.",
+    generated_at: "2026-01-01T00:00:00Z"
+  };
+
+  function renderJson(element, value) {
+    element.textContent = JSON.stringify(value || {}, null, 2);
+  }
+
+  function renderList(element, values) {
+    const items = Array.isArray(values) && values.length ? values : ["no_blocked_reasons_returned"];
+    element.replaceChildren(...items.map((value) => {
+      const item = document.createElement("li");
+      item.textContent = String(value);
+      return item;
+    }));
+  }
+
+  function renderFormalRouteFlags(result) {
+    const flags = {
+      generate_called: Boolean(result.calls_generate_route || result.triggers_generation_chain || result.affects_generation),
+      export_docx_called: Boolean(result.calls_export_docx_route || result.triggers_export_chain || result.affects_export),
+      review_apply_called: Boolean(result.calls_review_apply_route),
+      zbid_writeback_called: Boolean(result.affects_zbid_writeback),
+      output_job_export_written: Boolean(result.writes_output || result.writes_job || result.writes_export)
+    };
+    formalFlagsEl.replaceChildren(...Object.entries(flags).map(([key, value]) => {
+      const item = document.createElement("li");
+      item.textContent = `${key}=${value}`;
+      item.className = value ? "flag-risk" : "flag-safe";
+      return item;
+    }));
+  }
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    statusEl.textContent = "正在读取 preview-only metadata；不会调用正式链。";
+    try {
+      const response = await fetch(route, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(safePayload)
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${JSON.stringify(result)}`);
+      }
+      renderJson(previewPacketEl, result.preview_packet);
+      renderJson(validatorResultEl, result.validator_result);
+      renderList(blockedReasonsEl, result.blocked_reasons);
+      renderFormalRouteFlags(result);
+      statusEl.textContent = "preview-only metadata 已加载；结果仅供人工核查，不是 evidence，不是正式正文。";
+    } catch (error) {
+      previewPacketEl.textContent = "未加载";
+      validatorResultEl.textContent = "未加载";
+      renderList(blockedReasonsEl, ["preview_only_route_request_failed"]);
+      renderFormalRouteFlags({});
+      statusEl.textContent = `preview-only route 调用失败：${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+})();
+</script>
 </body>
 </html>
