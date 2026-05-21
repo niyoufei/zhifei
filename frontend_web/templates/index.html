@@ -37,9 +37,12 @@
   </section>
 
   <section class="full">
-    <h3>版面与生成设置</h3>
-    <form method="post">
-      <input type="hidden" name="action" value="generate" />
+    <h3>版面与预览设置</h3>
+    <div class="notice preview-boundary" role="status" aria-label="preview-only no-write status">
+      <strong>当前为 preview-only / no-write 阶段。</strong>
+      <span>仅展示本地预览与人工核查信息，不写回正式正文，不生成 DOCX，不写 output/job/export。</span>
+    </div>
+    <div class="no-write-panel" aria-label="preview-only layout settings">
       <div class="row">
         <label>行距</label><input value="固定 22 磅" disabled />
         <label>页边距</label><input value="上2.5cm，左右下2.0cm" disabled />
@@ -50,10 +53,24 @@
       </div>
       <div class="row">
         <label>章节页数设置</label>
-        <input name="chapter_pages" placeholder="示例：1=5;2=8;3=10 表示第1/2/3章页数上限" />
+        <input name="chapter_pages" placeholder="示例：1=5;2=8;3=10 表示第1/2/3章页数上限" disabled />
       </div>
-      <button type="submit">生成 Word 文档</button>
-    </form>
+      <button type="button" class="disabled-action" disabled aria-disabled="true">正式导出未开放</button>
+    </div>
+    <div class="notice blocked-reasons" aria-label="blocked reasons">
+      <strong>blocked_reasons</strong>
+      <ul>
+        <li>formal_writeback_allowed=false：正式写回未开放。</li>
+        <li>docx_export_allowed=false：Word / DOCX 正式导出未开放。</li>
+        <li>review_apply_allowed=false：review/apply 未开放。</li>
+        <li>zbid_writeback_allowed=false：ZBid 写回未开放。</li>
+        <li>output_write_allowed=false：output/job/export 写入未开放。</li>
+      </ul>
+    </div>
+    <div class="notice evidence-boundary" aria-label="evidence boundary">
+      <strong>证据边界</strong>
+      <p>AI advisory 不是 evidence；preview 不是正式正文。证据必须来自可验证资料锚点，不能由预览建议、候选补丁、diff、rollback 或 dry-run 结果替代。</p>
+    </div>
     {% with messages = get_flashed_messages() %}
       {% if messages %}<div class="msg">{{ messages[0] }}</div>{% endif %}
     {% endwith %}
