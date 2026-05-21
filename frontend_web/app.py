@@ -1,12 +1,26 @@
 import datetime
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 
-from flask import Flask, flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from flask import (
+    Flask,
+    Response,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
 from werkzeug.utils import secure_filename
 
 try:
@@ -47,6 +61,28 @@ app.secret_key = os.environ.get("TDOCSYS_KEY", secrets.token_hex(16))
 DB = os.path.join(BASE_DIR, "users.db")
 BYPASS_LOGIN = str(os.environ.get("TDOCSYS_BYPASS_LOGIN", "1")).strip().lower() in {"1", "true", "yes", "on"}
 LOCAL_USER = str(os.environ.get("TDOCSYS_LOCAL_USER", "local_user")).strip() or "local_user"
+PREVIEW_ONLY_PROXY_PATH = "/local-trial/preview-only"
+PREVIEW_ONLY_BACKEND_BASE_URL = os.environ.get(
+    "TDOCSYS_BACKEND_BASE_URL",
+    "http://127.0.0.1:18760",
+).rstrip("/")
+PREVIEW_ONLY_PROXY_TIMEOUT_SECONDS = float(
+    os.environ.get("TDOCSYS_BACKEND_PROXY_TIMEOUT", "10")
+)
+FORMAL_CHAIN_FALSE_FLAGS = {
+    "formal_writeback_allowed": False,
+    "review_apply_allowed": False,
+    "docx_export_allowed": False,
+    "zbid_writeback_allowed": False,
+    "output_write_allowed": False,
+    "calls_generate_route": False,
+    "calls_export_docx_route": False,
+    "calls_review_apply_route": False,
+    "affects_zbid_writeback": False,
+    "writes_output": False,
+    "writes_job": False,
+    "writes_export": False,
+}
 
 
 def _hash_password(raw: str) -> str:
@@ -90,6 +126,22 @@ def ensure_login() -> bool:
         session["user"] = LOCAL_USER
         return True
     return False
+
+
+def _preview_only_backend_url() -> str:
+    return f"{PREVIEW_ONLY_BACKEND_BASE_URL}{PREVIEW_ONLY_PROXY_PATH}"
+
+
+def _preview_only_proxy_error(message: str, *, status: int) -> tuple:
+    return jsonify({
+        "ok": False,
+        "preview_only": True,
+        "no_write": True,
+        "error": "preview_only_route_proxy_failed",
+        "message": message,
+        "target_path": PREVIEW_ONLY_PROXY_PATH,
+        **FORMAL_CHAIN_FALSE_FLAGS,
+    }), status
 
 
 def _resolve_category(raw: str) -> str:
@@ -168,6 +220,52 @@ def index():
         return redirect(url_for("index"))
 
     return render_template("index.html", user=session["user"], bypass_login=BYPASS_LOGIN)
+
+
+@app.post(PREVIEW_ONLY_PROXY_PATH)
+def local_trial_preview_only_proxy():
+    if not ensure_login():
+        return _preview_only_proxy_error("login_required", status=401)
+
+    request_body = request.get_data(cache=False) or b"{}"
+    try:
+        parsed_body = json.loads(request_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _preview_only_proxy_error("json_body_must_be_valid", status=400)
+    if not isinstance(parsed_body, dict):
+        return _preview_only_proxy_error("json_body_must_be_object", status=400)
+
+    proxy_request = urllib.request.Request(
+        _preview_only_backend_url(),
+        data=request_body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            proxy_request,
+            timeout=PREVIEW_ONLY_PROXY_TIMEOUT_SECONDS,
+        ) as upstream:
+            response_body = upstream.read()
+            response_status = upstream.status
+            response_content_type = upstream.headers.get("Content-Type", "application/json")
+    except urllib.error.HTTPError as exc:
+        return Response(
+            exc.read(),
+            status=exc.code,
+            content_type=exc.headers.get("Content-Type", "application/json"),
+        )
+    except urllib.error.URLError as exc:
+        return _preview_only_proxy_error(str(exc.reason), status=502)
+
+    return Response(
+        response_body,
+        status=response_status,
+        content_type=response_content_type,
+    )
 
 
 @app.post("/upload/<category>")
