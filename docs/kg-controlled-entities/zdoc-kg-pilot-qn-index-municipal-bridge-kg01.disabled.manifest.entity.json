@@ -1,0 +1,176 @@
+{
+  "manifest_entity_id": "zdoc-kg-pilot-qn-index-municipal-bridge-kg01-disabled-manifest-entity",
+  "entity_kind": "controlled_inert_manifest_entity",
+  "entity_status": "disabled_entity_only",
+  "scope": "docs_only",
+  "pilot_name": "ZDoc KG first controlled inert manifest entity",
+  "pilot_direction": "全能索引 + 市政桥梁 KG01",
+  "backup_direction": "全能索引 + 医院装修改造 KG02",
+  "created_from": "KG-08 manifest candidate",
+  "created_from_path": "docs/kg-manifest-candidates/zdoc-kg-pilot-qn-index-municipal-bridge-kg01.disabled.manifest.candidate.json",
+  "linked_registry_candidate": "KG-15 registry candidate",
+  "linked_registry_candidate_path": "docs/kg-registry-candidates/zdoc-kg-pilot-qn-index-municipal-bridge-kg01.disabled.registry.candidate.json",
+  "source_mode": "path_and_summary_only",
+  "registration_status": "not_registered",
+  "enabled": false,
+  "runtime_loadable": false,
+  "system_instruction_loadable": false,
+  "rag_loadable": false,
+  "prompt_registry_loadable": false,
+  "evidence_allowed": false,
+  "scoring_allowed": false,
+  "source_files_copied": false,
+  "raw_system_instruction_embedded": false,
+  "raw_prompt_embedded": false,
+  "raw_source_text_embedded": false,
+  "writeback_allowed": false,
+  "export_allowed": false,
+  "loader_config_present": false,
+  "endpoint_binding_present": false,
+  "runtime_registry_entry_present": false,
+  "activation_requires": "manual_authorization_after_KG31_review",
+  "candidate_snapshot": {
+    "kg08_status": "candidate_only",
+    "kg08_registration_status": "not_registered",
+    "kg08_enabled": false,
+    "kg15_status": "registry_candidate_only",
+    "kg15_registration_status": "not_registered",
+    "kg15_enabled": false
+  },
+  "disabled_flags": {
+    "enabled": false,
+    "runtime_access": false,
+    "runtime_loadable": false,
+    "rag_enabled": false,
+    "rag_loadable": false,
+    "evidence_enabled": false,
+    "evidence_allowed": false,
+    "scoring_enabled": false,
+    "scoring_allowed": false,
+    "prompt_registry_enabled": false,
+    "prompt_registry_loadable": false,
+    "system_instruction_registry_enabled": false,
+    "system_instruction_loadable": false,
+    "writeback_enabled": false,
+    "writeback_allowed": false,
+    "export_enabled": false,
+    "export_allowed": false
+  },
+  "domain_tags": [
+    "general_index",
+    "municipal_bridge_kg01",
+    "backup_hospital_renovation_kg02"
+  ],
+  "risk_level": "R2",
+  "manual_review_required": true,
+  "review_status": "pending",
+  "source_records": [
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/全能/00-HCX8-FINAL-KG-总索引版本说明.md",
+      "source_summary": "全能索引候选，仅用于登记跨专业索引线索和版本线索，不参与运行。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "general_index"
+      ],
+      "source_file_copied": false,
+      "raw_text_embedded": false,
+      "isolation_rules": [
+        "path_and_summary_only",
+        "not_system_instruction",
+        "not_runtime_readable"
+      ]
+    },
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/全能/06-HCX8-FINAL-KG-行业模块库.md",
+      "source_summary": "全能行业模块候选，仅用于登记术语和专业入口线索，不参与运行。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "general_index"
+      ],
+      "source_file_copied": false,
+      "raw_text_embedded": false,
+      "isolation_rules": [
+        "path_and_summary_only",
+        "manual_review_required",
+        "not_runtime_readable"
+      ]
+    },
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/全能/09-HCX8-FINAL-KG-标准产物模板库.md",
+      "source_summary": "全能模板候选，仅用于登记模板方向线索，不作为生成模板启用。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "general_index"
+      ],
+      "source_file_copied": false,
+      "raw_text_embedded": false,
+      "isolation_rules": [
+        "path_and_summary_only",
+        "not_generation_reference",
+        "manual_review_required"
+      ]
+    },
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/市政桥梁工程/KG01_市政桥梁工程核心知识图谱_上传版.md",
+      "source_summary": "市政桥梁 KG01 首个专业试点候选，仅用于登记专业知识锚点方向，不启用检索或生成。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "municipal_bridge_kg01"
+      ],
+      "source_file_copied": false,
+      "raw_text_embedded": false,
+      "isolation_rules": [
+        "path_and_summary_only",
+        "knowledge_anchor_candidate_only",
+        "rag_disabled",
+        "not_evidence",
+        "not_scoring_basis"
+      ]
+    },
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/医院装修改造/02_医院装修改造接口与医疗专项知识图谱.md",
+      "source_summary": "医院装修改造 KG02 备选试点候选，仅用于登记备选专业方向，不进入首个试点运行范围。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "backup_hospital_renovation_kg02"
+      ],
+      "source_file_copied": false,
+      "raw_text_embedded": false,
+      "isolation_rules": [
+        "path_and_summary_only",
+        "backup_candidate_only",
+        "manual_review_required",
+        "not_runtime_readable"
+      ]
+    }
+  ],
+  "isolation_rules": [
+    "docs_only_entity",
+    "not_runtime_manifest",
+    "not_registered",
+    "not_runtime_loadable",
+    "not_rag_loadable",
+    "not_prompt_registry_loadable",
+    "not_system_instruction_loadable",
+    "not_evidence",
+    "not_scoring_basis",
+    "not_writeback_source",
+    "not_export_source",
+    "source_path_records_origin_path_only",
+    "source_summary_records_summary_only",
+    "source_files_not_copied",
+    "raw_source_text_not_embedded",
+    "raw_system_instruction_not_embedded",
+    "raw_prompt_not_embedded",
+    "system_instruction_sources_must_remain_quarantined",
+    "qingtian_review_and_full_score_gate_sources_are_reference_candidates_only"
+  ],
+  "kg32_boundary": {
+    "kg32_must_be_separately_authorized": true,
+    "allowed_next_step": "entity_static_validation_rules_or_manual_review_only",
+    "system_integration_forbidden": true,
+    "runtime_registration_forbidden": true,
+    "rag_prompt_or_system_instruction_registry_forbidden": true,
+    "knowledge_pack_enablement_forbidden": true
+  }
+}
