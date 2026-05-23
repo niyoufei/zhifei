@@ -160,6 +160,7 @@ async def local_trial_preview_only_route(
         "endpoint_path": LOCAL_TRIAL_PREVIEW_ONLY_PATH,
         "preview_only": True,
         "no_write": True,
+        "no_evidence": True,
         "metadata_only": True,
         "preview_packet": preview_packet,
         "validator_result": validator_result,

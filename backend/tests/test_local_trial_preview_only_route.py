@@ -82,6 +82,7 @@ def _safe_payload(**overrides) -> dict:
 def _assert_no_write_route_flags(result: dict) -> None:
     assert result["preview_only"] is True
     assert result["no_write"] is True
+    assert result["no_evidence"] is True
     assert result["route_name"] == "local_trial_preview_only"
     assert result["endpoint_path"] == ROUTE_PATH
     assert result["calls_generate_route"] is False
