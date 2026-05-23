@@ -1,0 +1,71 @@
+{
+  "registry_candidate_id": "zdoc-kg-pilot-qn-index-municipal-bridge-kg01-disabled-registry-candidate",
+  "manifest_candidate_path": "docs/kg-manifest-candidates/zdoc-kg-pilot-qn-index-municipal-bridge-kg01.disabled.manifest.candidate.json",
+  "linked_manifest_candidate_path": "docs/kg-manifest-candidates/zdoc-kg-pilot-qn-index-municipal-bridge-kg01.disabled.manifest.candidate.json",
+  "pilot_direction": "全能索引 + 市政桥梁 KG01",
+  "backup_direction": "全能索引 + 医院装修改造 KG02",
+  "source_mode": "path_and_summary_only",
+  "status": "registry_candidate_only",
+  "registration_status": "not_registered",
+  "activation_requires": "manual_authorization_after_KG15_review",
+  "disabled_flags": {
+    "enabled": false,
+    "runtime_access": false,
+    "rag_enabled": false,
+    "evidence_enabled": false,
+    "scoring_enabled": false,
+    "prompt_registry_enabled": false,
+    "system_instruction_registry_enabled": false,
+    "writeback_enabled": false,
+    "export_enabled": false
+  },
+  "isolation_rules": [
+    "docs_only_registry_candidate",
+    "not_real_registry_file",
+    "not_registered_manifest",
+    "not_runtime_readable",
+    "manifest_candidate_path_points_to_docs_frozen_candidate_only",
+    "source_mode_path_and_summary_only",
+    "rag_registry_disabled",
+    "prompt_registry_disabled",
+    "system_instruction_registry_disabled",
+    "system_instruction_sources_must_remain_quarantined",
+    "qingtian_review_and_full_score_gate_sources_are_reference_candidates_only",
+    "not_evidence",
+    "not_scoring_basis",
+    "not_loaded_by_generate_export_review_or_writeback"
+  ],
+  "pre_registration_rules": {
+    "pre_registration_status": "draft_only",
+    "manual_review_required": true,
+    "review_status": "pending",
+    "approval_status": "not_approved",
+    "registration_must_remain_not_registered": true,
+    "runtime_registry_forbidden": true,
+    "rag_registry_forbidden": true,
+    "prompt_registry_forbidden": true,
+    "system_instruction_registry_forbidden": true,
+    "evidence_forbidden": true,
+    "scoring_basis_forbidden": true,
+    "writeback_forbidden": true,
+    "export_forbidden": true
+  },
+  "manual_authorization_required": true,
+  "risk_level": "R2",
+  "domain_tags": [
+    "general_index",
+    "municipal_bridge_kg01",
+    "backup_hospital_renovation_kg02"
+  ],
+  "future_authorization_conditions": [
+    "KG16_must_be_separately_authorized",
+    "KG16_should_design_registry_candidate_static_validation_rules_first",
+    "KG16_must_not_modify_KG08_manifest_candidate",
+    "KG16_must_not_register_manifest",
+    "KG16_must_not_create_real_registry_file",
+    "KG16_must_not_enable_runtime_access",
+    "KG16_must_not_enable_rag_prompt_or_system_instruction_registry",
+    "KG16_must_not_enable_evidence_scoring_writeback_or_export",
+    "KG16_must_not_run_services_ollama_ports_or_endpoints"
+  ]
+}
