@@ -1,0 +1,113 @@
+{
+  "pilot_name": "ZDoc KG controlled pilot disabled manifest candidate",
+  "pilot_direction": "全能索引 + 市政桥梁 KG01",
+  "backup_direction": "全能索引 + 医院装修改造 KG02",
+  "source_mode": "path_and_summary_only",
+  "status": "candidate_only",
+  "registration_status": "not_registered",
+  "activation_requires": "manual_authorization_after_KG08_review",
+  "disabled_flags": {
+    "enabled": false,
+    "runtime_access": false,
+    "rag_enabled": false,
+    "evidence_enabled": false,
+    "scoring_enabled": false,
+    "prompt_registry_enabled": false,
+    "system_instruction_registry_enabled": false,
+    "writeback_enabled": false,
+    "export_enabled": false
+  },
+  "domain_tags": [
+    "general_index",
+    "municipal_bridge_kg01",
+    "backup_hospital_renovation_kg02"
+  ],
+  "sources": [
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/全能/00-HCX8-FINAL-KG-总索引版本说明.md",
+      "source_summary": "全能索引候选，仅用于登记跨专业索引线索和版本线索，不参与运行。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "general_index"
+      ],
+      "isolation_rules": [
+        "path_and_summary_only",
+        "not_system_instruction",
+        "not_runtime_readable"
+      ]
+    },
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/全能/06-HCX8-FINAL-KG-行业模块库.md",
+      "source_summary": "全能行业模块候选，仅用于登记术语和专业入口线索，不参与运行。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "general_index"
+      ],
+      "isolation_rules": [
+        "path_and_summary_only",
+        "manual_review_required",
+        "not_runtime_readable"
+      ]
+    },
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/全能/09-HCX8-FINAL-KG-标准产物模板库.md",
+      "source_summary": "全能模板候选，仅用于登记模板方向线索，不作为生成模板启用。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "general_index"
+      ],
+      "isolation_rules": [
+        "path_and_summary_only",
+        "not_generation_reference",
+        "manual_review_required"
+      ]
+    },
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/市政桥梁工程/KG01_市政桥梁工程核心知识图谱_上传版.md",
+      "source_summary": "市政桥梁 KG01 首个专业试点候选，仅用于登记专业知识锚点方向，不启用检索或生成。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "municipal_bridge_kg01"
+      ],
+      "isolation_rules": [
+        "path_and_summary_only",
+        "knowledge_anchor_candidate_only",
+        "rag_disabled",
+        "not_evidence",
+        "not_scoring_basis"
+      ]
+    },
+    {
+      "source_path": "/Users/youfeini/Desktop/AI知识图谱大全/医院装修改造/02_医院装修改造接口与医疗专项知识图谱.md",
+      "source_summary": "医院装修改造 KG02 备选试点候选，仅用于登记备选专业方向，不进入首个试点运行范围。",
+      "risk_level": "R2",
+      "domain_tags": [
+        "backup_hospital_renovation_kg02"
+      ],
+      "isolation_rules": [
+        "path_and_summary_only",
+        "backup_candidate_only",
+        "manual_review_required",
+        "not_runtime_readable"
+      ]
+    }
+  ],
+  "isolation_rules": [
+    "source_path_records_origin_path_only",
+    "source_summary_records_summary_only",
+    "source_text_not_copied",
+    "system_instruction_sources_must_remain_quarantined",
+    "qingtian_review_and_full_score_gate_sources_are_reference_candidates_only",
+    "not_registered_in_zdoc_runtime",
+    "not_loaded_by_generate_export_review_or_writeback",
+    "not_evidence",
+    "not_scoring_basis"
+  ],
+  "future_authorization_conditions": [
+    "KG09_must_be_separately_authorized",
+    "KG09_should_design_static_validation_rules_first",
+    "candidate_registration_requires_manual_review",
+    "activation_requires_manual_authorization_after_KG08_review",
+    "all_disabled_flags_must_remain_false_until_later_explicit_authorization"
+  ]
+}
