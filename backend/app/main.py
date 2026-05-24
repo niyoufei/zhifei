@@ -28,6 +28,7 @@ from .routers.actions_bridge import router as actions_bridge_router
 from .routers.auth import router as auth_router
 from .routers.local_llm_preview_safe import router as local_llm_preview_safe_router
 from .routers.local_trial_preview_only import router as local_trial_preview_only_router
+from .routers.kg_read_only_preview import router as kg_read_only_preview_router
 
 app.include_router(ingest_router)
 app.include_router(retrieve_router)
@@ -38,6 +39,7 @@ app.include_router(actions_bridge_router)
 app.include_router(auth_router)
 app.include_router(local_llm_preview_safe_router)
 app.include_router(local_trial_preview_only_router)
+app.include_router(kg_read_only_preview_router)
 
 
 @app.get("/health")
