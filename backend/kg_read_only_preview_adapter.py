@@ -1,11 +1,12 @@
 """Minimal draft adapter for KG read-only preview payloads.
 
 This module is intentionally isolated from ZDoc runtime chains. It performs
-only controlled single-target file-stat metadata inspection when explicitly
-gated: no body reads, no JSON parsing, no route registration, no service calls,
-no model calls, no retrieval, and no writeback.
+only controlled single-target metadata or structure-only inspection when
+explicitly gated: no import-time reads, no service-start reads, no route
+registration, no service calls, no model calls, no retrieval, and no writeback.
 """
 
+import json
 from pathlib import Path
 from stat import S_IMODE, S_ISREG
 from typing import Any, Mapping, Optional
@@ -21,13 +22,21 @@ REAL_KG_ROUTE_READ_ONLY_SOURCE = "kg_runtime_39_real_kg_route_read_only_draft"
 REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE = (
     "route-level real-KG metadata-only read-only contract"
 )
+REAL_KG_STRUCTURE_CONTRACT_SCOPE = (
+    "single authorized target structure-only JSON summary draft"
+)
 AUTHORIZED_REAL_KG_TARGET = "知识图谱/ZF-KG-12-Municipal-Bridge.json"
 AUTHORIZED_REAL_KG_TARGET_PATH = (
     Path(__file__).parent.parent / AUTHORIZED_REAL_KG_TARGET
 )
 AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS = "authorized_single_target"
+AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS = (
+    "authorized_single_target_structure_only"
+)
 REAL_KG_TARGET_POLICY = "single_authorized_target_file_stat_metadata_only"
+REAL_KG_STRUCTURE_TARGET_POLICY = "single_authorized_target_structure_only"
 REAL_KG_READ_POLICY = "file_stat_metadata_only_no_content_read_no_json_parse"
+REAL_KG_STRUCTURE_READ_POLICY = "structure_only_json_read_no_value_output"
 MODULE_CONTRACT_COUNT = 44
 ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT = 69
 TOTAL_STRUCTURAL_PATH_COUNT = 180
@@ -37,6 +46,26 @@ BLOCKED_STRUCTURAL_PATH_COUNT = (
 VALUE_OUTPUT_POLICY = (
     "contract_metadata_only_no_entity_knowledge_prompt_instruction_"
     "evidence_scoring_generation_or_rag_text"
+)
+STRUCTURE_VALUE_OUTPUT_POLICY = (
+    "structure_only_key_type_count_length_summary_no_scalar_or_value_output"
+)
+STRUCTURE_SUMMARY_MAX_DEPTH = 4
+STRUCTURE_SUMMARY_MAX_PATHS = 80
+STRUCTURE_SUMMARY_FIELD_WHITELIST = (
+    "top_level_type",
+    "top_level_key_names",
+    "top_level_key_count",
+    "dict_count",
+    "list_count",
+    "null_count",
+    "scalar_type_counts",
+    "selected_structure_paths",
+    "list_lengths",
+    "field_type_sets",
+    "max_depth_limited",
+    "authorized_target",
+    "allowlist_status",
 )
 
 OUTPUT_FIELD_WHITELIST = (
@@ -70,6 +99,10 @@ OUTPUT_FIELD_WHITELIST = (
     "mtime",
     "mode",
     "permission",
+    "structure_read",
+    "structure_read_only",
+    "structure_summary",
+    "structure_contract",
 )
 
 ALLOWED_STRUCTURAL_PATH_POLICY = (
@@ -124,6 +157,7 @@ def build_kg_read_only_preview(
     real_kg_read_only: bool = False,
     real_kg_target: Optional[str] = None,
     feature_flag_enabled: bool = False,
+    structure_read: bool = False,
 ) -> dict[str, Any]:
     """Build a disabled KG read-only preview payload from supplied dictionaries."""
 
@@ -138,6 +172,7 @@ def build_kg_read_only_preview(
             manual_trigger=manual_trigger,
             real_kg_read_only=real_kg_read_only,
             feature_flag_enabled=feature_flag_enabled,
+            structure_read=structure_read,
         )
 
     manifest_check = _validate_disabled_entity(
@@ -233,6 +268,7 @@ def _real_kg_route_read_only_response(
     manual_trigger: bool,
     real_kg_read_only: bool,
     feature_flag_enabled: bool,
+    structure_read: bool,
 ) -> dict[str, Any]:
     target = real_kg_target if isinstance(real_kg_target, str) else ""
     if target != AUTHORIZED_REAL_KG_TARGET:
@@ -243,6 +279,36 @@ def _real_kg_route_read_only_response(
             status=BLOCKED_STATUS,
             reason=reason,
             ok=False,
+        )
+
+    if structure_read is True:
+        if feature_flag_enabled is not True:
+            return _real_kg_contract_response(
+                status=BLOCKED_STATUS,
+                reason="feature_flag_required_for_structure_read",
+                ok=False,
+            )
+
+        return _real_kg_contract_response(
+            status=PREVIEW_STATUS,
+            reason="real_kg_structure_read_route_draft",
+            ok=True,
+            target_policy=REAL_KG_STRUCTURE_TARGET_POLICY,
+            read_policy=REAL_KG_STRUCTURE_READ_POLICY,
+            structure_metadata={
+                "structure_read": True,
+                "structure_read_only": True,
+                "content_read_performed": True,
+                "json_parse_performed": True,
+                "structure_contract": _real_kg_structure_contract(),
+                "structure_summary": _authorized_real_kg_structure_summary(
+                    authorized_target=target,
+                    manual_trigger=manual_trigger,
+                    real_kg_read_only=real_kg_read_only,
+                    feature_flag_enabled=feature_flag_enabled,
+                    structure_read=structure_read,
+                ),
+            },
         )
 
     return _real_kg_contract_response(
@@ -263,6 +329,9 @@ def _real_kg_contract_response(
     reason: str,
     ok: bool,
     file_stat_metadata: Optional[Mapping[str, Any]] = None,
+    structure_metadata: Optional[Mapping[str, Any]] = None,
+    target_policy: Optional[str] = None,
+    read_policy: Optional[str] = None,
 ) -> dict[str, Any]:
     response = _contract_mapping_response(
         status=status,
@@ -274,8 +343,8 @@ def _real_kg_contract_response(
             "source": REAL_KG_ROUTE_READ_ONLY_SOURCE,
             "contract_scope": REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE,
             "authorized_target": AUTHORIZED_REAL_KG_TARGET,
-            "target_policy": REAL_KG_TARGET_POLICY,
-            "read_policy": REAL_KG_READ_POLICY,
+            "target_policy": target_policy or REAL_KG_TARGET_POLICY,
+            "read_policy": read_policy or REAL_KG_READ_POLICY,
             "value_output_policy": VALUE_OUTPUT_POLICY,
             "content_read_performed": False,
             "json_parse_performed": False,
@@ -290,6 +359,8 @@ def _real_kg_contract_response(
     )
     if file_stat_metadata:
         response.update(file_stat_metadata)
+    if structure_metadata:
+        response.update(structure_metadata)
     return _whitelisted_response(response)
 
 
@@ -332,6 +403,213 @@ def _authorized_real_kg_file_stat_metadata(
         "mtime": int(stat_result.st_mtime),
         "mode": format(mode, "o"),
         "permission": format(S_IMODE(mode), "03o"),
+    }
+
+
+def _real_kg_structure_contract() -> dict[str, Any]:
+    return {
+        "contract_scope": REAL_KG_STRUCTURE_CONTRACT_SCOPE,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+        "allowlist_status": AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS,
+        "target_policy": REAL_KG_STRUCTURE_TARGET_POLICY,
+        "feature_flag_required": True,
+        "manual_trigger_required": True,
+        "real_kg_read_only_required": True,
+        "structure_read_required": True,
+        "summary_field_whitelist": STRUCTURE_SUMMARY_FIELD_WHITELIST,
+        "value_output_policy": STRUCTURE_VALUE_OUTPUT_POLICY,
+        "scalar_policy": "type_only_no_value_output",
+        "list_policy": "length_and_element_type_summary_only",
+        "dict_policy": "key_names_key_count_and_field_type_sets_only",
+        "no_evidence": RUNTIME_BOUNDARY_FLAGS["no_evidence"],
+        "no_scoring": RUNTIME_BOUNDARY_FLAGS["no_scoring"],
+        "no_rag": RUNTIME_BOUNDARY_FLAGS["no_rag"],
+        "no_generation": RUNTIME_BOUNDARY_FLAGS["no_generation"],
+        "no_export": RUNTIME_BOUNDARY_FLAGS["no_export"],
+        "no_zbid_writeback": RUNTIME_BOUNDARY_FLAGS["no_zbid_writeback"],
+    }
+
+
+def _authorized_real_kg_structure_summary(
+    *,
+    authorized_target: str,
+    manual_trigger: bool,
+    real_kg_read_only: bool,
+    feature_flag_enabled: bool,
+    structure_read: bool,
+) -> dict[str, Any]:
+    if (
+        feature_flag_enabled is not True
+        or manual_trigger is not True
+        or real_kg_read_only is not True
+        or structure_read is not True
+        or authorized_target != AUTHORIZED_REAL_KG_TARGET
+    ):
+        return _empty_structure_summary(
+            allowlist_status="structure_read_gate_blocked",
+        )
+
+    try:
+        with AUTHORIZED_REAL_KG_TARGET_PATH.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return _empty_structure_summary(
+            allowlist_status="authorized_single_target_structure_unavailable",
+        )
+
+    return _build_structure_summary(
+        payload,
+        authorized_target=authorized_target,
+        allowlist_status=AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS,
+    )
+
+
+def _empty_structure_summary(*, allowlist_status: str) -> dict[str, Any]:
+    return {
+        "top_level_type": "unavailable",
+        "top_level_key_names": (),
+        "top_level_key_count": 0,
+        "dict_count": 0,
+        "list_count": 0,
+        "null_count": 0,
+        "scalar_type_counts": {},
+        "selected_structure_paths": (),
+        "list_lengths": {},
+        "field_type_sets": {},
+        "max_depth_limited": False,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+        "allowlist_status": allowlist_status,
+    }
+
+
+def _build_structure_summary(
+    payload: Any,
+    *,
+    authorized_target: str,
+    allowlist_status: str,
+) -> dict[str, Any]:
+    counters = {
+        "dict_count": 0,
+        "list_count": 0,
+        "null_count": 0,
+    }
+    scalar_type_counts: dict[str, int] = {}
+    selected_structure_paths: list[dict[str, str]] = []
+    list_lengths: dict[str, dict[str, Any]] = {}
+    field_type_sets: dict[str, dict[str, tuple[str, ...]]] = {}
+    max_depth_limited = False
+
+    def remember_path(path: str, type_name: str) -> None:
+        if len(selected_structure_paths) < STRUCTURE_SUMMARY_MAX_PATHS:
+            selected_structure_paths.append({"path": path, "type": type_name})
+
+    def walk(value: Any, path: str, depth: int) -> None:
+        nonlocal max_depth_limited
+        type_name = _json_structure_type(value)
+        remember_path(path, type_name)
+
+        if depth > STRUCTURE_SUMMARY_MAX_DEPTH:
+            max_depth_limited = True
+            return
+
+        if isinstance(value, dict):
+            counters["dict_count"] += 1
+            _merge_field_type_sets(field_type_sets, path, value)
+            for key, child in value.items():
+                walk(child, _child_structure_path(path, key), depth + 1)
+            return
+
+        if isinstance(value, list):
+            counters["list_count"] += 1
+            list_lengths[path] = {
+                "length": len(value),
+                "element_type_counts": _list_element_type_counts(value),
+            }
+            for child in value:
+                walk(child, f"{path}[]", depth + 1)
+            return
+
+        if value is None:
+            counters["null_count"] += 1
+            return
+
+        scalar_type_counts[type_name] = scalar_type_counts.get(type_name, 0) + 1
+
+    walk(payload, "$", 0)
+
+    top_level_key_names: tuple[str, ...] = ()
+    if isinstance(payload, dict):
+        top_level_key_names = tuple(str(key) for key in payload.keys())
+
+    return {
+        "top_level_type": _json_structure_type(payload),
+        "top_level_key_names": top_level_key_names,
+        "top_level_key_count": len(top_level_key_names),
+        "dict_count": counters["dict_count"],
+        "list_count": counters["list_count"],
+        "null_count": counters["null_count"],
+        "scalar_type_counts": dict(sorted(scalar_type_counts.items())),
+        "selected_structure_paths": tuple(selected_structure_paths),
+        "list_lengths": _limited_mapping(list_lengths),
+        "field_type_sets": _limited_mapping(field_type_sets),
+        "max_depth_limited": max_depth_limited,
+        "authorized_target": authorized_target,
+        "allowlist_status": allowlist_status,
+    }
+
+
+def _json_structure_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, dict):
+        return "dict"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    return type(value).__name__
+
+
+def _child_structure_path(parent: str, key: Any) -> str:
+    return f"{parent}.{str(key)}"
+
+
+def _list_element_type_counts(items: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        type_name = _json_structure_type(item)
+        counts[type_name] = counts.get(type_name, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _merge_field_type_sets(
+    field_type_sets: dict[str, dict[str, tuple[str, ...]]],
+    path: str,
+    value: Mapping[str, Any],
+) -> None:
+    existing = {
+        field_name: set(type_names)
+        for field_name, type_names in field_type_sets.get(path, {}).items()
+    }
+    for key, child in value.items():
+        field_name = str(key)
+        existing.setdefault(field_name, set()).add(_json_structure_type(child))
+    field_type_sets[path] = {
+        field_name: tuple(sorted(type_names))
+        for field_name, type_names in sorted(existing.items())
+    }
+
+
+def _limited_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: mapping[key]
+        for key in sorted(mapping.keys())[:STRUCTURE_SUMMARY_MAX_PATHS]
     }
 
 
