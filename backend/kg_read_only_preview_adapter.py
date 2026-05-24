@@ -25,6 +25,9 @@ REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE = (
 REAL_KG_STRUCTURE_CONTRACT_SCOPE = (
     "single authorized target structure-only JSON summary draft"
 )
+REAL_KG_STRUCTURAL_PROFILE_CONTRACT_SCOPE = (
+    "single authorized target content-safe structural profile draft"
+)
 AUTHORIZED_REAL_KG_TARGET = "知识图谱/ZF-KG-12-Municipal-Bridge.json"
 AUTHORIZED_REAL_KG_TARGET_PATH = (
     Path(__file__).parent.parent / AUTHORIZED_REAL_KG_TARGET
@@ -33,10 +36,19 @@ AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS = "authorized_single_target"
 AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS = (
     "authorized_single_target_structure_only"
 )
+AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS = (
+    "authorized_single_target_structural_profile_only"
+)
 REAL_KG_TARGET_POLICY = "single_authorized_target_file_stat_metadata_only"
 REAL_KG_STRUCTURE_TARGET_POLICY = "single_authorized_target_structure_only"
+REAL_KG_STRUCTURAL_PROFILE_TARGET_POLICY = (
+    "single_authorized_target_content_safe_structural_profile_only"
+)
 REAL_KG_READ_POLICY = "file_stat_metadata_only_no_content_read_no_json_parse"
 REAL_KG_STRUCTURE_READ_POLICY = "structure_only_json_read_no_value_output"
+REAL_KG_STRUCTURAL_PROFILE_READ_POLICY = (
+    "reuse_structure_read_summary_no_scalar_value_output"
+)
 MODULE_CONTRACT_COUNT = 44
 ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT = 69
 TOTAL_STRUCTURAL_PATH_COUNT = 180
@@ -52,6 +64,7 @@ STRUCTURE_VALUE_OUTPUT_POLICY = (
 )
 STRUCTURE_SUMMARY_MAX_DEPTH = 4
 STRUCTURE_SUMMARY_MAX_PATHS = 80
+STRUCTURAL_PROFILE_MAX_MODULE_CANDIDATES = 40
 STRUCTURE_SUMMARY_FIELD_WHITELIST = (
     "top_level_type",
     "top_level_key_names",
@@ -66,6 +79,42 @@ STRUCTURE_SUMMARY_FIELD_WHITELIST = (
     "max_depth_limited",
     "authorized_target",
     "allowlist_status",
+)
+STRUCTURAL_PROFILE_SCOPE = (
+    "paths_field_names_types_counts_hierarchy_module_name_candidates_only"
+)
+STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
+    "authorized_target",
+    "allowlist_status",
+    "profile_enabled",
+    "profile_scope",
+    "max_depth_limited",
+    "path_count",
+    "path_type_counts",
+    "depth_histogram",
+    "field_name_counts",
+    "field_type_sets",
+    "list_length_buckets",
+    "dict_key_count_buckets",
+    "module_name_candidates",
+    "redaction_policy",
+)
+STRUCTURAL_PROFILE_REDACTION_POLICY = {
+    "scalar": "type_and_count_only_no_scalar_value_output",
+    "list": "length_bucket_and_type_summary_only_no_item_content",
+    "dict": "key_name_key_count_and_type_set_only_no_value_content",
+    "module_name_candidates": "field_or_path_name_only_no_value_source",
+}
+JSON_STRUCTURE_TYPE_NAMES = frozenset(
+    {
+        "dict",
+        "list",
+        "null",
+        "bool",
+        "str",
+        "int",
+        "float",
+    }
 )
 
 OUTPUT_FIELD_WHITELIST = (
@@ -103,6 +152,10 @@ OUTPUT_FIELD_WHITELIST = (
     "structure_read_only",
     "structure_summary",
     "structure_contract",
+    "structural_profile",
+    "structural_profile_only",
+    "structural_profile_summary",
+    "structural_profile_contract",
 )
 
 ALLOWED_STRUCTURAL_PATH_POLICY = (
@@ -158,6 +211,7 @@ def build_kg_read_only_preview(
     real_kg_target: Optional[str] = None,
     feature_flag_enabled: bool = False,
     structure_read: bool = False,
+    structural_profile: bool = False,
 ) -> dict[str, Any]:
     """Build a disabled KG read-only preview payload from supplied dictionaries."""
 
@@ -173,6 +227,7 @@ def build_kg_read_only_preview(
             real_kg_read_only=real_kg_read_only,
             feature_flag_enabled=feature_flag_enabled,
             structure_read=structure_read,
+            structural_profile=structural_profile,
         )
 
     manifest_check = _validate_disabled_entity(
@@ -269,6 +324,7 @@ def _real_kg_route_read_only_response(
     real_kg_read_only: bool,
     feature_flag_enabled: bool,
     structure_read: bool,
+    structural_profile: bool,
 ) -> dict[str, Any]:
     target = real_kg_target if isinstance(real_kg_target, str) else ""
     if target != AUTHORIZED_REAL_KG_TARGET:
@@ -281,12 +337,71 @@ def _real_kg_route_read_only_response(
             ok=False,
         )
 
+    if structural_profile is True:
+        if feature_flag_enabled is not True:
+            return _real_kg_contract_response(
+                status=BLOCKED_STATUS,
+                reason="feature_flag_required_for_structural_profile",
+                ok=False,
+            )
+        if manual_trigger is not True:
+            return _real_kg_contract_response(
+                status=BLOCKED_STATUS,
+                reason="manual_trigger_required_for_structural_profile",
+                ok=False,
+            )
+        if real_kg_read_only is not True:
+            return _real_kg_contract_response(
+                status=BLOCKED_STATUS,
+                reason="real_kg_read_only_required_for_structural_profile",
+                ok=False,
+            )
+        if structure_read is not True:
+            return _real_kg_contract_response(
+                status=BLOCKED_STATUS,
+                reason="structure_read_required_for_structural_profile",
+                ok=False,
+            )
+
     if structure_read is True:
         if feature_flag_enabled is not True:
             return _real_kg_contract_response(
                 status=BLOCKED_STATUS,
                 reason="feature_flag_required_for_structure_read",
                 ok=False,
+            )
+
+        structure_summary = _authorized_real_kg_structure_summary(
+            authorized_target=target,
+            manual_trigger=manual_trigger,
+            real_kg_read_only=real_kg_read_only,
+            feature_flag_enabled=feature_flag_enabled,
+            structure_read=structure_read,
+        )
+        if structural_profile is True:
+            return _real_kg_contract_response(
+                status=PREVIEW_STATUS,
+                reason="real_kg_structural_profile_route_draft",
+                ok=True,
+                target_policy=REAL_KG_STRUCTURAL_PROFILE_TARGET_POLICY,
+                read_policy=REAL_KG_STRUCTURAL_PROFILE_READ_POLICY,
+                structure_metadata={
+                    "structure_read": True,
+                    "structure_read_only": True,
+                    "structural_profile": True,
+                    "structural_profile_only": True,
+                    "content_read_performed": True,
+                    "json_parse_performed": True,
+                    "structural_profile_contract": (
+                        _real_kg_structural_profile_contract()
+                    ),
+                    "structural_profile_summary": (
+                        _build_structural_profile_summary_from_structure_summary(
+                            structure_summary,
+                            authorized_target=target,
+                        )
+                    ),
+                },
             )
 
         return _real_kg_contract_response(
@@ -301,13 +416,7 @@ def _real_kg_route_read_only_response(
                 "content_read_performed": True,
                 "json_parse_performed": True,
                 "structure_contract": _real_kg_structure_contract(),
-                "structure_summary": _authorized_real_kg_structure_summary(
-                    authorized_target=target,
-                    manual_trigger=manual_trigger,
-                    real_kg_read_only=real_kg_read_only,
-                    feature_flag_enabled=feature_flag_enabled,
-                    structure_read=structure_read,
-                ),
+                "structure_summary": structure_summary,
             },
         )
 
@@ -430,6 +539,33 @@ def _real_kg_structure_contract() -> dict[str, Any]:
     }
 
 
+def _real_kg_structural_profile_contract() -> dict[str, Any]:
+    return {
+        "contract_scope": REAL_KG_STRUCTURAL_PROFILE_CONTRACT_SCOPE,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+        "allowlist_status": AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS,
+        "target_policy": REAL_KG_STRUCTURAL_PROFILE_TARGET_POLICY,
+        "feature_flag_required": True,
+        "manual_trigger_required": True,
+        "real_kg_read_only_required": True,
+        "structure_read_required": True,
+        "structural_profile_required": True,
+        "summary_field_whitelist": STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST,
+        "profile_scope": STRUCTURAL_PROFILE_SCOPE,
+        "redaction_policy": STRUCTURAL_PROFILE_REDACTION_POLICY,
+        "scalar_policy": "type_and_count_only_no_value_output",
+        "list_policy": "length_bucket_and_type_summary_only_no_item_content",
+        "dict_policy": "key_name_key_count_and_type_set_only_no_value_content",
+        "module_name_policy": "field_or_path_name_only_no_value_source",
+        "no_evidence": RUNTIME_BOUNDARY_FLAGS["no_evidence"],
+        "no_scoring": RUNTIME_BOUNDARY_FLAGS["no_scoring"],
+        "no_rag": RUNTIME_BOUNDARY_FLAGS["no_rag"],
+        "no_generation": RUNTIME_BOUNDARY_FLAGS["no_generation"],
+        "no_export": RUNTIME_BOUNDARY_FLAGS["no_export"],
+        "no_zbid_writeback": RUNTIME_BOUNDARY_FLAGS["no_zbid_writeback"],
+    }
+
+
 def _authorized_real_kg_structure_summary(
     *,
     authorized_target: str,
@@ -480,6 +616,240 @@ def _empty_structure_summary(*, allowlist_status: str) -> dict[str, Any]:
         "authorized_target": AUTHORIZED_REAL_KG_TARGET,
         "allowlist_status": allowlist_status,
     }
+
+
+def _build_structural_profile_summary_from_structure_summary(
+    structure_summary: Mapping[str, Any],
+    *,
+    authorized_target: str,
+) -> dict[str, Any]:
+    selected_paths = _structural_profile_selected_paths(structure_summary)
+    field_type_sets = _structural_profile_field_type_sets(structure_summary)
+    field_name_counts = _structural_profile_field_name_counts(field_type_sets)
+    source_allowlist_status = structure_summary.get("allowlist_status")
+    profile_enabled = (
+        source_allowlist_status == AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS
+    )
+    allowlist_status = (
+        AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS
+        if profile_enabled
+        else "authorized_single_target_structural_profile_unavailable"
+    )
+
+    return {
+        "authorized_target": authorized_target,
+        "allowlist_status": allowlist_status,
+        "profile_enabled": profile_enabled,
+        "profile_scope": STRUCTURAL_PROFILE_SCOPE,
+        "max_depth_limited": bool(structure_summary.get("max_depth_limited")),
+        "path_count": len(selected_paths),
+        "path_type_counts": _structural_profile_path_type_counts(selected_paths),
+        "depth_histogram": _structural_profile_depth_histogram(selected_paths),
+        "field_name_counts": field_name_counts,
+        "field_type_sets": field_type_sets,
+        "list_length_buckets": _structural_profile_list_length_buckets(
+            structure_summary,
+        ),
+        "dict_key_count_buckets": _structural_profile_dict_key_count_buckets(
+            field_type_sets,
+        ),
+        "module_name_candidates": _structural_profile_module_name_candidates(
+            selected_paths,
+            field_name_counts,
+        ),
+        "redaction_policy": STRUCTURAL_PROFILE_REDACTION_POLICY,
+    }
+
+
+def _structural_profile_selected_paths(
+    structure_summary: Mapping[str, Any],
+) -> tuple[dict[str, str], ...]:
+    raw_paths = structure_summary.get("selected_structure_paths")
+    if not isinstance(raw_paths, (list, tuple)):
+        return ()
+
+    selected_paths: list[dict[str, str]] = []
+    for item in raw_paths:
+        if not isinstance(item, Mapping):
+            continue
+        path = item.get("path")
+        type_name = item.get("type")
+        if not isinstance(path, str) or not isinstance(type_name, str):
+            continue
+        selected_paths.append(
+            {
+                "path": path,
+                "type": _structural_profile_type_name(type_name),
+            }
+        )
+    return tuple(selected_paths)
+
+
+def _structural_profile_field_type_sets(
+    structure_summary: Mapping[str, Any],
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    raw_field_type_sets = structure_summary.get("field_type_sets")
+    if not isinstance(raw_field_type_sets, Mapping):
+        return {}
+
+    profile_field_type_sets: dict[str, dict[str, tuple[str, ...]]] = {}
+    for path, fields in raw_field_type_sets.items():
+        if not isinstance(path, str) or not isinstance(fields, Mapping):
+            continue
+        safe_fields: dict[str, tuple[str, ...]] = {}
+        for field_name, type_names in fields.items():
+            if not isinstance(field_name, str) or not isinstance(
+                type_names,
+                (list, tuple, set),
+            ):
+                continue
+            safe_fields[field_name] = tuple(
+                sorted(
+                    {
+                        _structural_profile_type_name(type_name)
+                        for type_name in type_names
+                        if isinstance(type_name, str)
+                    }
+                )
+            )
+        profile_field_type_sets[path] = safe_fields
+    return _limited_mapping(profile_field_type_sets)
+
+
+def _structural_profile_type_name(type_name: str) -> str:
+    if type_name in JSON_STRUCTURE_TYPE_NAMES:
+        return type_name
+    return "other"
+
+
+def _structural_profile_path_type_counts(
+    selected_paths: tuple[dict[str, str], ...],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in selected_paths:
+        type_name = item["type"]
+        counts[type_name] = counts.get(type_name, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _structural_profile_depth_histogram(
+    selected_paths: tuple[dict[str, str], ...],
+) -> dict[str, int]:
+    histogram: dict[str, int] = {}
+    for item in selected_paths:
+        depth = str(_structural_profile_path_depth(item["path"]))
+        histogram[depth] = histogram.get(depth, 0) + 1
+    return dict(sorted(histogram.items()))
+
+
+def _structural_profile_path_depth(path: str) -> int:
+    if path == "$":
+        return 0
+
+    depth = 0
+    for segment in path.split("."):
+        if not segment or segment == "$":
+            depth += segment.count("[]")
+            continue
+        depth += 1 + segment.count("[]")
+    return depth
+
+
+def _structural_profile_field_name_counts(
+    field_type_sets: Mapping[str, Mapping[str, tuple[str, ...]]],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for fields in field_type_sets.values():
+        for field_name in fields:
+            counts[field_name] = counts.get(field_name, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _structural_profile_list_length_buckets(
+    structure_summary: Mapping[str, Any],
+) -> dict[str, int]:
+    raw_list_lengths = structure_summary.get("list_lengths")
+    if not isinstance(raw_list_lengths, Mapping):
+        return {}
+
+    buckets: dict[str, int] = {}
+    for detail in raw_list_lengths.values():
+        if not isinstance(detail, Mapping):
+            continue
+        length = detail.get("length")
+        if not isinstance(length, int) or length < 0:
+            continue
+        bucket = _structural_profile_count_bucket(length)
+        buckets[bucket] = buckets.get(bucket, 0) + 1
+    return dict(sorted(buckets.items()))
+
+
+def _structural_profile_dict_key_count_buckets(
+    field_type_sets: Mapping[str, Mapping[str, tuple[str, ...]]],
+) -> dict[str, int]:
+    buckets: dict[str, int] = {}
+    for fields in field_type_sets.values():
+        bucket = _structural_profile_count_bucket(len(fields))
+        buckets[bucket] = buckets.get(bucket, 0) + 1
+    return dict(sorted(buckets.items()))
+
+
+def _structural_profile_count_bucket(count: int) -> str:
+    if count == 0:
+        return "0"
+    if count <= 2:
+        return "1-2"
+    if count <= 5:
+        return "3-5"
+    if count <= 10:
+        return "6-10"
+    if count <= 50:
+        return "11-50"
+    return "51+"
+
+
+def _structural_profile_module_name_candidates(
+    selected_paths: tuple[dict[str, str], ...],
+    field_name_counts: Mapping[str, int],
+) -> tuple[str, ...]:
+    candidates = {
+        field_name
+        for field_name in field_name_counts
+        if _looks_like_module_name_candidate(field_name)
+    }
+    for item in selected_paths:
+        for segment in _structural_profile_path_segments(item["path"]):
+            if _looks_like_module_name_candidate(segment):
+                candidates.add(segment)
+    return tuple(sorted(candidates)[:STRUCTURAL_PROFILE_MAX_MODULE_CANDIDATES])
+
+
+def _structural_profile_path_segments(path: str) -> tuple[str, ...]:
+    segments: list[str] = []
+    for raw_segment in path.split("."):
+        segment = raw_segment.replace("[]", "").strip()
+        if segment and segment != "$":
+            segments.append(segment)
+    return tuple(segments)
+
+
+def _looks_like_module_name_candidate(name: str) -> bool:
+    lowered = name.lower()
+    return any(
+        token in lowered
+        for token in (
+            "module",
+            "section",
+            "chapter",
+            "part",
+            "category",
+            "模块",
+            "章节",
+            "目录",
+            "分部",
+            "分项",
+        )
+    )
 
 
 def _build_structure_summary(

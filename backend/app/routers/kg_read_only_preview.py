@@ -21,6 +21,8 @@ KG_READ_ONLY_PREVIEW_ALLOWED_FIELDS = frozenset(
         "real_kg_read_only",
         "authorized_target",
         "structure_read",
+        "structural_profile",
+        "structural_profile_only",
     }
 )
 KG_READ_ONLY_PREVIEW_REAL_KG_METADATA_FIELDS = (
@@ -49,6 +51,10 @@ KG_READ_ONLY_PREVIEW_REAL_KG_METADATA_FIELDS = (
     "structure_read_only",
     "structure_summary",
     "structure_contract",
+    "structural_profile",
+    "structural_profile_only",
+    "structural_profile_summary",
+    "structural_profile_contract",
 )
 
 router = APIRouter(tags=["KG Read Only Preview"])
@@ -201,6 +207,78 @@ async def kg_read_only_preview_route(
         )
 
     if (
+        "structural_profile" in request
+        and request.get("structural_profile") is not True
+    ):
+        return _base_response(
+            ok=False,
+            enabled=True,
+            status="blocked",
+            reason="structural_profile_true_required",
+            request_id=request_id,
+        )
+
+    if (
+        "structural_profile_only" in request
+        and request.get("structural_profile_only") is not True
+    ):
+        return _base_response(
+            ok=False,
+            enabled=True,
+            status="blocked",
+            reason="structural_profile_only_true_required",
+            request_id=request_id,
+        )
+
+    if (
+        request.get("structural_profile_only") is True
+        and request.get("structural_profile") is not True
+    ):
+        return _base_response(
+            ok=False,
+            enabled=True,
+            status="blocked",
+            reason="structural_profile_required_for_structural_profile_only",
+            request_id=request_id,
+        )
+
+    if (
+        request.get("structural_profile") is True
+        and request.get("real_kg_read_only") is not True
+    ):
+        return _base_response(
+            ok=False,
+            enabled=True,
+            status="blocked",
+            reason="real_kg_read_only_required_for_structural_profile",
+            request_id=request_id,
+        )
+
+    if (
+        request.get("structural_profile") is True
+        and request.get("structure_read") is not True
+    ):
+        return _base_response(
+            ok=False,
+            enabled=True,
+            status="blocked",
+            reason="structure_read_required_for_structural_profile",
+            request_id=request_id,
+        )
+
+    if (
+        request.get("structural_profile") is True
+        and "authorized_target" not in request
+    ):
+        return _base_response(
+            ok=False,
+            enabled=True,
+            status="blocked",
+            reason="authorized_target_required_for_structural_profile",
+            request_id=request_id,
+        )
+
+    if (
         request.get("structure_read") is True
         and request.get("real_kg_read_only") is not True
     ):
@@ -230,6 +308,7 @@ async def kg_read_only_preview_route(
             real_kg_target=request.get("authorized_target"),
             feature_flag_enabled=True,
             structure_read=request.get("structure_read") is True,
+            structural_profile=request.get("structural_profile") is True,
         )
         status = str(adapter_result.get("status") or "invalid")
         ok = status == "preview_only"
