@@ -81,7 +81,7 @@ STRUCTURE_SUMMARY_FIELD_WHITELIST = (
     "allowlist_status",
 )
 STRUCTURAL_PROFILE_SCOPE = (
-    "paths_field_names_types_counts_hierarchy_module_name_candidates_only"
+    "paths_field_names_types_counts_hierarchy_no_module_name_candidates"
 )
 STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
     "authorized_target",
@@ -99,12 +99,10 @@ STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
     "module_name_candidates",
     "redaction_policy",
 )
-STRUCTURAL_PROFILE_REDACTION_POLICY = {
-    "scalar": "type_and_count_only_no_scalar_value_output",
-    "list": "length_bucket_and_type_summary_only_no_item_content",
-    "dict": "key_name_key_count_and_type_set_only_no_value_content",
-    "module_name_candidates": "field_or_path_name_only_no_value_source",
-}
+STRUCTURAL_PROFILE_REDACTION_POLICY = (
+    "fixed_no_scalar_values_no_list_items_no_dict_values_no_prompt_"
+    "instruction_evidence_scoring_or_kg_body_text_no_module_candidates"
+)
 JSON_STRUCTURE_TYPE_NAMES = frozenset(
     {
         "dict",
@@ -388,6 +386,8 @@ def _real_kg_route_read_only_response(
                 structure_metadata={
                     "structure_read": True,
                     "structure_read_only": True,
+                    "structure_contract": _real_kg_structure_contract(),
+                    "structure_summary": structure_summary,
                     "structural_profile": True,
                     "structural_profile_only": True,
                     "content_read_performed": True,
@@ -812,16 +812,8 @@ def _structural_profile_module_name_candidates(
     selected_paths: tuple[dict[str, str], ...],
     field_name_counts: Mapping[str, int],
 ) -> tuple[str, ...]:
-    candidates = {
-        field_name
-        for field_name in field_name_counts
-        if _looks_like_module_name_candidate(field_name)
-    }
-    for item in selected_paths:
-        for segment in _structural_profile_path_segments(item["path"]):
-            if _looks_like_module_name_candidate(segment):
-                candidates.add(segment)
-    return tuple(sorted(candidates)[:STRUCTURAL_PROFILE_MAX_MODULE_CANDIDATES])
+    _ = selected_paths, field_name_counts
+    return ()
 
 
 def _structural_profile_path_segments(path: str) -> tuple[str, ...]:
