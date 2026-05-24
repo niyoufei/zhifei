@@ -37,6 +37,13 @@ KG_READ_ONLY_PREVIEW_REAL_KG_METADATA_FIELDS = (
     "no_generation",
     "no_export",
     "no_zbid_writeback",
+    "allowlist_status",
+    "exists",
+    "is_file",
+    "size_bytes",
+    "mtime",
+    "mode",
+    "permission",
 )
 
 router = APIRouter(tags=["KG Read Only Preview"])
@@ -186,6 +193,7 @@ async def kg_read_only_preview_route(
             manual_trigger=True,
             real_kg_read_only=True,
             real_kg_target=request.get("authorized_target"),
+            feature_flag_enabled=True,
         )
         status = str(adapter_result.get("status") or "invalid")
         ok = status == "preview_only"

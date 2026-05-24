@@ -1,10 +1,13 @@
 """Minimal draft adapter for KG read-only preview payloads.
 
-This module is intentionally isolated from ZDoc runtime chains. It provides
-pure functions only: no file IO, no route registration, no service calls, no
-model calls, no retrieval, and no writeback.
+This module is intentionally isolated from ZDoc runtime chains. It performs
+only controlled single-target file-stat metadata inspection when explicitly
+gated: no body reads, no JSON parsing, no route registration, no service calls,
+no model calls, no retrieval, and no writeback.
 """
 
+from pathlib import Path
+from stat import S_IMODE, S_ISREG
 from typing import Any, Mapping, Optional
 
 
@@ -19,8 +22,12 @@ REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE = (
     "route-level real-KG metadata-only read-only contract"
 )
 AUTHORIZED_REAL_KG_TARGET = "知识图谱/ZF-KG-12-Municipal-Bridge.json"
-REAL_KG_TARGET_POLICY = "single_authorized_target_identifier_metadata_only_no_io"
-REAL_KG_READ_POLICY = "no_file_io_no_content_read_no_json_parse"
+AUTHORIZED_REAL_KG_TARGET_PATH = (
+    Path(__file__).parent.parent / AUTHORIZED_REAL_KG_TARGET
+)
+AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS = "authorized_single_target"
+REAL_KG_TARGET_POLICY = "single_authorized_target_file_stat_metadata_only"
+REAL_KG_READ_POLICY = "file_stat_metadata_only_no_content_read_no_json_parse"
 MODULE_CONTRACT_COUNT = 44
 ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT = 69
 TOTAL_STRUCTURAL_PATH_COUNT = 180
@@ -56,6 +63,13 @@ OUTPUT_FIELD_WHITELIST = (
     "no_generation",
     "no_export",
     "no_zbid_writeback",
+    "allowlist_status",
+    "exists",
+    "is_file",
+    "size_bytes",
+    "mtime",
+    "mode",
+    "permission",
 )
 
 ALLOWED_STRUCTURAL_PATH_POLICY = (
@@ -109,6 +123,7 @@ def build_kg_read_only_preview(
     *,
     real_kg_read_only: bool = False,
     real_kg_target: Optional[str] = None,
+    feature_flag_enabled: bool = False,
 ) -> dict[str, Any]:
     """Build a disabled KG read-only preview payload from supplied dictionaries."""
 
@@ -118,7 +133,12 @@ def build_kg_read_only_preview(
         )
 
     if real_kg_read_only is True:
-        return _real_kg_route_read_only_response(real_kg_target)
+        return _real_kg_route_read_only_response(
+            real_kg_target,
+            manual_trigger=manual_trigger,
+            real_kg_read_only=real_kg_read_only,
+            feature_flag_enabled=feature_flag_enabled,
+        )
 
     manifest_check = _validate_disabled_entity(
         manifest_entity,
@@ -209,8 +229,12 @@ def _invalid_response(reason: str) -> dict[str, Any]:
 
 def _real_kg_route_read_only_response(
     real_kg_target: Optional[str],
+    *,
+    manual_trigger: bool,
+    real_kg_read_only: bool,
+    feature_flag_enabled: bool,
 ) -> dict[str, Any]:
-    target = str(real_kg_target or "").strip()
+    target = real_kg_target if isinstance(real_kg_target, str) else ""
     if target != AUTHORIZED_REAL_KG_TARGET:
         reason = "authorized_real_kg_target_required"
         if target:
@@ -225,6 +249,12 @@ def _real_kg_route_read_only_response(
         status=PREVIEW_STATUS,
         reason="real_kg_route_read_only_metadata_only",
         ok=True,
+        file_stat_metadata=_authorized_real_kg_file_stat_metadata(
+            authorized_target=target,
+            manual_trigger=manual_trigger,
+            real_kg_read_only=real_kg_read_only,
+            feature_flag_enabled=feature_flag_enabled,
+        ),
     )
 
 
@@ -232,6 +262,7 @@ def _real_kg_contract_response(
     status: str,
     reason: str,
     ok: bool,
+    file_stat_metadata: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     response = _contract_mapping_response(
         status=status,
@@ -257,7 +288,51 @@ def _real_kg_contract_response(
             "no_zbid_writeback": RUNTIME_BOUNDARY_FLAGS["no_zbid_writeback"],
         }
     )
+    if file_stat_metadata:
+        response.update(file_stat_metadata)
     return _whitelisted_response(response)
+
+
+def _authorized_real_kg_file_stat_metadata(
+    *,
+    authorized_target: str,
+    manual_trigger: bool,
+    real_kg_read_only: bool,
+    feature_flag_enabled: bool,
+) -> dict[str, Any]:
+    if (
+        feature_flag_enabled is not True
+        or manual_trigger is not True
+        or real_kg_read_only is not True
+        or authorized_target != AUTHORIZED_REAL_KG_TARGET
+    ):
+        return {}
+
+    try:
+        stat_result = AUTHORIZED_REAL_KG_TARGET_PATH.stat()
+    except OSError:
+        return {
+            "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+            "allowlist_status": AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS,
+            "exists": False,
+            "is_file": False,
+            "size_bytes": None,
+            "mtime": None,
+            "mode": None,
+            "permission": None,
+        }
+
+    mode = stat_result.st_mode
+    return {
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+        "allowlist_status": AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS,
+        "exists": True,
+        "is_file": S_ISREG(mode),
+        "size_bytes": stat_result.st_size,
+        "mtime": int(stat_result.st_mtime),
+        "mode": format(mode, "o"),
+        "permission": format(S_IMODE(mode), "03o"),
+    }
 
 
 def _contract_mapping_response(
