@@ -12,6 +12,83 @@ BLOCKED_STATUS = "blocked"
 INVALID_STATUS = "invalid"
 PREVIEW_STATUS = "preview_only"
 
+CONTRACT_SOURCE = "kg_runtime_28_29_adapter_contract_mapping_design"
+CONTRACT_SCOPE = "top-level plus first/second structural levels only"
+MODULE_CONTRACT_COUNT = 44
+ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT = 69
+TOTAL_STRUCTURAL_PATH_COUNT = 180
+BLOCKED_STRUCTURAL_PATH_COUNT = (
+    TOTAL_STRUCTURAL_PATH_COUNT - ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT
+)
+VALUE_OUTPUT_POLICY = (
+    "contract_metadata_only_no_entity_knowledge_prompt_instruction_"
+    "evidence_scoring_generation_or_rag_text"
+)
+
+OUTPUT_FIELD_WHITELIST = (
+    "ok",
+    "enabled",
+    "status",
+    "reason",
+    "source",
+    "contract_scope",
+    "module_contract_count",
+    "adapter_structural_path_whitelist_count",
+    "allowed_path_count",
+    "blocked_path_count",
+    "value_output_policy",
+    "no_write",
+    "no_evidence",
+    "no_scoring",
+    "no_rag",
+    "no_generation",
+    "no_export",
+    "no_zbid_writeback",
+)
+
+ALLOWED_STRUCTURAL_PATH_POLICY = (
+    "top_level_structure",
+    "first_level_structure",
+    "second_level_structure",
+    "path_presence",
+    "type_summary",
+    "count_summary",
+    "field_type_set_summary",
+)
+
+BLOCKED_STRUCTURAL_PATH_POLICY = (
+    "unknown_paths",
+    "real_business_body_values",
+    "entity_body_content",
+    "knowledge_entry_body_content",
+    "prompt_content",
+    "system_instruction_content",
+    "evidence_content",
+    "scoring_content",
+    "generated_document_body_content",
+    "generate_ready_content",
+    "rag_ready_text_blocks",
+    "prompt_registry_content",
+    "system_instruction_registry_content",
+)
+
+RUNTIME_BOUNDARY_FLAGS = {
+    "default_off": True,
+    "manual_trigger_required": True,
+    "read_only": True,
+    "no_write": True,
+    "no_evidence": True,
+    "no_scoring": True,
+    "no_rag": True,
+    "no_generation": True,
+    "no_export": True,
+    "no_zbid_writeback": True,
+    "no_ollama": True,
+    "no_model_upgrade": True,
+    "no_service_auto_run": True,
+    "no_ci_auto_run": True,
+}
+
 
 def build_kg_read_only_preview(
     manifest_entity: Mapping[str, Any],
@@ -23,7 +100,6 @@ def build_kg_read_only_preview(
     if manual_trigger is not True:
         return _blocked_response(
             reason="manual_trigger_required",
-            detail="manual_trigger must be True for preview draft creation.",
         )
 
     manifest_check = _validate_disabled_entity(
@@ -50,63 +126,13 @@ def build_kg_read_only_preview(
     if not manifest_check["ok"] or not registry_check["ok"]:
         return _invalid_response(
             reason="disabled_entity_validation_failed",
-            detail={
-                "manifest_entity": manifest_check,
-                "registry_entity": registry_check,
-            },
         )
 
-    return {
-        "status": PREVIEW_STATUS,
-        "adapter": "kg_read_only_preview_adapter_draft",
-        "default_off": True,
-        "manual_trigger": True,
-        "runtime_access": False,
-        "route_registered": False,
-        "writeback_allowed": False,
-        "output_write_allowed": False,
-        "evidence_allowed": False,
-        "scoring_allowed": False,
-        "rag_allowed": False,
-        "prompt_registry_allowed": False,
-        "system_instruction_registry_allowed": False,
-        "knowledge_pack_load_allowed": False,
-        "preview_payload": {
-            "pilot_name": _safe_get(manifest_entity, "pilot_name"),
-            "pilot_direction": _safe_get(manifest_entity, "pilot_direction"),
-            "domain_tags": _safe_get(manifest_entity, "domain_tags", []),
-            "risk_level": _safe_get(manifest_entity, "risk_level"),
-            "manifest_registration_status": _safe_get(
-                manifest_entity,
-                "registration_status",
-            ),
-            "registry_registration_status": _safe_get(
-                registry_entity,
-                "registration_status",
-            ),
-            "message": "Read-only preview payload draft; not evidence or scoring basis.",
-        },
-        "blocked_actions": (
-            "read_source_file",
-            "write_file",
-            "write_document_body",
-            "write_output_job_export",
-            "call_service",
-            "call_port",
-            "call_ollama",
-            "call_endpoint",
-            "register_route",
-            "trigger_generate",
-            "trigger_export_docx",
-            "trigger_review_apply",
-            "connect_rag",
-            "connect_prompt_registry",
-            "connect_system_instruction_registry",
-            "use_as_evidence",
-            "use_as_scoring_basis",
-            "load_knowledge_pack",
-        ),
-    }
+    return _contract_mapping_response(
+        status=PREVIEW_STATUS,
+        reason="adapter_contract_mapping_draft_static_only",
+        ok=True,
+    )
 
 
 def _validate_disabled_entity(
@@ -147,37 +173,55 @@ def _missing_fields(
     return tuple(field for field in field_names if field not in entity)
 
 
-def _blocked_response(reason: str, detail: str) -> dict[str, Any]:
-    return {
-        "status": BLOCKED_STATUS,
+def _blocked_response(reason: str) -> dict[str, Any]:
+    return _contract_mapping_response(
+        status=BLOCKED_STATUS,
+        reason=reason,
+        ok=False,
+    )
+
+
+def _invalid_response(reason: str) -> dict[str, Any]:
+    return _contract_mapping_response(
+        status=INVALID_STATUS,
+        reason=reason,
+        ok=False,
+    )
+
+
+def _contract_mapping_response(
+    status: str,
+    reason: str,
+    ok: bool,
+) -> dict[str, Any]:
+    response = {
+        "ok": ok,
+        "enabled": False,
+        "status": status,
         "reason": reason,
-        "detail": detail,
-        "runtime_access": False,
-        "route_registered": False,
-        "writeback_allowed": False,
-        "output_write_allowed": False,
-        "evidence_allowed": False,
-        "scoring_allowed": False,
+        "source": CONTRACT_SOURCE,
+        "contract_scope": CONTRACT_SCOPE,
+        "module_contract_count": MODULE_CONTRACT_COUNT,
+        "adapter_structural_path_whitelist_count": (
+            ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT
+        ),
+        "allowed_path_count": ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT,
+        "blocked_path_count": BLOCKED_STRUCTURAL_PATH_COUNT,
+        "value_output_policy": VALUE_OUTPUT_POLICY,
+        "no_write": RUNTIME_BOUNDARY_FLAGS["no_write"],
+        "no_evidence": RUNTIME_BOUNDARY_FLAGS["no_evidence"],
+        "no_scoring": RUNTIME_BOUNDARY_FLAGS["no_scoring"],
+        "no_rag": RUNTIME_BOUNDARY_FLAGS["no_rag"],
+        "no_generation": RUNTIME_BOUNDARY_FLAGS["no_generation"],
+        "no_export": RUNTIME_BOUNDARY_FLAGS["no_export"],
+        "no_zbid_writeback": RUNTIME_BOUNDARY_FLAGS["no_zbid_writeback"],
     }
+    return _whitelisted_response(response)
 
 
-def _invalid_response(reason: str, detail: Mapping[str, Any]) -> dict[str, Any]:
+def _whitelisted_response(response: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        "status": INVALID_STATUS,
-        "reason": reason,
-        "detail": detail,
-        "runtime_access": False,
-        "route_registered": False,
-        "writeback_allowed": False,
-        "output_write_allowed": False,
-        "evidence_allowed": False,
-        "scoring_allowed": False,
+        field_name: response[field_name]
+        for field_name in OUTPUT_FIELD_WHITELIST
+        if field_name in response
     }
-
-
-def _safe_get(
-    entity: Mapping[str, Any],
-    field_name: str,
-    default_value: Any = None,
-) -> Any:
-    return entity.get(field_name, default_value)
