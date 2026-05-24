@@ -18,7 +18,25 @@ KG_READ_ONLY_PREVIEW_ALLOWED_FIELDS = frozenset(
         "registry_entity",
         "manual_trigger",
         "request_id",
+        "real_kg_read_only",
+        "authorized_target",
     }
+)
+KG_READ_ONLY_PREVIEW_REAL_KG_METADATA_FIELDS = (
+    "contract_scope",
+    "authorized_target",
+    "target_policy",
+    "read_policy",
+    "value_output_policy",
+    "content_read_performed",
+    "json_parse_performed",
+    "no_write",
+    "no_evidence",
+    "no_scoring",
+    "no_rag",
+    "no_generation",
+    "no_export",
+    "no_zbid_writeback",
 )
 
 router = APIRouter(tags=["KG Read Only Preview"])
@@ -136,6 +154,54 @@ async def kg_read_only_preview_route(
             reason="manual_trigger_required",
             request_id=request_id,
         )
+
+    if (
+        "authorized_target" in request
+        and request.get("real_kg_read_only") is not True
+    ):
+        return _base_response(
+            ok=False,
+            enabled=True,
+            status="blocked",
+            reason="real_kg_read_only_required_for_authorized_target",
+            request_id=request_id,
+        )
+
+    if (
+        "real_kg_read_only" in request
+        and request.get("real_kg_read_only") is not True
+    ):
+        return _base_response(
+            ok=False,
+            enabled=True,
+            status="blocked",
+            reason="real_kg_read_only_true_required",
+            request_id=request_id,
+        )
+
+    if request.get("real_kg_read_only") is True:
+        adapter_result = build_kg_read_only_preview(
+            {},
+            {},
+            manual_trigger=True,
+            real_kg_read_only=True,
+            real_kg_target=request.get("authorized_target"),
+        )
+        status = str(adapter_result.get("status") or "invalid")
+        ok = status == "preview_only"
+        response = _base_response(
+            ok=ok,
+            enabled=True,
+            status=status,
+            reason="adapter_preview_ready" if ok else "adapter_preview_blocked",
+            request_id=request_id,
+            detail=adapter_result,
+        )
+        response["adapter_status"] = status
+        for field_name in KG_READ_ONLY_PREVIEW_REAL_KG_METADATA_FIELDS:
+            if field_name in adapter_result:
+                response[field_name] = adapter_result[field_name]
+        return response
 
     manifest_entity = request.get("manifest_entity")
     registry_entity = request.get("registry_entity")

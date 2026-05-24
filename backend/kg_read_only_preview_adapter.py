@@ -5,7 +5,7 @@ pure functions only: no file IO, no route registration, no service calls, no
 model calls, no retrieval, and no writeback.
 """
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 
 BLOCKED_STATUS = "blocked"
@@ -14,6 +14,13 @@ PREVIEW_STATUS = "preview_only"
 
 CONTRACT_SOURCE = "kg_runtime_28_29_adapter_contract_mapping_design"
 CONTRACT_SCOPE = "top-level plus first/second structural levels only"
+REAL_KG_ROUTE_READ_ONLY_SOURCE = "kg_runtime_39_real_kg_route_read_only_draft"
+REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE = (
+    "route-level real-KG metadata-only read-only contract"
+)
+AUTHORIZED_REAL_KG_TARGET = "知识图谱/ZF-KG-12-Municipal-Bridge.json"
+REAL_KG_TARGET_POLICY = "single_authorized_target_identifier_metadata_only_no_io"
+REAL_KG_READ_POLICY = "no_file_io_no_content_read_no_json_parse"
 MODULE_CONTRACT_COUNT = 44
 ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT = 69
 TOTAL_STRUCTURAL_PATH_COUNT = 180
@@ -32,11 +39,16 @@ OUTPUT_FIELD_WHITELIST = (
     "reason",
     "source",
     "contract_scope",
+    "authorized_target",
+    "target_policy",
+    "read_policy",
     "module_contract_count",
     "adapter_structural_path_whitelist_count",
     "allowed_path_count",
     "blocked_path_count",
     "value_output_policy",
+    "content_read_performed",
+    "json_parse_performed",
     "no_write",
     "no_evidence",
     "no_scoring",
@@ -94,6 +106,9 @@ def build_kg_read_only_preview(
     manifest_entity: Mapping[str, Any],
     registry_entity: Mapping[str, Any],
     manual_trigger: bool = False,
+    *,
+    real_kg_read_only: bool = False,
+    real_kg_target: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build a disabled KG read-only preview payload from supplied dictionaries."""
 
@@ -101,6 +116,9 @@ def build_kg_read_only_preview(
         return _blocked_response(
             reason="manual_trigger_required",
         )
+
+    if real_kg_read_only is True:
+        return _real_kg_route_read_only_response(real_kg_target)
 
     manifest_check = _validate_disabled_entity(
         manifest_entity,
@@ -187,6 +205,59 @@ def _invalid_response(reason: str) -> dict[str, Any]:
         reason=reason,
         ok=False,
     )
+
+
+def _real_kg_route_read_only_response(
+    real_kg_target: Optional[str],
+) -> dict[str, Any]:
+    target = str(real_kg_target or "").strip()
+    if target != AUTHORIZED_REAL_KG_TARGET:
+        reason = "authorized_real_kg_target_required"
+        if target:
+            reason = "unauthorized_real_kg_target"
+        return _real_kg_contract_response(
+            status=BLOCKED_STATUS,
+            reason=reason,
+            ok=False,
+        )
+
+    return _real_kg_contract_response(
+        status=PREVIEW_STATUS,
+        reason="real_kg_route_read_only_metadata_only",
+        ok=True,
+    )
+
+
+def _real_kg_contract_response(
+    status: str,
+    reason: str,
+    ok: bool,
+) -> dict[str, Any]:
+    response = _contract_mapping_response(
+        status=status,
+        reason=reason,
+        ok=ok,
+    )
+    response.update(
+        {
+            "source": REAL_KG_ROUTE_READ_ONLY_SOURCE,
+            "contract_scope": REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE,
+            "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+            "target_policy": REAL_KG_TARGET_POLICY,
+            "read_policy": REAL_KG_READ_POLICY,
+            "value_output_policy": VALUE_OUTPUT_POLICY,
+            "content_read_performed": False,
+            "json_parse_performed": False,
+            "no_write": RUNTIME_BOUNDARY_FLAGS["no_write"],
+            "no_evidence": RUNTIME_BOUNDARY_FLAGS["no_evidence"],
+            "no_scoring": RUNTIME_BOUNDARY_FLAGS["no_scoring"],
+            "no_rag": RUNTIME_BOUNDARY_FLAGS["no_rag"],
+            "no_generation": RUNTIME_BOUNDARY_FLAGS["no_generation"],
+            "no_export": RUNTIME_BOUNDARY_FLAGS["no_export"],
+            "no_zbid_writeback": RUNTIME_BOUNDARY_FLAGS["no_zbid_writeback"],
+        }
+    )
+    return _whitelisted_response(response)
 
 
 def _contract_mapping_response(
