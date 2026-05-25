@@ -13,6 +13,8 @@ from typing import Any, Mapping, Optional
 
 from backend.kg_content_safe_output_contract import (
     build_content_safe_output_contract_mapping,
+    build_preview_only_payload,
+    classify_content_safe_fields,
 )
 
 
@@ -61,6 +63,7 @@ STRUCTURE_SUMMARY_MAX_DEPTH = 4
 STRUCTURE_SUMMARY_MAX_PATHS = 80
 STRUCTURAL_PROFILE_MAX_MODULE_CANDIDATES = 40
 CONTENT_SAFE_OUTPUT_CONTRACT_MAPPING = build_content_safe_output_contract_mapping()
+PREVIEW_ONLY_ADAPTER_MAPPING_CONTRACT = classify_content_safe_fields()
 STRUCTURE_SUMMARY_FIELD_WHITELIST = (
     "top_level_type",
     "top_level_key_names",
@@ -270,6 +273,14 @@ def build_kg_read_only_preview(
         reason="adapter_contract_mapping_draft_static_only",
         ok=True,
     )
+
+
+def build_preview_only_adapter_mapping(
+    content_safe_response: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a preview-only mapping from already content-safe adapter fields."""
+
+    return build_preview_only_payload(content_safe_response)
 
 
 def _validate_disabled_entity(

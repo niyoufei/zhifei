@@ -7,12 +7,14 @@ handling, no scoring, no RAG, and no registry access.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 
 CONTENT_SAFE_OUTPUT_CONTRACT_SOURCE_CODE = 97
 CONTENT_SAFE_OUTPUT_CONTRACT_CLASSIFICATION_POLICY = 1
 CONTENT_SAFE_OUTPUT_CONTRACT_DOWNSTREAM_POLICY = 0
+PREVIEW_ONLY_ADAPTER_MAPPING_SOURCE_CODE = 100
+PREVIEW_ONLY_ADAPTER_MAPPING_POLICY = 1
 
 PREVIEW_ONLY_TOP_LEVEL_FIELDS = (
     "structure_read_only",
@@ -57,6 +59,29 @@ AUDIT_ONLY_FIELDS = (
     "adapter_contract_code",
     "validation_result",
     "overlap_check_result",
+)
+
+AUDIT_ONLY_RESPONSE_FIELDS = (
+    "feature_flag_status",
+    "manual_trigger_status",
+    "real_kg_read_only_status",
+    "authorized_target_hit_status",
+    "allowlist_status",
+    "route_contract_code",
+    "adapter_contract_code",
+    "validation_result",
+    "overlap_check_result",
+    "feature_flag",
+    "manual_trigger_required",
+    "real_kg_read_only",
+    "authorized_target",
+    "source",
+    "contract_scope",
+    "route_name",
+    "endpoint_path",
+    "status",
+    "reason",
+    "adapter_status",
 )
 
 PROHIBITED_FIELDS = (
@@ -108,3 +133,116 @@ def build_content_safe_output_contract_mapping() -> dict[str, Any]:
         "prohibited": PROHIBITED_FIELDS,
         "downstream_prohibitions": dict(DOWNSTREAM_PROHIBITIONS),
     }
+
+
+def classify_content_safe_fields() -> dict[str, Any]:
+    """Return the static KG-RUNTIME-100 adapter field classes."""
+
+    return {
+        "source": PREVIEW_ONLY_ADAPTER_MAPPING_SOURCE_CODE,
+        "mapping_policy": PREVIEW_ONLY_ADAPTER_MAPPING_POLICY,
+        "preview_only": {
+            "top_level_fields": PREVIEW_ONLY_TOP_LEVEL_FIELDS,
+            "structure_contract_fields": STRUCTURE_CONTRACT_PREVIEW_ONLY_FIELDS,
+            "structural_profile_contract_fields": (
+                STRUCTURAL_PROFILE_CONTRACT_PREVIEW_ONLY_FIELDS
+            ),
+        },
+        "audit_only": {
+            "contract_fields": AUDIT_ONLY_FIELDS,
+            "response_fields": AUDIT_ONLY_RESPONSE_FIELDS,
+        },
+        "prohibited": PROHIBITED_FIELDS,
+        "downstream_prohibitions": dict(DOWNSTREAM_PROHIBITIONS),
+    }
+
+
+def filter_preview_only_fields(
+    content_safe_response: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep only preview-only fields from an already content-safe response."""
+
+    preview_only = _filter_mapping_fields(
+        content_safe_response,
+        PREVIEW_ONLY_TOP_LEVEL_FIELDS,
+    )
+
+    structure_contract = _filter_safe_contract_fields(
+        content_safe_response.get("structure_contract"),
+        STRUCTURE_CONTRACT_PREVIEW_ONLY_FIELDS,
+    )
+    if structure_contract:
+        preview_only["structure_contract"] = structure_contract
+
+    structural_profile_contract = _filter_safe_contract_fields(
+        content_safe_response.get("structural_profile_contract"),
+        STRUCTURAL_PROFILE_CONTRACT_PREVIEW_ONLY_FIELDS,
+    )
+    if structural_profile_contract:
+        preview_only["structural_profile_contract"] = structural_profile_contract
+
+    return preview_only
+
+
+def filter_audit_only_fields(
+    content_safe_response: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep only audit-only fields from an already content-safe response."""
+
+    return _filter_mapping_fields(content_safe_response, AUDIT_ONLY_RESPONSE_FIELDS)
+
+
+def build_preview_only_payload(
+    content_safe_response: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the KG-RUNTIME-100 preview-only adapter mapping draft payload."""
+
+    return {
+        "source": PREVIEW_ONLY_ADAPTER_MAPPING_SOURCE_CODE,
+        "mapping_policy": PREVIEW_ONLY_ADAPTER_MAPPING_POLICY,
+        "preview_only": filter_preview_only_fields(content_safe_response),
+        "audit_only": filter_audit_only_fields(content_safe_response),
+        "prohibited": {
+            "fields": PROHIBITED_FIELDS,
+            "values_output": False,
+        },
+        "downstream_prohibitions": dict(DOWNSTREAM_PROHIBITIONS),
+    }
+
+
+def _filter_mapping_fields(
+    source: Mapping[str, Any],
+    field_names: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        field_name: source[field_name]
+        for field_name in field_names
+        if field_name in source
+    }
+
+
+def _filter_safe_contract_fields(
+    source: Any,
+    field_names: tuple[str, ...],
+) -> dict[str, Any]:
+    if not isinstance(source, Mapping):
+        return {}
+
+    return {
+        field_name: source[field_name]
+        for field_name in field_names
+        if field_name in source and _is_safe_contract_code(source[field_name])
+    }
+
+
+def _is_safe_contract_code(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    if isinstance(value, (list, tuple)):
+        return all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0
+            for item in value
+        )
+    return False
