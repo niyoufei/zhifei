@@ -11,6 +11,10 @@ from pathlib import Path
 from stat import S_IMODE, S_ISREG
 from typing import Any, Mapping, Optional
 
+from backend.kg_content_safe_output_contract import (
+    build_content_safe_output_contract_mapping,
+)
+
 
 BLOCKED_STATUS = "blocked"
 INVALID_STATUS = "invalid"
@@ -56,6 +60,7 @@ STRUCTURE_VALUE_OUTPUT_POLICY = 0
 STRUCTURE_SUMMARY_MAX_DEPTH = 4
 STRUCTURE_SUMMARY_MAX_PATHS = 80
 STRUCTURAL_PROFILE_MAX_MODULE_CANDIDATES = 40
+CONTENT_SAFE_OUTPUT_CONTRACT_MAPPING = build_content_safe_output_contract_mapping()
 STRUCTURE_SUMMARY_FIELD_WHITELIST = (
     "top_level_type",
     "top_level_key_names",
