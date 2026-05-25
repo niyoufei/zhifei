@@ -100,9 +100,7 @@ STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
     "redaction_policy",
 )
 STRUCTURAL_PROFILE_REDACTION_POLICY = (
-    "fixed_no_scalar_values_no_list_items_no_dict_values_no_prompt_"
-    "instruction_evidence_scoring_or_kg_body_text_no_module_candidates_"
-    "placeholder_paths_fields_and_top_level_keys_only"
+    "redacted"
 )
 JSON_STRUCTURE_TYPE_NAMES = frozenset(
     {
@@ -115,6 +113,16 @@ JSON_STRUCTURE_TYPE_NAMES = frozenset(
         "float",
     }
 )
+JSON_STRUCTURE_TYPE_CODE_BY_NAME = {
+    "dict": 1,
+    "list": 2,
+    "null": 3,
+    "bool": 4,
+    "str": 5,
+    "int": 6,
+    "float": 7,
+    "other": 8,
+}
 
 OUTPUT_FIELD_WHITELIST = (
     "ok",
@@ -612,9 +620,9 @@ def _empty_structure_summary(*, allowlist_status: str) -> dict[str, Any]:
         "list_count": 0,
         "null_count": 0,
         "scalar_type_counts": {},
-        "selected_structure_paths": (),
+        "selected_structure_paths": (0, (), ()),
         "list_lengths": {},
-        "field_type_sets": {},
+        "field_type_sets": (0, 0, (), ()),
         "max_depth_limited": False,
         "authorized_target": AUTHORIZED_REAL_KG_TARGET,
         "allowlist_status": allowlist_status,
@@ -645,7 +653,7 @@ def _build_structural_profile_summary_from_structure_summary(
         "profile_enabled": profile_enabled,
         "profile_scope": STRUCTURAL_PROFILE_SCOPE,
         "max_depth_limited": bool(structure_summary.get("max_depth_limited")),
-        "path_count": len(selected_paths),
+        "path_count": _safe_count(selected_paths.get("path_count")),
         "path_type_counts": _structural_profile_path_type_counts(selected_paths),
         "depth_histogram": _structural_profile_depth_histogram(selected_paths),
         "field_name_counts": field_name_counts,
@@ -666,60 +674,35 @@ def _build_structural_profile_summary_from_structure_summary(
 
 def _structural_profile_selected_paths(
     structure_summary: Mapping[str, Any],
-) -> tuple[dict[str, Any], ...]:
+) -> dict[str, Any]:
     raw_paths = structure_summary.get("selected_structure_paths")
-    if not isinstance(raw_paths, (list, tuple)):
-        return ()
+    if not isinstance(raw_paths, (list, tuple)) or len(raw_paths) != 3:
+        return {
+            "path_count": 0,
+            "depth_counts": (),
+            "type_counts": (),
+        }
 
-    selected_paths: list[dict[str, Any]] = []
-    for item in raw_paths:
-        if not isinstance(item, Mapping):
-            continue
-        path = item.get("path")
-        type_name = item.get("type")
-        if not isinstance(path, str) or not isinstance(type_name, str):
-            continue
-        depth = item.get("depth")
-        if not isinstance(depth, int) or depth < 0:
-            depth = _structural_profile_path_depth(path)
-        selected_paths.append(
-            {
-                "path": path,
-                "depth": depth,
-                "type": _structural_profile_type_name(type_name),
-            }
-        )
-    return tuple(selected_paths)
+    return {
+        "path_count": _safe_count(raw_paths[0]),
+        "depth_counts": _safe_pair_counts(raw_paths[1]),
+        "type_counts": _safe_pair_counts(raw_paths[2]),
+    }
 
 
 def _structural_profile_field_type_sets(
     structure_summary: Mapping[str, Any],
-) -> dict[str, dict[str, tuple[str, ...]]]:
+) -> tuple[Any, ...]:
     raw_field_type_sets = structure_summary.get("field_type_sets")
-    if not isinstance(raw_field_type_sets, Mapping):
-        return {}
+    if not isinstance(raw_field_type_sets, (list, tuple)) or len(raw_field_type_sets) != 4:
+        return (0, 0, (), ())
 
-    profile_field_type_sets: dict[str, dict[str, tuple[str, ...]]] = {}
-    for group_index, fields in enumerate(raw_field_type_sets.values(), start=1):
-        if not isinstance(fields, Mapping):
-            continue
-        safe_fields: dict[str, tuple[str, ...]] = {}
-        for type_set_index, type_names in enumerate(fields.values(), start=1):
-            if not isinstance(type_names, (list, tuple, set)):
-                continue
-            safe_fields[_placeholder("type_set", type_set_index)] = tuple(
-                sorted(
-                    {
-                        _structural_profile_type_name(type_name)
-                        for type_name in type_names
-                        if isinstance(type_name, str)
-                    }
-                )
-            )
-        profile_field_type_sets[
-            _placeholder("field_group", group_index)
-        ] = safe_fields
-    return _limited_mapping(profile_field_type_sets)
+    return (
+        _safe_count(raw_field_type_sets[0]),
+        _safe_count(raw_field_type_sets[1]),
+        _safe_pair_counts(raw_field_type_sets[2]),
+        _safe_pair_counts(raw_field_type_sets[3]),
+    )
 
 
 def _structural_profile_type_name(type_name: str) -> str:
@@ -729,24 +712,15 @@ def _structural_profile_type_name(type_name: str) -> str:
 
 
 def _structural_profile_path_type_counts(
-    selected_paths: tuple[dict[str, Any], ...],
-) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for item in selected_paths:
-        type_name = item["type"]
-        counts[type_name] = counts.get(type_name, 0) + 1
-    return dict(sorted(counts.items()))
+    selected_paths: Mapping[str, Any],
+) -> tuple[tuple[int, int], ...]:
+    return _safe_pair_counts(selected_paths.get("type_counts"))
 
 
 def _structural_profile_depth_histogram(
-    selected_paths: tuple[dict[str, Any], ...],
-) -> dict[str, int]:
-    histogram: dict[str, int] = {}
-    for item in selected_paths:
-        raw_depth = item.get("depth")
-        depth = str(raw_depth if isinstance(raw_depth, int) and raw_depth >= 0 else 0)
-        histogram[depth] = histogram.get(depth, 0) + 1
-    return dict(sorted(histogram.items()))
+    selected_paths: Mapping[str, Any],
+) -> tuple[tuple[int, int], ...]:
+    return _safe_pair_counts(selected_paths.get("depth_counts"))
 
 
 def _structural_profile_path_depth(path: str) -> int:
@@ -763,23 +737,18 @@ def _structural_profile_path_depth(path: str) -> int:
 
 
 def _structural_profile_field_name_counts(
-    field_type_sets: Mapping[str, Mapping[str, tuple[str, ...]]],
-) -> dict[str, Any]:
-    field_group_count = 0
-    field_slot_count = 0
-    for fields in field_type_sets.values():
-        field_group_count += 1
-        field_slot_count += len(fields)
-    return {
-        "field_group_count": field_group_count,
-        "field_group_count_bucket": _structural_profile_count_bucket(
-            field_group_count
-        ),
-        "field_slot_count": field_slot_count,
-        "field_slot_count_bucket": _structural_profile_count_bucket(
-            field_slot_count
-        ),
-    }
+    field_type_sets: tuple[Any, ...],
+) -> tuple[int, int, int, int]:
+    field_group_count = _safe_count(field_type_sets[0] if field_type_sets else 0)
+    field_slot_count = _safe_count(
+        field_type_sets[1] if len(field_type_sets) > 1 else 0
+    )
+    return (
+        field_group_count,
+        _structural_profile_count_bucket_code(field_group_count),
+        field_slot_count,
+        _structural_profile_count_bucket_code(field_slot_count),
+    )
 
 
 def _structural_profile_list_length_buckets(
@@ -802,13 +771,11 @@ def _structural_profile_list_length_buckets(
 
 
 def _structural_profile_dict_key_count_buckets(
-    field_type_sets: Mapping[str, Mapping[str, tuple[str, ...]]],
-) -> dict[str, int]:
-    buckets: dict[str, int] = {}
-    for fields in field_type_sets.values():
-        bucket = _structural_profile_count_bucket(len(fields))
-        buckets[bucket] = buckets.get(bucket, 0) + 1
-    return dict(sorted(buckets.items()))
+    field_type_sets: tuple[Any, ...],
+) -> tuple[tuple[int, int], ...]:
+    if len(field_type_sets) < 4:
+        return ()
+    return _safe_pair_counts(field_type_sets[3])
 
 
 def _structural_profile_count_bucket(count: int) -> str:
@@ -825,9 +792,46 @@ def _structural_profile_count_bucket(count: int) -> str:
     return "51+"
 
 
+def _structural_profile_count_bucket_code(count: int) -> int:
+    if count == 0:
+        return 0
+    if count <= 2:
+        return 1
+    if count <= 5:
+        return 2
+    if count <= 10:
+        return 3
+    if count <= 50:
+        return 4
+    return 5
+
+
+def _safe_count(value: Any) -> int:
+    if isinstance(value, int) and value >= 0:
+        return value
+    return 0
+
+
+def _safe_pair_counts(value: Any) -> tuple[tuple[int, int], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+
+    pairs: list[tuple[int, int]] = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        key, count = item
+        if not isinstance(key, int) or key < 0:
+            continue
+        if not isinstance(count, int) or count < 0:
+            continue
+        pairs.append((key, count))
+    return tuple(sorted(pairs))
+
+
 def _structural_profile_module_name_candidates(
-    selected_paths: tuple[dict[str, Any], ...],
-    field_name_counts: Mapping[str, Any],
+    selected_paths: Mapping[str, Any],
+    field_name_counts: tuple[int, int, int, int],
 ) -> tuple[str, ...]:
     _ = selected_paths, field_name_counts
     return ()
@@ -845,22 +849,15 @@ def _build_structure_summary(
         "null_count": 0,
     }
     scalar_type_counts: dict[str, int] = {}
-    selected_structure_paths: list[dict[str, Any]] = []
+    selected_structure_paths: list[tuple[int, int]] = []
     list_lengths: dict[str, dict[str, Any]] = {}
-    field_type_sets: dict[str, dict[str, tuple[str, ...]]] = {}
+    field_type_sets: list[tuple[int, ...]] = []
     max_depth_limited = False
 
     def remember_path(type_name: str, depth: int) -> None:
         if len(selected_structure_paths) < STRUCTURE_SUMMARY_MAX_PATHS:
             selected_structure_paths.append(
-                {
-                    "path": _placeholder(
-                        "path",
-                        len(selected_structure_paths) + 1,
-                    ),
-                    "depth": depth,
-                    "type": type_name,
-                }
+                (depth, _json_structure_type_code_from_name(type_name))
             )
 
     def walk(value: Any, depth: int) -> None:
@@ -900,24 +897,23 @@ def _build_structure_summary(
 
     walk(payload, 0)
 
-    top_level_key_names: tuple[str, ...] = ()
+    top_level_key_count = 0
     if isinstance(payload, dict):
-        top_level_key_names = tuple(
-            _placeholder("key", index)
-            for index, _key in enumerate(payload.keys(), start=1)
-        )
+        top_level_key_count = len(payload)
 
     return {
         "top_level_type": _json_structure_type(payload),
-        "top_level_key_names": top_level_key_names,
-        "top_level_key_count": len(top_level_key_names),
+        "top_level_key_names": (),
+        "top_level_key_count": top_level_key_count,
         "dict_count": counters["dict_count"],
         "list_count": counters["list_count"],
         "null_count": counters["null_count"],
         "scalar_type_counts": dict(sorted(scalar_type_counts.items())),
-        "selected_structure_paths": tuple(selected_structure_paths),
+        "selected_structure_paths": _summarize_selected_structure_paths(
+            selected_structure_paths
+        ),
         "list_lengths": _limited_mapping(list_lengths),
-        "field_type_sets": _limited_mapping(field_type_sets),
+        "field_type_sets": _summarize_field_type_sets(field_type_sets),
         "max_depth_limited": max_depth_limited,
         "authorized_target": authorized_target,
         "allowlist_status": allowlist_status,
@@ -942,6 +938,16 @@ def _json_structure_type(value: Any) -> str:
     return type(value).__name__
 
 
+def _json_structure_type_code(value: Any) -> int:
+    return _json_structure_type_code_from_name(_json_structure_type(value))
+
+
+def _json_structure_type_code_from_name(type_name: str) -> int:
+    if type_name in JSON_STRUCTURE_TYPE_CODE_BY_NAME:
+        return JSON_STRUCTURE_TYPE_CODE_BY_NAME[type_name]
+    return JSON_STRUCTURE_TYPE_CODE_BY_NAME["other"]
+
+
 def _list_element_type_counts(items: list[Any]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for item in items:
@@ -950,15 +956,50 @@ def _list_element_type_counts(items: list[Any]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _summarize_selected_structure_paths(
+    selected_structure_paths: list[tuple[int, int]],
+) -> tuple[int, tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
+    return (
+        len(selected_structure_paths),
+        _count_pairs(depth for depth, _type_code in selected_structure_paths),
+        _count_pairs(type_code for _depth, type_code in selected_structure_paths),
+    )
+
+
+def _summarize_field_type_sets(
+    field_type_sets: list[tuple[int, ...]],
+) -> tuple[int, int, tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
+    return (
+        len(field_type_sets),
+        sum(len(type_codes) for type_codes in field_type_sets),
+        _count_pairs(
+            type_code
+            for type_codes in field_type_sets
+            for type_code in type_codes
+        ),
+        _count_pairs(
+            _structural_profile_count_bucket_code(len(type_codes))
+            for type_codes in field_type_sets
+        ),
+    )
+
+
+def _count_pairs(items: Any) -> tuple[tuple[int, int], ...]:
+    counts: dict[int, int] = {}
+    for item in items:
+        if not isinstance(item, int) or item < 0:
+            continue
+        counts[item] = counts.get(item, 0) + 1
+    return tuple((key, counts[key]) for key in sorted(counts))
+
+
 def _merge_field_type_sets(
-    field_type_sets: dict[str, dict[str, tuple[str, ...]]],
+    field_type_sets: list[tuple[int, ...]],
     value: Mapping[str, Any],
 ) -> None:
-    field_group = _placeholder("field_group", len(field_type_sets) + 1)
-    field_type_sets[field_group] = {
-        _placeholder("type_set", index): (_json_structure_type(child),)
-        for index, child in enumerate(value.values(), start=1)
-    }
+    field_type_sets.append(
+        tuple(_json_structure_type_code(child) for child in value.values())
+    )
 
 
 def _placeholder(prefix: str, index: int) -> str:
