@@ -17,51 +17,32 @@ INVALID_STATUS = "invalid"
 PREVIEW_STATUS = "preview_only"
 
 CONTRACT_SOURCE = "kg_runtime_28_29_adapter_contract_mapping_design"
-CONTRACT_SCOPE = "top-level plus first/second structural levels only"
+CONTRACT_SCOPE = 0
 REAL_KG_ROUTE_READ_ONLY_SOURCE = "kg_runtime_39_real_kg_route_read_only_draft"
-REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE = (
-    "route-level real-KG metadata-only read-only contract"
-)
-REAL_KG_STRUCTURE_CONTRACT_SCOPE = (
-    "single authorized target structure-only JSON summary draft"
-)
-REAL_KG_STRUCTURAL_PROFILE_CONTRACT_SCOPE = (
-    "single authorized target content-safe structural profile draft"
-)
+REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE = 1
+REAL_KG_STRUCTURE_CONTRACT_SCOPE = 2
+REAL_KG_STRUCTURAL_PROFILE_CONTRACT_SCOPE = 3
 AUTHORIZED_REAL_KG_TARGET = "知识图谱/ZF-KG-12-Municipal-Bridge.json"
 AUTHORIZED_REAL_KG_TARGET_PATH = (
     Path(__file__).parent.parent / AUTHORIZED_REAL_KG_TARGET
 )
-AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS = "authorized_single_target"
-AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS = (
-    "authorized_single_target_structure_only"
-)
-AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS = (
-    "authorized_single_target_structural_profile_only"
-)
-REAL_KG_TARGET_POLICY = "single_authorized_target_file_stat_metadata_only"
-REAL_KG_STRUCTURE_TARGET_POLICY = "single_authorized_target_structure_only"
-REAL_KG_STRUCTURAL_PROFILE_TARGET_POLICY = (
-    "single_authorized_target_content_safe_structural_profile_only"
-)
-REAL_KG_READ_POLICY = "file_stat_metadata_only_no_content_read_no_json_parse"
-REAL_KG_STRUCTURE_READ_POLICY = "structure_only_json_read_no_value_output"
-REAL_KG_STRUCTURAL_PROFILE_READ_POLICY = (
-    "reuse_structure_read_summary_no_scalar_value_output"
-)
+AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS = "meta"
+AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS = "struct"
+AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS = "profile"
+REAL_KG_TARGET_POLICY = 0
+REAL_KG_STRUCTURE_TARGET_POLICY = 1
+REAL_KG_STRUCTURAL_PROFILE_TARGET_POLICY = 2
+REAL_KG_READ_POLICY = 0
+REAL_KG_STRUCTURE_READ_POLICY = 1
+REAL_KG_STRUCTURAL_PROFILE_READ_POLICY = 2
 MODULE_CONTRACT_COUNT = 44
 ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT = 69
 TOTAL_STRUCTURAL_PATH_COUNT = 180
 BLOCKED_STRUCTURAL_PATH_COUNT = (
     TOTAL_STRUCTURAL_PATH_COUNT - ADAPTER_STRUCTURAL_PATH_WHITELIST_COUNT
 )
-VALUE_OUTPUT_POLICY = (
-    "contract_metadata_only_no_entity_knowledge_prompt_instruction_"
-    "evidence_scoring_generation_or_rag_text"
-)
-STRUCTURE_VALUE_OUTPUT_POLICY = (
-    "structure_only_key_type_count_length_summary_no_scalar_or_value_output"
-)
+VALUE_OUTPUT_POLICY = 0
+STRUCTURE_VALUE_OUTPUT_POLICY = 0
 STRUCTURE_SUMMARY_MAX_DEPTH = 4
 STRUCTURE_SUMMARY_MAX_PATHS = 80
 STRUCTURAL_PROFILE_MAX_MODULE_CANDIDATES = 40
@@ -100,6 +81,21 @@ STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
 STRUCTURAL_PROFILE_REDACTION_POLICY = (
     "redacted"
 )
+ADAPTER_REASON_CODES = {
+    "manual_trigger_required": 10,
+    "disabled_entity_validation_failed": 11,
+    "adapter_contract_mapping_draft_static_only": 12,
+    "authorized_real_kg_target_required": 20,
+    "unauthorized_real_kg_target": 21,
+    "feature_flag_required_for_structural_profile": 22,
+    "manual_trigger_required_for_structural_profile": 23,
+    "real_kg_read_only_required_for_structural_profile": 24,
+    "structure_read_required_for_structural_profile": 25,
+    "feature_flag_required_for_structure_read": 26,
+    "real_kg_structural_profile_route_draft": 27,
+    "real_kg_structure_read_route_draft": 28,
+    "real_kg_route_read_only_metadata_only": 29,
+}
 JSON_STRUCTURE_TYPE_CODE_BY_NAME = {
     "dict": 1,
     "list": 2,
@@ -435,8 +431,8 @@ def _real_kg_contract_response(
     ok: bool,
     file_stat_metadata: Optional[Mapping[str, Any]] = None,
     structure_metadata: Optional[Mapping[str, Any]] = None,
-    target_policy: Optional[str] = None,
-    read_policy: Optional[str] = None,
+    target_policy: Optional[int] = None,
+    read_policy: Optional[int] = None,
 ) -> dict[str, Any]:
     response = _contract_mapping_response(
         status=status,
@@ -448,8 +444,10 @@ def _real_kg_contract_response(
             "source": REAL_KG_ROUTE_READ_ONLY_SOURCE,
             "contract_scope": REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE,
             "authorized_target": AUTHORIZED_REAL_KG_TARGET,
-            "target_policy": target_policy or REAL_KG_TARGET_POLICY,
-            "read_policy": read_policy or REAL_KG_READ_POLICY,
+            "target_policy": (
+                REAL_KG_TARGET_POLICY if target_policy is None else target_policy
+            ),
+            "read_policy": REAL_KG_READ_POLICY if read_policy is None else read_policy,
             "value_output_policy": VALUE_OUTPUT_POLICY,
             "content_read_performed": False,
             "json_parse_performed": False,
@@ -578,7 +576,7 @@ def _authorized_real_kg_structure_summary(
         or authorized_target != AUTHORIZED_REAL_KG_TARGET
     ):
         return _empty_structure_summary(
-            allowlist_status="structure_read_gate_blocked",
+            allowlist_status="blocked",
         )
 
     try:
@@ -586,7 +584,7 @@ def _authorized_real_kg_structure_summary(
             payload = json.load(handle)
     except (OSError, ValueError):
         return _empty_structure_summary(
-            allowlist_status="authorized_single_target_structure_unavailable",
+            allowlist_status="unavail",
         )
 
     return _build_structure_summary(
@@ -629,7 +627,7 @@ def _build_structural_profile_summary_from_structure_summary(
     allowlist_status = (
         AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS
         if profile_enabled
-        else "authorized_single_target_structural_profile_unavailable"
+        else "unavail"
     )
 
     return {
@@ -980,7 +978,7 @@ def _contract_mapping_response(
         "ok": ok,
         "enabled": False,
         "status": status,
-        "reason": reason,
+        "reason": _adapter_reason_code(reason),
         "source": CONTRACT_SOURCE,
         "contract_scope": CONTRACT_SCOPE,
         "module_contract_count": MODULE_CONTRACT_COUNT,
@@ -999,6 +997,10 @@ def _contract_mapping_response(
         "no_zbid_writeback": RUNTIME_BOUNDARY_FLAGS["no_zbid_writeback"],
     }
     return _whitelisted_response(response)
+
+
+def _adapter_reason_code(reason: str) -> int:
+    return ADAPTER_REASON_CODES.get(reason, 0)
 
 
 def _whitelisted_response(response: Mapping[str, Any]) -> dict[str, Any]:

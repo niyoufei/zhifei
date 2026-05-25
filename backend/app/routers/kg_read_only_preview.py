@@ -56,6 +56,26 @@ KG_READ_ONLY_PREVIEW_REAL_KG_METADATA_FIELDS = (
     "structural_profile_summary",
     "structural_profile_contract",
 )
+ROUTE_REASON_CODES = {
+    "feature_flag_disabled": 10,
+    "payload_required": 11,
+    "illegal_field": 12,
+    "manual_trigger_required": 13,
+    "real_kg_read_only_required_for_authorized_target": 14,
+    "real_kg_read_only_true_required": 15,
+    "structure_read_true_required": 16,
+    "structural_profile_true_required": 17,
+    "structural_profile_only_true_required": 18,
+    "structural_profile_required_for_structural_profile_only": 19,
+    "real_kg_read_only_required_for_structural_profile": 20,
+    "structure_read_required_for_structural_profile": 21,
+    "authorized_target_required_for_structural_profile": 22,
+    "real_kg_read_only_required_for_structure_read": 23,
+    "authorized_target_required_for_structure_read": 24,
+    "adapter_preview_ready": 25,
+    "adapter_preview_blocked": 26,
+    "manifest_and_registry_entity_dicts_required": 27,
+}
 
 router = APIRouter(tags=["KG Read Only Preview"])
 
@@ -78,7 +98,7 @@ def _base_response(
         "ok": bool(ok),
         "enabled": bool(enabled),
         "status": status,
-        "reason": reason,
+        "reason": _route_reason_code(reason),
         "request_id": str(request_id or "").strip(),
         "source": KG_READ_ONLY_PREVIEW_SOURCE,
         "route_name": KG_READ_ONLY_PREVIEW_ROUTE_NAME,
@@ -125,6 +145,10 @@ def _base_response(
     return response
 
 
+def _route_reason_code(reason: str) -> int:
+    return ROUTE_REASON_CODES.get(reason, 0)
+
+
 def _request_id(payload: Mapping[str, Any] | None) -> Any:
     if not isinstance(payload, Mapping):
         return None
@@ -160,7 +184,7 @@ async def kg_read_only_preview_route(
             ok=False,
             enabled=True,
             status="invalid",
-            reason=f"illegal_field:{extra_fields[0]}",
+            reason="illegal_field",
             request_id=request_id,
         )
 
