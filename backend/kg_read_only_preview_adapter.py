@@ -15,20 +15,30 @@ from typing import Any, Mapping, Optional
 BLOCKED_STATUS = "blocked"
 INVALID_STATUS = "invalid"
 PREVIEW_STATUS = "preview_only"
+ADAPTER_STATUS_CODES = {
+    BLOCKED_STATUS: 0,
+    INVALID_STATUS: 1,
+    PREVIEW_STATUS: 2,
+}
 
 CONTRACT_SOURCE = "kg_runtime_28_29_adapter_contract_mapping_design"
+CONTRACT_SOURCE_CODE = 1
 CONTRACT_SCOPE = 0
 REAL_KG_ROUTE_READ_ONLY_SOURCE = "kg_runtime_39_real_kg_route_read_only_draft"
+REAL_KG_ROUTE_READ_ONLY_SOURCE_CODE = 2
 REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE = 1
 REAL_KG_STRUCTURE_CONTRACT_SCOPE = 2
 REAL_KG_STRUCTURAL_PROFILE_CONTRACT_SCOPE = 3
 AUTHORIZED_REAL_KG_TARGET = "知识图谱/ZF-KG-12-Municipal-Bridge.json"
+AUTHORIZED_REAL_KG_TARGET_CODE = 1
 AUTHORIZED_REAL_KG_TARGET_PATH = (
     Path(__file__).parent.parent / AUTHORIZED_REAL_KG_TARGET
 )
-AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS = "meta"
-AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS = "struct"
-AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS = "profile"
+AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS = 1
+AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS = 2
+AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS = 3
+BLOCKED_ALLOWLIST_STATUS = 0
+UNAVAILABLE_ALLOWLIST_STATUS = 4
 REAL_KG_TARGET_POLICY = 0
 REAL_KG_STRUCTURE_TARGET_POLICY = 1
 REAL_KG_STRUCTURAL_PROFILE_TARGET_POLICY = 2
@@ -61,6 +71,9 @@ STRUCTURE_SUMMARY_FIELD_WHITELIST = (
     "authorized_target",
     "allowlist_status",
 )
+STRUCTURE_SUMMARY_FIELD_CODES = tuple(
+    range(1, len(STRUCTURE_SUMMARY_FIELD_WHITELIST) + 1)
+)
 STRUCTURAL_PROFILE_SCOPE = 0
 STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
     "authorized_target",
@@ -78,9 +91,10 @@ STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
     "module_name_candidates",
     "redaction_policy",
 )
-STRUCTURAL_PROFILE_REDACTION_POLICY = (
-    "redacted"
+STRUCTURAL_PROFILE_SUMMARY_FIELD_CODES = tuple(
+    range(1, len(STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST) + 1)
 )
+STRUCTURAL_PROFILE_REDACTION_POLICY = 0
 ADAPTER_REASON_CODES = {
     "manual_trigger_required": 10,
     "disabled_entity_validation_failed": 11,
@@ -441,9 +455,9 @@ def _real_kg_contract_response(
     )
     response.update(
         {
-            "source": REAL_KG_ROUTE_READ_ONLY_SOURCE,
+            "source": REAL_KG_ROUTE_READ_ONLY_SOURCE_CODE,
             "contract_scope": REAL_KG_ROUTE_READ_ONLY_CONTRACT_SCOPE,
-            "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+            "authorized_target": AUTHORIZED_REAL_KG_TARGET_CODE,
             "target_policy": (
                 REAL_KG_TARGET_POLICY if target_policy is None else target_policy
             ),
@@ -486,7 +500,7 @@ def _authorized_real_kg_file_stat_metadata(
         stat_result = AUTHORIZED_REAL_KG_TARGET_PATH.stat()
     except OSError:
         return {
-            "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+            "authorized_target": AUTHORIZED_REAL_KG_TARGET_CODE,
             "allowlist_status": AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS,
             "exists": False,
             "is_file": False,
@@ -498,7 +512,7 @@ def _authorized_real_kg_file_stat_metadata(
 
     mode = stat_result.st_mode
     return {
-        "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET_CODE,
         "allowlist_status": AUTHORIZED_REAL_KG_FILE_STAT_ALLOWLIST_STATUS,
         "exists": True,
         "is_file": S_ISREG(mode),
@@ -512,14 +526,14 @@ def _authorized_real_kg_file_stat_metadata(
 def _real_kg_structure_contract() -> dict[str, Any]:
     return {
         "contract_scope": REAL_KG_STRUCTURE_CONTRACT_SCOPE,
-        "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET_CODE,
         "allowlist_status": AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS,
         "target_policy": 0,
         "feature_flag_required": True,
         "manual_trigger_required": True,
         "real_kg_read_only_required": True,
         "structure_read_required": True,
-        "summary_field_whitelist": STRUCTURE_SUMMARY_FIELD_WHITELIST,
+        "summary_field_whitelist": STRUCTURE_SUMMARY_FIELD_CODES,
         "value_output_policy": 0,
         "scalar_policy": 0,
         "list_policy": 0,
@@ -536,7 +550,7 @@ def _real_kg_structure_contract() -> dict[str, Any]:
 def _real_kg_structural_profile_contract() -> dict[str, Any]:
     return {
         "contract_scope": REAL_KG_STRUCTURAL_PROFILE_CONTRACT_SCOPE,
-        "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET_CODE,
         "allowlist_status": AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS,
         "target_policy": 0,
         "feature_flag_required": True,
@@ -544,7 +558,7 @@ def _real_kg_structural_profile_contract() -> dict[str, Any]:
         "real_kg_read_only_required": True,
         "structure_read_required": True,
         "structural_profile_required": True,
-        "summary_field_whitelist": STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST,
+        "summary_field_whitelist": STRUCTURAL_PROFILE_SUMMARY_FIELD_CODES,
         "profile_scope": STRUCTURAL_PROFILE_SCOPE,
         "redaction_policy": STRUCTURAL_PROFILE_REDACTION_POLICY,
         "scalar_policy": 0,
@@ -576,7 +590,7 @@ def _authorized_real_kg_structure_summary(
         or authorized_target != AUTHORIZED_REAL_KG_TARGET
     ):
         return _empty_structure_summary(
-            allowlist_status="blocked",
+            allowlist_status=BLOCKED_ALLOWLIST_STATUS,
         )
 
     try:
@@ -584,7 +598,7 @@ def _authorized_real_kg_structure_summary(
             payload = json.load(handle)
     except (OSError, ValueError):
         return _empty_structure_summary(
-            allowlist_status="unavail",
+            allowlist_status=UNAVAILABLE_ALLOWLIST_STATUS,
         )
 
     return _build_structure_summary(
@@ -594,7 +608,7 @@ def _authorized_real_kg_structure_summary(
     )
 
 
-def _empty_structure_summary(*, allowlist_status: str) -> dict[str, Any]:
+def _empty_structure_summary(*, allowlist_status: int) -> dict[str, Any]:
     return {
         "top_level_type": 0,
         "top_level_key_names": (),
@@ -607,7 +621,7 @@ def _empty_structure_summary(*, allowlist_status: str) -> dict[str, Any]:
         "list_lengths": (),
         "field_type_sets": (0, 0, (), ()),
         "max_depth_limited": False,
-        "authorized_target": AUTHORIZED_REAL_KG_TARGET,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET_CODE,
         "allowlist_status": allowlist_status,
     }
 
@@ -627,11 +641,11 @@ def _build_structural_profile_summary_from_structure_summary(
     allowlist_status = (
         AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS
         if profile_enabled
-        else "unavail"
+        else UNAVAILABLE_ALLOWLIST_STATUS
     )
 
     return {
-        "authorized_target": authorized_target,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET_CODE,
         "allowlist_status": allowlist_status,
         "profile_enabled": profile_enabled,
         "profile_scope": STRUCTURAL_PROFILE_SCOPE,
@@ -803,7 +817,7 @@ def _build_structure_summary(
     payload: Any,
     *,
     authorized_target: str,
-    allowlist_status: str,
+    allowlist_status: int,
 ) -> dict[str, Any]:
     counters = {
         "dict_count": 0,
@@ -882,7 +896,7 @@ def _build_structure_summary(
         "list_lengths": tuple(list_lengths[:STRUCTURE_SUMMARY_MAX_PATHS]),
         "field_type_sets": _summarize_field_type_sets(field_type_sets),
         "max_depth_limited": max_depth_limited,
-        "authorized_target": authorized_target,
+        "authorized_target": AUTHORIZED_REAL_KG_TARGET_CODE,
         "allowlist_status": allowlist_status,
     }
 
@@ -977,9 +991,9 @@ def _contract_mapping_response(
     response = {
         "ok": ok,
         "enabled": False,
-        "status": status,
+        "status": _adapter_status_code(status),
         "reason": _adapter_reason_code(reason),
-        "source": CONTRACT_SOURCE,
+        "source": CONTRACT_SOURCE_CODE,
         "contract_scope": CONTRACT_SCOPE,
         "module_contract_count": MODULE_CONTRACT_COUNT,
         "adapter_structural_path_whitelist_count": (
@@ -1001,6 +1015,10 @@ def _contract_mapping_response(
 
 def _adapter_reason_code(reason: str) -> int:
     return ADAPTER_REASON_CODES.get(reason, 0)
+
+
+def _adapter_status_code(status: str) -> int:
+    return ADAPTER_STATUS_CODES.get(status, 0)
 
 
 def _whitelisted_response(response: Mapping[str, Any]) -> dict[str, Any]:

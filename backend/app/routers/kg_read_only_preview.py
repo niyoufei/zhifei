@@ -12,6 +12,16 @@ KG_READ_ONLY_PREVIEW_PATH = "/kg/read-only-preview"
 KG_READ_ONLY_PREVIEW_ROUTE_NAME = "kg_read_only_preview"
 KG_READ_ONLY_PREVIEW_FLAG = "ZDOC_KG_READ_ONLY_PREVIEW_ROUTE_ENABLED"
 KG_READ_ONLY_PREVIEW_SOURCE = "zdoc_kg_read_only_preview_route_draft"
+KG_READ_ONLY_PREVIEW_SOURCE_CODE = 1
+KG_READ_ONLY_PREVIEW_ROUTE_CODE = 1
+KG_READ_ONLY_PREVIEW_PATH_CODE = 1
+KG_READ_ONLY_PREVIEW_FLAG_CODE = 1
+ROUTE_STATUS_CODES = {
+    "blocked": 0,
+    "invalid": 1,
+    "preview_only": 2,
+    "disabled": 3,
+}
 KG_READ_ONLY_PREVIEW_ALLOWED_FIELDS = frozenset(
     {
         "manifest_entity",
@@ -89,7 +99,7 @@ def _base_response(
     *,
     ok: bool,
     enabled: bool,
-    status: str,
+    status: Any,
     reason: str,
     request_id: Any = None,
     detail: Any = None,
@@ -97,13 +107,13 @@ def _base_response(
     response: dict[str, Any] = {
         "ok": bool(ok),
         "enabled": bool(enabled),
-        "status": status,
+        "status": _route_status_code(status),
         "reason": _route_reason_code(reason),
         "request_id": str(request_id or "").strip(),
-        "source": KG_READ_ONLY_PREVIEW_SOURCE,
-        "route_name": KG_READ_ONLY_PREVIEW_ROUTE_NAME,
-        "endpoint_path": KG_READ_ONLY_PREVIEW_PATH,
-        "feature_flag": KG_READ_ONLY_PREVIEW_FLAG,
+        "source": KG_READ_ONLY_PREVIEW_SOURCE_CODE,
+        "route_name": KG_READ_ONLY_PREVIEW_ROUTE_CODE,
+        "endpoint_path": KG_READ_ONLY_PREVIEW_PATH_CODE,
+        "feature_flag": KG_READ_ONLY_PREVIEW_FLAG_CODE,
         "default_off": True,
         "manual_trigger_required": True,
         "preview_only": True,
@@ -147,6 +157,18 @@ def _base_response(
 
 def _route_reason_code(reason: str) -> int:
     return ROUTE_REASON_CODES.get(reason, 0)
+
+
+def _route_status_code(status: Any) -> int:
+    if isinstance(status, int):
+        return status
+    return ROUTE_STATUS_CODES.get(str(status), 0)
+
+
+def _adapter_response_status(adapter_result: Mapping[str, Any]) -> Any:
+    if "status" in adapter_result:
+        return adapter_result["status"]
+    return "invalid"
 
 
 def _request_id(payload: Mapping[str, Any] | None) -> Any:
@@ -334,8 +356,8 @@ async def kg_read_only_preview_route(
             structure_read=request.get("structure_read") is True,
             structural_profile=request.get("structural_profile") is True,
         )
-        status = str(adapter_result.get("status") or "invalid")
-        ok = status == "preview_only"
+        status = _adapter_response_status(adapter_result)
+        ok = adapter_result.get("ok") is True
         response = _base_response(
             ok=ok,
             enabled=True,
@@ -366,8 +388,8 @@ async def kg_read_only_preview_route(
         registry_entity,
         manual_trigger=True,
     )
-    status = str(adapter_result.get("status") or "invalid")
-    ok = status == "preview_only"
+    status = _adapter_response_status(adapter_result)
+    ok = adapter_result.get("ok") is True
     response = _base_response(
         ok=ok,
         enabled=True,
