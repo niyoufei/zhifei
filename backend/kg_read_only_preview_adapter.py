@@ -80,9 +80,7 @@ STRUCTURE_SUMMARY_FIELD_WHITELIST = (
     "authorized_target",
     "allowlist_status",
 )
-STRUCTURAL_PROFILE_SCOPE = (
-    "placeholder_paths_field_groups_types_counts_hierarchy_no_module_candidates"
-)
+STRUCTURAL_PROFILE_SCOPE = 0
 STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
     "authorized_target",
     "allowlist_status",
@@ -101,17 +99,6 @@ STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST = (
 )
 STRUCTURAL_PROFILE_REDACTION_POLICY = (
     "redacted"
-)
-JSON_STRUCTURE_TYPE_NAMES = frozenset(
-    {
-        "dict",
-        "list",
-        "null",
-        "bool",
-        "str",
-        "int",
-        "float",
-    }
 )
 JSON_STRUCTURE_TYPE_CODE_BY_NAME = {
     "dict": 1,
@@ -529,18 +516,16 @@ def _real_kg_structure_contract() -> dict[str, Any]:
         "contract_scope": REAL_KG_STRUCTURE_CONTRACT_SCOPE,
         "authorized_target": AUTHORIZED_REAL_KG_TARGET,
         "allowlist_status": AUTHORIZED_REAL_KG_STRUCTURE_ALLOWLIST_STATUS,
-        "target_policy": REAL_KG_STRUCTURE_TARGET_POLICY,
+        "target_policy": 0,
         "feature_flag_required": True,
         "manual_trigger_required": True,
         "real_kg_read_only_required": True,
         "structure_read_required": True,
         "summary_field_whitelist": STRUCTURE_SUMMARY_FIELD_WHITELIST,
-        "value_output_policy": STRUCTURE_VALUE_OUTPUT_POLICY,
-        "scalar_policy": "type_only_no_value_output",
-        "list_policy": "length_bucket_and_element_type_summary_only",
-        "dict_policy": (
-            "key_count_placeholder_key_names_and_placeholder_type_sets_only"
-        ),
+        "value_output_policy": 0,
+        "scalar_policy": 0,
+        "list_policy": 0,
+        "dict_policy": 0,
         "no_evidence": RUNTIME_BOUNDARY_FLAGS["no_evidence"],
         "no_scoring": RUNTIME_BOUNDARY_FLAGS["no_scoring"],
         "no_rag": RUNTIME_BOUNDARY_FLAGS["no_rag"],
@@ -555,7 +540,7 @@ def _real_kg_structural_profile_contract() -> dict[str, Any]:
         "contract_scope": REAL_KG_STRUCTURAL_PROFILE_CONTRACT_SCOPE,
         "authorized_target": AUTHORIZED_REAL_KG_TARGET,
         "allowlist_status": AUTHORIZED_REAL_KG_STRUCTURAL_PROFILE_ALLOWLIST_STATUS,
-        "target_policy": REAL_KG_STRUCTURAL_PROFILE_TARGET_POLICY,
+        "target_policy": 0,
         "feature_flag_required": True,
         "manual_trigger_required": True,
         "real_kg_read_only_required": True,
@@ -564,10 +549,10 @@ def _real_kg_structural_profile_contract() -> dict[str, Any]:
         "summary_field_whitelist": STRUCTURAL_PROFILE_SUMMARY_FIELD_WHITELIST,
         "profile_scope": STRUCTURAL_PROFILE_SCOPE,
         "redaction_policy": STRUCTURAL_PROFILE_REDACTION_POLICY,
-        "scalar_policy": "type_and_count_only_no_value_output",
-        "list_policy": "length_bucket_and_type_summary_only_no_item_content",
-        "dict_policy": "key_count_bucket_and_placeholder_type_set_only",
-        "module_name_policy": "always_empty_no_field_or_path_name_candidates",
+        "scalar_policy": 0,
+        "list_policy": 0,
+        "dict_policy": 0,
+        "module_name_policy": 0,
         "no_evidence": RUNTIME_BOUNDARY_FLAGS["no_evidence"],
         "no_scoring": RUNTIME_BOUNDARY_FLAGS["no_scoring"],
         "no_rag": RUNTIME_BOUNDARY_FLAGS["no_rag"],
@@ -613,15 +598,15 @@ def _authorized_real_kg_structure_summary(
 
 def _empty_structure_summary(*, allowlist_status: str) -> dict[str, Any]:
     return {
-        "top_level_type": "unavailable",
+        "top_level_type": 0,
         "top_level_key_names": (),
         "top_level_key_count": 0,
         "dict_count": 0,
         "list_count": 0,
         "null_count": 0,
-        "scalar_type_counts": {},
+        "scalar_type_counts": (),
         "selected_structure_paths": (0, (), ()),
-        "list_lengths": {},
+        "list_lengths": (),
         "field_type_sets": (0, 0, (), ()),
         "max_depth_limited": False,
         "authorized_target": AUTHORIZED_REAL_KG_TARGET,
@@ -705,12 +690,6 @@ def _structural_profile_field_type_sets(
     )
 
 
-def _structural_profile_type_name(type_name: str) -> str:
-    if type_name in JSON_STRUCTURE_TYPE_NAMES:
-        return type_name
-    return "other"
-
-
 def _structural_profile_path_type_counts(
     selected_paths: Mapping[str, Any],
 ) -> tuple[tuple[int, int], ...]:
@@ -753,21 +732,20 @@ def _structural_profile_field_name_counts(
 
 def _structural_profile_list_length_buckets(
     structure_summary: Mapping[str, Any],
-) -> dict[str, int]:
+) -> tuple[tuple[int, int], ...]:
     raw_list_lengths = structure_summary.get("list_lengths")
-    if not isinstance(raw_list_lengths, Mapping):
-        return {}
+    if not isinstance(raw_list_lengths, (list, tuple)):
+        return ()
 
-    buckets: dict[str, int] = {}
-    for detail in raw_list_lengths.values():
-        if not isinstance(detail, Mapping):
+    buckets: dict[int, int] = {}
+    for detail in raw_list_lengths:
+        if not isinstance(detail, (list, tuple)) or len(detail) < 3:
             continue
-        length = detail.get("length")
-        if not isinstance(length, int) or length < 0:
+        bucket_code = detail[2]
+        if not isinstance(bucket_code, int) or bucket_code < 0:
             continue
-        bucket = _structural_profile_count_bucket(length)
-        buckets[bucket] = buckets.get(bucket, 0) + 1
-    return dict(sorted(buckets.items()))
+        buckets[bucket_code] = buckets.get(bucket_code, 0) + 1
+    return tuple((key, buckets[key]) for key in sorted(buckets))
 
 
 def _structural_profile_dict_key_count_buckets(
@@ -776,20 +754,6 @@ def _structural_profile_dict_key_count_buckets(
     if len(field_type_sets) < 4:
         return ()
     return _safe_pair_counts(field_type_sets[3])
-
-
-def _structural_profile_count_bucket(count: int) -> str:
-    if count == 0:
-        return "0"
-    if count <= 2:
-        return "1-2"
-    if count <= 5:
-        return "3-5"
-    if count <= 10:
-        return "6-10"
-    if count <= 50:
-        return "11-50"
-    return "51+"
 
 
 def _structural_profile_count_bucket_code(count: int) -> int:
@@ -832,9 +796,9 @@ def _safe_pair_counts(value: Any) -> tuple[tuple[int, int], ...]:
 def _structural_profile_module_name_candidates(
     selected_paths: Mapping[str, Any],
     field_name_counts: tuple[int, int, int, int],
-) -> tuple[str, ...]:
+) -> list[str]:
     _ = selected_paths, field_name_counts
-    return ()
+    return []
 
 
 def _build_structure_summary(
@@ -848,9 +812,9 @@ def _build_structure_summary(
         "list_count": 0,
         "null_count": 0,
     }
-    scalar_type_counts: dict[str, int] = {}
+    scalar_type_counts: dict[int, int] = {}
     selected_structure_paths: list[tuple[int, int]] = []
-    list_lengths: dict[str, dict[str, Any]] = {}
+    list_lengths: list[tuple[int, int, int, tuple[tuple[int, int], ...]]] = []
     field_type_sets: list[tuple[int, ...]] = []
     max_depth_limited = False
 
@@ -878,13 +842,14 @@ def _build_structure_summary(
 
         if isinstance(value, list):
             counters["list_count"] += 1
-            list_lengths[
-                _placeholder("list_group", len(list_lengths) + 1)
-            ] = {
-                "length": len(value),
-                "length_bucket": _structural_profile_count_bucket(len(value)),
-                "element_type_counts": _list_element_type_counts(value),
-            }
+            list_lengths.append(
+                (
+                    len(list_lengths) + 1,
+                    len(value),
+                    _structural_profile_count_bucket_code(len(value)),
+                    _list_element_type_counts(value),
+                )
+            )
             for child in value:
                 walk(child, depth + 1)
             return
@@ -893,7 +858,8 @@ def _build_structure_summary(
             counters["null_count"] += 1
             return
 
-        scalar_type_counts[type_name] = scalar_type_counts.get(type_name, 0) + 1
+        type_code = _json_structure_type_code(value)
+        scalar_type_counts[type_code] = scalar_type_counts.get(type_code, 0) + 1
 
     walk(payload, 0)
 
@@ -902,17 +868,20 @@ def _build_structure_summary(
         top_level_key_count = len(payload)
 
     return {
-        "top_level_type": _json_structure_type(payload),
+        "top_level_type": _json_structure_type_code(payload),
         "top_level_key_names": (),
         "top_level_key_count": top_level_key_count,
         "dict_count": counters["dict_count"],
         "list_count": counters["list_count"],
         "null_count": counters["null_count"],
-        "scalar_type_counts": dict(sorted(scalar_type_counts.items())),
+        "scalar_type_counts": tuple(
+            (type_code, scalar_type_counts[type_code])
+            for type_code in sorted(scalar_type_counts)
+        ),
         "selected_structure_paths": _summarize_selected_structure_paths(
             selected_structure_paths
         ),
-        "list_lengths": _limited_mapping(list_lengths),
+        "list_lengths": tuple(list_lengths[:STRUCTURE_SUMMARY_MAX_PATHS]),
         "field_type_sets": _summarize_field_type_sets(field_type_sets),
         "max_depth_limited": max_depth_limited,
         "authorized_target": authorized_target,
@@ -948,12 +917,12 @@ def _json_structure_type_code_from_name(type_name: str) -> int:
     return JSON_STRUCTURE_TYPE_CODE_BY_NAME["other"]
 
 
-def _list_element_type_counts(items: list[Any]) -> dict[str, int]:
-    counts: dict[str, int] = {}
+def _list_element_type_counts(items: list[Any]) -> tuple[tuple[int, int], ...]:
+    counts: dict[int, int] = {}
     for item in items:
-        type_name = _json_structure_type(item)
-        counts[type_name] = counts.get(type_name, 0) + 1
-    return dict(sorted(counts.items()))
+        type_code = _json_structure_type_code(item)
+        counts[type_code] = counts.get(type_code, 0) + 1
+    return tuple((type_code, counts[type_code]) for type_code in sorted(counts))
 
 
 def _summarize_selected_structure_paths(
@@ -1000,17 +969,6 @@ def _merge_field_type_sets(
     field_type_sets.append(
         tuple(_json_structure_type_code(child) for child in value.values())
     )
-
-
-def _placeholder(prefix: str, index: int) -> str:
-    return f"{prefix}_{index:03d}"
-
-
-def _limited_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        key: mapping[key]
-        for key in sorted(mapping.keys())[:STRUCTURE_SUMMARY_MAX_PATHS]
-    }
 
 
 def _contract_mapping_response(
