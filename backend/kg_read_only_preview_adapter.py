@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional
 from backend.kg_content_safe_output_contract import (
     build_content_safe_output_contract_mapping,
     build_preview_only_payload,
+    build_preview_only_response_integration_payload,
     classify_content_safe_fields,
 )
 
@@ -168,6 +169,7 @@ OUTPUT_FIELD_WHITELIST = (
     "structural_profile_only",
     "structural_profile_summary",
     "structural_profile_contract",
+    "preview_only_response",
 )
 
 ALLOWED_STRUCTURAL_PATH_POLICY = (
@@ -281,6 +283,124 @@ def build_preview_only_adapter_mapping(
     """Build a preview-only mapping from already content-safe adapter fields."""
 
     return build_preview_only_payload(content_safe_response)
+
+
+def _build_preview_only_response_integration(
+    content_safe_response: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    enriched_response = dict(content_safe_response)
+    enriched_response.update(_preview_only_audit_fields(enriched_response, context))
+    adapter_mapping = build_preview_only_adapter_mapping(enriched_response)
+    enriched_response["overlap_check_result"] = _preview_only_overlap_check_result(
+        adapter_mapping
+    )
+    return build_preview_only_response_integration_payload(enriched_response)
+
+
+def _preview_only_audit_fields(
+    content_safe_response: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, int]:
+    feature_flag_enabled = context.get("feature_flag_enabled") is True
+    manual_trigger = context.get("manual_trigger") is True
+    real_kg_read_only = context.get("real_kg_read_only") is True
+    structure_read = context.get("structure_read") is True
+    structural_profile = context.get("structural_profile") is True
+    authorized_target = context.get("authorized_target")
+    authorized_target_hit = authorized_target == AUTHORIZED_REAL_KG_TARGET
+    allowlist_status = _preview_only_allowlist_status(content_safe_response)
+    validation_result = all(
+        (
+            feature_flag_enabled,
+            manual_trigger,
+            real_kg_read_only,
+            structure_read,
+            structural_profile,
+            authorized_target_hit,
+            allowlist_status > BLOCKED_ALLOWLIST_STATUS,
+        )
+    )
+
+    adapter_contract_code = PREVIEW_ONLY_ADAPTER_MAPPING_CONTRACT.get("source")
+    if not isinstance(adapter_contract_code, int) or isinstance(
+        adapter_contract_code,
+        bool,
+    ):
+        adapter_contract_code = 0
+
+    return {
+        "feature_flag_status": _preview_only_status_code(feature_flag_enabled),
+        "manual_trigger_status": _preview_only_status_code(manual_trigger),
+        "real_kg_read_only_status": _preview_only_status_code(real_kg_read_only),
+        "authorized_target_hit_status": _preview_only_status_code(
+            authorized_target_hit
+        ),
+        "allowlist_status": allowlist_status,
+        "route_contract_code": REAL_KG_ROUTE_READ_ONLY_SOURCE_CODE,
+        "adapter_contract_code": adapter_contract_code,
+        "validation_result": _preview_only_status_code(validation_result),
+    }
+
+
+def _preview_only_allowlist_status(
+    content_safe_response: Mapping[str, Any],
+) -> int:
+    for contract_field in (
+        "structural_profile_contract",
+        "structure_contract",
+    ):
+        contract = content_safe_response.get(contract_field)
+        if not isinstance(contract, Mapping):
+            continue
+        allowlist_status = contract.get("allowlist_status")
+        if (
+            isinstance(allowlist_status, int)
+            and not isinstance(allowlist_status, bool)
+            and allowlist_status >= 0
+        ):
+            return allowlist_status
+    return BLOCKED_ALLOWLIST_STATUS
+
+
+def _preview_only_status_code(value: bool) -> int:
+    return 1 if value is True else 0
+
+
+def _preview_only_overlap_check_result(
+    adapter_mapping: Mapping[str, Any],
+) -> int:
+    preview_only = adapter_mapping.get("preview_only")
+    prohibited = adapter_mapping.get("prohibited")
+    prohibited_fields: Any = ()
+    if isinstance(prohibited, Mapping):
+        prohibited_fields = prohibited.get("fields")
+
+    preview_field_names = _collect_mapping_field_names(preview_only)
+    prohibited_field_names = {
+        field_name
+        for field_name in prohibited_fields
+        if isinstance(field_name, str)
+    } if isinstance(prohibited_fields, (list, tuple)) else set()
+    return 0 if preview_field_names & prohibited_field_names else 1
+
+
+def _collect_mapping_field_names(value: Any) -> set[str]:
+    if isinstance(value, Mapping):
+        field_names: set[str] = set()
+        for key, child in value.items():
+            if isinstance(key, str):
+                field_names.add(key)
+            field_names.update(_collect_mapping_field_names(child))
+        return field_names
+
+    if isinstance(value, (list, tuple)):
+        field_names = set()
+        for child in value:
+            field_names.update(_collect_mapping_field_names(child))
+        return field_names
+
+    return set()
 
 
 def _validate_disabled_entity(
@@ -399,30 +519,39 @@ def _real_kg_route_read_only_response(
             structure_read=structure_read,
         )
         if structural_profile is True:
+            structure_metadata = {
+                "structure_read": True,
+                "structure_read_only": True,
+                "structure_contract": _real_kg_structure_contract(),
+                "structure_summary": structure_summary,
+                "structural_profile": True,
+                "structural_profile_only": True,
+                "content_read_performed": True,
+                "json_parse_performed": True,
+                "structural_profile_contract": (
+                    _real_kg_structural_profile_contract()
+                ),
+                "structural_profile_summary": (
+                    _build_structural_profile_summary_from_structure_summary(
+                        structure_summary,
+                        authorized_target=target,
+                    )
+                ),
+            }
             return _real_kg_contract_response(
                 status=PREVIEW_STATUS,
                 reason="real_kg_structural_profile_route_draft",
                 ok=True,
                 target_policy=REAL_KG_STRUCTURAL_PROFILE_TARGET_POLICY,
                 read_policy=REAL_KG_STRUCTURAL_PROFILE_READ_POLICY,
-                structure_metadata={
-                    "structure_read": True,
-                    "structure_read_only": True,
-                    "structure_contract": _real_kg_structure_contract(),
-                    "structure_summary": structure_summary,
-                    "structural_profile": True,
-                    "structural_profile_only": True,
-                    "content_read_performed": True,
-                    "json_parse_performed": True,
-                    "structural_profile_contract": (
-                        _real_kg_structural_profile_contract()
-                    ),
-                    "structural_profile_summary": (
-                        _build_structural_profile_summary_from_structure_summary(
-                            structure_summary,
-                            authorized_target=target,
-                        )
-                    ),
+                structure_metadata=structure_metadata,
+                preview_only_response_context={
+                    "feature_flag_enabled": feature_flag_enabled,
+                    "manual_trigger": manual_trigger,
+                    "real_kg_read_only": real_kg_read_only,
+                    "authorized_target": target,
+                    "structure_read": structure_read,
+                    "structural_profile": structural_profile,
                 },
             )
 
@@ -463,6 +592,7 @@ def _real_kg_contract_response(
     structure_metadata: Optional[Mapping[str, Any]] = None,
     target_policy: Optional[int] = None,
     read_policy: Optional[int] = None,
+    preview_only_response_context: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     response = _contract_mapping_response(
         status=status,
@@ -494,6 +624,11 @@ def _real_kg_contract_response(
         response.update(file_stat_metadata)
     if structure_metadata:
         response.update(structure_metadata)
+    if preview_only_response_context:
+        response["preview_only_response"] = _build_preview_only_response_integration(
+            response,
+            preview_only_response_context,
+        )
     return _whitelisted_response(response)
 
 

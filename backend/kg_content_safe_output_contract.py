@@ -15,6 +15,8 @@ CONTENT_SAFE_OUTPUT_CONTRACT_CLASSIFICATION_POLICY = 1
 CONTENT_SAFE_OUTPUT_CONTRACT_DOWNSTREAM_POLICY = 0
 PREVIEW_ONLY_ADAPTER_MAPPING_SOURCE_CODE = 100
 PREVIEW_ONLY_ADAPTER_MAPPING_POLICY = 1
+PREVIEW_ONLY_RESPONSE_INTEGRATION_SOURCE_CODE = 105
+PREVIEW_ONLY_RESPONSE_INTEGRATION_POLICY = 1
 
 PREVIEW_ONLY_TOP_LEVEL_FIELDS = (
     "structure_read_only",
@@ -71,17 +73,6 @@ AUDIT_ONLY_RESPONSE_FIELDS = (
     "adapter_contract_code",
     "validation_result",
     "overlap_check_result",
-    "feature_flag",
-    "manual_trigger_required",
-    "real_kg_read_only",
-    "authorized_target",
-    "source",
-    "contract_scope",
-    "route_name",
-    "endpoint_path",
-    "status",
-    "reason",
-    "adapter_status",
 )
 
 PROHIBITED_FIELDS = (
@@ -207,6 +198,25 @@ def build_preview_only_payload(
             "values_output": False,
         },
         "downstream_prohibitions": dict(DOWNSTREAM_PROHIBITIONS),
+    }
+
+
+def build_preview_only_response_integration_payload(
+    content_safe_response: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the KG-RUNTIME-105 preview-only response integration draft."""
+
+    adapter_mapping = build_preview_only_payload(content_safe_response)
+    return {
+        "preview_contract": {
+            "integration_source": PREVIEW_ONLY_RESPONSE_INTEGRATION_SOURCE_CODE,
+            "integration_policy": PREVIEW_ONLY_RESPONSE_INTEGRATION_POLICY,
+            "mapping_source": adapter_mapping["source"],
+            "mapping_policy": adapter_mapping["mapping_policy"],
+        },
+        "preview_only_mapping": adapter_mapping["preview_only"],
+        "audit_only_mapping": adapter_mapping["audit_only"],
+        "prohibited_mapping": tuple(adapter_mapping["prohibited"]["fields"]),
     }
 
 
