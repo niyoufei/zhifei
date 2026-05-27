@@ -66,6 +66,7 @@ KG_READ_ONLY_PREVIEW_REAL_KG_METADATA_FIELDS = (
     "structural_profile_summary",
     "structural_profile_contract",
     "preview_only_response",
+    "zdoc_preview_only_integration",
 )
 ROUTE_REASON_CODES = {
     "feature_flag_disabled": 10,

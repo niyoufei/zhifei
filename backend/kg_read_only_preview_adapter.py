@@ -15,6 +15,7 @@ from backend.kg_content_safe_output_contract import (
     build_content_safe_output_contract_mapping,
     build_preview_only_payload,
     build_preview_only_response_integration_payload,
+    build_zdoc_preview_only_payload,
     classify_content_safe_fields,
 )
 
@@ -170,6 +171,7 @@ OUTPUT_FIELD_WHITELIST = (
     "structural_profile_summary",
     "structural_profile_contract",
     "preview_only_response",
+    "zdoc_preview_only_integration",
 )
 
 ALLOWED_STRUCTURAL_PATH_POLICY = (
@@ -296,6 +298,21 @@ def _build_preview_only_response_integration(
         adapter_mapping
     )
     return build_preview_only_response_integration_payload(enriched_response)
+
+
+def build_zdoc_preview_only_adapter_payload(
+    content_safe_response: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prepare an already content-safe preview response for ZDoc internal use."""
+
+    enriched_response = dict(content_safe_response)
+    enriched_response.update(_preview_only_audit_fields(enriched_response, context))
+    adapter_mapping = build_preview_only_adapter_mapping(enriched_response)
+    enriched_response["overlap_check_result"] = _preview_only_overlap_check_result(
+        adapter_mapping
+    )
+    return build_zdoc_preview_only_payload(enriched_response)
 
 
 def _preview_only_audit_fields(
@@ -628,6 +645,12 @@ def _real_kg_contract_response(
         response["preview_only_response"] = _build_preview_only_response_integration(
             response,
             preview_only_response_context,
+        )
+        response["zdoc_preview_only_integration"] = (
+            build_zdoc_preview_only_adapter_payload(
+                response,
+                preview_only_response_context,
+            )
         )
     return _whitelisted_response(response)
 

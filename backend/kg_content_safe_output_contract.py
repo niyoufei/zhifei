@@ -17,6 +17,11 @@ PREVIEW_ONLY_ADAPTER_MAPPING_SOURCE_CODE = 100
 PREVIEW_ONLY_ADAPTER_MAPPING_POLICY = 1
 PREVIEW_ONLY_RESPONSE_INTEGRATION_SOURCE_CODE = 105
 PREVIEW_ONLY_RESPONSE_INTEGRATION_POLICY = 1
+ZDOC_PREVIEW_ONLY_INTEGRATION_SOURCE_CODE = 117
+ZDOC_PREVIEW_ONLY_INTEGRATION_POLICY = 1
+ZDOC_PREVIEW_ONLY_DEFAULT_OFF_POLICY = 1
+ZDOC_PREVIEW_ONLY_MANUAL_TRIGGER_POLICY = 1
+ZDOC_PREVIEW_ONLY_OUTPUT_CHAIN_POLICY = 0
 
 PREVIEW_ONLY_TOP_LEVEL_FIELDS = (
     "structure_read_only",
@@ -211,6 +216,30 @@ def build_preview_only_response_integration_payload(
         "preview_contract": {
             "integration_source": PREVIEW_ONLY_RESPONSE_INTEGRATION_SOURCE_CODE,
             "integration_policy": PREVIEW_ONLY_RESPONSE_INTEGRATION_POLICY,
+            "mapping_source": adapter_mapping["source"],
+            "mapping_policy": adapter_mapping["mapping_policy"],
+        },
+        "preview_only_mapping": adapter_mapping["preview_only"],
+        "audit_only_mapping": adapter_mapping["audit_only"],
+        "prohibited_mapping": tuple(adapter_mapping["prohibited"]["fields"]),
+    }
+
+
+def build_zdoc_preview_only_payload(
+    content_safe_response: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the KG-RUNTIME-117 ZDoc preview-only integration draft."""
+
+    adapter_mapping = build_preview_only_payload(content_safe_response)
+    return {
+        "preview_contract": {
+            "integration_source": PREVIEW_ONLY_RESPONSE_INTEGRATION_SOURCE_CODE,
+            "integration_policy": PREVIEW_ONLY_RESPONSE_INTEGRATION_POLICY,
+            "zdoc_integration_source": ZDOC_PREVIEW_ONLY_INTEGRATION_SOURCE_CODE,
+            "zdoc_integration_policy": ZDOC_PREVIEW_ONLY_INTEGRATION_POLICY,
+            "default_off_policy": ZDOC_PREVIEW_ONLY_DEFAULT_OFF_POLICY,
+            "manual_trigger_policy": ZDOC_PREVIEW_ONLY_MANUAL_TRIGGER_POLICY,
+            "output_chain_policy": ZDOC_PREVIEW_ONLY_OUTPUT_CHAIN_POLICY,
             "mapping_source": adapter_mapping["source"],
             "mapping_policy": adapter_mapping["mapping_policy"],
         },
