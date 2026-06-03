@@ -208,3 +208,60 @@ def test_local_trial_preview_only_route_source_does_not_call_formal_routes_or_zb
         "httpx.",
     }
     assert not {snippet for snippet in forbidden_snippets if snippet in source}
+
+
+def test_local_trial_preview_only_output_post_processing_cleans_synthetic_json():
+    result = local_trial_preview_only._post_process_preview_output(
+        "\x1b[?25lThinking...\n"
+        "Self-check: preparing final output.\n"
+        "\x1b[0m\n"
+        '{"status":"ok","test":"format_control"}',
+        target_format="json",
+    )
+
+    assert result["blocked_reasons"] == []
+    assert result["extracted_payload"]["status"] == "ok"
+    assert result["extracted_payload"]["test"] == "format_control"
+    assert "Thinking" not in result["cleaned_text"]
+    assert "Self-check" not in result["cleaned_text"]
+    assert "\x1b" not in result["cleaned_text"]
+    assert result["cleaning_applied"]["ansi_terminal_control_sequences"] is True
+    assert result["cleaning_applied"]["thinking_self_check_traces"] is True
+    assert result["cleaning_applied"]["target_structure_extracted"] is True
+
+
+def test_local_trial_preview_only_output_post_processing_extracts_markdown_and_text():
+    markdown_result = local_trial_preview_only._post_process_preview_output(
+        "Thinking...\n# Synthetic Preview\n- synthetic item",
+        target_format="markdown",
+    )
+    text_result = local_trial_preview_only._post_process_preview_output(
+        "Self-check: not part of final answer.\nSynthetic final answer.",
+        target_format="plain_text",
+    )
+
+    assert markdown_result["blocked_reasons"] == []
+    assert markdown_result["extracted_payload"].startswith("# Synthetic Preview")
+    assert markdown_result["cleaning_applied"]["target_structure_extracted"] is True
+    assert text_result["blocked_reasons"] == []
+    assert text_result["extracted_payload"] == "Synthetic final answer."
+    assert text_result["cleaning_applied"]["thinking_self_check_traces"] is True
+
+
+def test_local_trial_preview_only_output_post_processing_blocks_failure_and_can_disable():
+    blocked_result = local_trial_preview_only._post_process_preview_output(
+        "Thinking only without target payload.",
+        target_format="json",
+    )
+    disabled_result = local_trial_preview_only._post_process_preview_output(
+        "Thinking...\n" '{"status":"ok","test":"format_control"}',
+        target_format="json",
+        enabled=False,
+    )
+
+    assert "target_structure_not_found" in blocked_result["blocked_reasons"]
+    assert "post_processing_failed" in blocked_result["warnings"]
+    assert disabled_result["blocked_reasons"] == []
+    assert disabled_result["cleaning_applied"]["disabled"] is True
+    assert "post_processing_disabled" in disabled_result["warnings"]
+    assert "Thinking" in disabled_result["cleaned_text"]

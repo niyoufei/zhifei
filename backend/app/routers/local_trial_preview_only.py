@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, Body
@@ -18,6 +20,17 @@ FORMAL_FLAGS_FALSE = {
     "zbid_writeback_allowed": False,
     "output_write_allowed": False,
 }
+ANSI_TERMINAL_CONTROL_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+TRACE_MARKERS = (
+    "thinking",
+    "...done thinking",
+    "done thinking",
+    "self-check",
+    "self check",
+    "思考过程",
+    "自检",
+    "reasoning trace",
+)
 
 
 router = APIRouter(tags=["Local Trial Preview Only"])
@@ -50,14 +63,161 @@ def _append_unique(items: list[str], value: Any) -> None:
         items.append(item)
 
 
+def _strip_trace_lines(text: str) -> tuple[str, bool]:
+    kept_lines: list[str] = []
+    removed = False
+    for line in text.splitlines():
+        normalized = line.strip().lower()
+        if any(marker in normalized for marker in TRACE_MARKERS):
+            removed = True
+            continue
+        kept_lines.append(line)
+    return "\n".join(kept_lines).strip(), removed
+
+
+def _extract_json_object(text: str) -> str:
+    start = text.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1].strip()
+    return ""
+
+
+def _extract_markdown_block(text: str) -> str:
+    lines = [line.rstrip() for line in text.splitlines()]
+    first_marker = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.lstrip().startswith(("#", "-", "*", "1.", "```", "|"))
+        ),
+        None,
+    )
+    if first_marker is None:
+        return ""
+    return "\n".join(lines[first_marker:]).strip()
+
+
+def _post_process_preview_output(
+    value: Any,
+    *,
+    target_format: str = "text",
+    enabled: bool = True,
+) -> dict[str, Any]:
+    raw_text = _text(value)
+    target = _text(target_format, default="text", limit=40).lower()
+    result: dict[str, Any] = {
+        "raw_text": raw_text,
+        "cleaned_text": raw_text,
+        "extracted_payload": None,
+        "cleaning_applied": {
+            "ansi_terminal_control_sequences": False,
+            "thinking_self_check_traces": False,
+            "target_structure_extracted": False,
+            "disabled": not enabled,
+        },
+        "warnings": [],
+        "blocked_reasons": [],
+    }
+
+    if not enabled:
+        result["extracted_payload"] = raw_text
+        result["warnings"].append("post_processing_disabled")
+        return result
+
+    without_controls = ANSI_TERMINAL_CONTROL_RE.sub("", raw_text)
+    result["cleaning_applied"]["ansi_terminal_control_sequences"] = without_controls != raw_text
+    cleaned_text, traces_removed = _strip_trace_lines(without_controls)
+    result["cleaning_applied"]["thinking_self_check_traces"] = traces_removed
+    result["cleaned_text"] = cleaned_text
+
+    if target == "json":
+        candidate = _extract_json_object(cleaned_text)
+        if not candidate:
+            result["blocked_reasons"].append("target_structure_not_found")
+        else:
+            result["cleaned_text"] = candidate
+            result["cleaning_applied"]["target_structure_extracted"] = True
+            try:
+                result["extracted_payload"] = json.loads(candidate)
+            except json.JSONDecodeError:
+                result["extracted_payload"] = candidate
+                result["blocked_reasons"].append("json_parse_failed")
+    elif target == "markdown":
+        candidate = _extract_markdown_block(cleaned_text)
+        if not candidate:
+            result["blocked_reasons"].append("target_structure_not_found")
+        else:
+            result["cleaned_text"] = candidate
+            result["extracted_payload"] = candidate
+            result["cleaning_applied"]["target_structure_extracted"] = True
+    elif target in {"text", "plain", "plain_text"}:
+        if not cleaned_text:
+            result["blocked_reasons"].append("target_structure_not_found")
+        else:
+            result["extracted_payload"] = cleaned_text
+            result["cleaning_applied"]["target_structure_extracted"] = True
+    else:
+        result["warnings"].append("unsupported_target_format")
+        result["blocked_reasons"].append("target_format_not_supported")
+
+    if result["blocked_reasons"]:
+        result["warnings"].append("post_processing_failed")
+    return result
+
+
+def _post_processed_preview_metadata(
+    metadata: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw_preview_output = metadata.get(
+        "preview_output_raw_text",
+        metadata.get("preview_advisory_summary"),
+    )
+    post_processing_result = _post_process_preview_output(
+        raw_preview_output,
+        target_format=_text(metadata.get("preview_output_target_format"), default="text", limit=40),
+        enabled=_bool(metadata.get("preview_output_post_processing_enabled", True)),
+    )
+    post_processed_metadata = dict(metadata)
+    if not post_processing_result["blocked_reasons"]:
+        post_processed_metadata["preview_advisory_summary"] = _text(
+            post_processing_result.get("cleaned_text"),
+            limit=12000,
+        )
+    return post_processed_metadata, post_processing_result
+
+
 def _combined_blocked_reasons(
     preview_packet: dict[str, Any],
     validator_result: dict[str, Any],
+    output_post_processing: dict[str, Any] | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     for source in (preview_packet, validator_result):
         for reason in _list(source.get("blocked_reasons")):
             _append_unique(reasons, reason)
+    for reason in _list((output_post_processing or {}).get("blocked_reasons")):
+        _append_unique(reasons, reason)
     return reasons
 
 
@@ -150,9 +310,14 @@ async def local_trial_preview_only_route(
     request: dict[str, Any] | None = Body(default=None),
 ) -> dict[str, Any]:
     metadata = request if isinstance(request, dict) else {}
-    preview_packet = build_zdoc_zbid_preview_packet(**_packet_payload(metadata))
+    post_processed_metadata, output_post_processing = _post_processed_preview_metadata(metadata)
+    preview_packet = build_zdoc_zbid_preview_packet(**_packet_payload(post_processed_metadata))
     validator_result = validate_zbid_preview_input(preview_packet)
-    blocked_reasons = _combined_blocked_reasons(preview_packet, validator_result)
+    blocked_reasons = _combined_blocked_reasons(
+        preview_packet,
+        validator_result,
+        output_post_processing,
+    )
 
     return {
         "ok": True,
@@ -164,6 +329,9 @@ async def local_trial_preview_only_route(
         "metadata_only": True,
         "preview_packet": preview_packet,
         "validator_result": validator_result,
+        "output_post_processing": output_post_processing,
+        "cleaning_applied": output_post_processing["cleaning_applied"],
+        "warnings": output_post_processing["warnings"],
         "blocked_reasons": blocked_reasons,
         **FORMAL_FLAGS_FALSE,
         "calls_generate_route": False,
