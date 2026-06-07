@@ -220,6 +220,7 @@ def test_local_trial_preview_only_output_post_processing_cleans_synthetic_json()
     )
 
     assert result["blocked_reasons"] == []
+    assert result["post_processing_blocked"] is False
     assert result["extracted_payload"]["status"] == "ok"
     assert result["extracted_payload"]["test"] == "format_control"
     assert "Thinking" not in result["cleaned_text"]
@@ -241,9 +242,11 @@ def test_local_trial_preview_only_output_post_processing_extracts_markdown_and_t
     )
 
     assert markdown_result["blocked_reasons"] == []
+    assert markdown_result["post_processing_blocked"] is False
     assert markdown_result["extracted_payload"].startswith("# Synthetic Preview")
     assert markdown_result["cleaning_applied"]["target_structure_extracted"] is True
     assert text_result["blocked_reasons"] == []
+    assert text_result["post_processing_blocked"] is False
     assert text_result["extracted_payload"] == "Synthetic final answer."
     assert text_result["cleaning_applied"]["thinking_self_check_traces"] is True
 
@@ -260,8 +263,10 @@ def test_local_trial_preview_only_output_post_processing_blocks_failure_and_can_
     )
 
     assert "target_structure_not_found" in blocked_result["blocked_reasons"]
+    assert blocked_result["post_processing_blocked"] is True
     assert "post_processing_failed" in blocked_result["warnings"]
     assert disabled_result["blocked_reasons"] == []
+    assert disabled_result["post_processing_blocked"] is False
     assert disabled_result["cleaning_applied"]["disabled"] is True
     assert "post_processing_disabled" in disabled_result["warnings"]
     assert "Thinking" in disabled_result["cleaned_text"]

@@ -138,6 +138,7 @@ def _post_process_preview_output(
         },
         "warnings": [],
         "blocked_reasons": [],
+        "post_processing_blocked": False,
     }
 
     if not enabled:
@@ -182,6 +183,7 @@ def _post_process_preview_output(
         result["blocked_reasons"].append("target_format_not_supported")
 
     if result["blocked_reasons"]:
+        result["post_processing_blocked"] = True
         result["warnings"].append("post_processing_failed")
     return result
 
