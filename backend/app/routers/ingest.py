@@ -15,6 +15,11 @@ from backend.zhifei_autoplan.case_library_service import CASE_LIBRARY_SCOPE
 from backend.zhifei_autoplan.image_library import IMAGE_LIBRARY_SCOPE, normalize_text_list
 from backend.zhifei_autoplan.project_types import normalize_project_type
 
+try:
+    from backend.zhifei_autoplan.local_adapter_shim import normalize_input as _local_adapter_normalize_input
+except Exception:
+    _local_adapter_normalize_input = None
+
 router = APIRouter(prefix="/ingest", tags=["文档解析"])
 
 UPLOAD_DIR = Path("backend/data/uploads")
@@ -46,6 +51,34 @@ def _resolve_workspace_context(
         root = Path("backend/data")
     root.mkdir(parents=True, exist_ok=True)
     return {"session_id": str(session_id or ""), "workspace_dir": str(root)}
+
+
+def _attach_local_adapter_ingest_result(result: Dict[str, Any], project_id: str | None = None) -> Dict[str, Any]:
+    if _local_adapter_normalize_input is None or not isinstance(result, dict):
+        return result
+    try:
+        saved = result.get("saved") if isinstance(result.get("saved"), list) else []
+        source_files = [
+            {
+                "filename": rec.get("filename"),
+                "sha256": rec.get("sha256"),
+                "doc_type": rec.get("doc_type"),
+            }
+            for rec in saved
+            if isinstance(rec, dict)
+        ]
+        envelope = _local_adapter_normalize_input({"project_id": project_id, "source_files": source_files})
+        result["local_adapter"] = {
+            "status": "normalized",
+            "source_file_count": len(envelope.get("source_files") or []),
+            "missing_params": envelope.get("missing_params") or [],
+        }
+    except Exception as exc:
+        result["local_adapter"] = {
+            "status": "normalizer_error",
+            "issues": [{"code": "LOCAL_ADAPTER_INPUT_NORMALIZE_FAILED", "message": repr(exc)}],
+        }
+    return result
 
 
 def workspace_paths(workspace_dir: str | Path) -> Dict[str, Path]:
@@ -553,7 +586,7 @@ async def upload(
     description: str | None = None,
     usable: bool | str | None = True,
 ):
-    return await _handle_upload(
+    result = await _handle_upload(
         files,
         project_id=project_id,
         source_hint=source_hint,
@@ -571,6 +604,7 @@ async def upload(
         description=description,
         usable=usable,
     )
+    return _attach_local_adapter_ingest_result(result, project_id=project_id)
 
 
 @router.post("/ingest")
@@ -592,7 +626,7 @@ async def ingest(
     description: str | None = None,
     usable: bool | str | None = True,
 ):
-    return await _handle_upload(
+    result = await _handle_upload(
         files,
         project_id=project_id,
         source_hint=source_hint,
@@ -610,3 +644,4 @@ async def ingest(
         description=description,
         usable=usable,
     )
+    return _attach_local_adapter_ingest_result(result, project_id=project_id)

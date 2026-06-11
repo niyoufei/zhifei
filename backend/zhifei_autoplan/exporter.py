@@ -18,6 +18,11 @@ from docx.oxml.ns import qn
 from backend.zhifei_autoplan.media import generate_section_visuals
 from backend.zhifei_autoplan.terminology_guard import load_global_terminology, normalize_text_terminology
 
+try:
+    from backend.zhifei_autoplan.local_adapter_shim import validate_before_export as _local_adapter_validate_before_export
+except Exception:
+    _local_adapter_validate_before_export = None
+
 
 _AUTOFIX_MARK_RE = re.compile(r"【自动补充】(?P<name>[^\n]{1,80}?)(?:：|:)")
 _OVERVIEW_SECTION_RE = re.compile(r"(工程概况|项目概况)")
@@ -39,6 +44,27 @@ _GENERIC_COVER_IMAGE_STEMS = {
     "现场图",
     "现状",
 }
+
+
+def _local_adapter_export_error(export_kind: str, issues: Any) -> RuntimeError:
+    payload = {
+        "status": "blocked",
+        "export_allowed": False,
+        "export_kind": export_kind,
+        "issues": issues if isinstance(issues, list) else [{"code": "LOCAL_ADAPTER_EXPORT_BLOCKED", "message": str(issues)}],
+    }
+    return RuntimeError(json.dumps(payload, ensure_ascii=False))
+
+
+def _require_local_adapter_export_allowed(data: Dict[str, Any] | None, export_kind: str) -> None:
+    if _local_adapter_validate_before_export is None:
+        raise _local_adapter_export_error(export_kind, [{"code": "ADAPTER_IMPORT_FAILURE", "message": "local adapter shim import failed"}])
+    try:
+        gate = _local_adapter_validate_before_export(data or {})
+    except Exception as exc:
+        raise _local_adapter_export_error(export_kind, [{"code": "ADAPTER_EXPORT_GATE_FAILURE", "message": repr(exc)}])
+    if not gate.get("export_allowed"):
+        raise _local_adapter_export_error(export_kind, gate.get("issues") or [{"code": "LOCAL_ADAPTER_EXPORT_BLOCKED", "message": "export blocked"}])
 
 
 def _strip_internal_autofix_markers(text: str) -> str:
@@ -1098,6 +1124,7 @@ def _write_docx_build_report(
     media_count: int,
     quality_checks: Any = None,
 ) -> None:
+    _require_local_adapter_export_allowed({"sections": sections, "quality_checks": quality_checks}, "docx_build_report")
     report_json_path, report_log_path = _build_report_paths(output_path)
     report_json_path.parent.mkdir(parents=True, exist_ok=True)
     section_titles = [
@@ -1354,6 +1381,7 @@ def _append_quality_evidence_appendix(
 
 
 def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
+    _require_local_adapter_export_allowed(data, "docx")
     style_raw = data.get("style") or {}
     style_cfg = _normalize_style(style_raw)
     chapter_pages = data.get("chapter_pages") or {}
@@ -1832,6 +1860,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
 
 
 def export_autoplan_compare_docx(data: Dict[str, Any], output_path: str) -> str:
+    _require_local_adapter_export_allowed(data, "compare_docx")
     style_raw = data.get("style") or {}
     style_cfg = _normalize_style(style_raw)
     doc = Document()
@@ -1880,6 +1909,7 @@ def export_autoplan_compare_docx(data: Dict[str, Any], output_path: str) -> str:
 
 
 def export_autoplan_focus_xlsx(data: Dict[str, Any], output_path: str) -> str:
+    _require_local_adapter_export_allowed(data, "focus_xlsx")
     """
     Export a reviewer-friendly XLSX for BoQ focus closure:
     - focus items cross-index (chapter + drawing/std locator + closure gaps)
@@ -2823,6 +2853,7 @@ def export_autoplan_docx_from_file(json_path: str, output_path: str) -> str:
 
 
 def export_scoring_evidence_overview_xlsx(data: Dict[str, Any], output_path: str) -> str:
+    _require_local_adapter_export_allowed(data, "scoring_evidence_overview_xlsx")
     """
     评分点覆盖与证据引用总览
     - 评分点覆盖: score_mapping item_cards
@@ -3061,6 +3092,7 @@ def export_scoring_evidence_overview_xlsx(data: Dict[str, Any], output_path: str
 
 
 def export_expert_review_brief_docx(data: Dict[str, Any], output_path: str) -> str:
+    _require_local_adapter_export_allowed(data, "expert_review_brief_docx")
     """
     10%专家复核提要版
     仅保留: 工期关键节点、资源峰值、重大安质风控、加分策略触发摘要。
