@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from typing import List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Header, BackgroundTasks
 from pydantic import BaseModel
@@ -26,10 +26,71 @@ from backend.zhifei_autoplan.plan_store import save_plan, load_plan
 from backend.zhifei_autoplan.optimizer import optimize_sections
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
 
+try:
+    from backend.zhifei_autoplan.local_adapter_shim import (
+        block_export_response as _local_adapter_block_export_response,
+        map_output as _local_adapter_map_output,
+    )
+except Exception:
+    _local_adapter_block_export_response = None
+    _local_adapter_map_output = None
+
 router = APIRouter(prefix="/autoplan", tags=["Zhifei AutoPlan"])
 JWT_SECRET = os.environ.get("ZF_JWT_SECRET", "change-me")
 JWT_ALG = "HS256"
 COST_PER_JOB = int(os.environ.get("ZF_JOB_COST", "1"))
+
+
+def _local_adapter_issue(code: str, message: str, *, variant_index: int | None = None) -> Dict[str, Any]:
+    issue: Dict[str, Any] = {"code": code, "message": message, "severity": "error"}
+    if variant_index is not None:
+        issue["variant_index"] = variant_index
+    return issue
+
+
+def _local_adapter_block(issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if _local_adapter_block_export_response is not None:
+        return _local_adapter_block_export_response(issues)
+    return {"ok": False, "status": "blocked", "export_allowed": False, "issues": issues}
+
+
+def _local_adapter_gate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if _local_adapter_map_output is None:
+        return {
+            "export_allowed": False,
+            "results": results,
+            "issues": [_local_adapter_issue("ADAPTER_IMPORT_FAILURE", "local adapter shim import failed")],
+        }
+    issues: List[Dict[str, Any]] = []
+    gated_results: List[Dict[str, Any]] = []
+    for idx, result in enumerate(results):
+        if not isinstance(result, dict):
+            issues.append(_local_adapter_issue("ADAPTER_OUTPUT_INVALID", "variant output is not a dict", variant_index=idx))
+            continue
+        try:
+            envelope = _local_adapter_map_output(result)
+        except Exception as exc:
+            issues.append(_local_adapter_issue("ADAPTER_HOOK_FAILURE", repr(exc), variant_index=idx))
+            continue
+        adapter_view = {
+            "status": envelope.get("status"),
+            "export_allowed": bool(envelope.get("export_allowed")),
+            "issues": envelope.get("issues") or [],
+            "hard_gates": envelope.get("hard_gates") or [],
+            "evidence_summary": envelope.get("evidence_summary") or {},
+        }
+        result["local_adapter"] = adapter_view
+        if not adapter_view["export_allowed"]:
+            issues.extend(
+                issue if isinstance(issue, dict) else _local_adapter_issue("LOCAL_ADAPTER_EXPORT_BLOCKED", str(issue), variant_index=idx)
+                for issue in adapter_view["issues"]
+            )
+        gated_results.append(result)
+    return {"export_allowed": not issues, "results": gated_results, "issues": issues}
+
+
+def _local_adapter_job_error(issues: List[Dict[str, Any]]) -> str:
+    return json.dumps(_local_adapter_block(issues), ensure_ascii=False)
 
 
 def _load_field_alias() -> dict:
@@ -512,6 +573,10 @@ async def generate_plan(req: GenerateRequest, authorization: str | None = Header
     for vid in variant_ids:
         payload["variant_id"] = int(vid)
         results.append(await run_autoplan(payload))
+    gate = _local_adapter_gate_results(results)
+    if not gate["export_allowed"]:
+        return _local_adapter_block(gate["issues"])
+    results = gate["results"]
     out_path = Path("build") / "autoplan_generated.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -589,6 +654,16 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
             for vid in variant_ids:
                 payload["variant_id"] = int(vid)
                 results.append(asyncio.run(run_autoplan(payload)))
+            gate = _local_adapter_gate_results(results)
+            if not gate["export_allowed"]:
+                update_job(
+                    job_id,
+                    status="failed",
+                    result=_local_adapter_block(gate["issues"]),
+                    error=_local_adapter_job_error(gate["issues"]),
+                )
+                return
+            results = gate["results"]
             out_json = Path("build") / f"autoplan_{job_id}.json"
             out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
             docx_files = []
