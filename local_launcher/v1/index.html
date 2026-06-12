@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    >
+    <title>ZDoc 本地启动器 V1 受控启动骨架</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="shell" aria-labelledby="page-title">
+      <header class="hero">
+        <p class="eyebrow">V1 受控启动 UI 骨架</p>
+        <h1 id="page-title">ZDoc 本地启动器 V1 受控启动骨架</h1>
+        <p class="status-line">
+          当前状态：
+          <strong>仅界面骨架 / 未授权启动</strong>
+        </p>
+      </header>
+
+      <section class="notice" aria-label="安全提示">
+        <h2>安全提示</h2>
+        <p>本页面不启动服务、不访问接口、不运行 Ollama、不触发生成、导出或写回。</p>
+      </section>
+
+      <section class="panel" aria-labelledby="baseline-heading">
+        <h2 id="baseline-heading">基础占位信息</h2>
+        <dl class="status-grid">
+          <div>
+            <dt>当前版本</dt>
+            <dd>V1 受控启动 UI 骨架</dd>
+          </div>
+          <div>
+            <dt>仓库路径</dt>
+            <dd>仅占位</dd>
+          </div>
+          <div>
+            <dt>当前分支</dt>
+            <dd>仅占位</dd>
+          </div>
+          <div>
+            <dt>HEAD / 标签</dt>
+            <dd>仅占位</dd>
+          </div>
+          <div>
+            <dt>ZDoc 后端状态</dt>
+            <dd>占位，未启动，V1 UI 骨架不检查</dd>
+          </div>
+          <div>
+            <dt>ZDoc 前端状态</dt>
+            <dd>占位，未启动，V1 UI 骨架不检查</dd>
+          </div>
+          <div>
+            <dt>服务端口状态</dt>
+            <dd>仅占位，未检查</dd>
+          </div>
+          <div>
+            <dt>日志路径</dt>
+            <dd>仅占位，未读取</dd>
+          </div>
+          <div>
+            <dt>配置状态</dt>
+            <dd>仅占位，未读取</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="panel highlight" aria-labelledby="preflight-heading">
+        <h2 id="preflight-heading">启动前检查区</h2>
+        <dl class="check-list">
+          <div>
+            <dt>仓库基线检查</dt>
+            <dd>仅占位</dd>
+          </div>
+          <div>
+            <dt>工作区 clean 检查</dt>
+            <dd>仅占位</dd>
+          </div>
+          <div>
+            <dt>后端启动命令授权</dt>
+            <dd>未授权</dd>
+          </div>
+          <div>
+            <dt>前端启动命令授权</dt>
+            <dd>未授权</dd>
+          </div>
+          <div>
+            <dt>端口检查授权</dt>
+            <dd>未授权</dd>
+          </div>
+          <div>
+            <dt>日志读取授权</dt>
+            <dd>未授权</dd>
+          </div>
+          <div>
+            <dt>接口健康检查授权</dt>
+            <dd>未授权</dd>
+          </div>
+          <div>
+            <dt>Ollama</dt>
+            <dd>默认禁止</dd>
+          </div>
+          <div>
+            <dt>generation / export / write-back</dt>
+            <dd>默认禁止</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="panel" aria-labelledby="service-heading">
+        <h2 id="service-heading">服务状态区</h2>
+        <dl class="status-grid compact">
+          <div>
+            <dt>ZDoc 后端</dt>
+            <dd>未启动 / V1 UI 骨架不检查</dd>
+          </div>
+          <div>
+            <dt>ZDoc 前端</dt>
+            <dd>未启动 / V1 UI 骨架不检查</dd>
+          </div>
+          <div>
+            <dt>接口</dt>
+            <dd>未访问</dd>
+          </div>
+          <div>
+            <dt>端口</dt>
+            <dd>未检查</dd>
+          </div>
+          <div>
+            <dt>日志</dt>
+            <dd>未读取</dd>
+          </div>
+          <div>
+            <dt>配置</dt>
+            <dd>未读取</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="panel" aria-labelledby="stop-heading">
+        <h2 id="stop-heading">停止服务区</h2>
+        <p>停止服务能力仅为占位。后端、前端和相关进程的停止方式必须由后续 runtime 节点单独授权。</p>
+      </section>
+
+      <section class="panel warning" aria-labelledby="exception-heading">
+        <h2 id="exception-heading">异常提示区</h2>
+        <p>如需处理端口冲突、服务残留、日志异常或配置异常，必须进入后续单独授权节点。本 UI 骨架不执行恢复动作。</p>
+      </section>
+
+      <section class="panel warning" aria-labelledby="prohibited-heading">
+        <h2 id="prohibited-heading">禁止能力提示区</h2>
+        <ul>
+          <li>禁止启动或停止服务。</li>
+          <li>禁止访问接口或执行健康检查。</li>
+          <li>禁止运行 Ollama 或调用模型。</li>
+          <li>禁止进入 trial、真实使用或 50 人正式使用。</li>
+          <li>禁止 generation、export、write-back 和 ZBid 写回。</li>
+          <li>禁止读取真实知识图谱、真实项目资料和实例内容。</li>
+        </ul>
+      </section>
+
+      <section class="panel" aria-labelledby="actions-heading">
+        <h2 id="actions-heading">禁用操作区</h2>
+        <div class="action-list">
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">启动 ZDoc 后端</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">启动 ZDoc 前端</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">停止 ZDoc 后端</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">停止 ZDoc 前端</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">检查端口</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">查看日志</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">健康检查</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">打开仅预览</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">运行 Ollama</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">生成文档</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">导出文档</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">写回 ZBid</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">读取知识图谱</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+          <div class="action-row">
+            <button type="button" disabled aria-disabled="true">加载项目资料</button>
+            <span>V1 UI 骨架中已禁用，需后续单独授权。</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="next-note" aria-label="下一步授权提示">
+        <h2>下一步授权提示</h2>
+        <p>真正 runtime preflight、受控启动、受控停止、日志读取、端口检查和接口健康检查，必须由后续单独节点授权。</p>
+      </section>
+    </main>
+  </body>
+</html>
