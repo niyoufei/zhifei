@@ -1,38 +1,38 @@
-# ZDoc Local Launcher V0 Safety Shell
+# ZDoc 本地启动器 V0 安全外壳
 
-This directory contains the V0 safety shell skeleton for the ZDoc local launcher.
+本目录包含 ZDoc 本地启动器的 V0 静态安全外壳。
 
-V0 is a static safety shell only. It does not start, stop, probe, read, write, generate, export, or call any runtime component.
+V0 只是安全外壳，不是可启动系统。当前中文化仅为易用性修正，不代表开放任何运行能力。
 
-## Boundary
+## 安全边界
 
-- V0 does not start ZDoc services.
-- V0 does not access endpoints.
-- V0 does not run Ollama or any model command.
-- V0 does not enter trial, preview-only trial, real use, or production use.
-- V0 does not trigger generation, export, or write-back.
-- V0 does not read real KG content.
-- V0 does not read real project materials.
-- V0 does not read output, job, or export content.
-- V0 does not include an executable launcher script.
-- V0 does not create a packaged App.
+- V0 不启动 ZDoc 服务。
+- V0 不访问 endpoint 或任何接口。
+- V0 不运行 Ollama 或任何模型命令。
+- V0 不进入 trial、仅预览试用、真实使用或生产使用。
+- V0 不触发 generation、export 或 write-back。
+- V0 不读取真实知识图谱。
+- V0 不读取真实项目资料。
+- V0 不读取 output、job 或 export 内容。
+- V0 不包含可执行启动脚本。
+- V0 不创建真正 App 包。
 
-## Files
+## 文件
 
-- `index.html`: static local safety-shell page with status placeholders.
-- `styles.css`: static local styles only.
-- `launcher-state.json`: static placeholder state with all runtime permissions disabled.
+- `index.html`：静态本地安全外壳页面，展示状态占位信息。
+- `styles.css`：仅包含静态样式。
+- `launcher-state.json`：静态占位状态，所有运行权限均保持禁用。
 
-## Controls
+## 控件
 
-All action buttons are disabled by default. The disabled controls are visible only to show future V1/V2 boundary categories.
+所有动作按钮默认禁用。这些按钮只用于展示后续 V1/V2 可能出现的能力分类。
 
-V0 cannot start ZDoc, stop ZDoc, open preview, run Ollama, generate documents, export documents, write back to ZBid, read KG, load project files, or open output/job/export content.
+V0 不能启动 ZDoc、停止 ZDoc、打开预览、运行 Ollama、生成文档、导出文档、写回 ZBid、读取知识图谱、加载项目资料，或打开输出 / 任务 / 导出目录。
 
-## Future Boundary
+## 后续边界
 
-V1 may connect controlled startup only after a separate named authorization gate defines exact commands, ownership, ports, logs, stop behavior, rollback behavior, and verification limits.
+后续 V1 只有在单独授权后，才可以接入受控启动。该授权必须明确命令、归属、端口、日志、停止方式、回滚方式和验证边界。
 
-Until that separate authorization exists, this V0 safety shell remains static, inert, and placeholder-only.
+在单独授权前，本 V0 安全外壳保持静态、不可运行、仅占位。
 
-After LOCAL-LAUNCHER-003 is completed, the result must wait for ChatGPT master-control review. The workflow must stop and must not enter the next node automatically.
+完成本节点后必须等待 ChatGPT 总控师审核。流程必须停止，不得自动进入下一节点。
