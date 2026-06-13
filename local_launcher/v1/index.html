@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    >
+    <title>ZDoc 本地 AI 文档系统控制台</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">V1 专业静态控制台</p>
+          <h1 id="page-title">ZDoc 本地 AI 文档系统控制台</h1>
+          <p class="safety-line">不启动服务、不访问接口、不运行 Ollama、不触发生成、导出或写回。</p>
+        </div>
+        <div class="auth-badge" aria-label="当前授权状态">
+          <span>当前状态</span>
+          <strong>未授权启动 / 仅静态展示</strong>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar" aria-label="控制台导航">
+          <p class="sidebar-title">导航</p>
+          <nav>
+            <a href="#overview">总览</a>
+            <a href="#preflight">启动前检查</a>
+            <a href="#service-status">服务状态</a>
+            <a href="#logs-ports-config">日志与端口</a>
+            <a href="#prohibited">禁止能力</a>
+            <a href="#next-authorization">后续授权</a>
+          </nav>
+        </aside>
+
+        <main class="content" aria-label="V1 专业静态控制台内容">
+          <section class="status-strip" aria-label="当前授权状态区">
+            <div>
+              <span>版本</span>
+              <strong>V1 专业静态控制台</strong>
+            </div>
+            <div>
+              <span>授权</span>
+              <strong>未授权启动</strong>
+            </div>
+            <div>
+              <span>运行边界</span>
+              <strong>仅静态展示</strong>
+            </div>
+          </section>
+
+          <section class="panel" id="overview" aria-labelledby="overview-heading">
+            <div class="section-heading">
+              <p class="section-kicker">Overview</p>
+              <h2 id="overview-heading">总览区</h2>
+            </div>
+            <dl class="metric-grid">
+              <div>
+                <dt>当前模式</dt>
+                <dd>V1 专业静态控制台</dd>
+              </div>
+              <div>
+                <dt>授权状态</dt>
+                <dd>未授权启动</dd>
+              </div>
+              <div>
+                <dt>服务状态</dt>
+                <dd>未启动 / 未检查</dd>
+              </div>
+              <div>
+                <dt>接口状态</dt>
+                <dd>未访问</dd>
+              </div>
+              <div>
+                <dt>Ollama</dt>
+                <dd>默认禁止</dd>
+              </div>
+              <div>
+                <dt>生成 / 导出 / 写回</dt>
+                <dd>默认禁止</dd>
+              </div>
+              <div>
+                <dt>真实 KG</dt>
+                <dd>默认禁止</dd>
+              </div>
+              <div>
+                <dt>项目资料</dt>
+                <dd>默认禁止</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="panel" id="preflight" aria-labelledby="preflight-heading">
+            <div class="section-heading">
+              <p class="section-kicker">Preflight</p>
+              <h2 id="preflight-heading">启动前检查区</h2>
+            </div>
+            <dl class="check-grid">
+              <div>
+                <dt>仓库基线检查</dt>
+                <dd>占位，未执行</dd>
+              </div>
+              <div>
+                <dt>工作区 clean 检查</dt>
+                <dd>占位，未执行</dd>
+              </div>
+              <div>
+                <dt>后端启动授权</dt>
+                <dd>未授权</dd>
+              </div>
+              <div>
+                <dt>前端启动授权</dt>
+                <dd>未授权</dd>
+              </div>
+              <div>
+                <dt>端口检查授权</dt>
+                <dd>未授权</dd>
+              </div>
+              <div>
+                <dt>日志读取授权</dt>
+                <dd>未授权</dd>
+              </div>
+              <div>
+                <dt>endpoint 健康检查授权</dt>
+                <dd>未授权</dd>
+              </div>
+              <div>
+                <dt>runtime preflight</dt>
+                <dd>未进入</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="panel" id="service-status" aria-labelledby="service-heading">
+            <div class="section-heading">
+              <p class="section-kicker">Service</p>
+              <h2 id="service-heading">服务状态区</h2>
+            </div>
+            <dl class="metric-grid compact-grid">
+              <div>
+                <dt>ZDoc 后端</dt>
+                <dd>未启动 / V1 静态控制台不检查</dd>
+              </div>
+              <div>
+                <dt>ZDoc 前端</dt>
+                <dd>未启动 / V1 静态控制台不检查</dd>
+              </div>
+              <div>
+                <dt>endpoint</dt>
+                <dd>未访问</dd>
+              </div>
+              <div>
+                <dt>端口</dt>
+                <dd>未检查</dd>
+              </div>
+              <div>
+                <dt>日志</dt>
+                <dd>未读取</dd>
+              </div>
+              <div>
+                <dt>配置</dt>
+                <dd>未读取</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="panel" id="logs-ports-config" aria-labelledby="ops-heading">
+            <div class="section-heading">
+              <p class="section-kicker">Placeholders</p>
+              <h2 id="ops-heading">日志、端口、配置占位区</h2>
+            </div>
+            <div class="placeholder-list">
+              <article>
+                <h3>日志占位</h3>
+                <p>未读取。日志读取需要后续单独授权。</p>
+              </article>
+              <article>
+                <h3>端口占位</h3>
+                <p>未检查。端口检查需要后续单独授权。</p>
+              </article>
+              <article>
+                <h3>配置占位</h3>
+                <p>未读取。配置读取需要后续单独授权。</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="panel danger-panel" id="prohibited" aria-labelledby="prohibited-heading">
+            <div class="section-heading">
+              <p class="section-kicker">Boundary</p>
+              <h2 id="prohibited-heading">禁止能力提示区</h2>
+            </div>
+            <ul class="rule-list">
+              <li>禁止启动服务。</li>
+              <li>禁止访问接口。</li>
+              <li>禁止运行 Ollama。</li>
+              <li>禁止进入 trial。</li>
+              <li>禁止生成文档。</li>
+              <li>禁止导出文档。</li>
+              <li>禁止写回 ZBid。</li>
+              <li>禁止读取真实知识图谱。</li>
+              <li>禁止读取真实项目资料。</li>
+              <li>禁止写 output/job/export。</li>
+            </ul>
+          </section>
+
+          <section class="panel" aria-labelledby="disabled-actions-heading">
+            <div class="section-heading">
+              <p class="section-kicker">Disabled actions</p>
+              <h2 id="disabled-actions-heading">禁用操作区</h2>
+            </div>
+            <div class="action-list">
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">启动 ZDoc 后端</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">启动 ZDoc 前端</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">停止 ZDoc 后端</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">停止 ZDoc 前端</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">检查端口</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">查看日志</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">健康检查</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">打开仅预览</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">运行 Ollama</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">生成文档</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">导出文档</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">写回 ZBid</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">读取知识图谱</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+              <div class="action-row">
+                <button type="button" disabled aria-disabled="true">加载项目资料</button>
+                <span>当前未授权，V1 专业静态控制台中保持禁用。</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel review-panel" id="next-authorization" aria-labelledby="next-heading">
+            <div class="section-heading">
+              <p class="section-kicker">Authorization</p>
+              <h2 id="next-heading">后续授权提示区</h2>
+            </div>
+            <ul class="authorization-list">
+              <li>进入 runtime preflight 需要单独授权。</li>
+              <li>启动服务需要单独授权。</li>
+              <li>停止服务需要单独授权。</li>
+              <li>endpoint 健康检查需要单独授权。</li>
+              <li>日志读取需要单独授权。</li>
+              <li>任何 generation/export/write-back 仍不在本阶段授权范围内。</li>
+            </ul>
+          </section>
+
+          <footer class="audit-footer" aria-label="底部审计状态区">
+            <span>HEAD/tag：占位，未在页面执行检查</span>
+            <span>no-runtime</span>
+            <span>no-endpoint</span>
+            <span>no-Ollama</span>
+            <span>no-trial</span>
+            <span>no-generation/export/write-back</span>
+            <span>下一节点：等待审核，不进入 LOCAL-LAUNCHER-018</span>
+          </footer>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>
