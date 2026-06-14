@@ -3,108 +3,114 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ZDoc 本地启动器静态 no-op 页面</title>
+    <title>ZDoc 本地启动器静态 no-op 骨架</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
     <main class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">LOCAL-LAUNCHER-005</p>
-          <h1>ZDoc 本地启动器静态页面</h1>
-          <p class="lede">仅展示本地启动器的阅读骨架、mock 状态和未授权提示；所有按钮保持 no-op。</p>
+          <p class="eyebrow">LOCAL-LAUNCHER-008</p>
+          <h1>ZDoc 本地启动器静态 no-op 骨架</h1>
+          <p class="lede">仅展示本地启动器的阅读骨架、mock 状态和未授权提示；所有按钮、状态与说明均保持 disabled / no-op，不代表真实运行能力。</p>
         </div>
         <div class="badge-stack" aria-label="当前模式">
-          <span class="mode-badge">静态 no-op</span>
-          <span class="mode-badge is-muted">未连接真实服务</span>
+          <span class="mode-badge">static skeleton</span>
+          <span class="mode-badge is-muted">mock / disabled</span>
+          <span class="mode-badge is-warning">no real action</span>
         </div>
       </header>
 
       <section class="notice notice-safe" aria-label="安全边界提示">
-        <strong>安全边界：当前页面只做静态展示。</strong>
-        <span>不会启动、停止或检测服务；不会读取日志、端口、配置、KG、项目资料或招标文件；不会访问 endpoint、执行 Ollama、触发 generation/export/write-back。</span>
+        <strong>安全边界：当前版本仅为静态 no-op 骨架。</strong>
+        <span>不会启动、停止、重启或检测服务；不会访问 endpoint 或执行 HTTP request；不会执行 Ollama、读取真实资料、读取日志正文或触发 generation/export/write-back。</span>
+        <ul class="boundary-list">
+          <li>不读取真实 KG、项目资料、招标文件、`.env`、secrets、tokens、credentials。</li>
+          <li>不读取 output/job/export 正文，不写入 output/job/export。</li>
+          <li>不进入 trial、真实使用或 50 人正式使用；真实能力必须等待后续独立 gate 授权。</li>
+        </ul>
       </section>
 
       <section class="grid" aria-label="mock 状态">
         <article class="status-card">
           <span class="status-dot status-idle"></span>
           <div>
-            <p class="status-label">mock only</p>
+            <p class="status-label">mock / disabled</p>
             <h2>ZDoc 服务状态</h2>
-            <p>页面仅显示静态状态，不执行启动、停止或状态检查。</p>
+            <p>静态展示为未启动；页面不启动、不停止、不重启，也不执行真实状态检查。</p>
           </div>
         </article>
 
         <article class="status-card">
           <span class="status-dot status-idle"></span>
           <div>
-            <p class="status-label">mock only</p>
+            <p class="status-label">mock / disabled</p>
             <h2>Ollama server 状态</h2>
-            <p>页面不启动、不停止、不调用模型服务。</p>
+            <p>静态展示为未连接；页面不启动、不停止、不重启，也不调用模型服务。</p>
           </div>
         </article>
 
         <article class="status-card">
           <span class="status-dot status-locked"></span>
           <div>
-            <p class="status-label status-label-locked">locked</p>
+            <p class="status-label status-label-locked">read disabled</p>
             <h2>KG 读取状态</h2>
-            <p>未接入真实 KG，也不读取任何 KG 正文。</p>
+            <p>未接入真实 KG，不读取 KG 正文、metadata、proof、manifest 或 sample 实例。</p>
           </div>
         </article>
 
         <article class="status-card">
           <span class="status-dot status-locked"></span>
           <div>
-            <p class="status-label status-label-locked">locked</p>
+            <p class="status-label status-label-locked">read blocked</p>
             <h2>项目资料读取状态</h2>
-            <p>未读取真实项目资料、招标文件或输出正文。</p>
+            <p>不读取真实项目资料、招标文件、secrets、tokens、credentials、日志正文或输出正文。</p>
           </div>
         </article>
 
         <article class="status-card wide-card">
           <span class="status-dot status-locked"></span>
           <div>
-            <p class="status-label status-label-locked">blocked</p>
+            <p class="status-label status-label-locked">write blocked</p>
             <h2>generation / export / write-back 状态</h2>
-            <p>未授权、未触发、未写入 output/job/export。</p>
+            <p>未授权、未触发、未写入；当前页面不是 trial、真实使用或 50 人正式使用入口。</p>
           </div>
         </article>
       </section>
 
       <section class="controls" aria-label="本地启动控制壳层占位">
-        <button type="button" data-noop="启动提示" aria-disabled="true">启动提示</button>
-        <button type="button" data-noop="停止提示" aria-disabled="true">停止提示</button>
-        <button type="button" data-noop="状态提示" aria-disabled="true">状态提示</button>
-        <button type="button" data-noop="日志提示" aria-disabled="true">日志提示</button>
-        <button type="button" data-noop="端口提示" aria-disabled="true">端口提示</button>
-        <button type="button" data-noop="配置提示" aria-disabled="true">配置提示</button>
+        <button type="button" data-noop="启动 no-op" aria-disabled="true">启动 no-op</button>
+        <button type="button" data-noop="停止 no-op" aria-disabled="true">停止 no-op</button>
+        <button type="button" data-noop="状态 no-op" aria-disabled="true">状态 no-op</button>
+        <button type="button" data-noop="日志 no-op" aria-disabled="true">日志 no-op</button>
+        <button type="button" data-noop="端口 no-op" aria-disabled="true">端口 no-op</button>
+        <button type="button" data-noop="配置 no-op" aria-disabled="true">配置 no-op</button>
       </section>
 
       <p id="actionNotice" class="notice notice-action" role="status" aria-live="polite">
-        当前为静态 no-op 页面：点击按钮只更新这条提示，不执行真实动作。
+        当前为静态 no-op 页面：点击按钮只更新这条提示，不执行真实启动、停止、检查、读取、访问或写入。
       </p>
 
       <section class="panel-area" aria-label="静态说明区">
         <div class="tabs" role="tablist" aria-label="说明切换">
           <button type="button" class="tab is-active" data-panel-target="boundary" role="tab" aria-selected="true">边界说明</button>
           <button type="button" class="tab" data-panel-target="nextGate" role="tab" aria-selected="false">后续授权</button>
-          <button type="button" class="tab" data-panel-target="mock" role="tab" aria-selected="false">Mock 状态</button>
+          <button type="button" class="tab" data-panel-target="mock" role="tab" aria-selected="false">Mock / disabled</button>
         </div>
 
         <article class="panel is-active" id="boundary" role="tabpanel">
           <h2>静态边界</h2>
-          <p>本页面只展示静态 UI、mock 状态和未授权提示；不包含真实启动控制、状态检测、日志读取、端口检查、配置检查或数据接入。</p>
+          <p>本页面只展示静态 UI、mock 状态和未授权提示；不包含真实启动控制、状态检测、日志读取、端口检查、配置检查、endpoint 访问、HTTP request、Ollama 调用或数据接入。</p>
         </article>
 
         <article class="panel" id="nextGate" role="tabpanel" hidden>
           <h2>后续授权说明</h2>
-          <p>如需接入任何真实动作，必须另设授权节点，重新声明允许范围、禁止范围、阻断条件和验收方式。</p>
+          <p>如需接入任何真实动作，必须另设授权节点，重新声明允许范围、禁止范围、阻断条件和验收方式；未授权前不得进入 trial、真实使用或 50 人正式使用。</p>
         </article>
 
         <article class="panel" id="mock" role="tabpanel" hidden>
           <h2>Mock 状态快照</h2>
-          <p>以下内容为页面内置 mock 状态，仅用于静态展示，不读取真实配置文件。</p>
+          <p>以下内容为页面内置 mock / disabled 状态，仅用于静态展示，不读取真实配置文件、资料正文、日志正文或输出正文。</p>
           <pre id="mockConfig" aria-label="mock 配置内容"></pre>
         </article>
       </section>

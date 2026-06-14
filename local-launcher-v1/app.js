@@ -2,11 +2,15 @@
   const mockConfig = {
     appMode: "static-skeleton",
     zdocService: "not-started-by-this-app",
+    runtimeAccess: "disabled",
+    networkAccess: "disabled",
     kgAccess: "disabled",
     projectDataAccess: "disabled",
+    secretAccess: "disabled",
     generation: "disabled",
     export: "disabled",
-    writeBack: "disabled"
+    writeBack: "disabled",
+    trialUse: "blocked"
   };
 
   const actionNotice = document.getElementById("actionNotice");
@@ -14,12 +18,12 @@
   const noopButtons = document.querySelectorAll("[data-noop]");
   const tabButtons = document.querySelectorAll("[data-panel-target]");
   const noopMessages = {
-    启动提示: "静态 no-op：未授权启动；页面只保留按钮位置。",
-    停止提示: "静态 no-op：未授权停止；页面不控制任何进程。",
-    状态提示: "静态 no-op：未授权检测状态；页面只显示 mock 状态。",
-    日志提示: "静态 no-op：未授权读取日志；页面不读取任何正文。",
-    端口提示: "静态 no-op：未授权检查端口；页面不探测运行环境。",
-    配置提示: "静态 no-op：未授权读取配置；页面只展示内置 mock 状态。"
+    "启动 no-op": "静态 no-op：启动入口已禁用；页面只更新提示，不启动任何服务。",
+    "停止 no-op": "静态 no-op：停止入口已禁用；页面不停止或重启任何进程。",
+    "状态 no-op": "静态 no-op：状态检查已禁用；页面只展示 mock 状态。",
+    "日志 no-op": "静态 no-op：日志读取已禁用；页面不读取任何正文。",
+    "端口 no-op": "静态 no-op：端口检查已禁用；页面不探测运行环境。",
+    "配置 no-op": "静态 no-op：配置读取已禁用；页面只展示内置 mock 状态。"
   };
 
   if (mockConfigView) {

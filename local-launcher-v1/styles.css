@@ -10,6 +10,7 @@
   --accent-strong: #234f52;
   --warn: #8a5a11;
   --warn-soft: #fff3d7;
+  --warn-line: #ead19b;
   --locked: #8b3a3a;
   --locked-soft: #f8e7e7;
   --idle: #3f6d8b;
@@ -98,6 +99,12 @@ h2 {
   color: var(--muted);
 }
 
+.mode-badge.is-warning {
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
 .notice {
   margin: 22px 0;
   border: 1px solid var(--line);
@@ -116,7 +123,7 @@ h2 {
 
 .notice-safe {
   background: var(--warn-soft);
-  border-color: #ead19b;
+  border-color: var(--warn-line);
   color: var(--warn);
 }
 
@@ -124,6 +131,14 @@ h2 {
   background: var(--accent-soft);
   color: var(--accent-strong);
   font-weight: 700;
+}
+
+.boundary-list {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding-left: 20px;
+  color: var(--warn);
 }
 
 .grid {
@@ -214,6 +229,14 @@ button:hover {
 
 .controls button {
   padding: 0 10px;
+}
+
+.controls button::after {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  content: "disabled";
 }
 
 .panel-area {

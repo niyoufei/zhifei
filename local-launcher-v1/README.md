@@ -1,17 +1,22 @@
-# ZDoc 本地启动器静态 no-op 页面
+# ZDoc 本地启动器静态 no-op 骨架
 
-本目录仅为本地启动器静态 UI 骨架。`LOCAL-LAUNCHER-005` 仅优化页面可读性、静态文案、样式层级和 no-op 提示，不接入任何真实动作。
+本目录当前版本仅为本地启动器静态 UI 骨架。`LOCAL-LAUNCHER-008` 只强化 README 与页面用户引导的安全边界说明，不接入任何真实运行能力。
 
-当前边界：
+当前静态边界：
 
-1. 当前不启动服务。
-2. 当前不访问 endpoint。
-3. 当前不执行 Ollama 命令。
-4. 当前不读取真实 KG。
-5. 当前不读取真实项目资料。
-6. 当前不触发 generation/export/write-back。
-7. 当前不进入 trial。
-8. 当前不创建真正 App 安装包。
-9. 当前不读取真实日志、端口、配置、招标文件、secrets、output/job/export 正文。
+1. 当前版本不启动 ZDoc 服务。
+2. 当前版本不启动、停止或重启 Ollama server。
+3. 当前版本不访问 endpoint。
+4. 当前版本不执行 HTTP request。
+5. 当前版本不读取真实 KG。
+6. 当前版本不读取真实项目资料或招标文件。
+7. 当前版本不读取 `.env`、secrets、tokens、credentials。
+8. 当前版本不读取 output/job/export 正文或日志正文。
+9. 当前版本不触发 generation/export/write-back。
+10. 当前版本不进入 trial、真实使用或 50 人正式使用。
+11. 当前版本不创建真正 App 安装包。
+12. 所有按钮、状态标签和提示语均为 mock / disabled / no-op 展示。
 
-页面按钮仅更新静态提示，不执行启动、停止、状态检查、日志读取、端口检查或配置读取。如需任何真实启动控制或真实数据接入，必须另设授权节点，并在授权节点中重新声明允许范围、禁止范围、阻断条件和验收方式。
+页面按钮仅更新静态提示，不执行启动、停止、重启、状态检查、日志读取、端口检查、配置读取、endpoint 访问、HTTP request、Ollama 调用、真实资料读取、generation、export 或 write-back。
+
+后续任何真实运行能力必须经过独立 gate、独立授权和独立安全审查；未获明确授权前，本静态骨架不得被解释为 trial、真实使用或 50 人正式使用入口。
