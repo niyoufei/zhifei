@@ -8,6 +8,10 @@
   --accent: #1f6feb;
   --warning-bg: #fff4d6;
   --warning-border: #d59b00;
+  --hold-bg: #eef7ff;
+  --hold-border: #4b8fd8;
+  --no-go-bg: #fff0f0;
+  --no-go-border: #d55c5c;
   --disabled-bg: #e3e8ee;
   --disabled-ink: #6d7884;
 }
@@ -124,6 +128,52 @@ h2 {
   margin: 0;
   overflow-wrap: anywhere;
   font-weight: 650;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  min-height: 120px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+}
+
+.summary-card h3 {
+  margin: 0 0 8px;
+  font-size: 0.96rem;
+}
+
+.summary-card p {
+  margin-bottom: 0;
+  color: var(--muted);
+}
+
+.hold-panel {
+  border-color: var(--hold-border);
+  background: var(--hold-bg);
+}
+
+.no-go-panel {
+  border-color: var(--no-go-border);
+  background: var(--no-go-bg);
+}
+
+.check-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.check-list li {
+  padding-left: 2px;
+  overflow-wrap: anywhere;
 }
 
 .action-list {

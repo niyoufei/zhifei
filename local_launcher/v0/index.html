@@ -3,10 +3,6 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-    >
     <title>ZDoc 本地启动器 V0 安全外壳</title>
     <link rel="stylesheet" href="styles.css">
   </head>
@@ -91,6 +87,51 @@
         </dl>
       </section>
 
+      <section class="panel" aria-labelledby="runtime-shell-heading">
+        <h2 id="runtime-shell-heading">静态运行占位</h2>
+        <div class="summary-grid">
+          <article class="summary-card">
+            <h3>日志占位</h3>
+            <p>未读取日志，仅展示后续阶段可能承载的状态区域。</p>
+          </article>
+          <article class="summary-card">
+            <h3>端口占位</h3>
+            <p>未检查端口，不代表服务在线或可连接。</p>
+          </article>
+          <article class="summary-card">
+            <h3>OpenAPI smoke 占位</h3>
+            <p>framework smoke route 仅作为文字状态保留，本 V0 页面不访问。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel hold-panel" aria-labelledby="hold-heading">
+        <h2 id="hold-heading">业务 endpoint HOLD</h2>
+        <ul class="check-list">
+          <li>file-list route 保持 HOLD，不得直接验证。</li>
+          <li>file-read route 保持 HOLD，不得直接验证。</li>
+          <li>真实资料正文保持 HOLD，沙盒方案完成前不得读取。</li>
+        </ul>
+      </section>
+
+      <section class="panel no-go-panel" aria-labelledby="no-go-heading">
+        <h2 id="no-go-heading">NO-GO 边界</h2>
+        <ul class="check-list">
+          <li>出现脚本、外链、自动跳转或可提交表单。</li>
+          <li>出现 endpoint 访问动作或真实资料路径。</li>
+          <li>出现可执行权限变化或运行能力放开。</li>
+        </ul>
+      </section>
+
+      <section class="panel" aria-labelledby="operator-heading">
+        <h2 id="operator-heading">操作员检查清单</h2>
+        <ul class="check-list">
+          <li>确认本页面仍为静态安全外壳。</li>
+          <li>确认所有按钮继续保持禁用。</li>
+          <li>确认后续建设需要单独授权。</li>
+        </ul>
+      </section>
+
       <section class="panel" aria-labelledby="actions-heading">
         <h2 id="actions-heading">已禁用操作</h2>
         <div class="action-list">
@@ -139,7 +180,7 @@
 
       <section class="stop-note" aria-label="完成后停止边界">
         <h2>完成后停止边界</h2>
-        <p>创建并回报本 V0 安全外壳后必须停止，不得自动进入下一节点。</p>
+        <p>创建并回报本 V0 安全外壳后必须停止，不得自动进入下一节点。10L 后续阶段必须单独授权。</p>
       </section>
     </main>
   </body>
