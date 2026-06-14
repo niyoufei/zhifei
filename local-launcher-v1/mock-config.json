@@ -1,9 +1,42 @@
 {
-  "appMode": "static-skeleton",
-  "zdocService": "not-started-by-this-app",
-  "kgAccess": "disabled",
-  "projectDataAccess": "disabled",
-  "generation": "disabled",
-  "export": "disabled",
-  "writeBack": "disabled"
+  "appMode": "professional-static-console",
+  "node": "LOCAL-LAUNCHER-017-R1",
+  "authorization": "not-authorized-to-run",
+  "runtimeMode": "no-service-no-endpoint",
+  "permissions": {
+    "serviceLifecycle": false,
+    "networkAccess": false,
+    "endpointAccess": false,
+    "ollamaAccess": false,
+    "modelInference": false,
+    "promptInput": false,
+    "realKgRead": false,
+    "projectDataRead": false,
+    "secretRead": false,
+    "logBodyRead": false,
+    "outputJobExportRead": false,
+    "generation": false,
+    "export": false,
+    "writeBack": false,
+    "trialUse": false,
+    "realUse": false,
+    "fiftyPersonUse": false
+  },
+  "status": {
+    "zdocService": "mock-not-started",
+    "ollamaServer": "mock-not-connected",
+    "logs": "read-blocked",
+    "ports": "check-disabled",
+    "config": "real-config-read-disabled"
+  },
+  "guardrails": [
+    "no-service",
+    "no-endpoint",
+    "no-ollama",
+    "no-model-inference",
+    "no-real-data",
+    "no-generation-export-write-back",
+    "no-trial",
+    "no-real-use"
+  ]
 }
