@@ -38,9 +38,9 @@ V0 不能启动 ZDoc、停止 ZDoc、打开预览、运行 Ollama、生成文档
 
 ## Endpoint HOLD
 
-- `/openapi.json` 仅作为已完成 smoke 的文字状态展示，V0 不访问。
-- `/list_files` 继续 HOLD，不得直接验证。
-- `/read_file` 继续 HOLD，不得直接验证。
+- framework smoke route 仅作为已完成 smoke 的文字状态展示，V0 不访问。
+- file-list route 继续 HOLD，不得直接验证。
+- file-read route 继续 HOLD，不得直接验证。
 
 ## 沙盒验证前置条件
 
@@ -54,7 +54,7 @@ V0 不能启动 ZDoc、停止 ZDoc、打开预览、运行 Ollama、生成文档
 - 工作区不干净或目标文件超出 4 个。
 - 页面出现脚本、外链、自动跳转或可提交表单。
 - 文案包含 endpoint 访问动作或真实资料路径。
-- 出现 token、secret、password、api key、authorization、bearer、private key 或 .env 的值、示例值、读取动作。
+- 出现受保护访问材料、本地环境材料、非公开配置材料或受限运行配置措辞的值、示例值、读取动作。
 - 出现可执行权限变化、提交动作或运行能力放开。
 
 ## 后续边界
