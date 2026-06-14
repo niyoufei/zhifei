@@ -7,10 +7,13 @@
   --line: #d8dfd5;
   --accent: #2f6f73;
   --accent-soft: #e4f0ef;
+  --accent-strong: #234f52;
   --warn: #8a5a11;
   --warn-soft: #fff3d7;
   --locked: #8b3a3a;
+  --locked-soft: #f8e7e7;
   --idle: #3f6d8b;
+  --idle-soft: #e8f1f6;
 }
 
 * {
@@ -37,7 +40,7 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
-  padding-bottom: 20px;
+  padding-bottom: 22px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -56,8 +59,8 @@ p {
 }
 
 h1 {
-  margin-bottom: 0;
-  font-size: clamp(28px, 4vw, 44px);
+  margin-bottom: 10px;
+  font-size: 40px;
   line-height: 1.1;
 }
 
@@ -66,8 +69,22 @@ h2 {
   font-size: 18px;
 }
 
-.mode-badge {
+.lede {
+  max-width: 700px;
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.badge-stack {
+  display: flex;
   flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.mode-badge {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 7px 12px;
@@ -77,11 +94,24 @@ h2 {
   font-weight: 700;
 }
 
+.mode-badge.is-muted {
+  color: var(--muted);
+}
+
 .notice {
   margin: 22px 0;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 14px 16px;
+  padding: 16px 18px;
+}
+
+.notice strong,
+.notice span {
+  display: block;
+}
+
+.notice strong {
+  margin-bottom: 6px;
 }
 
 .notice-safe {
@@ -92,7 +122,8 @@ h2 {
 
 .notice-action {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 700;
 }
 
 .grid {
@@ -106,7 +137,7 @@ h2 {
   grid-template-columns: 14px 1fr;
   gap: 12px;
   align-items: start;
-  min-height: 118px;
+  min-height: 132px;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 18px;
@@ -120,6 +151,23 @@ h2 {
 .status-card p {
   margin-bottom: 0;
   color: var(--muted);
+}
+
+.status-label {
+  display: inline-block;
+  margin-bottom: 8px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--idle-soft);
+  color: var(--idle);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.status-label-locked {
+  background: var(--locked-soft);
+  color: var(--locked);
 }
 
 .status-dot {
@@ -164,6 +212,10 @@ button:hover {
   cursor: not-allowed;
 }
 
+.controls button {
+  padding: 0 10px;
+}
+
 .panel-area {
   margin-top: 22px;
   border-top: 1px solid var(--line);
@@ -196,8 +248,12 @@ button:hover {
 }
 
 .panel p {
-  margin-bottom: 0;
+  margin-bottom: 12px;
   color: var(--muted);
+}
+
+.panel p:last-child {
+  margin-bottom: 0;
 }
 
 pre {
@@ -213,6 +269,14 @@ pre {
 @media (max-width: 760px) {
   .topbar {
     flex-direction: column;
+  }
+
+  .badge-stack {
+    align-items: flex-start;
+  }
+
+  h1 {
+    font-size: 30px;
   }
 
   .grid,
