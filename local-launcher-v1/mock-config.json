@@ -1,0 +1,9 @@
+{
+  "appMode": "static-skeleton",
+  "zdocService": "not-started-by-this-app",
+  "kgAccess": "disabled",
+  "projectDataAccess": "disabled",
+  "generation": "disabled",
+  "export": "disabled",
+  "writeBack": "disabled"
+}
