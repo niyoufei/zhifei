@@ -1,0 +1,70 @@
+{
+  "metadata": {
+    "purpose": "P0 sanitized demo project for local readiness and smoke planning",
+    "sanitized_demo": true,
+    "real_business_material": false,
+    "external_network_required": false,
+    "secret_required": false,
+    "safe_to_commit": true
+  },
+  "topic": "Sanitized municipal drainage pump station construction organization design demo",
+  "project_id": "demo-p0-sanitized-municipal-drainage",
+  "variants": 1,
+  "generate_images": false,
+  "remediate_mode": "template",
+  "timeout_sec": 300,
+  "poll_sec": 2,
+  "requirements": [
+    "Use only this sanitized metadata and built-in templates.",
+    "Keep every risk item in risk-control-verification form.",
+    "Do not require external network, secrets, or real project files."
+  ],
+  "plan": {
+    "outline": [
+      "Project overview",
+      "Construction deployment",
+      "Key and difficult works",
+      "Quality control measures",
+      "Safety and civilized construction",
+      "Final review checklist"
+    ],
+    "style": {
+      "paper": "A4",
+      "font": {
+        "eastAsia": "SimSun",
+        "latin": "Times New Roman",
+        "size_pt": 12,
+        "line_spacing": 1.5
+      },
+      "margins_cm": {
+        "top": 2.54,
+        "right": 2.5,
+        "bottom": 2.54,
+        "left": 3.0
+      }
+    },
+    "chapter_pages": {
+      "Project overview": 1,
+      "Construction deployment": 1,
+      "Key and difficult works": 1,
+      "Quality control measures": 1,
+      "Safety and civilized construction": 1,
+      "Final review checklist": 1
+    },
+    "chapter_requirements": {
+      "Key and difficult works": [
+        "Mention dewatering, traffic organization, and rainy-season continuity as synthetic demo risks."
+      ],
+      "Final review checklist": [
+        "List missing evidence, scoring response coverage, and export readiness as manual checks."
+      ]
+    }
+  },
+  "params_override": {
+    "qse_defaults": {
+      "PM10_limit": "<=150ug/m3",
+      "day_noise_limit": "<=70dB",
+      "night_noise_limit": "<=55dB"
+    }
+  }
+}
