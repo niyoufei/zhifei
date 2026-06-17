@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ZDoc 本地 AI 文档系统控制台 - 静态 no-op</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="控制台导航">
+        <div class="brand-block">
+          <p class="eyebrow">LOCAL-LAUNCHER-017-R1</p>
+          <h1>ZDoc 本地 AI 文档系统控制台</h1>
+          <p>V1 专业静态控制台</p>
+        </div>
+
+        <nav class="side-nav" aria-label="静态视图切换">
+          <button type="button" class="nav-item is-active" data-panel-target="overview" aria-controls="panel-overview" aria-selected="true">总览</button>
+          <button type="button" class="nav-item" data-panel-target="precheck" aria-controls="panel-precheck" aria-selected="false">启动前检查</button>
+          <button type="button" class="nav-item" data-panel-target="services" aria-controls="panel-services" aria-selected="false">服务状态</button>
+          <button type="button" class="nav-item" data-panel-target="logs" aria-controls="panel-logs" aria-selected="false">日志与端口</button>
+          <button type="button" class="nav-item" data-panel-target="forbidden" aria-controls="panel-forbidden" aria-selected="false">禁止能力</button>
+          <button type="button" class="nav-item" data-panel-target="handoff" aria-controls="panel-handoff" aria-selected="false">后续授权</button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <span class="state-pill state-pill-muted">static skeleton</span>
+          <span class="state-pill state-pill-danger">no runtime</span>
+        </div>
+      </aside>
+
+      <section class="workspace" aria-label="静态控制台内容">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">未授权启动 / 仅静态展示</p>
+            <h2>专业 UI 升级执行 gate 静态页</h2>
+            <p class="lede">页面只展示 mock 状态、disabled 控件和 no-op 提示；不会启动服务、访问 endpoint、执行 Ollama、读取真实资料或触发 generation/export/write-back。</p>
+          </div>
+          <div class="top-actions" aria-label="当前授权状态">
+            <span class="state-pill">mock</span>
+            <span class="state-pill state-pill-muted">disabled</span>
+            <span class="state-pill state-pill-warning">review required</span>
+          </div>
+        </header>
+
+        <section class="status-strip" aria-label="边界状态">
+          <article>
+            <span>授权状态</span>
+            <strong>未授权启动</strong>
+          </article>
+          <article>
+            <span>服务方式</span>
+            <strong>无服务</strong>
+          </article>
+          <article>
+            <span>网络访问</span>
+            <strong>无 endpoint</strong>
+          </article>
+          <article>
+            <span>模型能力</span>
+            <strong>无 Ollama</strong>
+          </article>
+        </section>
+
+        <section class="notice notice-boundary" aria-label="安全边界提示">
+          <div>
+            <strong>当前版本是纯前端静态 no-op 控制台。</strong>
+            <span>按钮点击只更新页面提示，不执行真实启动、停止、重启、状态检查、日志读取、端口探测、配置读取、HTTP request、模型推理或写回。</span>
+          </div>
+          <ul>
+            <li>不读取真实 KG、项目资料、招标文件、`.env`、secrets、tokens、credentials。</li>
+            <li>不读取 output/job/export 正文或日志正文，不写入 output/job/export。</li>
+            <li>不进入 trial、真实使用或 50 人正式使用。</li>
+          </ul>
+        </section>
+
+        <section class="content-grid">
+          <div class="main-column">
+            <section class="card-grid" aria-label="mock 状态卡片">
+              <article class="metric-card">
+                <span class="dot dot-idle"></span>
+                <p>系统状态</p>
+                <h3>静态展示</h3>
+                <span class="caption">无真实状态检查</span>
+              </article>
+              <article class="metric-card">
+                <span class="dot dot-locked"></span>
+                <p>启动权限</p>
+                <h3>未授权</h3>
+                <span class="caption">所有动作保持 disabled</span>
+              </article>
+              <article class="metric-card">
+                <span class="dot dot-review"></span>
+                <p>数据读取</p>
+                <h3>已阻断</h3>
+                <span class="caption">无 KG / 项目资料读取</span>
+              </article>
+              <article class="metric-card">
+                <span class="dot dot-locked"></span>
+                <p>输出写回</p>
+                <h3>已禁用</h3>
+                <span class="caption">无 generation/export/write-back</span>
+              </article>
+            </section>
+
+            <section class="control-panel" aria-label="禁用控制区">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">no-op controls</p>
+                  <h3>控制壳层占位</h3>
+                </div>
+                <span class="state-pill state-pill-danger">disabled</span>
+              </div>
+              <div class="control-grid">
+                <button type="button" data-noop="启动" aria-disabled="true">启动</button>
+                <button type="button" data-noop="停止" aria-disabled="true">停止</button>
+                <button type="button" data-noop="刷新状态" aria-disabled="true">刷新状态</button>
+                <button type="button" data-noop="读取日志" aria-disabled="true">读取日志</button>
+                <button type="button" data-noop="检查端口" aria-disabled="true">检查端口</button>
+                <button type="button" data-noop="查看配置" aria-disabled="true">查看配置</button>
+              </div>
+              <p id="actionNotice" class="notice notice-action" role="status" aria-live="polite">
+                当前为静态 no-op：点击控件只更新本提示，不执行真实动作。
+              </p>
+            </section>
+
+            <section class="panel-stack" aria-label="静态面板">
+              <article class="panel is-active" id="panel-overview" role="tabpanel">
+                <div class="section-heading">
+                  <div>
+                    <p class="eyebrow">overview</p>
+                    <h3>总览</h3>
+                  </div>
+                  <span class="state-pill">static</span>
+                </div>
+                <p>本控制台只表达本地启动器未来可能具备的管理界面形态。当前没有运行链路、没有 endpoint、没有模型调用、没有真实资料接入。</p>
+                <div class="timeline">
+                  <div><span>1</span><strong>静态骨架</strong><small>已形成 mock / disabled / no-op 表达。</small></div>
+                  <div><span>2</span><strong>专业化界面</strong><small>017-R1 仅优化视觉层级与边界文案。</small></div>
+                  <div><span>3</span><strong>后续复核</strong><small>018 需另获授权后才可审查本次静态改动。</small></div>
+                </div>
+              </article>
+
+              <article class="panel" id="panel-precheck" role="tabpanel" hidden>
+                <div class="section-heading">
+                  <div>
+                    <p class="eyebrow">precheck placeholder</p>
+                    <h3>启动前检查</h3>
+                  </div>
+                  <span class="state-pill state-pill-warning">placeholder</span>
+                </div>
+                <ul class="check-list">
+                  <li><span class="check-mark muted"></span>服务进程检查：disabled，不探测。</li>
+                  <li><span class="check-mark muted"></span>端口占用检查：disabled，不读取。</li>
+                  <li><span class="check-mark muted"></span>配置完整性检查：disabled，不访问真实配置。</li>
+                  <li><span class="check-mark muted"></span>模型可用性检查：disabled，不执行 Ollama。</li>
+                </ul>
+              </article>
+
+              <article class="panel" id="panel-services" role="tabpanel" hidden>
+                <div class="section-heading">
+                  <div>
+                    <p class="eyebrow">service placeholders</p>
+                    <h3>服务状态</h3>
+                  </div>
+                  <span class="state-pill state-pill-muted">mock only</span>
+                </div>
+                <div class="table-like" aria-label="mock 服务状态">
+                  <div><span>ZDoc 服务</span><strong>未启动 by static page</strong></div>
+                  <div><span>Ollama server</span><strong>未连接 by static page</strong></div>
+                  <div><span>运行环境</span><strong>未检测 by static page</strong></div>
+                </div>
+              </article>
+
+              <article class="panel" id="panel-logs" role="tabpanel" hidden>
+                <div class="section-heading">
+                  <div>
+                    <p class="eyebrow">logs and ports</p>
+                    <h3>日志与端口</h3>
+                  </div>
+                  <span class="state-pill state-pill-danger">read blocked</span>
+                </div>
+                <p>日志正文、端口状态、output/job/export 正文均不读取。本区域仅作为未来授权前的静态占位，不含路径、命令或真实入口。</p>
+              </article>
+
+              <article class="panel" id="panel-forbidden" role="tabpanel" hidden>
+                <div class="section-heading">
+                  <div>
+                    <p class="eyebrow">guardrails</p>
+                    <h3>禁止能力</h3>
+                  </div>
+                  <span class="state-pill state-pill-danger">blocked</span>
+                </div>
+                <ul class="boundary-list">
+                  <li>禁止服务启动、停止、重启、状态检查。</li>
+                  <li>禁止 endpoint、HTTP request、curl、localhost、127.0.0.1。</li>
+                  <li>禁止 Ollama、模型推理、prompt 输入。</li>
+                  <li>禁止真实 KG、项目资料、招标文件、secrets、tokens、credentials。</li>
+                  <li>禁止 generation/export/write-back、trial、真实使用和 50 人正式使用。</li>
+                </ul>
+              </article>
+
+              <article class="panel" id="panel-handoff" role="tabpanel" hidden>
+                <div class="section-heading">
+                  <div>
+                    <p class="eyebrow">handoff</p>
+                    <h3>后续授权</h3>
+                  </div>
+                  <span class="state-pill state-pill-warning">not authorized</span>
+                </div>
+                <p>未获总控师下一步明确授权，不得进入 LOCAL-LAUNCHER-018。后续 review gate 只能复核本次静态 UI 是否仍保持 no-op / mock / disabled 边界。</p>
+              </article>
+            </section>
+          </div>
+
+          <aside class="safety-rail" aria-label="安全边界侧栏">
+            <section class="rail-card">
+              <p class="eyebrow">current boundary</p>
+              <h3>不可解释为真实运行</h3>
+              <p>当前页面没有真实启动链路，也没有对任何后端、模型、数据或导出路径的访问。</p>
+            </section>
+
+            <section class="rail-card">
+              <p class="eyebrow">mock state</p>
+              <h3>内置状态快照</h3>
+              <pre id="mockConfig" aria-label="mock 配置内容"></pre>
+            </section>
+
+            <section class="rail-card">
+              <p class="eyebrow">audit footer</p>
+              <h3>017-R1 静态改动</h3>
+              <p>仅优化 5 个静态文件与新增 017-R1 docs；不修改既有 docs，不新增服务脚本或依赖。</p>
+            </section>
+          </aside>
+        </section>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
