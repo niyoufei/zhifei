@@ -171,6 +171,24 @@ python3 scripts/smoke_api.py
 python3 scripts/smoke_api.py http://127.0.0.1:8000
 ```
 
+### P0 静态就绪检查（不启动服务）
+
+P0 readiness 是 local-only static gate，只读取本地仓库结构、现有 git 元数据、脱敏 demo 配置和路径级风险类别；不启动 runtime、不访问 endpoint、不读取真实资料正文或密钥。
+
+```bash
+python3 scripts/p0_readiness.py --json
+```
+
+状态含义：
+- `PASS_P0_READINESS_STATIC`：静态边界检查通过，可提交给后续受控 runtime/endpoint gate 复核。
+- `NO-GO_P0_READINESS_STATIC`：存在 `failures` 阻断原因，需要先处理或由总控确认。
+
+常见阻断：
+- `worktree_not_clean`：当前工作区仍有未提交修改或未跟踪文件；P0 实施文件尚未提交/收口时出现该 NO-GO 属预期门控。
+- clean worktree 后，重新运行 `python3 scripts/p0_readiness.py --json`，确认 `status` 为 `PASS_P0_READINESS_STATIC` 且 `failures` 为空。
+
+脱敏 demo 位于 `projects/_demo_p0/project.json`。后续如需访问 `/p0/readiness`、`/health` 或运行端到端 smoke，必须进入单独 runtime/endpoint gate。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
