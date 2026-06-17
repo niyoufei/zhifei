@@ -20,6 +20,19 @@
     # 快速接口冒烟（项目根目录执行）
     python3 scripts/smoke_api.py http://127.0.0.1:8000
 
+## 3.1) P0 静态就绪检查（不启动服务）
+    cd "$HOME/Desktop/文档生成系统"
+    python3 scripts/p0_readiness.py
+    python3 scripts/p0_readiness.py --json
+
+该检查只读取仓库结构、现有 git 元数据、脱敏 demo 配置和路径级风险类别；不启动服务、不访问 endpoint、不读取真实资料正文或密钥。
+
+判读：
+- `PASS_P0_READINESS_STATIC` 表示静态边界检查通过，仍不代表允许 merge、runtime、launcher 或 endpoint。
+- `NO-GO_P0_READINESS_STATIC` 表示存在 `failures` 阻断原因。
+- `worktree_not_clean` 表示当前工作区仍 dirty；实施文件未提交/收口时出现该结果是预期门控。
+- clean worktree 后重新运行 `python3 scripts/p0_readiness.py --json`；验收条件是 `status=PASS_P0_READINESS_STATIC` 且 `failures=[]`。
+
 ## 4) 审计与清理（Autoplan 审计日志与导出）
 
 - **审计日志路径**：`backend/data/audit/autoplan.jsonl`（Autoplan 相关操作会追加）
