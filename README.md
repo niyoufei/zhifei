@@ -189,6 +189,14 @@ python3 scripts/p0_readiness.py --json
 
 脱敏 demo 位于 `projects/_demo_p0/project.json`。后续如需访问 `/p0/readiness`、`/health` 或运行端到端 smoke，必须进入单独 runtime/endpoint gate。
 
+### Phase 1 本地基线索引（不启动服务）
+
+Phase 1 local-only 当前基线为 `a241e68603d1be06c4b9412043760a5536f9c328`。本地入口、readiness 分层、demo、launcher、测试与禁止边界已记录在：
+
+- `docs/openclaw-zhifei-doc-phase1-local-baseline.md`
+
+该索引只说明本地自治建设起点，不代表允许 runtime、endpoint、launcher、push 或 held config 正文审查。`local-launcher-v1/mock-config.json` 仍保持 metadata-only hold，任何内容读取、launcher smoke 或 endpoint smoke 都必须另开单独 gate。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
