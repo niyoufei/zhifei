@@ -33,6 +33,20 @@
 - `worktree_not_clean` 表示当前工作区仍 dirty；实施文件未提交/收口时出现该结果是预期门控。
 - clean worktree 后重新运行 `python3 scripts/p0_readiness.py --json`；验收条件是 `status=PASS_P0_READINESS_STATIC` 且 `failures=[]`。
 
+## 3.2) Phase 1A 本地基线索引（不启动服务）
+
+Phase 1 local-only baseline index:
+
+    docs/openclaw-zhifei-doc-phase1-local-baseline.md
+
+P0 readiness 复核命令：
+
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_p0_readiness
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/p0_readiness.py
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/p0_readiness.py --json
+
+Phase 1A 只允许索引和文档闭合；不代表允许 push、runtime、launcher、endpoint、真实资料读取或 held config 内容读取。`local-launcher-v1/mock-config.json` 仍保持 metadata-only hold，任何正文审查或 smoke 都必须另开 gate。
+
 ## 4) 审计与清理（Autoplan 审计日志与导出）
 
 - **审计日志路径**：`backend/data/audit/autoplan.jsonl`（Autoplan 相关操作会追加）
