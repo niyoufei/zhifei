@@ -260,6 +260,21 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_business_input_
 
 Phase 2A 通过后，只能建议进入 `PHASE2B_SCORING_RESPONSE_MATRIX_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
 
+### Phase 2B scoring response matrix（静态写门）
+
+Phase 2B 在 Phase 2A synthetic business input 基础上生成 deterministic scoring response matrix，覆盖评分项、响应策略、工程对象、证据锚点、青天 AI 评标友好字段、缺项诊断和审计状态。该阶段仍只使用 synthetic fixture；不得读取真实招标文件、图纸、清单、客户资料正文，不得读取 `local-launcher-v1/mock-config.json` 正文。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_scoring_response_matrix
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_scoring_response_matrix.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2b-scoring-response-matrix.md`
+
+Phase 2B 通过后，只能建议进入 `PHASE2C_RISK_OBJECT_BINDING_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
