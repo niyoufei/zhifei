@@ -56,6 +56,7 @@ Phase 1A 只允许索引和文档闭合；不代表允许 push、runtime、launc
     docs/openclaw-zhifei-doc-phase1b-demo-workflow.md
     docs/openclaw-zhifei-doc-phase1c-readiness-delivery-index.md
     docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md
+    docs/openclaw-zhifei-doc-phase1e-static-test-matrix.md
 
 静态复核命令：
 
@@ -66,12 +67,15 @@ Phase 1A 只允许索引和文档闭合；不代表允许 push、runtime、launc
     PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_demo_workflow.py --json
     PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase1_delivery_index
     PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_delivery_index.py --json
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase1_static_matrix
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_static_matrix.py --json
 
 clean worktree 后的预期状态：
 
 - P0: `PASS_P0_READINESS_STATIC`
 - Phase 1B: `PASS_PHASE1B_DEMO_WORKFLOW_STATIC`
 - Phase 1C: `PASS_PHASE1C_READINESS_DELIVERY_INDEX_STATIC`
+- Phase 1E: `PASS_PHASE1E_STATIC_TEST_MATRIX`
 
 常见诊断：
 
@@ -82,7 +86,7 @@ clean worktree 后的预期状态：
 - `p0_readiness_static_pass`：先回到 P0 JSON 的 `failures` 列表排查。
 - `phase1b_static_demo_workflow_pass`：先回到 Phase 1B JSON 的 `failures` 列表排查。
 
-Phase 1D 当前成果是 docs / RUNBOOK closure。Phase 1E 后续入口是 static test matrix；该入口仍不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文或读取真实业务资料。
+Phase 1D 当前成果是 docs / RUNBOOK closure。Phase 1E 当前成果是 static test matrix；该入口仍不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文或读取真实业务资料。Phase 1E 通过后，下一步只能建议 `PHASE1_LOCAL_STATIC_BASELINE_CLOSEOUT_READONLY`，不得自动进入 Phase 2 代码建设。
 
 硬闸门关系：
 
