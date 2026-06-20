@@ -133,7 +133,7 @@ Still forbidden in Phase 1A:
 - Phase 1D docs closure gate: close README, RUNBOOK, and docs wording across P0, Phase 1, runtime, endpoint,
   launcher, and config content review gates; see `docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md`.
 - Phase 1E static test matrix gate: build a no-runtime test matrix and failure diagnostic checklist after
-  Phase 1D docs / RUNBOOK closure.
+  Phase 1D docs / RUNBOOK closure; see `docs/openclaw-zhifei-doc-phase1e-static-test-matrix.md`.
 
 Every follow-up gate requires a separate ChatGPT approval and must restate allowed files, forbidden actions,
 test commands, acceptance criteria, rollback or stop conditions, and sensitive-content handling.
