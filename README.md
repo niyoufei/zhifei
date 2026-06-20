@@ -209,6 +209,18 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_demo_workflow.p
 
 - `docs/openclaw-zhifei-doc-phase1b-demo-workflow.md`
 
+### Phase 1C readiness / delivery index（不启动服务）
+
+Phase 1C 汇总 P0 与 Phase 1B 的静态证据，形成本地 readiness 分层、delivery entry 索引、产物索引规则与禁止边界矩阵。该命令不生成 Markdown/HTML/Word/Excel/PPTX/PDF 业务产物，不写 runtime `build/` 结果：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_delivery_index.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase1c-readiness-delivery-index.md`
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
