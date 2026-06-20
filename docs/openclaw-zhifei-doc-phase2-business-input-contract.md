@@ -101,11 +101,18 @@ secret bodies, or refresh remotes.
 
 ## Phase 2B Relationship
 
-Phase 2B should build the scoring item extraction and response matrix on top of
-this static contract. Phase 2B must remain synthetic-only until a later gate
-authorizes broader data use. It must not infer permission for runtime, endpoint,
-launcher, held config content review, real document reads, export, formal writeback,
-push, fetch, or merge.
+Phase 2B builds the scoring item extraction and response matrix on top of this
+static contract. The Phase 2B contract and validator live in:
+
+- `docs/openclaw-zhifei-doc-phase2b-scoring-response-matrix.md`
+- `projects/_demo_phase2_scoring_response_matrix/project.json`
+- `backend/zhifei_autoplan/phase2_scoring_response_matrix.py`
+- `scripts/phase2_scoring_response_matrix.py`
+
+Phase 2B must remain synthetic-only until a later gate authorizes broader data
+use. It must not infer permission for runtime, endpoint, launcher, held config
+content review, real document reads, export, formal writeback, push, fetch, or
+merge.
 
 Suggested next gate after Phase 2A local commit:
 
