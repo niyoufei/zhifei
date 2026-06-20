@@ -245,6 +245,21 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_static_matrix.p
 
 Phase 1E 通过后，可进入 `PHASE1_LOCAL_STATIC_BASELINE_CLOSEOUT_READONLY` 只读 closeout 计划；不得自动进入 Phase 2 代码建设。
 
+### Phase 2A business input contract（静态写门）
+
+Phase 2A 建立 Phase 2 业务引擎的静态输入契约、脱敏合成样例和 no-runtime 校验器。该阶段只使用 synthetic fixture、mock metadata 和手工构造测试；不得读取真实招标文件、图纸、清单、客户资料正文，不得读取 `local-launcher-v1/mock-config.json` 正文。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_business_input_contract
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_business_input_contract.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2-business-input-contract.md`
+
+Phase 2A 通过后，只能建议进入 `PHASE2B_SCORING_RESPONSE_MATRIX_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
