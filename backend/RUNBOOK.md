@@ -97,6 +97,35 @@ Phase 1D 当前成果是 docs / RUNBOOK closure。Phase 1E 当前成果是 stati
 
 以上 gate 互相独立；P0、Phase 1B、Phase 1C 或 Phase 1D 通过，都不等于 runtime、endpoint、launcher 或 config content review 已获准。
 
+## 3.4) Phase 2A business input contract（静态写门）
+
+Phase 2A 入口：
+
+    docs/openclaw-zhifei-doc-phase2-business-input-contract.md
+    projects/_demo_phase2_business_input/project.json
+    backend/zhifei_autoplan/phase2_business_input_contract.py
+    scripts/phase2_business_input_contract.py
+
+静态复核命令：
+
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_business_input_contract
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_business_input_contract.py
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_business_input_contract.py --json
+
+clean worktree 后的预期状态：
+
+- Phase 2A: `PASS_PHASE2A_BUSINESS_INPUT_CONTRACT_STATIC`
+
+常见诊断：
+
+- `synthetic_fixture_missing`：恢复 Phase 2A synthetic fixture。
+- `required_nested_fields_present`：补齐业务输入契约必填字段。
+- `no_real_doc_body_like_fields`：删除正文类字段，不得塞入真实招标/图纸/清单/客户资料正文。
+- `no_secret_like_fields`：删除 credential-like 字段或值。
+- `forbidden_action_flags_false`：runtime、endpoint、launcher、held config body、真实资料正文、secret、remote sync、export、formal writeback 标记必须为 false。
+
+Phase 2A 只建立业务输入契约、脱敏合成样例、静态 validator/CLI 和测试。不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文、读取真实业务资料正文、导出成果、正式写回、push/fetch/merge。下一阶段只能建议 `PHASE2B_SCORING_RESPONSE_MATRIX_PLAN_OR_WRITE_GATE`，不得自动进入 Phase 2B。
+
 ## 4) 审计与清理（Autoplan 审计日志与导出）
 
 - **审计日志路径**：`backend/data/audit/autoplan.jsonl`（Autoplan 相关操作会追加）
