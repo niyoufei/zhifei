@@ -233,7 +233,17 @@ Phase 1D 仍是 docs-only gate：不 push、不 fetch/pull/merge/rebase、不启
 
 ### Phase 1E static test matrix（后续入口）
 
-Phase 1E 应建立 no-runtime / no-endpoint 静态测试矩阵，覆盖 P0、Phase 1B、Phase 1C、docs 链接、clean-worktree PASS、dirty-worktree NO-GO、失败诊断和硬闸门 negative proof。进入 Phase 1E 前仍需保持 clean worktree，并重新运行 P0 静态验收命令。
+Phase 1E 建立 no-runtime / no-endpoint 静态测试矩阵，覆盖 P0、Phase 1B、Phase 1C、Phase 1D docs closure、docs 链接、clean-worktree PASS、dirty-worktree NO-GO、失败诊断和硬闸门 negative proof：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_static_matrix.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase1e-static-test-matrix.md`
+
+Phase 1E 通过后，可进入 `PHASE1_LOCAL_STATIC_BASELINE_CLOSEOUT_READONLY` 只读 closeout 计划；不得自动进入 Phase 2 代码建设。
 
 ## Web 控制台（不需终端）
 
