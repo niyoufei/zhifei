@@ -236,6 +236,50 @@ clean worktree 后的预期状态：
 
 Phase 2D 只生成 static / preview-only Qingtian-friendly checklist、脱敏合成样例、静态 validator/CLI 和测试；不代表真实评标结果，不输出评分结果，不连接真实青天系统。不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文、读取真实业务资料正文、导出成果、正式写回、push/fetch/merge。下一阶段只能建议 `PHASE2E_FINAL_REVIEW_ISSUE_LIST_PLAN_OR_WRITE_GATE`，不得自动进入 Phase 2E。
 
+## 3.8) Phase 2E final review issue list（静态写门）
+
+Phase 2E 入口：
+
+    docs/openclaw-zhifei-doc-phase2e-final-review-issue-list.md
+    projects/_demo_phase2_final_review_issue_list/project.json
+    backend/zhifei_autoplan/phase2_final_review_issue_list.py
+    scripts/phase2_final_review_issue_list.py
+
+静态复核命令：
+
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_final_review_issue_list
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_final_review_issue_list.py
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_final_review_issue_list.py --json
+
+clean worktree 后的预期状态：
+
+- Phase 2E: `PASS_PHASE2E_FINAL_REVIEW_ISSUE_LIST_STATIC`
+
+常见诊断：
+
+- `phase2a_contract_pass`：先修复同一 synthetic fixture 的 Phase 2A contract 校验。
+- `phase2b_matrix_pass`：先修复同一 synthetic fixture 的 Phase 2B matrix 校验。
+- `phase2c_binding_pass`：先修复同一 synthetic fixture 的 Phase 2C binding 校验。
+- `phase2d_checklist_pass`：先修复同一 synthetic fixture 的 Phase 2D checklist 校验。
+- `issue_ids_unique`：修复重复或空 issue id。
+- `severity_values_valid`：severity 只能是 `info`、`low`、`medium`、`high`、`blocking`。
+- `source_phases_valid`：source phase 只能是 `P2A`、`P2B`、`P2C`、`P2D`、`cross_phase`。
+- `linked_scoring_items_known`：只引用 Phase 2B matrix 中存在的 scoring item id。
+- `linked_engineering_objects_known`：只引用 fixture 中存在的 engineering object id。
+- `linked_risks_known`：只引用 Phase 2C binding 中存在的 risk id。
+- `linked_checklists_known`：只引用 Phase 2D checklist 中存在的 checklist id。
+- `diagnostic_evidence_present`：补齐非空 diagnostic evidence。
+- `recommended_action_present`：补齐非空 recommended action。
+- `formal_writeback_allowed_false`：该 issue list 只能 static / preview-only，必须保持 formal writeback blocked。
+- `export_allowed_false`：不得导出成果。
+- `official_score_claim_false`：不得声明正式评分结果。
+- `no_official_score_like_fields`：删除任何评分结果类字段。
+- `no_real_doc_body_like_fields`：删除正文类字段，不得塞入真实招标/图纸/清单/客户资料正文。
+- `no_secret_like_fields`：删除 credential-like 字段或值。
+- `forbidden_action_flags_false`：runtime、endpoint、launcher、held config body、真实资料正文、secret、remote sync、export、formal writeback 标记必须为 false。
+
+Phase 2E 只生成 static / preview-only final review issue list、脱敏合成样例、静态 validator/CLI 和测试；不代表正式终审结论，不写回文件，不导出成果，不输出官方评分，不连接真实青天系统。不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文、读取真实业务资料正文、导出成果、正式写回、push/fetch/merge。下一阶段只能建议 `PHASE2F_OUTPUT_PRE_INDEX_PLAN_OR_WRITE_GATE`，不得自动进入 Phase 2F。
+
 ## 4) 审计与清理（Autoplan 审计日志与导出）
 
 - **审计日志路径**：`backend/data/audit/autoplan.jsonl`（Autoplan 相关操作会追加）
