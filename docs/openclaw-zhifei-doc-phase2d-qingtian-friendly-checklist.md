@@ -133,3 +133,8 @@ real Qingtian connection, export, formal writeback, push, fetch, or merge.
 Suggested next gate after Phase 2D local commit:
 
 `PHASE2E_FINAL_REVIEW_ISSUE_LIST_PLAN_OR_WRITE_GATE`
+
+When authorized, Phase 2E is expected to remain static and preview-only. Its
+final review issue list must not become a formal final review conclusion, export
+artifact, official score, real Qingtian connection, or writeback path; those
+actions require later hard gates.
