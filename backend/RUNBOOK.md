@@ -47,6 +47,52 @@ P0 readiness 复核命令：
 
 Phase 1A 只允许索引和文档闭合；不代表允许 push、runtime、launcher、endpoint、真实资料读取或 held config 内容读取。`local-launcher-v1/mock-config.json` 仍保持 metadata-only hold，任何正文审查或 smoke 都必须另开 gate。
 
+## 3.3) Phase 1 本地静态路线（不启动服务）
+
+文档入口：
+
+    docs/openclaw-zhifei-doc-p0-readiness.md
+    docs/openclaw-zhifei-doc-phase1-local-baseline.md
+    docs/openclaw-zhifei-doc-phase1b-demo-workflow.md
+    docs/openclaw-zhifei-doc-phase1c-readiness-delivery-index.md
+    docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md
+
+静态复核命令：
+
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_p0_readiness
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/p0_readiness.py
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/p0_readiness.py --json
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase1_demo_workflow
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_demo_workflow.py --json
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase1_delivery_index
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_delivery_index.py --json
+
+clean worktree 后的预期状态：
+
+- P0: `PASS_P0_READINESS_STATIC`
+- Phase 1B: `PASS_PHASE1B_DEMO_WORKFLOW_STATIC`
+- Phase 1C: `PASS_PHASE1C_READINESS_DELIVERY_INDEX_STATIC`
+
+常见诊断：
+
+- `worktree_not_clean`：当前还有未提交或未跟踪文件；完成授权范围内的本地 docs-only commit 后重跑。
+- `git_index_lock_present`：`.git/index.lock` 存在；先停止并进入单独 git 锁处理决策。
+- `required_entries_missing`：静态入口缺失；先恢复缺失文件或重新确认范围。
+- `sanitized_demo_project_missing_or_invalid`：只修复脱敏 demo metadata，不得替换为真实业务资料。
+- `p0_readiness_static_pass`：先回到 P0 JSON 的 `failures` 列表排查。
+- `phase1b_static_demo_workflow_pass`：先回到 Phase 1B JSON 的 `failures` 列表排查。
+
+Phase 1D 当前成果是 docs / RUNBOOK closure。Phase 1E 后续入口是 static test matrix；该入口仍不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文或读取真实业务资料。
+
+硬闸门关系：
+
+- runtime smoke gate：单独决定是否允许启动服务。
+- endpoint smoke gate：单独决定是否允许访问 `/health`、`/p0/readiness`、`/openapi.json`、`/list_files`、`/read_file` 或业务 endpoint。
+- launcher smoke gate：单独决定是否允许启动或操作 launcher。
+- config content review gate：单独决定是否允许读取 `local-launcher-v1/mock-config.json` 正文。
+
+以上 gate 互相独立；P0、Phase 1B、Phase 1C 或 Phase 1D 通过，都不等于 runtime、endpoint、launcher 或 config content review 已获准。
+
 ## 4) 审计与清理（Autoplan 审计日志与导出）
 
 - **审计日志路径**：`backend/data/audit/autoplan.jsonl`（Autoplan 相关操作会追加）
