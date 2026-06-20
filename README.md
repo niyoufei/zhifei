@@ -305,6 +305,21 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_qingtian_friend
 
 Phase 2D 通过后，只能建议进入 `PHASE2E_FINAL_REVIEW_ISSUE_LIST_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、连接真实青天系统、导出成果、正式写回、push/fetch/merge 或读取真实资料。
 
+### Phase 2E final review issue list（静态写门）
+
+Phase 2E 基于 Phase 2A business input、Phase 2B scoring response matrix、Phase 2C risk object binding 与 Phase 2D Qingtian friendly checklist，生成 deterministic final review issue list。该 issue list 只用于 static / preview-only 复核缺项、风险、证据不足、可解析性不足、追溯链断点与人工复核项，不代表正式终审结论，不写回文件，不导出成果，不输出官方评分，不连接真实青天系统；真实资料、runtime、endpoint、export、formal writeback 均需后续硬闸门。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_final_review_issue_list
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_final_review_issue_list.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2e-final-review-issue-list.md`
+
+Phase 2E 通过后，只能建议进入 `PHASE2F_OUTPUT_PRE_INDEX_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、连接真实青天系统、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
