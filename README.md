@@ -275,6 +275,21 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_scoring_respons
 
 Phase 2B 通过后，只能建议进入 `PHASE2C_RISK_OBJECT_BINDING_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
 
+### Phase 2C risk object binding（静态写门）
+
+Phase 2C 基于 Phase 2A synthetic business input 与 Phase 2B scoring response matrix，生成 deterministic risk-object binding，覆盖 risk clue、工程对象、评分矩阵行、response controls、evidence requirements、Qingtian tags 和 audit traceability。该阶段仍只使用 synthetic fixture；不得读取真实招标文件、图纸、清单、客户资料正文，不得读取 `local-launcher-v1/mock-config.json` 正文。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_risk_object_binding
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_risk_object_binding.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2c-risk-object-binding.md`
+
+Phase 2C 通过后，只能建议进入 `PHASE2D_QINGTIAN_FRIENDLY_CHECKLIST_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
