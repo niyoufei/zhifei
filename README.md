@@ -320,6 +320,21 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_final_review_is
 
 Phase 2E 通过后，只能建议进入 `PHASE2F_OUTPUT_PRE_INDEX_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、连接真实青天系统、导出成果、正式写回、push/fetch/merge 或读取真实资料。
 
+### Phase 2F output pre-index（静态写门）
+
+Phase 2F 基于 Phase 2A business input、Phase 2B scoring response matrix、Phase 2C risk object binding、Phase 2D Qingtian friendly checklist 与 Phase 2E final review issue list，生成 deterministic output pre-index。该 pre-index 只登记后续可能请求的报告、矩阵、问题清单、审计索引、交付包索引、交接摘要和证据追溯索引条目；不生成正式成果文件，不导出，不写回，不输出官方评分，不连接真实青天系统；真实资料、runtime、endpoint、export、formal writeback 均需后续硬闸门。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_output_pre_index
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_output_pre_index.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2f-output-pre-index.md`
+
+Phase 2F 通过后，只能建议进入 Phase 2 closeout 的只读计划或闸门；不得自动启动 runtime、访问 endpoint、启动 launcher、连接真实青天系统、导出成果、正式写回、push/fetch/merge、声明 release-ready、声明 official score ready 或读取真实资料。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
