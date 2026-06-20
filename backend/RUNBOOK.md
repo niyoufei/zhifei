@@ -280,6 +280,43 @@ clean worktree 后的预期状态：
 
 Phase 2E 只生成 static / preview-only final review issue list、脱敏合成样例、静态 validator/CLI 和测试；不代表正式终审结论，不写回文件，不导出成果，不输出官方评分，不连接真实青天系统。不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文、读取真实业务资料正文、导出成果、正式写回、push/fetch/merge。下一阶段只能建议 `PHASE2F_OUTPUT_PRE_INDEX_PLAN_OR_WRITE_GATE`，不得自动进入 Phase 2F。
 
+## 3.9) Phase 2F output pre-index（静态写门）
+
+Phase 2F 入口：
+
+    docs/openclaw-zhifei-doc-phase2f-output-pre-index.md
+    projects/_demo_phase2_output_pre_index/project.json
+    backend/zhifei_autoplan/phase2_output_pre_index.py
+    scripts/phase2_output_pre_index.py
+
+静态复核命令：
+
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_output_pre_index
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_output_pre_index.py
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_output_pre_index.py --json
+
+clean worktree 后的预期状态：
+
+- Phase 2F: `PASS_PHASE2F_OUTPUT_PRE_INDEX_STATIC`
+
+常见诊断：
+
+- `phase2a_contract_pass`：先修复同一 synthetic fixture 的 Phase 2A contract 校验。
+- `phase2b_matrix_pass`：先修复同一 synthetic fixture 的 Phase 2B matrix 校验。
+- `phase2c_binding_pass`：先修复同一 synthetic fixture 的 Phase 2C binding 校验。
+- `phase2d_checklist_pass`：先修复同一 synthetic fixture 的 Phase 2D checklist 校验。
+- `phase2e_issue_list_pass`：先修复同一 synthetic fixture 的 Phase 2E issue list 校验。
+- `required_output_entry_fields_present`：补齐 output pre-index entry 必填字段。
+- `output_types_valid`：output type 必须在 Phase 2F enum 内。
+- `export_status_allowed`：export status 只能是 `blocked` 或 `preview_only`。
+- `writeback_not_performed`：不得声明 formal writeback 已执行。
+- `official_score_not_generated`：不得声明 official score 已生成。
+- `artifact_generation_not_generated`：不得声明文件成果已生成。
+- `data_boundary_blocks_forbidden_reads`：held config body、真实资料正文、secret、runtime、endpoint 声明必须保持 blocked/false。
+- `trace_links_known`：trace link 只能指向 Phase 2A-2E 静态对象或 synthetic fixture。
+
+Phase 2F 只生成 static / preview-only output pre-index、脱敏合成样例、静态 validator/CLI 和测试；不生成报告、矩阵、问题清单、审计索引、交付包、Markdown/HTML/DOCX/PDF/Excel/PPTX 成果文件，不代表 release-ready，不代表 official score ready。不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文、读取真实业务资料正文、导出成果、正式写回、push/fetch/merge。下一阶段只能建议 Phase 2 closeout 的只读计划或闸门，不得自动进入 Phase 2 closeout 或 Phase 3。
+
 ## 4) 审计与清理（Autoplan 审计日志与导出）
 
 - **审计日志路径**：`backend/data/audit/autoplan.jsonl`（Autoplan 相关操作会追加）
