@@ -221,6 +221,20 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_delivery_index.
 
 - `docs/openclaw-zhifei-doc-phase1c-readiness-delivery-index.md`
 
+### Phase 1D docs / RUNBOOK closure（不启动服务）
+
+Phase 1D 将 README、`backend/RUNBOOK.md` 和 Phase 1 docs 串成本地静态路线图。操作者可以从这里看清 P0 static readiness、Phase 1 local-only baseline、Phase 1B demo workflow、Phase 1C readiness / delivery index、Phase 1D 当前文档闭合成果，以及 Phase 1E static test matrix 的后续入口。
+
+闭合索引记录在：
+
+- `docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md`
+
+Phase 1D 仍是 docs-only gate：不 push、不 fetch/pull/merge/rebase、不启动 runtime、不访问 endpoint、不启动 launcher、不读取真实业务资料或 secret、不读取 `local-launcher-v1/mock-config.json` 正文。runtime smoke gate、endpoint smoke gate、launcher smoke gate 和 config content review gate 仍是互相独立的后续人工门。
+
+### Phase 1E static test matrix（后续入口）
+
+Phase 1E 应建立 no-runtime / no-endpoint 静态测试矩阵，覆盖 P0、Phase 1B、Phase 1C、docs 链接、clean-worktree PASS、dirty-worktree NO-GO、失败诊断和硬闸门 negative proof。进入 Phase 1E 前仍需保持 clean worktree，并重新运行 P0 静态验收命令。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
