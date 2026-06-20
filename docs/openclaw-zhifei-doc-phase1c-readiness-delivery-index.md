@@ -72,6 +72,10 @@ Phase 1C is accepted only when:
 
 ## Next Plan
 
-Phase 1D should close README, RUNBOOK, and docs language so operators can see the
+Phase 1D closes README, RUNBOOK, and docs language so operators can see the
 relationship among P0, Phase 1 static gates, runtime gate, endpoint gate, launcher
 gate, and held config content review gate without needing prior thread context.
+The docs closure index is `docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md`.
+
+After Phase 1D, Phase 1E should add a no-runtime static test matrix and failure
+diagnostic checklist.
