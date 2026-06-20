@@ -197,6 +197,18 @@ Phase 1 local-only 当前基线为 `a241e68603d1be06c4b9412043760a5536f9c328`。
 
 该索引只说明本地自治建设起点，不代表允许 runtime、endpoint、launcher、push 或 held config 正文审查。`local-launcher-v1/mock-config.json` 仍保持 metadata-only hold，任何内容读取、launcher smoke 或 endpoint smoke 都必须另开单独 gate。
 
+### Phase 1B 静态 demo workflow（不启动服务）
+
+Phase 1B 将 `projects/_demo_p0/project.json` 串成本地静态链路：项目登记、P0 readiness、静态边界检查、计划输出索引和后续 runtime/endpoint gate handoff。命令只读取 sanitized demo metadata 和本地静态 readiness 证据，不生成业务产物、不访问 endpoint、不启动 launcher：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_demo_workflow.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase1b-demo-workflow.md`
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
