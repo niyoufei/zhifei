@@ -111,10 +111,17 @@ secret bodies, or refresh remotes.
 
 ## Phase 2C Relationship
 
-Phase 2C may bind risk objects to matrix rows only after Phase 2B passes and a
-separate controller gate authorizes the next phase. Phase 2B does not authorize
-runtime, endpoint, launcher, held config content review, real document reads,
-export, formal writeback, push, fetch, or merge.
+Phase 2C binds risk clues to engineering objects and Phase 2B matrix rows only
+after Phase 2B passes and a separate controller gate authorizes the next phase.
+The Phase 2C contract and validator live in:
+
+- `docs/openclaw-zhifei-doc-phase2c-risk-object-binding.md`
+- `projects/_demo_phase2_risk_object_binding/project.json`
+- `backend/zhifei_autoplan/phase2_risk_object_binding.py`
+- `scripts/phase2_risk_object_binding.py`
+
+Phase 2B does not authorize runtime, endpoint, launcher, held config content
+review, real document reads, export, formal writeback, push, fetch, or merge.
 
 Suggested next gate after Phase 2B local commit:
 
