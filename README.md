@@ -290,6 +290,21 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_risk_object_bin
 
 Phase 2C 通过后，只能建议进入 `PHASE2D_QINGTIAN_FRIENDLY_CHECKLIST_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
 
+### Phase 2D Qingtian friendly checklist（静态写门）
+
+Phase 2D 基于 Phase 2A business input、Phase 2B scoring response matrix 与 Phase 2C risk object binding，生成 deterministic Qingtian-friendly static checklist，用于检查 AI 可解析、评分项可响应、工程对象可绑定、证据可追溯、风险措施可诊断等静态条件。该 checklist 是 static / preview-only，不代表真实评标结果，不输出评分结果，不连接真实青天系统；真实资料、runtime、endpoint 均需后续硬闸门。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_qingtian_friendly_checklist
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_qingtian_friendly_checklist.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2d-qingtian-friendly-checklist.md`
+
+Phase 2D 通过后，只能建议进入 `PHASE2E_FINAL_REVIEW_ISSUE_LIST_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、连接真实青天系统、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：
