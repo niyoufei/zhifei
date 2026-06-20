@@ -38,6 +38,13 @@ AUTHORIZED_CHANGED_FILES = frozenset(
 FORBIDDEN_PATH_MARKERS = {
     RiskCategory.KG: (
         "知识图谱/",
+        "knowledge graph",
+        "knowledge-graph",
+        "knowledge_graph",
+        "real kg",
+        "real-kg",
+        "real_kg",
+        "kg/",
         "knowledge_graph/",
         "backend/data/kg/",
         "kg_packs/",
@@ -45,10 +52,20 @@ FORBIDDEN_PATH_MARKERS = {
     ),
     RiskCategory.REAL_PROJECT_DATA: (
         "真实项目",
+        "真实资料",
         "招标",
+        "投标",
         "图纸",
         "清单",
         "项目样本",
+        "real_project",
+        "project_data",
+        "project_sample",
+        "project_samples",
+        "tender",
+        "bid_file",
+        "drawings/",
+        "boq/",
         "backend/data/uploads/",
         "backend/data/extracts/",
         "data/uploads/",
@@ -56,6 +73,9 @@ FORBIDDEN_PATH_MARKERS = {
     ),
     RiskCategory.SECRETS: (
         ".env",
+        "secrets/",
+        "tokens/",
+        "credentials/",
         "secret",
         "token",
         "credential",
@@ -67,10 +87,16 @@ FORBIDDEN_PATH_MARKERS = {
     ),
     RiskCategory.OUTPUT_JOB_EXPORT_LOG: (
         "output/",
+        "outputs/",
         "job/",
+        "jobs/",
         "export/",
+        "exports/",
+        "log/",
         "logs/",
+        ".log",
         "build/",
+        ".runtime/docgen",
         ".runtime/docgen/",
         "backend/data/audit/",
         "data/audit/",
@@ -111,7 +137,9 @@ class StaticGuardResult:
 
 def analyze_path_string(path: str) -> StaticGuardResult:
     normalized = _normalize_path(path)
-    risks = _risks_for_text(normalized, FORBIDDEN_PATH_MARKERS)
+    risks = _risks_for_text(
+        f"{normalized}/{normalized.strip('/')}/", FORBIDDEN_PATH_MARKERS
+    )
     return StaticGuardResult(
         allowed=not risks,
         risk_categories=risks,
@@ -150,7 +178,10 @@ def validate_changed_files(paths: Iterable[str]) -> StaticGuardResult:
 
 
 def _normalize_path(path: str) -> str:
-    clean = str(PurePosixPath(str(path).replace("\\", "/"))).lstrip("./")
+    clean = str(PurePosixPath(str(path).replace("\\", "/")))
+    while clean.startswith("./"):
+        clean = clean[2:]
+    clean = clean.lstrip("/")
     return "" if clean == "." else clean
 
 
