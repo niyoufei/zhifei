@@ -35,6 +35,7 @@ reads, remote sync, push, tag, release, or PR mutation.
 - Phase 1B static demo workflow: `docs/openclaw-zhifei-doc-phase1b-demo-workflow.md`
 - Phase 1C readiness / delivery index: `docs/openclaw-zhifei-doc-phase1c-readiness-delivery-index.md`
 - Phase 1D docs / RUNBOOK closure: `docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md`
+- Phase 1E static test matrix: `docs/openclaw-zhifei-doc-phase1e-static-test-matrix.md`
 
 ## Static Verification Commands
 
@@ -48,6 +49,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_demo_workflow.py --json
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase1_delivery_index
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_delivery_index.py --json
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase1_static_matrix
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_static_matrix.py --json
 ```
 
 Expected clean-worktree statuses:
@@ -55,6 +58,7 @@ Expected clean-worktree statuses:
 - `PASS_P0_READINESS_STATIC`
 - `PASS_PHASE1B_DEMO_WORKFLOW_STATIC`
 - `PASS_PHASE1C_READINESS_DELIVERY_INDEX_STATIC`
+- `PASS_PHASE1E_STATIC_TEST_MATRIX`
 
 While Phase 1D docs are dirty but not yet committed, P0, Phase 1B, and Phase 1C CLIs
 may return their `NO-GO` statuses because they intentionally reject an unclosed
@@ -104,6 +108,11 @@ runtime, endpoint, launcher, or config content gates have passed.
 
 ## Phase 1E Entry
 
-Phase 1E should build a static test matrix that remains no-runtime and no-endpoint.
-The matrix should cover P0, Phase 1B, Phase 1C, docs links, expected clean-worktree
-statuses, dirty-worktree NO-GO behavior, and hard-gate negative proofs.
+Phase 1E builds a static test matrix that remains no-runtime and no-endpoint.
+The matrix covers P0, Phase 1B, Phase 1C, Phase 1D docs closure, docs links,
+expected clean-worktree statuses, dirty-worktree NO-GO behavior, failure diagnostics,
+and hard-gate negative proofs.
+
+After Phase 1E passes, the next suggested gate is
+`PHASE1_LOCAL_STATIC_BASELINE_CLOSEOUT_READONLY`. It is a readonly closeout plan,
+not Phase 2 code construction.
