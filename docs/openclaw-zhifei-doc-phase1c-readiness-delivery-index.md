@@ -77,5 +77,5 @@ relationship among P0, Phase 1 static gates, runtime gate, endpoint gate, launch
 gate, and held config content review gate without needing prior thread context.
 The docs closure index is `docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md`.
 
-After Phase 1D, Phase 1E should add a no-runtime static test matrix and failure
-diagnostic checklist.
+After Phase 1D, Phase 1E adds a no-runtime static test matrix and failure diagnostic
+checklist. The matrix index is `docs/openclaw-zhifei-doc-phase1e-static-test-matrix.md`.
