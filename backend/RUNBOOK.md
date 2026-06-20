@@ -160,6 +160,42 @@ clean worktree 后的预期状态：
 
 Phase 2B 只生成静态 scoring response matrix、脱敏合成样例、静态 validator/CLI 和测试。不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文、读取真实业务资料正文、导出成果、正式写回、push/fetch/merge。下一阶段只能建议 `PHASE2C_RISK_OBJECT_BINDING_PLAN_OR_WRITE_GATE`，不得自动进入 Phase 2C。
 
+## 3.6) Phase 2C risk object binding（静态写门）
+
+Phase 2C 入口：
+
+    docs/openclaw-zhifei-doc-phase2c-risk-object-binding.md
+    projects/_demo_phase2_risk_object_binding/project.json
+    backend/zhifei_autoplan/phase2_risk_object_binding.py
+    scripts/phase2_risk_object_binding.py
+
+静态复核命令：
+
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_risk_object_binding
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_risk_object_binding.py
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_risk_object_binding.py --json
+
+clean worktree 后的预期状态：
+
+- Phase 2C: `PASS_PHASE2C_RISK_OBJECT_BINDING_STATIC`
+
+常见诊断：
+
+- `phase2b_matrix_pass`：先修复同一 synthetic fixture 的 Phase 2B matrix 校验。
+- `risk_clues_present`：恢复至少一个 synthetic risk clue。
+- `risk_ids_unique`：修复重复或空 risk id。
+- `risk_levels_valid`：risk level 只能是 `low`、`medium`、`high`、`critical`。
+- `linked_engineering_objects_known`：只引用 fixture 中存在的 engineering object id。
+- `linked_scoring_items_known`：只引用 Phase 2B matrix 中存在的 scoring item id。
+- `response_control_points_present`：补齐 response control points。
+- `required_evidence_present`：补齐 evidence metadata anchors。
+- `qingtian_tags_present`：补齐 Qingtian-friendly tags。
+- `no_real_doc_body_like_fields`：删除正文类字段，不得塞入真实招标/图纸/清单/客户资料正文。
+- `no_secret_like_fields`：删除 credential-like 字段或值。
+- `forbidden_action_flags_false`：runtime、endpoint、launcher、held config body、真实资料正文、secret、remote sync、export、formal writeback 标记必须为 false。
+
+Phase 2C 只生成静态 risk-object binding、脱敏合成样例、静态 validator/CLI 和测试。不得启动 runtime、访问 endpoint、启动 launcher、读取 held config 正文、读取真实业务资料正文、导出成果、正式写回、push/fetch/merge。下一阶段只能建议 `PHASE2D_QINGTIAN_FRIENDLY_CHECKLIST_PLAN_OR_WRITE_GATE`，不得自动进入 Phase 2D。
+
 ## 4) 审计与清理（Autoplan 审计日志与导出）
 
 - **审计日志路径**：`backend/data/audit/autoplan.jsonl`（Autoplan 相关操作会追加）
