@@ -1,0 +1,182 @@
+{
+  "project_metadata": {
+    "project_id": "demo-phase2c-hefei-road-synthetic",
+    "project_name": "Synthetic Hefei municipal road risk binding demo",
+    "project_type": "municipal_road",
+    "location": "Hefei synthetic district",
+    "sanitized_demo": true,
+    "real_business_material": false,
+    "source_kind": "manual_synthetic_fixture"
+  },
+  "tender_metadata": {
+    "tender_doc_ref": "synthetic-tender-ref-001",
+    "tender_doc_version": "synthetic-v1",
+    "evaluation_method": "synthetic comprehensive scoring method",
+    "source_kind": "mock_metadata",
+    "technical_requirement_summaries": [
+      "Describe traffic organization for staged municipal road works.",
+      "Describe rainy-season drainage and pavement quality controls."
+    ],
+    "format_requirement_summaries": [
+      "Keep risk controls traceable to scoring item ids and evidence anchors."
+    ]
+  },
+  "scoring_item_metadata": [
+    {
+      "item_id": "score-drainage-risk",
+      "item_name": "Drainage and rainy-season control",
+      "scoring_category": "construction_quality_and_safety",
+      "max_score": 10,
+      "requirement_summary": "Synthetic scoring item for drainage continuity and rainy-season response.",
+      "response_strategy": "Map drainage continuity, temporary bypass, inspection checkpoints, and rainy-season controls to evidence anchors.",
+      "evidence_needed": [
+        "quality inspection checkpoint metadata",
+        "temporary drainage method metadata"
+      ],
+      "related_engineering_object_ids": [
+        "obj-drainage-line"
+      ],
+      "qingtian_keywords": [
+        "inspection_checkpoint",
+        "rainy_season_control",
+        "temporary_drainage"
+      ],
+      "qingtian_parse_tags": [
+        "evidence_anchor",
+        "risk_control",
+        "scoring_clause"
+      ]
+    },
+    {
+      "item_id": "score-traffic-organization",
+      "item_name": "Traffic organization response",
+      "scoring_category": "construction_organization",
+      "max_score": 12,
+      "requirement_summary": "Synthetic scoring item for staged traffic diversion measures.",
+      "response_strategy": "Map staged traffic diversion, schedule coordination, and peak-hour mitigation to response sections and evidence anchors.",
+      "evidence_needed": [
+        "staged construction schedule metadata",
+        "traffic diversion plan metadata"
+      ],
+      "related_engineering_object_ids": [
+        "obj-main-road"
+      ],
+      "qingtian_keywords": [
+        "peak_hour_mitigation",
+        "staged_construction",
+        "traffic_diversion"
+      ],
+      "qingtian_parse_tags": [
+        "evidence_anchor",
+        "response_section",
+        "scoring_clause"
+      ]
+    }
+  ],
+  "engineering_object_metadata": [
+    {
+      "object_id": "obj-main-road",
+      "object_type": "municipal_road_segment",
+      "object_name": "Synthetic main road segment",
+      "synthetic_scope_summary": "Two-lane staged road surface rehabilitation with temporary traffic diversion."
+    },
+    {
+      "object_id": "obj-drainage-line",
+      "object_type": "stormwater_pipeline",
+      "object_name": "Synthetic stormwater line",
+      "synthetic_scope_summary": "Mock stormwater pipe replacement with temporary bypass and inspection points."
+    }
+  ],
+  "risk_clue_metadata": [
+    {
+      "risk_id": "risk-rainy-season-drainage-binding",
+      "risk_title": "Rainy-season drainage continuity",
+      "risk_category": "drainage_and_quality_control",
+      "risk_level": "high",
+      "risk_clue_id": "risk-rainy-season-drainage",
+      "risk_hint": "Synthetic risk clue for temporary drainage interruption.",
+      "linked_engineering_object_ids": [
+        "obj-drainage-line"
+      ],
+      "linked_scoring_item_ids": [
+        "score-drainage-risk"
+      ],
+      "response_control_points": [
+        "inspect temporary bypass readiness",
+        "track rainy-season drainage continuity"
+      ],
+      "required_evidence": [
+        "quality inspection checkpoint metadata",
+        "temporary drainage method metadata"
+      ],
+      "qingtian_tags": [
+        "evidence_anchor",
+        "rainy_season_control",
+        "risk_control"
+      ],
+      "expected_response_mode": "risk_control_verification"
+    },
+    {
+      "risk_id": "risk-traffic-continuity-binding",
+      "risk_title": "Traffic continuity during staged works",
+      "risk_category": "traffic_organization",
+      "risk_level": "medium",
+      "risk_clue_id": "risk-traffic-continuity",
+      "risk_hint": "Synthetic risk clue for peak-hour diversion pressure.",
+      "linked_engineering_object_ids": [
+        "obj-main-road"
+      ],
+      "linked_scoring_item_ids": [
+        "score-traffic-organization"
+      ],
+      "response_control_points": [
+        "align staged diversion with schedule metadata",
+        "verify peak-hour mitigation controls"
+      ],
+      "required_evidence": [
+        "staged construction schedule metadata",
+        "traffic diversion plan metadata"
+      ],
+      "qingtian_tags": [
+        "peak_hour_mitigation",
+        "response_section",
+        "risk_control"
+      ],
+      "expected_response_mode": "risk_control_verification"
+    }
+  ],
+  "output_intent_metadata": {
+    "intended_outputs": [
+      "risk_object_binding_snapshot",
+      "future_qingtian_friendly_checklist_seed"
+    ],
+    "export_requested": false,
+    "formal_writeback_requested": false,
+    "materialized_business_outputs": []
+  },
+  "audit_boundary_metadata": {
+    "snapshot_id": "phase2c-synthetic-hefei-road-001",
+    "schema_version": "phase2c.risk_object_binding.v1",
+    "input_hash_mode": "deterministic_fixture_hash_later_gate",
+    "requires_human_review": true,
+    "allowed_next_gate": "PHASE2D_QINGTIAN_FRIENDLY_CHECKLIST_PLAN_OR_WRITE_GATE"
+  },
+  "qingtian_ai_review_metadata": {
+    "evaluation_friendly": true,
+    "scoring_clause_refs_required": true,
+    "evidence_anchor_required": true,
+    "preview_advisory_not_evidence": true,
+    "manual_final_review_required": true
+  },
+  "safety_boundary": {
+    "runtime_allowed": false,
+    "endpoint_access_allowed": false,
+    "launcher_allowed": false,
+    "held_config_body_read_allowed": false,
+    "real_business_doc_body_allowed": false,
+    "secret_body_allowed": false,
+    "fetch_pull_merge_push_allowed": false,
+    "export_allowed": false,
+    "formal_writeback_allowed": false
+  }
+}
