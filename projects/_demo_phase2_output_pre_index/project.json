@@ -1,0 +1,442 @@
+{
+  "project_metadata": {
+    "project_id": "demo-phase2f-output-pre-index",
+    "project_name": "Synthetic municipal road output pre-index demo",
+    "project_type": "municipal_road",
+    "location": "Hefei synthetic district",
+    "sanitized_demo": true,
+    "real_business_material": false
+  },
+  "tender_metadata": {
+    "tender_doc_ref": "synthetic-ref",
+    "tender_doc_version": "synthetic-v1",
+    "evaluation_method": "synthetic scoring",
+    "source_kind": "mock_metadata"
+  },
+  "scoring_item_metadata": [
+    {
+      "item_id": "score-traffic",
+      "item_name": "Traffic organization",
+      "scoring_category": "construction_organization",
+      "max_score": 12,
+      "requirement_summary": "Synthetic traffic response.",
+      "response_strategy": "Map staged diversion metadata to response sections.",
+      "evidence_needed": [
+        "traffic plan metadata"
+      ],
+      "related_engineering_object_ids": [
+        "obj-road"
+      ],
+      "qingtian_keywords": [
+        "traffic_diversion"
+      ],
+      "qingtian_parse_tags": [
+        "scoring_clause"
+      ]
+    }
+  ],
+  "engineering_object_metadata": [
+    {
+      "object_id": "obj-road",
+      "object_type": "municipal_road_segment",
+      "object_name": "Synthetic road",
+      "synthetic_scope_summary": "Synthetic staged road works."
+    }
+  ],
+  "risk_clue_metadata": [
+    {
+      "risk_id": "risk-traffic-binding",
+      "risk_type": "traffic_organization",
+      "risk_title": "Traffic continuity",
+      "risk_category": "traffic_organization",
+      "risk_level": "medium",
+      "risk_clue_id": "risk-traffic",
+      "risk_hint": "Synthetic peak diversion risk.",
+      "related_engineering_object_ids": [
+        "obj-road"
+      ],
+      "linked_engineering_object_ids": [
+        "obj-road"
+      ],
+      "linked_scoring_item_ids": [
+        "score-traffic"
+      ],
+      "response_control_points": [
+        "verify staged diversion metadata"
+      ],
+      "required_evidence": [
+        "traffic plan metadata"
+      ],
+      "qingtian_tags": [
+        "traffic_diversion"
+      ],
+      "expected_response_mode": "risk_control_verification"
+    }
+  ],
+  "qingtian_checklist_metadata": [
+    {
+      "checklist_id": "check-traffic",
+      "checklist_title": "Traffic checklist",
+      "checklist_category": "ai_parseability",
+      "linked_scoring_item_ids": [
+        "score-traffic"
+      ],
+      "linked_engineering_object_ids": [
+        "obj-road"
+      ],
+      "linked_risk_ids": [
+        "risk-traffic-binding"
+      ],
+      "qingtian_keywords": [
+        "traffic_diversion"
+      ],
+      "qingtian_parse_tags": [
+        "scoring_clause"
+      ],
+      "evidence_requirements": [
+        "traffic plan metadata"
+      ],
+      "traceability_requirements": [
+        "phase2b:score-traffic",
+        "phase2c:risk-traffic-binding"
+      ],
+      "diagnosable_failure_reason": "missing traffic evidence anchors",
+      "severity": "medium",
+      "affects_score": false,
+      "official_score_claim": false
+    }
+  ],
+  "final_review_issue_metadata": [
+    {
+      "issue_id": "issue-contract-pass",
+      "issue_title": "Business input contract is reviewable",
+      "issue_category": "contract_completeness",
+      "severity": "info",
+      "source_phase": "P2A",
+      "linked_scoring_item_ids": [
+        "score-traffic"
+      ],
+      "linked_engineering_object_ids": [
+        "obj-road"
+      ],
+      "linked_risk_ids": [],
+      "linked_checklist_ids": [],
+      "issue_reason": "Synthetic business input contains the required review metadata.",
+      "diagnostic_evidence": [
+        "phase2a contract status is PASS"
+      ],
+      "recommended_action": "Keep the static contract as preview evidence only.",
+      "responsible_review_role": "technical_reviewer",
+      "review_status": "pass_static",
+      "blocking_level": "pass",
+      "formal_writeback_allowed": false,
+      "export_allowed": false,
+      "official_score_claim": false
+    },
+    {
+      "issue_id": "issue-traffic-warning",
+      "issue_title": "Traffic evidence requires human trace review",
+      "issue_category": "evidence_traceability",
+      "severity": "medium",
+      "source_phase": "P2D",
+      "linked_scoring_item_ids": [
+        "score-traffic"
+      ],
+      "linked_engineering_object_ids": [
+        "obj-road"
+      ],
+      "linked_risk_ids": [
+        "risk-traffic-binding"
+      ],
+      "linked_checklist_ids": [
+        "check-traffic"
+      ],
+      "issue_reason": "Qingtian-friendly tags are present but still require manual evidence review.",
+      "diagnostic_evidence": [
+        "check-traffic links score, object, risk, and evidence tags"
+      ],
+      "recommended_action": "Review traffic evidence anchors before any later export gate.",
+      "responsible_review_role": "qingtian_parseability_reviewer",
+      "review_status": "warning_static",
+      "blocking_level": "warning",
+      "formal_writeback_allowed": false,
+      "export_allowed": false,
+      "official_score_claim": false
+    },
+    {
+      "issue_id": "issue-formal-gate-blocked",
+      "issue_title": "Formal writeback and export remain blocked",
+      "issue_category": "hard_gate_boundary",
+      "severity": "blocking",
+      "source_phase": "cross_phase",
+      "linked_scoring_item_ids": [
+        "score-traffic"
+      ],
+      "linked_engineering_object_ids": [
+        "obj-road"
+      ],
+      "linked_risk_ids": [
+        "risk-traffic-binding"
+      ],
+      "linked_checklist_ids": [
+        "check-traffic"
+      ],
+      "issue_reason": "The final review issue list is preview-only and cannot become a formal result.",
+      "diagnostic_evidence": [
+        "formal_writeback_allowed=false",
+        "export_allowed=false"
+      ],
+      "recommended_action": "Open a separate hard gate before real inputs, export, or writeback.",
+      "responsible_review_role": "final_review_controller",
+      "review_status": "blocking_static",
+      "blocking_level": "blocking",
+      "formal_writeback_allowed": false,
+      "export_allowed": false,
+      "official_score_claim": false
+    }
+  ],
+  "output_pre_index_metadata": [
+    {
+      "output_id": "out-final-review-report",
+      "output_type": "final_review_report",
+      "title": "Future final review report index entry",
+      "source_phase": "P2E",
+      "source_inputs": [
+        "phase2e:final_review_issue_list"
+      ],
+      "intended_consumer": "final_review_controller",
+      "allowed_format_descriptor": "terminal preview metadata only",
+      "export_status": "blocked",
+      "writeback_status": "blocked",
+      "official_score_status": "blocked",
+      "artifact_generation_status": "blocked",
+      "data_boundary": {
+        "content_source": "synthetic_fixture_only",
+        "held_config_body_read": false,
+        "real_business_doc_body_read": false,
+        "secret_read": false,
+        "runtime_started": false,
+        "endpoint_accessed": false
+      },
+      "trace_links": [
+        "phase2e:final_review_issue_list",
+        "phase2e:issue-formal-gate-blocked",
+        "synthetic_fixture:project.json"
+      ],
+      "blocker_reason": "Formal report materialization requires a later explicit export gate."
+    },
+    {
+      "output_id": "out-scoring-matrix",
+      "output_type": "scoring_matrix",
+      "title": "Future scoring matrix index entry",
+      "source_phase": "P2B",
+      "source_inputs": [
+        "phase2b:score-traffic"
+      ],
+      "intended_consumer": "scoring_reviewer",
+      "allowed_format_descriptor": "terminal preview metadata only",
+      "export_status": "blocked",
+      "writeback_status": "blocked",
+      "official_score_status": "blocked",
+      "artifact_generation_status": "blocked",
+      "data_boundary": {
+        "content_source": "synthetic_fixture_only",
+        "held_config_body_read": false,
+        "real_business_doc_body_read": false,
+        "secret_read": false,
+        "runtime_started": false,
+        "endpoint_accessed": false
+      },
+      "trace_links": [
+        "phase2b:scoring_response_matrix",
+        "phase2b:score-traffic"
+      ],
+      "blocker_reason": "Scoring matrix export remains blocked until a later formal output gate."
+    },
+    {
+      "output_id": "out-issue-list",
+      "output_type": "issue_list",
+      "title": "Future issue list index entry",
+      "source_phase": "P2E",
+      "source_inputs": [
+        "phase2e:issue-contract-pass",
+        "phase2e:issue-traffic-warning",
+        "phase2e:issue-formal-gate-blocked"
+      ],
+      "intended_consumer": "technical_reviewer",
+      "allowed_format_descriptor": "terminal preview metadata only",
+      "export_status": "blocked",
+      "writeback_status": "blocked",
+      "official_score_status": "blocked",
+      "artifact_generation_status": "blocked",
+      "data_boundary": {
+        "content_source": "synthetic_fixture_only",
+        "held_config_body_read": false,
+        "real_business_doc_body_read": false,
+        "secret_read": false,
+        "runtime_started": false,
+        "endpoint_accessed": false
+      },
+      "trace_links": [
+        "phase2e:issue-contract-pass",
+        "phase2e:issue-traffic-warning",
+        "phase2e:issue-formal-gate-blocked"
+      ],
+      "blocker_reason": "Issue list remains preview-only and cannot be written as a formal result."
+    },
+    {
+      "output_id": "out-audit-index",
+      "output_type": "audit_index",
+      "title": "Future audit index entry",
+      "source_phase": "cross_phase",
+      "source_inputs": [
+        "phase2a:business_input_contract",
+        "phase2b:scoring_response_matrix",
+        "phase2c:risk_object_binding",
+        "phase2d:qingtian_friendly_checklist",
+        "phase2e:final_review_issue_list"
+      ],
+      "intended_consumer": "audit_reviewer",
+      "allowed_format_descriptor": "terminal preview metadata only",
+      "export_status": "blocked",
+      "writeback_status": "blocked",
+      "official_score_status": "blocked",
+      "artifact_generation_status": "blocked",
+      "data_boundary": {
+        "content_source": "synthetic_fixture_only",
+        "held_config_body_read": false,
+        "real_business_doc_body_read": false,
+        "secret_read": false,
+        "runtime_started": false,
+        "endpoint_accessed": false
+      },
+      "trace_links": [
+        "phase2a:business_input_contract",
+        "phase2b:scoring_response_matrix",
+        "phase2c:risk_object_binding",
+        "phase2d:qingtian_friendly_checklist",
+        "phase2e:final_review_issue_list"
+      ],
+      "blocker_reason": "Audit index files require a later closeout or export gate."
+    },
+    {
+      "output_id": "out-delivery-package-index",
+      "output_type": "delivery_package_index",
+      "title": "Future delivery package index entry",
+      "source_phase": "cross_phase",
+      "source_inputs": [
+        "phase2e:final_review_issue_list"
+      ],
+      "intended_consumer": "delivery_controller",
+      "allowed_format_descriptor": "terminal preview metadata only",
+      "export_status": "blocked",
+      "writeback_status": "blocked",
+      "official_score_status": "blocked",
+      "artifact_generation_status": "blocked",
+      "data_boundary": {
+        "content_source": "synthetic_fixture_only",
+        "held_config_body_read": false,
+        "real_business_doc_body_read": false,
+        "secret_read": false,
+        "runtime_started": false,
+        "endpoint_accessed": false
+      },
+      "trace_links": [
+        "phase2e:final_review_issue_list",
+        "synthetic_fixture:project.json"
+      ],
+      "blocker_reason": "Delivery packaging is not authorized in Phase 2F."
+    },
+    {
+      "output_id": "out-handoff-summary",
+      "output_type": "handoff_summary",
+      "title": "Future handoff summary index entry",
+      "source_phase": "cross_phase",
+      "source_inputs": [
+        "phase2a:project_metadata",
+        "phase2e:final_review_issue_list"
+      ],
+      "intended_consumer": "phase_closeout_controller",
+      "allowed_format_descriptor": "terminal preview metadata only",
+      "export_status": "preview_only",
+      "writeback_status": "blocked",
+      "official_score_status": "blocked",
+      "artifact_generation_status": "blocked",
+      "data_boundary": {
+        "content_source": "synthetic_fixture_only",
+        "held_config_body_read": false,
+        "real_business_doc_body_read": false,
+        "secret_read": false,
+        "runtime_started": false,
+        "endpoint_accessed": false
+      },
+      "trace_links": [
+        "phase2a:project_metadata",
+        "phase2e:final_review_issue_list"
+      ],
+      "blocker_reason": "Only terminal preview metadata is allowed; no handoff file is generated."
+    },
+    {
+      "output_id": "out-evidence-trace-index",
+      "output_type": "evidence_trace_index",
+      "title": "Future evidence trace index entry",
+      "source_phase": "cross_phase",
+      "source_inputs": [
+        "phase2b:score-traffic",
+        "phase2c:risk-traffic-binding",
+        "phase2d:check-traffic"
+      ],
+      "intended_consumer": "evidence_reviewer",
+      "allowed_format_descriptor": "terminal preview metadata only",
+      "export_status": "blocked",
+      "writeback_status": "blocked",
+      "official_score_status": "blocked",
+      "artifact_generation_status": "blocked",
+      "data_boundary": {
+        "content_source": "synthetic_fixture_only",
+        "held_config_body_read": false,
+        "real_business_doc_body_read": false,
+        "secret_read": false,
+        "runtime_started": false,
+        "endpoint_accessed": false
+      },
+      "trace_links": [
+        "phase2b:score-traffic",
+        "phase2c:risk-traffic-binding",
+        "phase2d:check-traffic"
+      ],
+      "blocker_reason": "Evidence trace materialization requires a later authorized evidence gate."
+    }
+  ],
+  "output_intent_metadata": {
+    "intended_outputs": [
+      "output_pre_index_static_snapshot"
+    ],
+    "export_requested": false,
+    "formal_writeback_requested": false
+  },
+  "audit_boundary_metadata": {
+    "snapshot_id": "phase2f-fixture",
+    "schema_version": "phase2f.output_pre_index.v1",
+    "input_hash_mode": "deterministic_fixture_hash_later_gate",
+    "requires_human_review": true
+  },
+  "qingtian_ai_review_metadata": {
+    "evaluation_friendly": true,
+    "scoring_clause_refs_required": true,
+    "evidence_anchor_required": true,
+    "preview_advisory_not_evidence": true,
+    "connects_real_qingtian_system": false
+  },
+  "safety_boundary": {
+    "runtime_allowed": false,
+    "endpoint_access_allowed": false,
+    "launcher_allowed": false,
+    "held_config_body_read_allowed": false,
+    "real_business_doc_body_allowed": false,
+    "secret_body_allowed": false,
+    "fetch_pull_merge_push_allowed": false,
+    "export_allowed": false,
+    "formal_writeback_allowed": false
+  }
+}

@@ -153,3 +153,12 @@ or merge.
 Suggested next gate after Phase 2E local commit:
 
 `PHASE2F_OUTPUT_PRE_INDEX_PLAN_OR_WRITE_GATE`
+
+## Static Handoff Update
+
+When a later controller explicitly authorizes Phase 2F, the Phase 2E issue ids
+and static boundary flags may be referenced by the Phase 2F output pre-index.
+This handoff does not alter Phase 2E's verified conclusion: Phase 2E remains a
+preview-only final review issue list and still does not authorize runtime,
+endpoint, launcher, held config content review, real document reads, real
+Qingtian connection, export, formal writeback, push, fetch, or merge.
