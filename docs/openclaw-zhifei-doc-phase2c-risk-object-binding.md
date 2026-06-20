@@ -117,10 +117,19 @@ secret bodies, or refresh remotes.
 
 ## Phase 2D Relationship
 
-Phase 2D may build a Qingtian-friendly checklist only after Phase 2C passes and
-a separate controller gate authorizes the next phase. Phase 2C does not
+Phase 2D may build a static, preview-only Qingtian-friendly checklist only after
+Phase 2C passes and a separate controller gate authorizes the next phase. The
+Phase 2D contract and validator live in:
+
+- `docs/openclaw-zhifei-doc-phase2d-qingtian-friendly-checklist.md`
+- `projects/_demo_phase2_qingtian_friendly_checklist/project.json`
+- `backend/zhifei_autoplan/phase2_qingtian_friendly_checklist.py`
+- `scripts/phase2_qingtian_friendly_checklist.py`
+
+Phase 2D must not be treated as a real evaluation result. Phase 2C does not
 authorize runtime, endpoint, launcher, held config content review, real document
-reads, export, formal writeback, push, fetch, or merge.
+reads, real Qingtian connection, export, formal writeback, push, fetch, or
+merge.
 
 Suggested next gate after Phase 2C local commit:
 
