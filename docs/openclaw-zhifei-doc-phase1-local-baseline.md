@@ -134,6 +134,9 @@ Still forbidden in Phase 1A:
   launcher, and config content review gates; see `docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md`.
 - Phase 1E static test matrix gate: build a no-runtime test matrix and failure diagnostic checklist after
   Phase 1D docs / RUNBOOK closure; see `docs/openclaw-zhifei-doc-phase1e-static-test-matrix.md`.
+- Phase 2A business input contract gate: after Phase 1 closeout and Phase 2 readonly planning approval,
+  add only the static business input contract, synthetic fixture, validator, CLI, tests, and docs entry;
+  see `docs/openclaw-zhifei-doc-phase2-business-input-contract.md`.
 
 Every follow-up gate requires a separate ChatGPT approval and must restate allowed files, forbidden actions,
 test commands, acceptance criteria, rollback or stop conditions, and sensitive-content handling.

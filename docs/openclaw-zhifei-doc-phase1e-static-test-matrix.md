@@ -86,3 +86,7 @@ Phase 1E does not authorize:
 If Phase 1E passes after local commit, the next suggested gate is
 `PHASE1_LOCAL_STATIC_BASELINE_CLOSEOUT_READONLY`. That closeout should be readonly
 and must not enter Phase 2 code construction automatically.
+
+After Phase 1 closeout and the Phase 2 readonly business-engine plan gate both pass,
+the first allowed static write gate is `PHASE2A_BUSINESS_INPUT_CONTRACT`. Its
+entry document is `docs/openclaw-zhifei-doc-phase2-business-input-contract.md`.
