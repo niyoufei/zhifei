@@ -52,12 +52,9 @@ def test_changed_files_allow_only_system_autonomy_010_static_guard_scope():
     assert result.allowed is True
 
 
-def test_changed_files_block_runtime_script_web_ui_and_legacy_009_or_earlier_scope():
+def test_changed_files_block_legacy_009_and_earlier_scopes():
     result = validate_changed_files(
         [
-            "scripts/run_web_ui.sh",
-            "local-launcher-v1/app.js",
-            "backend/zhifei_autoplan/system_autonomy_permissions.py",
             "docs/zdoc-system-autonomy-009-implementation-static-guard-scope-correction-no-runtime.md",
             "docs/zdoc-system-autonomy-008-implementation-static-guard-scope-correction-no-runtime.md",
         ]
@@ -65,5 +62,29 @@ def test_changed_files_block_runtime_script_web_ui_and_legacy_009_or_earlier_sco
 
     assert result.allowed is False
     assert "changed_file_outside_system_autonomy_010_static_guard_scope" in result.blocked_reasons
+    assert result.risk_categories == ()
+
+
+def test_changed_files_block_runtime_web_ui_and_sensitive_paths():
+    result = validate_changed_files(
+        [
+            "scripts/run_web_ui.sh",
+            "local-launcher-v1/app.js",
+            "backend/zhifei_autoplan/system_autonomy_permissions.py",
+            "kg_packs/live.json",
+            "data/uploads/project.docx",
+            ".env.local",
+            "jobs/state.json",
+            "exports/result.docx",
+            "logs/run.log",
+        ]
+    )
+
+    assert result.allowed is False
+    assert "changed_file_outside_system_autonomy_010_static_guard_scope" in result.blocked_reasons
     assert RiskCategory.RUNTIME in result.risk_categories
     assert RiskCategory.WEB_UI in result.risk_categories
+    assert RiskCategory.KG in result.risk_categories
+    assert RiskCategory.REAL_PROJECT_DATA in result.risk_categories
+    assert RiskCategory.SECRETS in result.risk_categories
+    assert RiskCategory.OUTPUT_JOB_EXPORT_LOG in result.risk_categories
