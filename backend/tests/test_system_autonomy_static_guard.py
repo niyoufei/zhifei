@@ -13,6 +13,9 @@ def test_path_guard_blocks_real_kg_project_data_secrets_and_outputs():
         "01_真实项目测试/example.docx": RiskCategory.REAL_PROJECT_DATA,
         ".env.local": RiskCategory.SECRETS,
         "output/result.json": RiskCategory.OUTPUT_JOB_EXPORT_LOG,
+        "jobs/state.json": RiskCategory.OUTPUT_JOB_EXPORT_LOG,
+        "exports/result.docx": RiskCategory.OUTPUT_JOB_EXPORT_LOG,
+        "logs/run.log": RiskCategory.OUTPUT_JOB_EXPORT_LOG,
     }
 
     for path, category in cases.items():
@@ -35,12 +38,12 @@ def test_command_guard_blocks_runtime_endpoint_ollama_model_prompt():
         assert category in result.risk_categories
 
 
-def test_changed_files_allow_only_system_autonomy_009_static_guard_scope():
+def test_changed_files_allow_only_system_autonomy_010_static_guard_scope():
     assert AUTHORIZED_CHANGED_FILES == frozenset(
         {
             "backend/zhifei_autoplan/system_autonomy_static_guard.py",
             "backend/tests/test_system_autonomy_static_guard.py",
-            "docs/zdoc-system-autonomy-009-implementation-static-guard-scope-correction-no-runtime.md",
+            "docs/zdoc-system-autonomy-010-implementation-static-guard-scope-correction-no-runtime.md",
         }
     )
 
@@ -49,17 +52,18 @@ def test_changed_files_allow_only_system_autonomy_009_static_guard_scope():
     assert result.allowed is True
 
 
-def test_changed_files_block_runtime_script_web_ui_and_legacy_008_scope():
+def test_changed_files_block_runtime_script_web_ui_and_legacy_009_or_earlier_scope():
     result = validate_changed_files(
         [
             "scripts/run_web_ui.sh",
             "local-launcher-v1/app.js",
             "backend/zhifei_autoplan/system_autonomy_permissions.py",
+            "docs/zdoc-system-autonomy-009-implementation-static-guard-scope-correction-no-runtime.md",
             "docs/zdoc-system-autonomy-008-implementation-static-guard-scope-correction-no-runtime.md",
         ]
     )
 
     assert result.allowed is False
-    assert "changed_file_outside_system_autonomy_009_static_guard_scope" in result.blocked_reasons
+    assert "changed_file_outside_system_autonomy_010_static_guard_scope" in result.blocked_reasons
     assert RiskCategory.RUNTIME in result.risk_categories
     assert RiskCategory.WEB_UI in result.risk_categories
