@@ -25,7 +25,7 @@ AUTHORIZED_CHANGED_FILES = frozenset(
     {
         "backend/zhifei_autoplan/system_autonomy_static_guard.py",
         "backend/tests/test_system_autonomy_static_guard.py",
-        "docs/zdoc-system-autonomy-008-implementation-static-guard-scope-correction-no-runtime.md",
+        "docs/zdoc-system-autonomy-009-implementation-static-guard-scope-correction-no-runtime.md",
     }
 )
 
@@ -160,7 +160,7 @@ def validate_changed_files(paths: Iterable[str]) -> StaticGuardResult:
         risks.extend(analyze_path_string(path).risk_categories)
     blocked_reasons = []
     if outside:
-        blocked_reasons.append("changed_file_outside_system_autonomy_008_static_guard_scope")
+        blocked_reasons.append("changed_file_outside_system_autonomy_009_static_guard_scope")
     if risks:
         blocked_reasons.append("changed_file_matches_forbidden_boundary")
     return StaticGuardResult(
