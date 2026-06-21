@@ -23,15 +23,9 @@ class RiskCategory(str, Enum):
 
 AUTHORIZED_CHANGED_FILES = frozenset(
     {
-        "backend/zhifei_autoplan/system_autonomy_permissions.py",
-        "backend/zhifei_autoplan/system_autonomy_state_machine.py",
-        "backend/zhifei_autoplan/system_autonomy_evidence.py",
         "backend/zhifei_autoplan/system_autonomy_static_guard.py",
-        "backend/tests/test_system_autonomy_permissions.py",
-        "backend/tests/test_system_autonomy_state_machine.py",
-        "backend/tests/test_system_autonomy_evidence.py",
         "backend/tests/test_system_autonomy_static_guard.py",
-        "docs/zdoc-system-autonomy-controlled-code-implementation-no-runtime-gate-system-autonomy-006.md",
+        "docs/zdoc-system-autonomy-008-implementation-static-guard-scope-correction-no-runtime.md",
     }
 )
 
@@ -166,7 +160,7 @@ def validate_changed_files(paths: Iterable[str]) -> StaticGuardResult:
         risks.extend(analyze_path_string(path).risk_categories)
     blocked_reasons = []
     if outside:
-        blocked_reasons.append("changed_file_outside_system_autonomy_006_allowlist")
+        blocked_reasons.append("changed_file_outside_system_autonomy_008_static_guard_scope")
     if risks:
         blocked_reasons.append("changed_file_matches_forbidden_boundary")
     return StaticGuardResult(
