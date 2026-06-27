@@ -14,9 +14,9 @@
     <div class="app-shell">
       <header class="topbar" aria-labelledby="page-title">
         <div>
-          <p class="eyebrow">V1 专业静态控制台</p>
+          <p class="eyebrow">V1 专业静态控制台 / canonical 静态资产边界</p>
           <h1 id="page-title">ZDoc 本地 AI 文档系统控制台</h1>
-          <p class="safety-line">不启动服务、不访问接口、不运行 Ollama、不触发生成、导出或写回。</p>
+          <p class="safety-line">仅静态展示；不启动服务、不访问接口、不访问本地回环地址、不运行 Ollama、不执行模型推理、不触发生成、导出或写回。</p>
         </div>
         <div class="auth-badge" aria-label="当前授权状态">
           <span>当前状态</span>
@@ -49,7 +49,7 @@
             </div>
             <div>
               <span>运行边界</span>
-              <strong>仅静态展示</strong>
+              <strong>canonical 静态资产 / 仅静态展示</strong>
             </div>
           </section>
 
@@ -73,10 +73,18 @@
               </div>
               <div>
                 <dt>接口状态</dt>
-                <dd>未访问</dd>
+                <dd>未访问 / 未授权</dd>
+              </div>
+              <div>
+                <dt>本地访问</dt>
+                <dd>未授权 / 未检查</dd>
               </div>
               <div>
                 <dt>Ollama</dt>
+                <dd>默认禁止</dd>
+              </div>
+              <div>
+                <dt>模型推理</dt>
                 <dd>默认禁止</dd>
               </div>
               <div>
@@ -132,6 +140,14 @@
                 <dt>runtime preflight</dt>
                 <dd>未进入</dd>
               </div>
+              <div>
+                <dt>canonical 静态边界</dt>
+                <dd>已声明 / 不授予运行能力</dd>
+              </div>
+              <div>
+                <dt>模型推理授权</dt>
+                <dd>未授权</dd>
+              </div>
             </dl>
           </section>
 
@@ -151,7 +167,11 @@
               </div>
               <div>
                 <dt>endpoint</dt>
-                <dd>未访问</dd>
+                <dd>未访问 / 不可用作授权状态</dd>
+              </div>
+              <div>
+                <dt>本地回环访问</dt>
+                <dd>未授权 / V1 静态控制台不检查</dd>
               </div>
               <div>
                 <dt>端口</dt>
@@ -197,7 +217,9 @@
             <ul class="rule-list">
               <li>禁止启动服务。</li>
               <li>禁止访问接口。</li>
+              <li>禁止访问本地回环地址。</li>
               <li>禁止运行 Ollama。</li>
+              <li>禁止执行模型推理。</li>
               <li>禁止进入 trial。</li>
               <li>禁止生成文档。</li>
               <li>禁止导出文档。</li>
@@ -283,6 +305,8 @@
               <li>启动服务需要单独授权。</li>
               <li>停止服务需要单独授权。</li>
               <li>endpoint 健康检查需要单独授权。</li>
+              <li>本地回环访问需要单独授权。</li>
+              <li>模型推理需要单独授权。</li>
               <li>日志读取需要单独授权。</li>
               <li>任何 generation/export/write-back 仍不在本阶段授权范围内。</li>
             </ul>
@@ -290,12 +314,15 @@
 
           <footer class="audit-footer" aria-label="底部审计状态区">
             <span>HEAD/tag：占位，未在页面执行检查</span>
+            <span>canonical static boundary</span>
             <span>no-runtime</span>
             <span>no-endpoint</span>
+            <span>no-local-access</span>
             <span>no-Ollama</span>
+            <span>no-model-inference</span>
             <span>no-trial</span>
             <span>no-generation/export/write-back</span>
-            <span>下一节点：等待审核，不进入 LOCAL-LAUNCHER-018</span>
+            <span>下一节点：等待审核，不进入 026F</span>
           </footer>
         </main>
       </div>
