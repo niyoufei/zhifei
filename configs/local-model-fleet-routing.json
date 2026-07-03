@@ -1,0 +1,82 @@
+{
+  "schema_version": "027m-r1c",
+  "status": "selected_not_runtime_verified",
+  "deployment_mode": "local_only",
+  "api_models_enabled": false,
+  "video_generation_enabled": false,
+  "runtime_note": "All listed language models were confirmed by local Ollama manifests. No inference was executed during this governance node.",
+  "default_model": {
+    "role": "high_quality_default",
+    "model": "qwen3.6:35b",
+    "parameter_scale": "35B",
+    "reason": "Primary high-quality local default for document generation and technical bid drafting."
+  },
+  "routes": {
+    "high_quality_default": "qwen3.6:35b",
+    "stable_default": "qwen3:30b",
+    "top_quality_manual": "qwen3-next:80b-a3b-instruct-q8_0",
+    "deepseek_reasoning_high": "deepseek-r1:70b",
+    "deepseek_reasoning_standard": "deepseek-r1:32b",
+    "coding": "qwen3-coder:30b",
+    "balanced": "qwen3:14b",
+    "minimum_baseline": "qwen3:8b",
+    "lightweight_preview": "qwen3:0.6b",
+    "fallback": "qwen3:0.6b"
+  },
+  "retention_policy": {
+    "must_keep": [
+      "qwen3.6:35b",
+      "qwen3:30b",
+      "qwen3-next:80b-a3b-instruct-q8_0",
+      "deepseek-r1:70b",
+      "deepseek-r1:32b",
+      "qwen3-coder:30b"
+    ],
+    "should_keep": [
+      "qwen3:14b",
+      "qwen3:8b"
+    ],
+    "delete_candidate_after_routing_replacement": [
+      "qwen3:0.6b"
+    ]
+  },
+  "activation_policy": {
+    "do_not_auto_pull_models": true,
+    "do_not_auto_start_ollama": true,
+    "do_not_auto_run_inference": true,
+    "require_runtime_inventory_before_activation": true,
+    "require_precheck_engine_allow_before_runtime_start": true
+  },
+  "local_manifest_evidence": {
+    "confirmed_models": [
+      "qwen3:0.6b",
+      "qwen3:8b",
+      "qwen3:14b",
+      "qwen3:30b",
+      "qwen3-coder:30b",
+      "deepseek-r1:32b",
+      "deepseek-r1:70b",
+      "qwen3.6:35b",
+      "qwen3-next:80b-a3b-instruct-q8_0"
+    ]
+  },
+  "image_generation": {
+    "enabled": false,
+    "planned_first_stage": [
+      "Qwen-Image",
+      "Qwen-Image-Edit"
+    ],
+    "planned_second_stage": [
+      "FLUX.1-dev",
+      "Stable Diffusion 3.5 Large",
+      "SDXL",
+      "ControlNet"
+    ],
+    "note": "Image generation is planned but not deployed in this node."
+  },
+  "governance": {
+    "baseline_commit": "755a958ba2cba066f48395be4391947ae446d435",
+    "baseline_tag": "v0.1.715-local-launcher-027l-post-merge-main-baseline",
+    "node": "LOCAL-LAUNCHER-027M-R1C-LOCAL-MODEL-FLEET-ROUTING-CONFIG-GATE"
+  }
+}
