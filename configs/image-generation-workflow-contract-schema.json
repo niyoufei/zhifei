@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "zdoc://image-generation/workflow-contract-schema/027n-r4b",
+  "title": "ZDoc Image Generation Workflow Contract Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "workflow_id",
+    "intended_model",
+    "required_inputs",
+    "output_expectations",
+    "safety_policy",
+    "no_video_generation",
+    "runtime_forbidden",
+    "runtime_enabled",
+    "allowed_task_type",
+    "disabled_video_generation"
+  ],
+  "properties": {
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "intended_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "required_inputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "output_expectations": {
+      "type": "object",
+      "required": [
+        "output_type",
+        "single_image_only",
+        "auto_upload"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "output_type": {
+          "type": "string"
+        },
+        "single_image_only": {
+          "const": true
+        },
+        "auto_upload": {
+          "const": false
+        }
+      }
+    },
+    "safety_policy": {
+      "type": "object",
+      "required": [
+        "local_only",
+        "no_model_weight_read",
+        "no_env_read"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "local_only": {
+          "const": true
+        },
+        "no_model_weight_read": {
+          "const": true
+        },
+        "no_env_read": {
+          "const": true
+        }
+      }
+    },
+    "no_video_generation": {
+      "const": true
+    },
+    "runtime_forbidden": {
+      "type": "object",
+      "required": [
+        "comfyui_start",
+        "localhost_access",
+        "inference",
+        "image_generation"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "comfyui_start": {
+          "const": true
+        },
+        "localhost_access": {
+          "const": true
+        },
+        "inference": {
+          "const": true
+        },
+        "image_generation": {
+          "const": true
+        }
+      }
+    },
+    "runtime_enabled": {
+      "const": false
+    },
+    "allowed_task_type": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "disabled_video_generation": {
+      "const": true
+    }
+  }
+}

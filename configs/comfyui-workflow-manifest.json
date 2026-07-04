@@ -1,0 +1,73 @@
+{
+  "schema_version": "027n-r4b",
+  "deployment_mode": "local_only",
+  "video_generation_enabled": false,
+  "workflows": {
+    "qwen_image_text_to_image": {
+      "workflow_id": "qwen_image_text_to_image",
+      "workflow_json_ref": null,
+      "workflow_json_status": "pending_real_workflow",
+      "node_type_summary": [
+        "text_prompt_input",
+        "negative_prompt_input",
+        "qwen_image_model_loader",
+        "image_sampler",
+        "image_output"
+      ],
+      "model_reference_id": "qwen_image_primary",
+      "custom_nodes_required": [],
+      "input_binding_profile": "qwen_image_text_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "no_video_generation": true,
+      "disabled_video_generation": true
+    },
+    "qwen_image_edit_image_to_image": {
+      "workflow_id": "qwen_image_edit_image_to_image",
+      "workflow_json_ref": null,
+      "workflow_json_status": "pending_real_workflow",
+      "node_type_summary": [
+        "source_image_input",
+        "text_prompt_input",
+        "negative_prompt_input",
+        "qwen_image_edit_model_loader",
+        "image_edit_sampler",
+        "image_output"
+      ],
+      "model_reference_id": "qwen_image_edit",
+      "custom_nodes_required": [],
+      "input_binding_profile": "qwen_image_edit_image_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "no_video_generation": true,
+      "disabled_video_generation": true
+    },
+    "flux_realistic_text_to_image": {
+      "workflow_id": "flux_realistic_text_to_image",
+      "workflow_json_ref": null,
+      "workflow_json_status": "pending_real_workflow",
+      "node_type_summary": [
+        "text_prompt_input",
+        "negative_prompt_input",
+        "flux_model_loader",
+        "image_sampler",
+        "image_output"
+      ],
+      "model_reference_id": "flux_realistic",
+      "custom_nodes_required": [],
+      "input_binding_profile": "flux_realistic_text_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "no_video_generation": true,
+      "disabled_video_generation": true
+    }
+  },
+  "video_generation": {
+    "enabled": false,
+    "runtime_enabled": false,
+    "notes": "Video workflows are not registered for R4B."
+  }
+}
