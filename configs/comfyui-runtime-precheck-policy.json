@@ -1,0 +1,63 @@
+{
+  "precheck_policy_version": "027n-r5b",
+  "local_only": true,
+  "video_generation_enabled": false,
+  "r5b_static_only": true,
+  "allow_start_comfyui": false,
+  "allow_access_localhost": false,
+  "allow_model_weight_read": false,
+  "allow_ollama_model_dir_read": false,
+  "allow_env_file_read": false,
+  "allow_image_generation": false,
+  "allow_workflow_dry_run": false,
+  "require_explicit_authorization_for_runtime": true,
+  "allowed_static_checks": [
+    "registry_exists",
+    "manifest_exists",
+    "schema_exists",
+    "workflow_json_status_pending",
+    "workflow_json_ref_environment_neutral",
+    "runtime_enabled_false",
+    "no_video_generation_true",
+    "input_binding_complete",
+    "output_policy_single_image",
+    "prompt_template_mapping_complete",
+    "video_generation_disabled"
+  ],
+  "design_only_environment_checks": [
+    "comfyui_install_path_exists",
+    "workflow_json_file_exists",
+    "custom_nodes_exist",
+    "output_directory_writable",
+    "port_available",
+    "model_reference_resolvable"
+  ],
+  "runtime_checks_requiring_explicit_authorization": [
+    "start_comfyui",
+    "access_localhost",
+    "service_health_check",
+    "read_real_model_directory",
+    "workflow_dry_run",
+    "generate_image"
+  ],
+  "forbidden_paths": [
+    ".env",
+    "**/.env",
+    "~/.ollama/models",
+    "model_weight_files",
+    "secret_files",
+    "token_files",
+    "full_disk_scan"
+  ],
+  "forbidden_actions": [
+    "start_comfyui",
+    "access_localhost",
+    "run_inference",
+    "generate_image",
+    "read_model_weights",
+    "read_ollama_models",
+    "read_env",
+    "scan_full_disk",
+    "deploy_video_generation"
+  ]
+}
