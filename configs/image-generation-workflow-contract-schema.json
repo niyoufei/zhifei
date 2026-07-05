@@ -111,6 +111,68 @@
     },
     "disabled_video_generation": {
       "const": true
+    },
+    "workflow_json_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workflow_json_status": {
+      "enum": [
+        "pending_real_workflow",
+        "mapped_static_unverified"
+      ]
+    },
+    "alternative_workflow_json_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "mapping_confidence": {
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    },
+    "manual_confirmation_required": {
+      "type": "boolean"
+    },
+    "manual_confirmation_reason": {
+      "type": "string"
+    },
+    "model_reference_hint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mapping_source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mapped_from_comfyui_root_policy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "r5k_environment_mapping_status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "custom_nodes_mapping_status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "inferred_custom_node_types": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "package_mapping_unverified": {
+      "type": "boolean"
     }
   }
 }

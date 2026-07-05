@@ -9,6 +9,23 @@ REQUIRED_WORKFLOW_IDS = {
     "flux_realistic_text_to_image",
 }
 
+ALLOWED_WORKFLOW_JSON_STATUSES = {
+    "pending_real_workflow",
+    "mapped_static_unverified",
+}
+
+ALLOWED_MAPPING_CONFIDENCES = {"HIGH", "MEDIUM", "LOW"}
+
+MODEL_WEIGHT_EXTENSIONS = (
+    ".safetensors",
+    ".ckpt",
+    ".pt",
+    ".pth",
+    ".gguf",
+    ".bin",
+    ".onnx",
+)
+
 REGISTRY_REQUIRED_FIELDS = {
     "workflow_id",
     "workflow_contract_id",
@@ -76,12 +93,18 @@ def validate_workflow_registry(registry: dict) -> list[str]:
             errors.append(f"{workflow_id} registry missing fields: {missing}")
         if entry.get("workflow_id") != workflow_id:
             errors.append(f"{workflow_id} workflow_id must match registry key")
+        if entry.get("workflow_json_status") not in ALLOWED_WORKFLOW_JSON_STATUSES:
+            errors.append(
+                f"{workflow_id} workflow_json_status must be pending_real_workflow or mapped_static_unverified"
+            )
         if entry.get("runtime_enabled") is not False:
             errors.append(f"{workflow_id} runtime_enabled must be false")
         if entry.get("no_video_generation") is not True:
             errors.append(f"{workflow_id} no_video_generation must be true")
         if _looks_environment_specific_path(entry.get("workflow_json_ref")):
             errors.append(f"{workflow_id} workflow_json_ref must not be environment-specific")
+        if _looks_model_weight_ref(entry.get("workflow_json_ref")):
+            errors.append(f"{workflow_id} workflow_json_ref must not point to a model weight")
 
     return errors
 
@@ -110,12 +133,19 @@ def validate_workflow_manifest(manifest: dict) -> list[str]:
             errors.append(f"{workflow_id} manifest missing fields: {missing}")
         if entry.get("workflow_id") != workflow_id:
             errors.append(f"{workflow_id} workflow_id must match manifest key")
+        if entry.get("workflow_json_status") not in ALLOWED_WORKFLOW_JSON_STATUSES:
+            errors.append(
+                f"{workflow_id} manifest workflow_json_status must be pending_real_workflow or mapped_static_unverified"
+            )
         if entry.get("runtime_enabled") is not False:
             errors.append(f"{workflow_id} manifest runtime_enabled must be false")
         if entry.get("no_video_generation") is not True:
             errors.append(f"{workflow_id} manifest no_video_generation must be true")
         if _looks_environment_specific_path(entry.get("workflow_json_ref")):
             errors.append(f"{workflow_id} workflow_json_ref must not be environment-specific")
+        if _looks_model_weight_ref(entry.get("workflow_json_ref")):
+            errors.append(f"{workflow_id} workflow_json_ref must not point to a model weight")
+        errors.extend(_validate_static_mapping_metadata(workflow_id, entry))
 
     return errors
 
@@ -180,3 +210,48 @@ def _looks_environment_specific_path(value: object) -> bool:
     if not isinstance(value, str):
         return False
     return value.startswith(("/", "~", "file://")) or "/Users/" in value or "\\Users\\" in value
+
+
+def _looks_model_weight_ref(value: object) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, str):
+        return False
+    return value.lower().endswith(MODEL_WEIGHT_EXTENSIONS)
+
+
+def _validate_static_mapping_metadata(workflow_id: str, entry: dict) -> list[str]:
+    errors: list[str] = []
+    alternative_refs = entry.get("alternative_workflow_json_refs")
+    if alternative_refs is not None:
+        if not isinstance(alternative_refs, list) or not all(
+            isinstance(item, str) for item in alternative_refs
+        ):
+            errors.append(f"{workflow_id} alternative_workflow_json_refs must be a string array")
+        else:
+            for ref in alternative_refs:
+                if _looks_environment_specific_path(ref):
+                    errors.append(
+                        f"{workflow_id} alternative_workflow_json_refs must not be environment-specific"
+                    )
+                if _looks_model_weight_ref(ref):
+                    errors.append(
+                        f"{workflow_id} alternative_workflow_json_refs must not point to a model weight"
+                    )
+
+    mapping_confidence = entry.get("mapping_confidence")
+    if mapping_confidence is not None and mapping_confidence not in ALLOWED_MAPPING_CONFIDENCES:
+        errors.append(f"{workflow_id} mapping_confidence must be HIGH, MEDIUM, or LOW")
+
+    manual_confirmation_required = entry.get("manual_confirmation_required")
+    if (
+        manual_confirmation_required is not None
+        and not isinstance(manual_confirmation_required, bool)
+    ):
+        errors.append(f"{workflow_id} manual_confirmation_required must be boolean")
+
+    model_reference_hint = entry.get("model_reference_hint")
+    if model_reference_hint is not None and not isinstance(model_reference_hint, str):
+        errors.append(f"{workflow_id} model_reference_hint must be a string")
+
+    return errors
