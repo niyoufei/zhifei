@@ -22,7 +22,10 @@ from image_generation.precheck.comfyui_precheck_plan import (
 )
 from image_generation.workflows.workflow_input_binding import DEFAULT_INPUT_BINDING_PROFILES
 from image_generation.workflows.workflow_output_policy import DEFAULT_OUTPUT_POLICIES
-from image_generation.workflows.workflow_validator import REQUIRED_WORKFLOW_IDS
+from image_generation.workflows.workflow_validator import (
+    ALLOWED_WORKFLOW_JSON_STATUSES,
+    REQUIRED_WORKFLOW_IDS,
+)
 
 
 REQUIRED_POLICY_FIELDS = {
@@ -246,6 +249,7 @@ def _validate_workflow_entries(label: str, workflows: dict[str, Any], target: st
     runtime_errors: list[str] = []
     video_errors: list[str] = []
     status_errors: list[str] = []
+    mapped_static_unverified: list[str] = []
     ref_errors: list[str] = []
     input_errors: list[str] = []
     for workflow_id, entry in workflows.items():
@@ -256,13 +260,25 @@ def _validate_workflow_entries(label: str, workflows: dict[str, Any], target: st
             runtime_errors.append(workflow_id)
         if entry.get("no_video_generation") is not True:
             video_errors.append(workflow_id)
-        if entry.get("workflow_json_status") != "pending_real_workflow":
+        workflow_json_status = entry.get("workflow_json_status")
+        if workflow_json_status not in ALLOWED_WORKFLOW_JSON_STATUSES:
             status_errors.append(workflow_id)
+        if workflow_json_status == "mapped_static_unverified":
+            mapped_static_unverified.append(workflow_id)
         if not _is_environment_neutral_ref(entry.get("workflow_json_ref")):
             ref_errors.append(workflow_id)
         profile_id = entry.get("input_binding_profile")
         if profile_id not in DEFAULT_INPUT_BINDING_PROFILES:
             input_errors.append(workflow_id)
+
+    status_message = "workflow_json_status must be pending_real_workflow or mapped_static_unverified"
+    if mapped_static_unverified and not status_errors:
+        status_pass_message = (
+            f"{label} workflow_json_status accepted; mapped_static_unverified remains "
+            f"static-only and not runtime-ready: {mapped_static_unverified}"
+        )
+    else:
+        status_pass_message = f"{label} workflow_json_status_static_unverified passed"
 
     checks = (
         ("runtime_enabled_false", runtime_errors, "runtime_enabled must be false"),
@@ -270,21 +286,32 @@ def _validate_workflow_entries(label: str, workflows: dict[str, Any], target: st
         (
             "workflow_json_status_pending",
             status_errors,
-            "workflow_json_status must be pending_real_workflow",
+            status_message,
+            status_pass_message,
         ),
         (
             "workflow_json_ref_environment_neutral",
             ref_errors,
             "workflow_json_ref must be null or relative and environment neutral",
+            f"{label} workflow_json_ref_environment_neutral passed",
         ),
-        ("input_binding_complete", input_errors, "input_binding_profile must be known"),
+        (
+            "input_binding_complete",
+            input_errors,
+            "input_binding_profile must be known",
+            f"{label} input_binding_complete passed",
+        ),
     )
-    for check_id, errors, message in checks:
+    for check in checks:
+        check_id = check[0]
+        errors = check[1]
+        message = check[2]
+        pass_message = check[3] if len(check) > 3 else f"{label} {check_id} passed"
         results.append(
             _result(
                 f"{label}_{check_id}",
                 PrecheckStatus.FAIL if errors else PrecheckStatus.PASS,
-                f"{message}: {errors}" if errors else f"{label} {check_id} passed",
+                f"{message}: {errors}" if errors else pass_message,
                 target,
             )
         )
