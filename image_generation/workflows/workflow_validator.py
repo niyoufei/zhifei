@@ -161,8 +161,8 @@ def validate_prompt_template_workflow_mapping(
     if not isinstance(template_map, dict):
         return ["prompt templates must use templates object"]
 
-    if len(template_map) != 13:
-        errors.append("prompt template count must remain 13")
+    if len(template_map) < 14:
+        errors.append("prompt template count must be at least 14")
 
     workflows = registry.get("workflows", {})
     contract_ids = {
