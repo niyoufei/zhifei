@@ -366,9 +366,42 @@
       ],
       "generation_policy": {
         "single_image_only_by_default": true,
+        "max_candidates_per_task": 3,
+        "recommended_candidates_per_task": 2,
+        "candidate_generation_mode": "serial_single_image",
+        "seed_required": true,
+        "manual_review_required": true,
+        "auto_publish_enabled": false,
         "video_generation_enabled": false,
         "batch_generation_enabled": false,
-        "requires_manual_review": true
+        "cross_model_comparison_enabled": false,
+        "requires_manual_review": true,
+        "output_naming_pattern": "project_slug__template_id__scene_type__seed-{seed}__{width}x{height}__{timestamp}__review-{review_status}.png",
+        "review_status_enum": [
+          "draft",
+          "candidate",
+          "selected",
+          "rejected",
+          "needs_regeneration",
+          "approved_for_bid"
+        ],
+        "retention_policy": {
+          "keep_original_outputs": true,
+          "keep_selected_outputs": true,
+          "allow_cleanup_rejected_candidates": true,
+          "cleanup_requires_manifest": true,
+          "auto_delete_enabled": false,
+          "never_clear_output_dir": true,
+          "never_delete_model_files": true
+        },
+        "duplicate_model_cleanup_policy": {
+          "keep_current_workflow_target_models": true,
+          "keep_hf_cache_symlink_shards_by_default": true,
+          "delete_uncertain_assets": false,
+          "cleanup_requires_separate_gate": true,
+          "forbid_wildcard_rm": true,
+          "verify_required_models_after_cleanup": true
+        }
       },
       "style_tags": [
         "technical_bid",
