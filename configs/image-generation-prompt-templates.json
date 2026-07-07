@@ -311,6 +311,83 @@
         "workers wear PPE"
       ]
     },
+    "qwen_image_tender_municipal_trench_lifting_v1": {
+      "task_type": "construction_process_diagram",
+      "recommended_model_role": "qwen_image_primary",
+      "model_role": "qwen_image_text_to_image",
+      "template_id": "qwen_image_tender_municipal_trench_lifting_v1",
+      "template_name": "市政雨污分流沟槽管道吊装技术标插图模板",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "workflow_id": "qwen_image_text_to_image",
+      "workflow_json_ref": "blueprints/Text to Image (Qwen-Image).json",
+      "model_family": "qwen_image",
+      "generator": "qwen_image_primary",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "{project_type}，{construction_scene}，市政道路雨污分流沟槽开挖与管道吊装现场，{key_equipment}，硬质围挡，吊装警戒区，专人指挥，工人佩戴安全帽和反光背心，{safety_controls}，{environmental_controls}，{site_context}，真实摄影风格，技术标正文插图，无可读文字。",
+      "positive_prompt_template": "{project_type}，{construction_scene}，市政道路雨污分流沟槽开挖与管道吊装现场，{key_equipment}，硬质围挡，吊装警戒区，专人指挥，工人佩戴安全帽和反光背心，{safety_controls}，{environmental_controls}，{site_context}，真实摄影风格，技术标正文插图，无可读文字。",
+      "flux_prompt_en": "technical bid illustration of municipal stormwater and sewage diversion trench excavation and pipe lifting site, hard fencing, lifting warning zone, dedicated signal person, workers wearing helmets and reflective vests, safety and environmental controls, realistic documentary construction style, no readable text",
+      "negative_prompt": "可读文字，乱码文字，水印，logo，卡通，油画，科幻，视频帧，多图拼接，人物畸形，机械畸形，错误吊装，危险作业，管道错误，过曝，过暗，大面积空白，模糊。",
+      "negative_prompt_template": "可读文字，乱码文字，水印，logo，卡通，油画，科幻，视频帧，多图拼接，人物畸形，机械畸形，错误吊装，危险作业，管道错误，过曝，过暗，大面积空白，模糊。",
+      "variable_fields": [
+        "project_type",
+        "construction_scene",
+        "key_equipment",
+        "safety_controls",
+        "environmental_controls",
+        "site_context"
+      ],
+      "fixed_parameters": {
+        "workflow": "qwen_image_text_to_image",
+        "width": 1024,
+        "height": 768,
+        "batch_size": 1,
+        "steps": 8,
+        "cfg": 1,
+        "sampler": "euler",
+        "scheduler": "simple"
+      },
+      "usage_scope": [
+        "施工组织设计技术标正文插图",
+        "市政道路雨污分流施工场景",
+        "沟槽开挖与管道吊装",
+        "安全文明施工示意图"
+      ],
+      "limitations": [
+        "不适用于正式批量图集",
+        "不适用于视频生成",
+        "不适用于 image edit",
+        "不适用于 FLUX 对比",
+        "不适用于未经人工终审的正式发布图"
+      ],
+      "quality_notes": [
+        "R6-C 相比 R6-A 技术标适配性更优",
+        "保留风险：雨污分流双线关系不强、局部吊装/喷雾略理想化",
+        "正式投标使用前需人工终审"
+      ],
+      "generation_policy": {
+        "single_image_only_by_default": true,
+        "video_generation_enabled": false,
+        "batch_generation_enabled": false,
+        "requires_manual_review": true
+      },
+      "style_tags": [
+        "technical_bid",
+        "municipal_drainage",
+        "trench_lifting",
+        "realistic_construction"
+      ],
+      "quality_constraints": [
+        "realistic technical-bid body illustration",
+        "no readable text",
+        "manual final review required"
+      ],
+      "construction_constraints": [
+        "stormwater and sewage diversion context is visible",
+        "trench excavation and pipe lifting are shown",
+        "lifting warning zone and signal person are present",
+        "workers wear helmets and reflective vests"
+      ]
+    },
     "birdseye_site_render": {
       "task_type": "birdseye_render",
       "recommended_model_role": "flux_realistic",
