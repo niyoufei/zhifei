@@ -50,12 +50,50 @@ def test_qwen_image_tender_municipal_trench_lifting_template_is_registered():
         "sampler": "euler",
         "scheduler": "simple",
     }
-    assert template["generation_policy"] == {
-        "single_image_only_by_default": True,
-        "video_generation_enabled": False,
-        "batch_generation_enabled": False,
-        "requires_manual_review": True,
+    policy = template["generation_policy"]
+    assert policy["max_candidates_per_task"] == 3
+    assert policy["recommended_candidates_per_task"] == 2
+    assert policy["recommended_candidates_per_task"] <= policy["max_candidates_per_task"]
+    assert policy["candidate_generation_mode"] == "serial_single_image"
+    assert policy["seed_required"] is True
+    assert policy["manual_review_required"] is True
+    assert policy["auto_publish_enabled"] is False
+    assert policy["video_generation_enabled"] is False
+    assert policy["batch_generation_enabled"] is False
+    assert policy["cross_model_comparison_enabled"] is False
+    assert policy["requires_manual_review"] is True
+    assert (
+        policy["output_naming_pattern"]
+        == "project_slug__template_id__scene_type__seed-{seed}__{width}x{height}__{timestamp}__review-{review_status}.png"
+    )
+    assert policy["review_status_enum"] == [
+        "draft",
+        "candidate",
+        "selected",
+        "rejected",
+        "needs_regeneration",
+        "approved_for_bid",
+    ]
+    assert policy["retention_policy"] == {
+        "keep_original_outputs": True,
+        "keep_selected_outputs": True,
+        "allow_cleanup_rejected_candidates": True,
+        "cleanup_requires_manifest": True,
+        "auto_delete_enabled": False,
+        "never_clear_output_dir": True,
+        "never_delete_model_files": True,
     }
+    assert policy["duplicate_model_cleanup_policy"] == {
+        "keep_current_workflow_target_models": True,
+        "keep_hf_cache_symlink_shards_by_default": True,
+        "delete_uncertain_assets": False,
+        "cleanup_requires_separate_gate": True,
+        "forbid_wildcard_rm": True,
+        "verify_required_models_after_cleanup": True,
+    }
+    assert template["model_family"] == "qwen_image"
+    assert template["workflow_contract_id"] != "flux_realistic_text_to_image"
+    assert template["workflow_contract_id"] != "qwen_image_edit_image_to_image"
     assert "不适用于视频生成" in template["limitations"]
     assert "不适用于 image edit" in template["limitations"]
     assert "不适用于 FLUX 对比" in template["limitations"]
