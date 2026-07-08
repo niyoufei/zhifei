@@ -174,6 +174,78 @@ R8B_REVIEW_POLICY_REQUIRED_FIELDS = {
     "approval_required_before_bid",
 }
 
+PROJECT_TEMPLATE_INSTANCE_SCHEMA_TYPE = "project_template_instance"
+PROJECT_TEMPLATE_INSTANCE_SCHEMA_VERSION = "027n-r10-c"
+
+PROJECT_TEMPLATE_INSTANCE_REQUIRED_FIELDS = {
+    "schema_type",
+    "schema_version",
+    "project_id",
+    "project_name",
+    "template_id",
+    "workflow_id",
+    "created_time",
+    "operator",
+    "variables",
+    "policy_refs",
+    "locked_policy_flags",
+    "review",
+}
+
+PROJECT_TEMPLATE_INSTANCE_REQUIRED_POLICY_REFS = {
+    "generation_policy",
+    "review_policy",
+    "retention_policy",
+}
+
+PROJECT_TEMPLATE_INSTANCE_LOCKED_POLICY_FLAGS = {
+    "video_generation_enabled": False,
+    "batch_generation_enabled": False,
+    "auto_publish_enabled": False,
+}
+
+PROJECT_TEMPLATE_INSTANCE_FORBIDDEN_VARIABLE_VALUES = {
+    "待补充",
+    "未知",
+    "TBD",
+    "N/A",
+    "自动生成",
+}
+
+PROJECT_TEMPLATE_INSTANCE_REVIEW_STATUSES = {
+    "draft",
+    "candidate",
+    "selected",
+    "rejected",
+    "needs_regeneration",
+    "approved_for_bid",
+}
+
+PROJECT_TEMPLATE_INSTANCE_ALLOWED_REVIEW_TRANSITIONS = {
+    ("draft", "candidate"),
+    ("candidate", "selected"),
+    ("candidate", "rejected"),
+    ("candidate", "needs_regeneration"),
+    ("selected", "approved_for_bid"),
+}
+
+PROJECT_TEMPLATE_INSTANCE_APPROVED_REQUIRED_FIELDS = {
+    "approved_time",
+    "reviewer",
+    "checks",
+    "review_notes",
+}
+
+PROJECT_TEMPLATE_INSTANCE_APPROVED_CHECKS = {
+    "template_applicable",
+    "variables_complete",
+    "manual_review_completed",
+    "no_watermark_logo",
+    "no_obvious_ai_artifacts",
+    "safety_civilized_construction_correct",
+    "technical_bid_illustration_fit",
+}
+
 
 def validate_workflow_registry(registry: dict) -> list[str]:
     """Return static registry errors; do not inspect runtime state."""
@@ -328,6 +400,53 @@ def validate_r4b_static_configs(
         + validate_workflow_manifest(manifest)
         + validate_prompt_template_workflow_mapping(prompt_templates, registry)
     )
+
+
+def validate_project_template_instance(
+    instance: dict,
+    prompt_templates: dict,
+    registry: dict,
+) -> list[str]:
+    """Validate an R10-C project_template_instance without runtime access."""
+
+    if not isinstance(instance, dict):
+        return ["project_template_instance must be an object"]
+
+    errors: list[str] = []
+    missing = sorted(PROJECT_TEMPLATE_INSTANCE_REQUIRED_FIELDS - set(instance))
+    if missing:
+        errors.append(f"project_template_instance missing fields: {missing}")
+
+    if instance.get("schema_type") != PROJECT_TEMPLATE_INSTANCE_SCHEMA_TYPE:
+        errors.append("schema_type must be project_template_instance")
+    if instance.get("schema_version") != PROJECT_TEMPLATE_INSTANCE_SCHEMA_VERSION:
+        errors.append("schema_version must be 027n-r10-c")
+
+    for field in (
+        "project_id",
+        "project_name",
+        "template_id",
+        "workflow_id",
+        "created_time",
+        "operator",
+    ):
+        if field in instance and not _is_non_empty_string(instance.get(field)):
+            errors.append(f"{field} must be a non-empty string")
+
+    template = _project_instance_template(instance, prompt_templates, errors)
+    _validate_project_instance_workflow(instance, registry, template, errors)
+    _validate_project_instance_variables(instance.get("variables"), errors)
+    _validate_project_instance_policy_refs(instance.get("policy_refs"), errors)
+    _validate_project_instance_template_policy_sources(template, errors)
+    _validate_project_instance_locked_policy_flags(
+        instance.get("locked_policy_flags"),
+        template,
+        errors,
+    )
+    _validate_project_instance_no_policy_overrides(instance, errors)
+    _validate_project_instance_review(instance.get("review"), errors)
+
+    return errors
 
 
 def _looks_environment_specific_path(value: object) -> bool:
@@ -664,3 +783,213 @@ def _validate_expected_policy_object(
             )
 
     return errors
+
+
+def _project_instance_template(
+    instance: dict,
+    prompt_templates: dict,
+    errors: list[str],
+) -> dict | None:
+    templates = prompt_templates.get("templates") if isinstance(prompt_templates, dict) else None
+    if not isinstance(templates, dict):
+        errors.append("prompt templates must use templates object")
+        return None
+
+    template_id = instance.get("template_id")
+    if not isinstance(template_id, str) or not template_id.strip():
+        return None
+
+    template = templates.get(template_id)
+    if not isinstance(template, dict):
+        errors.append("template_id must reference an existing template")
+        return None
+
+    return template
+
+
+def _validate_project_instance_workflow(
+    instance: dict,
+    registry: dict,
+    template: dict | None,
+    errors: list[str],
+) -> None:
+    workflow_id = instance.get("workflow_id")
+    workflows = registry.get("workflows") if isinstance(registry, dict) else None
+    if isinstance(workflow_id, str) and workflow_id.strip():
+        if not isinstance(workflows, dict) or workflow_id not in workflows:
+            errors.append("workflow_id must exist in registry")
+        if template is not None and template.get("workflow_id") != workflow_id:
+            errors.append("workflow_id must match template workflow_id")
+
+
+def _validate_project_instance_variables(value: object, errors: list[str]) -> None:
+    if not isinstance(value, dict):
+        errors.append("variables must be an object")
+        return
+
+    missing = sorted(TEMPLATE_ADMISSION_REQUIRED_VARIABLE_FIELDS - set(value))
+    if missing:
+        errors.append(f"variables missing fields: {missing}")
+
+    for field in sorted(TEMPLATE_ADMISSION_REQUIRED_VARIABLE_FIELDS):
+        if field not in value:
+            continue
+        variable_value = value.get(field)
+        if not _is_non_empty_string(variable_value):
+            errors.append(f"variables.{field} must be a non-empty string")
+            continue
+        if _is_forbidden_project_variable_value(variable_value):
+            errors.append(f"variables.{field} contains forbidden placeholder value")
+
+
+def _validate_project_instance_policy_refs(value: object, errors: list[str]) -> None:
+    if not isinstance(value, dict):
+        errors.append("policy_refs must be an object")
+        return
+
+    missing = sorted(PROJECT_TEMPLATE_INSTANCE_REQUIRED_POLICY_REFS - set(value))
+    if missing:
+        errors.append(f"policy_refs missing fields: {missing}")
+
+    for policy_name in sorted(PROJECT_TEMPLATE_INSTANCE_REQUIRED_POLICY_REFS):
+        if policy_name not in value:
+            continue
+        if not _is_template_policy_ref(value.get(policy_name), policy_name):
+            errors.append(f"policy_refs.{policy_name} must reference template policy")
+
+
+def _validate_project_instance_template_policy_sources(
+    template: dict | None,
+    errors: list[str],
+) -> None:
+    if template is None:
+        return
+
+    generation_policy = template.get("generation_policy")
+    if not isinstance(generation_policy, dict):
+        errors.append("template generation_policy must be an object")
+        return
+
+    if not isinstance(template.get("review_policy"), dict):
+        errors.append("template review_policy must be an object")
+    if not isinstance(generation_policy.get("retention_policy"), dict):
+        errors.append("template retention_policy must be an object")
+
+
+def _validate_project_instance_locked_policy_flags(
+    value: object,
+    template: dict | None,
+    errors: list[str],
+) -> None:
+    if not isinstance(value, dict):
+        errors.append("locked_policy_flags must be an object")
+        return
+
+    missing = sorted(set(PROJECT_TEMPLATE_INSTANCE_LOCKED_POLICY_FLAGS) - set(value))
+    if missing:
+        errors.append(f"locked_policy_flags missing fields: {missing}")
+
+    for flag, expected_value in PROJECT_TEMPLATE_INSTANCE_LOCKED_POLICY_FLAGS.items():
+        if value.get(flag) is not expected_value:
+            errors.append(f"locked_policy_flags.{flag} must be false")
+
+    if template is None:
+        return
+
+    generation_policy = template.get("generation_policy")
+    if not isinstance(generation_policy, dict):
+        errors.append("template generation_policy must be an object")
+        return
+
+    for flag, expected_value in PROJECT_TEMPLATE_INSTANCE_LOCKED_POLICY_FLAGS.items():
+        if generation_policy.get(flag) is not expected_value:
+            errors.append(f"template generation_policy.{flag} must be false")
+
+
+def _validate_project_instance_no_policy_overrides(
+    instance: dict,
+    errors: list[str],
+) -> None:
+    for policy_name in sorted(PROJECT_TEMPLATE_INSTANCE_REQUIRED_POLICY_REFS):
+        if policy_name in instance:
+            errors.append(f"{policy_name} must not be defined on project_template_instance")
+
+    for flag in sorted(PROJECT_TEMPLATE_INSTANCE_LOCKED_POLICY_FLAGS):
+        if flag in instance:
+            errors.append(f"{flag} must not be defined on project_template_instance")
+
+
+def _validate_project_instance_review(value: object, errors: list[str]) -> None:
+    if not isinstance(value, dict):
+        errors.append("review must be an object")
+        return
+
+    status = value.get("status")
+    previous_status = value.get("previous_status")
+    if status not in PROJECT_TEMPLATE_INSTANCE_REVIEW_STATUSES:
+        errors.append("review.status must be an allowed review status")
+        return
+    if previous_status is not None:
+        if previous_status not in PROJECT_TEMPLATE_INSTANCE_REVIEW_STATUSES:
+            errors.append("review.previous_status must be an allowed review status")
+        elif previous_status != status and (
+            previous_status,
+            status,
+        ) not in PROJECT_TEMPLATE_INSTANCE_ALLOWED_REVIEW_TRANSITIONS:
+            errors.append(f"review transition {previous_status} -> {status} is not allowed")
+
+    if status == "approved_for_bid":
+        if previous_status != "selected":
+            errors.append("approved_for_bid must transition from selected")
+        _validate_project_instance_approved_review(value, errors)
+
+
+def _validate_project_instance_approved_review(value: dict, errors: list[str]) -> None:
+    missing = sorted(PROJECT_TEMPLATE_INSTANCE_APPROVED_REQUIRED_FIELDS - set(value))
+    if missing:
+        errors.append(f"review missing approved_for_bid fields: {missing}")
+
+    for field in ("approved_time", "reviewer", "review_notes"):
+        if field in value and not _is_non_empty_string(value.get(field)):
+            errors.append(f"review.{field} must be a non-empty string")
+
+    checks = value.get("checks")
+    if not isinstance(checks, dict):
+        errors.append("review.checks must be an object")
+        return
+
+    missing_checks = sorted(PROJECT_TEMPLATE_INSTANCE_APPROVED_CHECKS - set(checks))
+    if missing_checks:
+        errors.append(f"review.checks missing fields: {missing_checks}")
+
+    for check in sorted(PROJECT_TEMPLATE_INSTANCE_APPROVED_CHECKS):
+        if checks.get(check) is not True:
+            errors.append(f"review.checks.{check} must be true for approved_for_bid")
+
+
+def _is_non_empty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_forbidden_project_variable_value(value: str) -> bool:
+    normalized = value.strip()
+    return (
+        normalized in PROJECT_TEMPLATE_INSTANCE_FORBIDDEN_VARIABLE_VALUES
+        or normalized.upper() in PROJECT_TEMPLATE_INSTANCE_FORBIDDEN_VARIABLE_VALUES
+    )
+
+
+def _is_template_policy_ref(value: object, policy_name: str) -> bool:
+    allowed_refs = {
+        "template",
+        f"template.{policy_name}",
+        f"template:{policy_name}",
+    }
+    if isinstance(value, str):
+        return value in allowed_refs
+    if not isinstance(value, dict):
+        return False
+    if value.get("source") != "template":
+        return False
+    ref = value.get("policy") or value.get("policy_name") or value.get("ref")
+    return ref in (None, policy_name, f"template.{policy_name}", f"template:{policy_name}")
