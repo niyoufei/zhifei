@@ -54,6 +54,7 @@ def test_qwen_image_tender_municipal_trench_lifting_template_is_registered():
     assert policy["max_candidates_per_task"] == 3
     assert policy["recommended_candidates_per_task"] == 2
     assert policy["recommended_candidates_per_task"] <= policy["max_candidates_per_task"]
+    assert policy["single_image_only_by_default"] is True
     assert policy["candidate_generation_mode"] == "serial_single_image"
     assert policy["seed_required"] is True
     assert policy["manual_review_required"] is True
@@ -74,6 +75,26 @@ def test_qwen_image_tender_municipal_trench_lifting_template_is_registered():
         "needs_regeneration",
         "approved_for_bid",
     ]
+    review_policy = template["review_policy"]
+    assert set(review_policy) == {
+        "required",
+        "manual_review_required",
+        "review_status_enum",
+        "checklist",
+        "approval_required_before_bid",
+    }
+    assert review_policy["required"] is True
+    assert review_policy["manual_review_required"] is True
+    assert review_policy["review_status_enum"] == policy["review_status_enum"]
+    assert review_policy["checklist"] == [
+        "technical_bid_scene_fit",
+        "watermark_logo_check",
+        "text_artifact_check",
+        "safety_civilized_construction_check",
+        "person_equipment_integrity_check",
+        "formal_document_suitability_check",
+    ]
+    assert review_policy["approval_required_before_bid"] is True
     assert policy["retention_policy"] == {
         "keep_original_outputs": True,
         "keep_selected_outputs": True,
