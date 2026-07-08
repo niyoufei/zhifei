@@ -105,6 +105,14 @@ R7B_REQUIRED_DUPLICATE_MODEL_CLEANUP_POLICY = {
     "verify_required_models_after_cleanup": True,
 }
 
+R8B_REVIEW_POLICY_REQUIRED_FIELDS = {
+    "required",
+    "manual_review_required",
+    "review_status_enum",
+    "checklist",
+    "approval_required_before_bid",
+}
+
 
 def validate_workflow_registry(registry: dict) -> list[str]:
     """Return static registry errors; do not inspect runtime state."""
@@ -303,10 +311,16 @@ def _validate_static_mapping_metadata(workflow_id: str, entry: dict) -> list[str
 def _validate_r7b_minimal_production_policy(template: dict) -> list[str]:
     template_id = template.get("template_id", R7B_POLICY_TEMPLATE_ID)
     errors: list[str] = []
+    review_policy_errors = _validate_r8b_review_policy(
+        template_id,
+        template.get("review_policy"),
+    )
 
     policy = template.get("generation_policy")
     if not isinstance(policy, dict):
-        return [f"{template_id} generation_policy must be an object"]
+        return [
+            f"{template_id} generation_policy must be an object"
+        ] + review_policy_errors
 
     missing = sorted(R7B_POLICY_REQUIRED_FIELDS - set(policy.keys()))
     if missing:
@@ -396,6 +410,41 @@ def _validate_r7b_minimal_production_policy(template: dict) -> list[str]:
         or template.get("task_type") == "site_photo_edit"
     ):
         errors.append(f"{template_id} must not enable image edit")
+
+    errors.extend(review_policy_errors)
+
+    return errors
+
+
+def _validate_r8b_review_policy(template_id: str, value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{template_id} review_policy must be an object"]
+
+    errors: list[str] = []
+    missing = sorted(R8B_REVIEW_POLICY_REQUIRED_FIELDS - set(value.keys()))
+    if missing:
+        errors.append(f"{template_id} review_policy missing fields: {missing}")
+    if value.get("required") is not True:
+        errors.append(f"{template_id} review_policy.required must be true")
+    if value.get("manual_review_required") is not True:
+        errors.append(f"{template_id} review_policy.manual_review_required must be true")
+
+    review_status_enum = value.get("review_status_enum")
+    if not isinstance(review_status_enum, list) or not review_status_enum or not all(
+        isinstance(item, str) for item in review_status_enum
+    ):
+        errors.append(
+            f"{template_id} review_policy.review_status_enum must be a non-empty string array"
+        )
+
+    checklist = value.get("checklist")
+    if not isinstance(checklist, list) or not checklist or not all(
+        isinstance(item, str) for item in checklist
+    ):
+        errors.append(f"{template_id} review_policy.checklist must be a non-empty string array")
+
+    if value.get("approval_required_before_bid") is not True:
+        errors.append(f"{template_id} review_policy.approval_required_before_bid must be true")
 
     return errors
 

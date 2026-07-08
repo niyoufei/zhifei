@@ -403,6 +403,27 @@
           "verify_required_models_after_cleanup": true
         }
       },
+      "review_policy": {
+        "required": true,
+        "manual_review_required": true,
+        "review_status_enum": [
+          "draft",
+          "candidate",
+          "selected",
+          "rejected",
+          "needs_regeneration",
+          "approved_for_bid"
+        ],
+        "checklist": [
+          "technical_bid_scene_fit",
+          "watermark_logo_check",
+          "text_artifact_check",
+          "safety_civilized_construction_check",
+          "person_equipment_integrity_check",
+          "formal_document_suitability_check"
+        ],
+        "approval_required_before_bid": true
+      },
       "style_tags": [
         "technical_bid",
         "municipal_drainage",
