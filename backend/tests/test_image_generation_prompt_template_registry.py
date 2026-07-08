@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
+
+import pytest
 
 from image_generation.router.validators import validate_prompt_templates
 from image_generation.workflows.workflow_bridge import WorkflowBridge
@@ -18,10 +21,57 @@ def _load_json(path: str) -> dict:
         return json.load(file)
 
 
-def test_qwen_image_tender_municipal_trench_lifting_template_is_registered():
-    prompt_templates = _load_json("configs/image-generation-prompt-templates.json")
+def _load_static_configs() -> tuple[dict, dict, dict]:
+    return (
+        _load_json("configs/image-generation-prompt-templates.json"),
+        _load_json("configs/image-generation-workflow-registry.json"),
+        _load_json("configs/comfyui-workflow-manifest.json"),
+    )
+
+
+def _new_template(case_id: str, prompt_templates: dict) -> tuple[str, dict]:
+    template_key = f"admission_{case_id}"
+    template = deepcopy(prompt_templates["templates"][TEMPLATE_ID])
+    template["template_id"] = template_key
+    return template_key, template
+
+
+def _validate_prompt_template_admission(prompt_templates: dict) -> list[str]:
     registry = _load_json("configs/image-generation-workflow-registry.json")
     manifest = _load_json("configs/comfyui-workflow-manifest.json")
+    return validate_r4b_static_configs(registry, manifest, prompt_templates)
+
+
+def _remove(field: str):
+    def mutate(template: dict) -> None:
+        template.pop(field)
+
+    return mutate
+
+
+def _set_generation_policy(field: str, value: object):
+    def mutate(template: dict) -> None:
+        template["generation_policy"][field] = value
+
+    return mutate
+
+
+def _set_review_policy(field: str, value: object):
+    def mutate(template: dict) -> None:
+        template["review_policy"][field] = value
+
+    return mutate
+
+
+def _set_retention_policy(field: str, value: object):
+    def mutate(template: dict) -> None:
+        template["generation_policy"]["retention_policy"][field] = value
+
+    return mutate
+
+
+def test_qwen_image_tender_municipal_trench_lifting_template_is_registered():
+    prompt_templates, registry, manifest = _load_static_configs()
 
     assert validate_prompt_templates(prompt_templates) == []
     assert validate_r4b_static_configs(registry, manifest, prompt_templates) == []
@@ -122,9 +172,7 @@ def test_qwen_image_tender_municipal_trench_lifting_template_is_registered():
 
 
 def test_qwen_image_tender_template_builds_static_single_image_workflow_plan():
-    prompt_templates = _load_json("configs/image-generation-prompt-templates.json")
-    registry = _load_json("configs/image-generation-workflow-registry.json")
-    manifest = _load_json("configs/comfyui-workflow-manifest.json")
+    prompt_templates, registry, manifest = _load_static_configs()
     bridge = WorkflowBridge(registry, manifest, prompt_templates)
 
     assert bridge.workflow_id_for_template(TEMPLATE_ID) == WORKFLOW_ID
@@ -150,3 +198,93 @@ def test_qwen_image_tender_template_builds_static_single_image_workflow_plan():
     assert plan.input_binding.bindings["scheduler"] == "simple"
     assert plan.input_binding.source_image_required is False
     assert plan.input_binding.bindings["source_image"]["read_file_in_r4b"] is False
+
+
+def test_prompt_template_admission_rejects_duplicate_template_id():
+    prompt_templates, _, _ = _load_static_configs()
+    template = deepcopy(prompt_templates["templates"][TEMPLATE_ID])
+    prompt_templates["templates"]["duplicate_qwen_template"] = template
+
+    errors = _validate_prompt_template_admission(prompt_templates)
+
+    assert any("duplicate template_id" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("case_id", "mutate", "expected_error"),
+    [
+        (
+            "missing_workflow_id",
+            _remove("workflow_id"),
+            "workflow_id must be a non-empty string",
+        ),
+        (
+            "missing_fixed_parameters",
+            _remove("fixed_parameters"),
+            "fixed_parameters must be an object",
+        ),
+        (
+            "missing_variable_fields",
+            _remove("variable_fields"),
+            "variable_fields must be a string array",
+        ),
+        (
+            "missing_generation_policy",
+            _remove("generation_policy"),
+            "generation_policy must be an object",
+        ),
+        (
+            "batch_generation_enabled_true",
+            _set_generation_policy("batch_generation_enabled", True),
+            "generation_policy.batch_generation_enabled must be false",
+        ),
+        (
+            "video_generation_enabled_true",
+            _set_generation_policy("video_generation_enabled", True),
+            "generation_policy.video_generation_enabled must be false",
+        ),
+        (
+            "manual_review_required_false",
+            _set_generation_policy("manual_review_required", False),
+            "generation_policy.manual_review_required must be true",
+        ),
+        (
+            "auto_publish_enabled_true",
+            _set_generation_policy("auto_publish_enabled", True),
+            "generation_policy.auto_publish_enabled must be false",
+        ),
+        (
+            "review_required_false",
+            _set_review_policy("required", False),
+            "review_policy.required must be true",
+        ),
+        (
+            "cleanup_requires_manifest_false",
+            _set_retention_policy("cleanup_requires_manifest", False),
+            "retention_policy.cleanup_requires_manifest must be true",
+        ),
+        (
+            "auto_delete_enabled_true",
+            _set_retention_policy("auto_delete_enabled", True),
+            "retention_policy.auto_delete_enabled must be false",
+        ),
+        (
+            "unknown_workflow_id",
+            lambda template: template.__setitem__("workflow_id", "missing_workflow"),
+            "workflow_id must exist in registry",
+        ),
+    ],
+)
+def test_prompt_template_admission_rejects_invalid_new_templates(
+    case_id: str,
+    mutate,
+    expected_error: str,
+):
+    prompt_templates, _, _ = _load_static_configs()
+    template_key, template = _new_template(case_id, prompt_templates)
+    mutate(template)
+    prompt_templates["templates"][template_key] = template
+
+    errors = _validate_prompt_template_admission(prompt_templates)
+
+    assert any(expected_error in error for error in errors), errors

@@ -68,6 +68,67 @@ TEMPLATE_MAPPING_REQUIRED_FIELDS = {
     "flux_prompt_en",
 }
 
+TEMPLATE_ADMISSION_LEGACY_TEMPLATE_IDS = {
+    "foundation_pit_construction",
+    "rebar_binding",
+    "formwork_installation",
+    "concrete_pouring",
+    "hoisting_operation",
+    "temporary_facility_layout",
+    "safe_civilized_construction",
+    "material_yard_management",
+    "road_pipeline_construction",
+    "campus_renovation_scene",
+    "municipal_drainage_construction",
+    "birdseye_site_render",
+    "technical_bid_cover",
+}
+
+TEMPLATE_ADMISSION_MARKER_FIELDS = {
+    "workflow_id",
+    "fixed_parameters",
+    "variable_fields",
+    "generation_policy",
+    "review_policy",
+}
+
+TEMPLATE_ADMISSION_REQUIRED_FIXED_PARAMETERS = {
+    "width",
+    "height",
+    "batch_size",
+}
+
+TEMPLATE_ADMISSION_REQUIRED_VARIABLE_FIELDS = {
+    "project_type",
+    "construction_scene",
+    "key_equipment",
+    "safety_controls",
+    "environmental_controls",
+    "site_context",
+}
+
+TEMPLATE_ADMISSION_GENERATION_POLICY_REQUIRED_FIELDS = {
+    "batch_generation_enabled",
+    "video_generation_enabled",
+    "manual_review_required",
+    "auto_publish_enabled",
+    "candidate_generation_mode",
+}
+
+TEMPLATE_ADMISSION_REVIEW_POLICY_REQUIRED_FIELDS = {
+    "required",
+    "checklist",
+    "review_status_enum",
+    "approval_required_before_bid",
+}
+
+TEMPLATE_ADMISSION_RETENTION_POLICY_REQUIRED_FIELDS = {
+    "keep_original_outputs",
+    "keep_selected_outputs",
+    "auto_delete_enabled",
+    "cleanup_requires_manifest",
+}
+
 R7B_POLICY_TEMPLATE_ID = "qwen_image_tender_municipal_trench_lifting_v1"
 
 R7B_POLICY_REQUIRED_FIELDS = {
@@ -210,11 +271,14 @@ def validate_prompt_template_workflow_mapping(
         errors.append("prompt template count must be at least 14")
 
     workflows = registry.get("workflows", {})
+    workflow_entries = workflows.values() if isinstance(workflows, dict) else []
+    workflow_ids = set(workflows.keys()) if isinstance(workflows, dict) else set()
     contract_ids = {
         entry.get("workflow_contract_id")
-        for entry in workflows.values()
+        for entry in workflow_entries
         if isinstance(entry, dict)
     }
+    seen_template_ids: dict[str, str] = {}
 
     for template_key, template in template_map.items():
         if not isinstance(template, dict):
@@ -223,7 +287,16 @@ def validate_prompt_template_workflow_mapping(
         missing = sorted(TEMPLATE_MAPPING_REQUIRED_FIELDS - set(template.keys()))
         if missing:
             errors.append(f"{template_key} mapping missing fields: {missing}")
-        if template.get("template_id") != template_key:
+        template_id = template.get("template_id")
+        if not isinstance(template_id, str) or not template_id.strip():
+            errors.append(f"{template_key} template_id must be a non-empty string")
+        elif template_id in seen_template_ids:
+            errors.append(
+                f"{template_key} duplicate template_id {template_id!r} already used by {seen_template_ids[template_id]}"
+            )
+        else:
+            seen_template_ids[template_id] = template_key
+        if template_id != template_key:
             errors.append(f"{template_key} template_id must match template key")
         if template.get("workflow_contract_id") not in contract_ids:
             errors.append(f"{template_key} workflow_contract_id must exist in registry")
@@ -231,6 +304,8 @@ def validate_prompt_template_workflow_mapping(
             errors.append(f"{template_key} missing qwen_prompt_zh")
         if not template.get("flux_prompt_en"):
             errors.append(f"{template_key} missing flux_prompt_en")
+        if _template_requires_admission(template_key, template):
+            errors.extend(_validate_template_admission(template_key, template, workflow_ids))
 
     r7b_template = template_map.get(R7B_POLICY_TEMPLATE_ID)
     if not isinstance(r7b_template, dict):
@@ -304,6 +379,129 @@ def _validate_static_mapping_metadata(workflow_id: str, entry: dict) -> list[str
     model_reference_hint = entry.get("model_reference_hint")
     if model_reference_hint is not None and not isinstance(model_reference_hint, str):
         errors.append(f"{workflow_id} model_reference_hint must be a string")
+
+    return errors
+
+
+def _template_requires_admission(template_key: str, template: dict) -> bool:
+    if template_key not in TEMPLATE_ADMISSION_LEGACY_TEMPLATE_IDS:
+        return True
+    return bool(TEMPLATE_ADMISSION_MARKER_FIELDS & set(template.keys()))
+
+
+def _validate_template_admission(
+    template_key: str,
+    template: dict,
+    workflow_ids: set[str],
+) -> list[str]:
+    errors: list[str] = []
+
+    workflow_id = template.get("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        errors.append(f"{template_key} workflow_id must be a non-empty string")
+    elif workflow_id not in workflow_ids:
+        errors.append(f"{template_key} workflow_id must exist in registry")
+
+    fixed_parameters = template.get("fixed_parameters")
+    if not isinstance(fixed_parameters, dict):
+        errors.append(f"{template_key} fixed_parameters must be an object")
+    else:
+        missing_fixed = sorted(
+            TEMPLATE_ADMISSION_REQUIRED_FIXED_PARAMETERS - set(fixed_parameters.keys())
+        )
+        if missing_fixed:
+            errors.append(f"{template_key} fixed_parameters missing fields: {missing_fixed}")
+
+    variable_fields = template.get("variable_fields")
+    if not isinstance(variable_fields, list) or not all(
+        isinstance(item, str) for item in variable_fields
+    ):
+        errors.append(f"{template_key} variable_fields must be a string array")
+    else:
+        missing_variables = sorted(
+            TEMPLATE_ADMISSION_REQUIRED_VARIABLE_FIELDS - set(variable_fields)
+        )
+        if missing_variables:
+            errors.append(f"{template_key} variable_fields missing fields: {missing_variables}")
+
+    policy = template.get("generation_policy")
+    if not isinstance(policy, dict):
+        errors.append(f"{template_key} generation_policy must be an object")
+        return errors
+
+    missing_policy = sorted(TEMPLATE_ADMISSION_GENERATION_POLICY_REQUIRED_FIELDS - set(policy))
+    if missing_policy:
+        errors.append(f"{template_key} generation_policy missing fields: {missing_policy}")
+    if policy.get("batch_generation_enabled") is not False:
+        errors.append(f"{template_key} generation_policy.batch_generation_enabled must be false")
+    if policy.get("video_generation_enabled") is not False:
+        errors.append(f"{template_key} generation_policy.video_generation_enabled must be false")
+    if policy.get("manual_review_required") is not True:
+        errors.append(f"{template_key} generation_policy.manual_review_required must be true")
+    if policy.get("auto_publish_enabled") is not False:
+        errors.append(f"{template_key} generation_policy.auto_publish_enabled must be false")
+    if policy.get("candidate_generation_mode") != "serial_single_image":
+        errors.append(
+            f"{template_key} generation_policy.candidate_generation_mode must be serial_single_image"
+        )
+
+    review_policy = template.get("review_policy")
+    if not isinstance(review_policy, dict):
+        errors.append(f"{template_key} review_policy must be an object")
+    else:
+        errors.extend(_validate_template_admission_review_policy(template_key, review_policy))
+
+    retention_policy = policy.get("retention_policy")
+    if not isinstance(retention_policy, dict):
+        errors.append(f"{template_key} retention_policy must be an object")
+    else:
+        errors.extend(_validate_template_admission_retention_policy(template_key, retention_policy))
+
+    return errors
+
+
+def _validate_template_admission_review_policy(
+    template_key: str,
+    review_policy: dict,
+) -> list[str]:
+    errors: list[str] = []
+    missing = sorted(TEMPLATE_ADMISSION_REVIEW_POLICY_REQUIRED_FIELDS - set(review_policy))
+    if missing:
+        errors.append(f"{template_key} review_policy missing fields: {missing}")
+    if review_policy.get("required") is not True:
+        errors.append(f"{template_key} review_policy.required must be true")
+    if review_policy.get("approval_required_before_bid") is not True:
+        errors.append(f"{template_key} review_policy.approval_required_before_bid must be true")
+
+    checklist = review_policy.get("checklist")
+    if not isinstance(checklist, list) or not checklist or not all(
+        isinstance(item, str) for item in checklist
+    ):
+        errors.append(f"{template_key} review_policy.checklist must be a non-empty string array")
+
+    review_status_enum = review_policy.get("review_status_enum")
+    if not isinstance(review_status_enum, list) or not review_status_enum or not all(
+        isinstance(item, str) for item in review_status_enum
+    ):
+        errors.append(
+            f"{template_key} review_policy.review_status_enum must be a non-empty string array"
+        )
+
+    return errors
+
+
+def _validate_template_admission_retention_policy(
+    template_key: str,
+    retention_policy: dict,
+) -> list[str]:
+    errors: list[str] = []
+    missing = sorted(TEMPLATE_ADMISSION_RETENTION_POLICY_REQUIRED_FIELDS - set(retention_policy))
+    if missing:
+        errors.append(f"{template_key} retention_policy missing fields: {missing}")
+    if retention_policy.get("auto_delete_enabled") is not False:
+        errors.append(f"{template_key} retention_policy.auto_delete_enabled must be false")
+    if retention_policy.get("cleanup_requires_manifest") is not True:
+        errors.append(f"{template_key} retention_policy.cleanup_requires_manifest must be true")
 
     return errors
 
