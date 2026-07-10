@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from image_generation.prompts.project_template_prompt_plan import (
+    build_project_template_prompt_plan,
+)
 from image_generation.router.validators import validate_prompt_templates
 from image_generation.workflows.workflow_bridge import WorkflowBridge
 from image_generation.workflows.workflow_validator import (
@@ -449,3 +452,173 @@ def test_project_template_instance_rejects_invalid_instances(
     errors = _validate_project_instance(instance)
 
     assert any(expected_error in error for error in errors), errors
+
+
+def test_project_template_prompt_plan_builds_deterministic_safe_plan():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+
+    plan = build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+
+    assert plan == build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+    assert plan["plan_type"] == "project_template_prompt_plan"
+    assert plan["plan_version"] == "027n-r11-a"
+    assert plan["project_id"] == instance["project_id"]
+    assert plan["project_name"] == instance["project_name"]
+    assert plan["template_id"] == TEMPLATE_ID
+    assert plan["workflow_id"] == WORKFLOW_ID
+    assert plan["candidate_seed"] == 0
+    for value in instance["variables"].values():
+        assert value in plan["positive_prompt"]
+    assert "{" not in plan["positive_prompt"]
+    assert "{" not in plan["negative_prompt"]
+    assert (
+        plan["negative_prompt"]
+        == prompt_templates["templates"][TEMPLATE_ID]["negative_prompt_template"]
+    )
+    assert plan["fixed_parameters"]["batch_size"] == 1
+    assert plan["review_status"] == "candidate"
+    assert plan["runtime_execution_authorized"] is False
+    assert json.loads(json.dumps(plan, ensure_ascii=False)) == plan
+
+
+def test_project_template_prompt_plan_rejects_unknown_template_id():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+    instance["template_id"] = "missing_template"
+
+    with pytest.raises(ValueError, match="template_id must reference an existing template"):
+        build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+
+
+def test_project_template_prompt_plan_rejects_workflow_mismatch():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+    instance["workflow_id"] = "qwen_image_edit_image_to_image"
+
+    with pytest.raises(ValueError, match="workflow_id must match template workflow_id"):
+        build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+
+
+@pytest.mark.parametrize("candidate_seed", [-1, True, 1.0, "1"])
+def test_project_template_prompt_plan_rejects_invalid_candidate_seed(candidate_seed):
+    prompt_templates, registry, _ = _load_static_configs()
+
+    with pytest.raises(ValueError, match="candidate_seed must be a non-negative integer"):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            candidate_seed,
+        )
+
+
+@pytest.mark.parametrize("batch_size", [2, True])
+def test_project_template_prompt_plan_rejects_batch_size_other_than_one(batch_size):
+    prompt_templates, registry, _ = _load_static_configs()
+    prompt_templates["templates"][TEMPLATE_ID]["fixed_parameters"]["batch_size"] = batch_size
+
+    with pytest.raises(ValueError, match="fixed_parameters.batch_size must be 1"):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            0,
+        )
+
+
+@pytest.mark.parametrize(
+    "policy_field",
+    ["video_generation_enabled", "batch_generation_enabled", "auto_publish_enabled"],
+)
+def test_project_template_prompt_plan_rejects_enabled_unsafe_policy(policy_field: str):
+    prompt_templates, registry, _ = _load_static_configs()
+    prompt_templates["templates"][TEMPLATE_ID]["generation_policy"][policy_field] = True
+
+    with pytest.raises(ValueError, match=rf"generation_policy\.{policy_field} must be false"):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            0,
+        )
+
+
+def test_project_template_prompt_plan_does_not_mutate_inputs_and_detaches_snapshots():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+    original_prompt_templates = deepcopy(prompt_templates)
+    original_registry = deepcopy(registry)
+    original_instance = deepcopy(instance)
+
+    plan = build_project_template_prompt_plan(instance, prompt_templates, registry, 7)
+
+    assert instance == original_instance
+    assert prompt_templates == original_prompt_templates
+    assert registry == original_registry
+    template = prompt_templates["templates"][TEMPLATE_ID]
+    assert plan["fixed_parameters"] == template["fixed_parameters"]
+    assert plan["fixed_parameters"] is not template["fixed_parameters"]
+    assert plan["generation_policy"] == template["generation_policy"]
+    assert plan["generation_policy"] is not template["generation_policy"]
+    assert plan["review_policy"] == template["review_policy"]
+    assert plan["review_policy"] is not template["review_policy"]
+    assert plan["retention_policy"] == template["generation_policy"]["retention_policy"]
+    assert plan["retention_policy"] is not template["generation_policy"]["retention_policy"]
+
+    plan["fixed_parameters"]["batch_size"] = 99
+    plan["generation_policy"]["video_generation_enabled"] = True
+    plan["generation_policy"]["retention_policy"]["auto_delete_enabled"] = True
+    plan["review_policy"]["required"] = False
+    plan["review_policy"]["checklist"].append("synthetic-check")
+    plan["retention_policy"]["auto_delete_enabled"] = True
+    assert prompt_templates == original_prompt_templates
+
+
+def test_project_template_prompt_plan_rejects_undeclared_prompt_variable():
+    prompt_templates, registry, _ = _load_static_configs()
+    prompt_templates["templates"][TEMPLATE_ID][
+        "positive_prompt_template"
+    ] += "，{outside_field}"
+
+    with pytest.raises(ValueError, match="contains undeclared variables"):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            0,
+        )
+
+
+def test_project_template_prompt_plan_rejects_instance_policy_override():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+    instance["generation_policy"] = {"batch_generation_enabled": False}
+
+    with pytest.raises(ValueError, match="generation_policy must not be defined"):
+        build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_error"),
+    [
+        ("api_token", "synthetic-test-value", "must not contain token fields"),
+        ("model_path", "/synthetic/model", "must not contain model or output path fields"),
+        ("output_path", "/synthetic/output", "must not contain model or output path fields"),
+    ],
+)
+def test_project_template_prompt_plan_rejects_sensitive_runtime_fields(
+    field: str,
+    value: str,
+    expected_error: str,
+):
+    prompt_templates, registry, _ = _load_static_configs()
+    prompt_templates["templates"][TEMPLATE_ID]["fixed_parameters"][field] = value
+
+    with pytest.raises(ValueError, match=expected_error):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            0,
+        )
