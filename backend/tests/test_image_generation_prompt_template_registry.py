@@ -8,7 +8,10 @@ import pytest
 
 from image_generation.router.validators import validate_prompt_templates
 from image_generation.workflows.workflow_bridge import WorkflowBridge
-from image_generation.workflows.workflow_validator import validate_r4b_static_configs
+from image_generation.workflows.workflow_validator import (
+    validate_project_template_instance,
+    validate_r4b_static_configs,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +43,58 @@ def _validate_prompt_template_admission(prompt_templates: dict) -> list[str]:
     registry = _load_json("configs/image-generation-workflow-registry.json")
     manifest = _load_json("configs/comfyui-workflow-manifest.json")
     return validate_r4b_static_configs(registry, manifest, prompt_templates)
+
+
+def _valid_project_template_instance() -> dict:
+    return {
+        "schema_type": "project_template_instance",
+        "schema_version": "027n-r10-c",
+        "project_id": "project-027n-r10c-demo",
+        "project_name": "市政雨污分流沟槽管道吊装示例项目",
+        "template_id": TEMPLATE_ID,
+        "workflow_id": WORKFLOW_ID,
+        "created_time": "2026-07-08T00:00:00+08:00",
+        "operator": "manual-review-operator",
+        "variables": {
+            "project_type": "市政道路工程",
+            "construction_scene": "雨污分流沟槽开挖与管道吊装",
+            "key_equipment": "汽车吊、挖掘机、管道吊具",
+            "safety_controls": "硬质围挡、吊装警戒区、专人指挥",
+            "environmental_controls": "雾炮降尘、材料覆盖、出入口冲洗",
+            "site_context": "城市道路半幅封闭施工现场",
+        },
+        "policy_refs": {
+            "generation_policy": "template:generation_policy",
+            "review_policy": "template:review_policy",
+            "retention_policy": "template:retention_policy",
+        },
+        "locked_policy_flags": {
+            "video_generation_enabled": False,
+            "batch_generation_enabled": False,
+            "auto_publish_enabled": False,
+        },
+        "review": {
+            "status": "approved_for_bid",
+            "previous_status": "selected",
+            "approved_time": "2026-07-08T01:00:00+08:00",
+            "reviewer": "technical-bid-reviewer",
+            "review_notes": "人工终审确认可用于技术标插图。",
+            "checks": {
+                "template_applicable": True,
+                "variables_complete": True,
+                "manual_review_completed": True,
+                "no_watermark_logo": True,
+                "no_obvious_ai_artifacts": True,
+                "safety_civilized_construction_correct": True,
+                "technical_bid_illustration_fit": True,
+            },
+        },
+    }
+
+
+def _validate_project_instance(instance: dict) -> list[str]:
+    prompt_templates, registry, _ = _load_static_configs()
+    return validate_project_template_instance(instance, prompt_templates, registry)
 
 
 def _remove(field: str):
@@ -286,5 +341,111 @@ def test_prompt_template_admission_rejects_invalid_new_templates(
     prompt_templates["templates"][template_key] = template
 
     errors = _validate_prompt_template_admission(prompt_templates)
+
+    assert any(expected_error in error for error in errors), errors
+
+
+def test_project_template_instance_accepts_valid_instance():
+    errors = _validate_project_instance(_valid_project_template_instance())
+
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("case_id", "mutate", "expected_error"),
+    [
+        (
+            "missing_project_id",
+            lambda instance: instance.pop("project_id"),
+            "project_template_instance missing fields: ['project_id']",
+        ),
+        (
+            "missing_variables_field",
+            lambda instance: instance.pop("variables"),
+            "project_template_instance missing fields: ['variables']",
+        ),
+        (
+            "missing_variables_site_context",
+            lambda instance: instance["variables"].pop("site_context"),
+            "variables missing fields: ['site_context']",
+        ),
+        (
+            "variables_empty_value",
+            lambda instance: instance["variables"].__setitem__("site_context", "  "),
+            "variables.site_context must be a non-empty string",
+        ),
+        (
+            "variables_tbd_value",
+            lambda instance: instance["variables"].__setitem__("site_context", "TBD"),
+            "variables.site_context contains forbidden placeholder value",
+        ),
+        (
+            "missing_policy_refs",
+            lambda instance: instance.pop("policy_refs"),
+            "project_template_instance missing fields: ['policy_refs']",
+        ),
+        (
+            "missing_locked_policy_flags",
+            lambda instance: instance.pop("locked_policy_flags"),
+            "project_template_instance missing fields: ['locked_policy_flags']",
+        ),
+        (
+            "video_generation_enabled_true",
+            lambda instance: instance["locked_policy_flags"].__setitem__(
+                "video_generation_enabled",
+                True,
+            ),
+            "locked_policy_flags.video_generation_enabled must be false",
+        ),
+        (
+            "batch_generation_enabled_true",
+            lambda instance: instance["locked_policy_flags"].__setitem__(
+                "batch_generation_enabled",
+                True,
+            ),
+            "locked_policy_flags.batch_generation_enabled must be false",
+        ),
+        (
+            "auto_publish_enabled_true",
+            lambda instance: instance["locked_policy_flags"].__setitem__(
+                "auto_publish_enabled",
+                True,
+            ),
+            "locked_policy_flags.auto_publish_enabled must be false",
+        ),
+        (
+            "draft_direct_to_approved",
+            lambda instance: instance["review"].__setitem__("previous_status", "draft"),
+            "review transition draft -> approved_for_bid is not allowed",
+        ),
+        (
+            "candidate_direct_to_approved",
+            lambda instance: instance["review"].__setitem__("previous_status", "candidate"),
+            "review transition candidate -> approved_for_bid is not allowed",
+        ),
+        (
+            "approved_missing_reviewer",
+            lambda instance: instance["review"].pop("reviewer"),
+            "review missing approved_for_bid fields: ['reviewer']",
+        ),
+        (
+            "approved_check_false",
+            lambda instance: instance["review"]["checks"].__setitem__(
+                "variables_complete",
+                False,
+            ),
+            "review.checks.variables_complete must be true for approved_for_bid",
+        ),
+    ],
+)
+def test_project_template_instance_rejects_invalid_instances(
+    case_id: str,
+    mutate,
+    expected_error: str,
+):
+    instance = _valid_project_template_instance()
+    mutate(instance)
+
+    errors = _validate_project_instance(instance)
 
     assert any(expected_error in error for error in errors), errors
