@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import builtins
 from copy import deepcopy
+from enum import Enum, auto
 import inspect
 import json
 import socket
@@ -93,6 +94,10 @@ class _FakeOpener:
             raise self.error
         assert self.response is not None
         return self.response
+
+
+class _UnknownOperation(Enum):
+    UNKNOWN = auto()
 
 
 def _json_response(
@@ -193,6 +198,291 @@ def test_default_opener_explicitly_disables_proxies_and_redirects(monkeypatch) -
     )
 
 
+def test_legacy_load_json_request_bypass_is_removed_before_opener() -> None:
+    opener = _FakeOpener(_json_response(_health_payload()))
+    transport = LocalComfyUITransport(opener=opener)
+    arbitrary_request = urllib.request.Request("https://example.com/history")
+
+    assert "_load_json" not in vars(LocalComfyUITransport)
+    with pytest.raises(AttributeError):
+        legacy_entry = getattr(transport, "_load_json")
+        legacy_entry(arbitrary_request)
+
+    assert opener.calls == []
+
+
+def test_internal_execute_rejects_urllib_request_before_opener() -> None:
+    opener = _FakeOpener(_json_response(_health_payload()))
+    transport = LocalComfyUITransport(opener=opener)
+    arbitrary_request = urllib.request.Request("https://example.com/prompt")
+
+    with pytest.raises(ValueError, match="supported local ComfyUI operation"):
+        transport._execute(arbitrary_request)  # type: ignore[arg-type]
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "https://example.com/prompt",
+        "/history/demo",
+        "DELETE",
+        _UnknownOperation.UNKNOWN,
+    ],
+    ids=["external-url", "path", "method", "unknown-operation"],
+)
+def test_internal_execute_rejects_routing_values_before_opener(
+    operation: object,
+) -> None:
+    opener = _FakeOpener(_json_response(_health_payload()))
+    transport = LocalComfyUITransport(opener=opener)
+
+    with pytest.raises(ValueError, match="supported local ComfyUI operation"):
+        transport._execute(operation)  # type: ignore[arg-type]
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value"),
+    [
+        ("request_value", urllib.request.Request("https://example.com")),
+        ("url", "https://example.com"),
+        ("path", "/history"),
+        ("method", "DELETE"),
+        ("headers", {"Authorization": "synthetic"}),
+        ("endpoint", "https://example.com"),
+    ],
+)
+def test_internal_execute_accepts_no_generic_routing_keywords(
+    keyword: str,
+    value: object,
+) -> None:
+    opener = _FakeOpener(_json_response(_health_payload()))
+    transport = LocalComfyUITransport(opener=opener)
+
+    with pytest.raises(TypeError):
+        transport._execute(
+            transport_module._LocalComfyUIOperation.SYSTEM_STATS,
+            **{keyword: value},
+        )
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        transport_module._LocalComfyUIOperation.SYSTEM_STATS,
+        transport_module._LocalComfyUIOperation.QUEUE,
+    ],
+    ids=["health", "queue"],
+)
+@pytest.mark.parametrize(
+    "api_prompt",
+    [
+        {},
+        None,
+        urllib.request.Request("https://example.com"),
+    ],
+    ids=["dict", "none", "request"],
+)
+def test_internal_get_operations_reject_payload_before_opener(
+    operation: object,
+    api_prompt: object,
+) -> None:
+    opener = _FakeOpener(_json_response(_health_payload()))
+    transport = LocalComfyUITransport(opener=opener)
+
+    with pytest.raises(ValueError, match="GET operations must not include"):
+        transport._execute(operation, api_prompt=api_prompt)  # type: ignore[arg-type]
+
+    assert opener.calls == []
+
+
+def test_internal_submit_rejects_missing_payload_before_opener() -> None:
+    opener = _FakeOpener(_json_response({"prompt_id": "prompt-demo-001"}))
+    transport = LocalComfyUITransport(opener=opener)
+
+    with pytest.raises(ValueError, match="api_prompt must be a dict"):
+        transport._execute(transport_module._LocalComfyUIOperation.SUBMIT_PROMPT)
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    "api_prompt",
+    [
+        None,
+        [],
+        "prompt",
+        urllib.request.Request("https://example.com"),
+    ],
+)
+def test_internal_submit_rejects_non_dict_payload_before_opener(
+    api_prompt: object,
+) -> None:
+    opener = _FakeOpener(_json_response({"prompt_id": "prompt-demo-001"}))
+    transport = LocalComfyUITransport(opener=opener)
+
+    with pytest.raises(ValueError, match="api_prompt must be a dict"):
+        transport._execute(
+            transport_module._LocalComfyUIOperation.SUBMIT_PROMPT,
+            api_prompt=api_prompt,
+        )
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    "api_prompt",
+    [
+        {"1": {"value": {1, 2}}},
+        {"1": {"value": float("nan")}},
+        {"1": {"value": object()}},
+    ],
+)
+def test_internal_submit_rejects_non_serializable_payload_before_opener(
+    api_prompt: dict,
+) -> None:
+    opener = _FakeOpener(_json_response({"prompt_id": "prompt-demo-001"}))
+    transport = LocalComfyUITransport(opener=opener)
+
+    with pytest.raises(ValueError, match="api_prompt must be JSON serializable"):
+        transport._execute(
+            transport_module._LocalComfyUIOperation.SUBMIT_PROMPT,
+            api_prompt=api_prompt,
+        )
+
+    assert opener.calls == []
+
+
+def test_internal_submit_rejects_circular_payload_before_opener() -> None:
+    api_prompt: dict[str, Any] = {"1": {}}
+    api_prompt["1"]["self"] = api_prompt
+    opener = _FakeOpener(_json_response({"prompt_id": "prompt-demo-001"}))
+    transport = LocalComfyUITransport(opener=opener)
+
+    with pytest.raises(ValueError, match="api_prompt must be JSON serializable"):
+        transport._execute(
+            transport_module._LocalComfyUIOperation.SUBMIT_PROMPT,
+            api_prompt=api_prompt,
+        )
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "api_prompt",
+        "response_payload",
+        "expected_path",
+        "expected_method",
+    ),
+    [
+        (
+            transport_module._LocalComfyUIOperation.SYSTEM_STATS,
+            None,
+            _health_payload(),
+            "/system_stats",
+            "GET",
+        ),
+        (
+            transport_module._LocalComfyUIOperation.QUEUE,
+            None,
+            {"queue_running": [], "queue_pending": []},
+            "/queue",
+            "GET",
+        ),
+        (
+            transport_module._LocalComfyUIOperation.SUBMIT_PROMPT,
+            {"1": {"inputs": {}}},
+            {"prompt_id": "prompt-demo-001"},
+            "/prompt",
+            "POST",
+        ),
+    ],
+)
+def test_internal_operation_mapping_builds_only_fixed_requests(
+    operation: object,
+    api_prompt: dict | None,
+    response_payload: object,
+    expected_path: str,
+    expected_method: str,
+) -> None:
+    opener = _FakeOpener(_json_response(response_payload))
+    transport = LocalComfyUITransport(opener=opener)
+
+    if api_prompt is None:
+        result = transport._execute(operation)  # type: ignore[arg-type]
+    else:
+        result = transport._execute(  # type: ignore[arg-type]
+            operation,
+            api_prompt=api_prompt,
+        )
+
+    assert result == response_payload
+    assert len(opener.calls) == 1
+    request_value, timeout = opener.calls[0]
+    assert request_value.full_url == f"{LOCAL_COMFYUI_BASE_URL}{expected_path}"
+    assert request_value.get_method() == expected_method
+    assert request_value.get_header("Accept") == "application/json"
+    assert timeout == HTTP_TIMEOUT_SECONDS
+    if expected_method == "GET":
+        assert request_value.data is None
+    else:
+        assert request_value.get_header("Content-type") == "application/json"
+        assert json.loads(request_value.data.decode("utf-8")) == {
+            "prompt": api_prompt
+        }
+
+
+def test_request_construction_and_open_are_confined_to_internal_execute() -> None:
+    source = inspect.getsource(transport_module)
+    tree = ast.parse(source)
+    transport_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "LocalComfyUITransport"
+    )
+    request_constructor_methods: set[str] = set()
+    opener_call_methods: set[str] = set()
+
+    for method in transport_class.body:
+        if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(method):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "Request"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "request"
+            ):
+                request_constructor_methods.add(method.name)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "open"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "_opener"
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "self"
+            ):
+                opener_call_methods.add(method.name)
+
+    assert request_constructor_methods == {"_execute"}
+    assert opener_call_methods == {"_execute"}
+    assert tuple(
+        inspect.signature(LocalComfyUITransport._execute).parameters
+    ) == ("self", "operation", "api_prompt")
+    assert tuple(
+        inspect.signature(transport_module._read_json_response).parameters
+    ) == ("response",)
+
+
 def test_check_returns_true_for_expected_system_stats_object() -> None:
     response = _json_response({**_health_payload(), "extra": "ignored"})
     opener = _FakeOpener(response)
@@ -288,6 +578,7 @@ def test_check_uses_exact_get_request_timeout_and_bounded_read() -> None:
 
     assert LocalComfyUITransport(opener=opener).check() is True
 
+    assert len(opener.calls) == 1
     request_value, timeout = opener.calls[0]
     assert request_value.full_url == f"{LOCAL_COMFYUI_BASE_URL}/system_stats"
     assert request_value.get_method() == "GET"
@@ -383,6 +674,7 @@ def test_get_state_uses_exact_queue_get_request() -> None:
         "pending": [],
     }
 
+    assert len(opener.calls) == 1
     request_value, timeout = opener.calls[0]
     assert request_value.full_url == f"{LOCAL_COMFYUI_BASE_URL}/queue"
     assert request_value.get_method() == "GET"
@@ -471,6 +763,7 @@ def test_submit_uses_exact_post_url_method_headers_and_timeout() -> None:
 
     LocalComfyUITransport(opener=opener).submit({"1": {"inputs": {}}})
 
+    assert len(opener.calls) == 1
     request_value, timeout = opener.calls[0]
     assert request_value.full_url == f"{LOCAL_COMFYUI_BASE_URL}/prompt"
     assert request_value.get_method() == "POST"

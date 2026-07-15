@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from enum import Enum, auto
 import json
 from typing import Any, Protocol
 from urllib import request
@@ -16,6 +17,13 @@ LOCAL_COMFYUI_BASE_URL = "http://127.0.0.1:8188"
 HTTP_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _RESPONSE_READ_CHUNK_BYTES = 64 * 1024
+_MISSING_API_PROMPT = object()
+
+
+class _LocalComfyUIOperation(Enum):
+    SYSTEM_STATS = auto()
+    QUEUE = auto()
+    SUBMIT_PROMPT = auto()
 
 
 class _OpenerPort(Protocol):
@@ -65,6 +73,25 @@ def _reject_nonstandard_json_constant(_value: str) -> None:
     raise ValueError("non-standard JSON constant")
 
 
+def _read_json_response(response: Any) -> object:
+    status = getattr(response, "status", None)
+    if type(status) is not int or not 200 <= status < 300:
+        raise ValueError("ComfyUI HTTP request failed")
+
+    content_type = response.headers.get("Content-Type", "")
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        raise ValueError("ComfyUI response must use application/json")
+
+    raw_body = _read_limited_body(response)
+    try:
+        return json.loads(
+            raw_body.decode("utf-8"),
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError("ComfyUI response must be valid UTF-8 JSON") from None
+
+
 class LocalComfyUITransport:
     """Expose only health, queue-state, and one-prompt submission operations."""
 
@@ -76,19 +103,13 @@ class LocalComfyUITransport:
     ) -> None:
         if base_url not in {LOCAL_COMFYUI_BASE_URL, f"{LOCAL_COMFYUI_BASE_URL}/"}:
             raise ValueError(f"base_url must be exactly {LOCAL_COMFYUI_BASE_URL}")
-        self._base_url = LOCAL_COMFYUI_BASE_URL
         self._opener = _build_default_opener() if opener is None else opener
 
     def check(self) -> bool:
         """Return whether the fixed local ComfyUI service has the expected shape."""
 
-        request_value = request.Request(
-            f"{self._base_url}/system_stats",
-            headers={"Accept": "application/json"},
-            method="GET",
-        )
         try:
-            response_data = self._load_json(request_value)
+            response_data = self._execute(_LocalComfyUIOperation.SYSTEM_STATS)
         except ValueError:
             return False
         return (
@@ -100,12 +121,7 @@ class LocalComfyUITransport:
     def get_state(self) -> dict:
         """Return only the coordinator queue fields in normalized form."""
 
-        request_value = request.Request(
-            f"{self._base_url}/queue",
-            headers={"Accept": "application/json"},
-            method="GET",
-        )
-        response_data = self._load_json(request_value)
+        response_data = self._execute(_LocalComfyUIOperation.QUEUE)
         if not isinstance(response_data, dict):
             raise ValueError("queue response must be a JSON object")
         running = response_data.get("queue_running")
@@ -122,26 +138,10 @@ class LocalComfyUITransport:
     def submit(self, api_prompt: dict) -> dict:
         """Submit one deep-copied API prompt and return only its prompt id."""
 
-        if not isinstance(api_prompt, dict):
-            raise ValueError("api_prompt must be a dict")
-        try:
-            request_body = _strict_json_bytes(
-                {"prompt": deepcopy(api_prompt)},
-                "api_prompt",
-            )
-        except Exception:
-            raise ValueError("api_prompt must be JSON serializable") from None
-
-        request_value = request.Request(
-            f"{self._base_url}/prompt",
-            data=request_body,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+        response_data = self._execute(
+            _LocalComfyUIOperation.SUBMIT_PROMPT,
+            api_prompt=api_prompt,
         )
-        response_data = self._load_json(request_value)
         if not isinstance(response_data, dict):
             raise ValueError("submit response must be a JSON object")
         prompt_id = response_data.get("prompt_id")
@@ -151,32 +151,59 @@ class LocalComfyUITransport:
             )
         return {"prompt_id": prompt_id}
 
-    def _load_json(self, request_value: request.Request) -> object:
+    def _execute(
+        self,
+        operation: _LocalComfyUIOperation,
+        *,
+        api_prompt: object = _MISSING_API_PROMPT,
+    ) -> object:
+        if type(operation) is not _LocalComfyUIOperation:
+            raise ValueError("operation must be a supported local ComfyUI operation")
+
+        if operation is _LocalComfyUIOperation.SYSTEM_STATS:
+            if api_prompt is not _MISSING_API_PROMPT:
+                raise ValueError("GET operations must not include api_prompt")
+            request_value = request.Request(
+                f"{LOCAL_COMFYUI_BASE_URL}/system_stats",
+                headers={"Accept": "application/json"},
+                method="GET",
+            )
+        elif operation is _LocalComfyUIOperation.QUEUE:
+            if api_prompt is not _MISSING_API_PROMPT:
+                raise ValueError("GET operations must not include api_prompt")
+            request_value = request.Request(
+                f"{LOCAL_COMFYUI_BASE_URL}/queue",
+                headers={"Accept": "application/json"},
+                method="GET",
+            )
+        elif operation is _LocalComfyUIOperation.SUBMIT_PROMPT:
+            if not isinstance(api_prompt, dict):
+                raise ValueError("api_prompt must be a dict")
+            try:
+                request_body = _strict_json_bytes(
+                    {"prompt": deepcopy(api_prompt)},
+                    "api_prompt",
+                )
+            except Exception:
+                raise ValueError("api_prompt must be JSON serializable") from None
+            request_value = request.Request(
+                f"{LOCAL_COMFYUI_BASE_URL}/prompt",
+                data=request_body,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+        else:
+            raise ValueError("operation must be a supported local ComfyUI operation")
+
         try:
             with self._opener.open(
                 request_value,
                 timeout=HTTP_TIMEOUT_SECONDS,
             ) as response:
-                status = getattr(response, "status", None)
-                if type(status) is not int or not 200 <= status < 300:
-                    raise ValueError("ComfyUI HTTP request failed")
-
-                content_type = response.headers.get("Content-Type", "")
-                if content_type.split(";", 1)[0].strip().lower() != "application/json":
-                    raise ValueError(
-                        "ComfyUI response must use application/json"
-                    )
-
-                raw_body = _read_limited_body(response)
-                try:
-                    return json.loads(
-                        raw_body.decode("utf-8"),
-                        parse_constant=_reject_nonstandard_json_constant,
-                    )
-                except (UnicodeDecodeError, ValueError):
-                    raise ValueError(
-                        "ComfyUI response must be valid UTF-8 JSON"
-                    ) from None
+                return _read_json_response(response)
         except ValueError:
             raise
         except Exception:
