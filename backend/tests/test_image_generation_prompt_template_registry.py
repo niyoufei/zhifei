@@ -4,6 +4,8 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
 
 import pytest
 
@@ -21,6 +23,13 @@ from image_generation.workflows.workflow_bridge import WorkflowBridge
 from image_generation.workflows.workflow_input_binding import (
     PRODUCTION_BINDING_CONTRACT_KEYS,
     PRODUCTION_BINDING_DESCRIPTOR_FIELDS,
+)
+from image_generation.workflows.workflow_path_resolver import (
+    PRODUCTION_COMFYUI_WORKFLOW_ROOT,
+    ProductionWorkflowPathError,
+    WorkflowPathResolver,
+    resolve_production_workflow_path,
+    validate_production_workflow_relative_path,
 )
 from image_generation.workflows.workflow_validator import (
     PRODUCTION_API_WORKFLOW_FROZEN,
@@ -222,7 +231,14 @@ def test_production_eligibility_schema_freezes_only_the_authorized_states_and_co
         == PRODUCTION_API_WORKFLOW_FROZEN
     )
     assert frozen_rule["then"]["required"] == ["workflow_json_ref"]
-    assert frozen_rule["then"]["properties"]["workflow_json_ref"]["pattern"] == ".*\\S.*"
+    assert frozen_rule["then"]["properties"]["workflow_json_ref"] == {
+        "$ref": "#/$defs/productionWorkflowRelativePath"
+    }
+    production_path_schema = schema["$defs"]["productionWorkflowRelativePath"]
+    assert production_path_schema["type"] == "string"
+    assert production_path_schema["minLength"] == 1
+    assert production_path_schema["pattern"].startswith("^")
+    assert production_path_schema["pattern"].endswith("$")
     verified_rule = manifest_record_schema["allOf"][0]
     assert (
         verified_rule["if"]["properties"]["workflow_json_status"]["const"]
@@ -230,6 +246,191 @@ def test_production_eligibility_schema_freezes_only_the_authorized_states_and_co
     )
     assert verified_rule["then"]["required"] == ["production_binding_contract"]
     assert verified_rule["else"]["not"]["required"] == ["production_binding_contract"]
+
+
+def test_production_workflow_root_is_fixed_and_production_api_cannot_override_it(
+    tmp_path,
+):
+    assert PRODUCTION_COMFYUI_WORKFLOW_ROOT == Path("workflows/comfyui")
+
+    resolved = resolve_production_workflow_path(
+        tmp_path,
+        "qwen_image_text_to_image.json",
+    )
+
+    assert resolved == (
+        tmp_path / "workflows/comfyui/qwen_image_text_to_image.json"
+    ).resolve()
+    with pytest.raises(TypeError):
+        resolve_production_workflow_path(
+            tmp_path,
+            "qwen_image_text_to_image.json",
+            production_root=tmp_path / "override",
+        )
+
+
+def test_production_workflow_path_accepts_nested_missing_file_without_creating_it(
+    tmp_path,
+):
+    workflow_path = tmp_path / "workflows/comfyui/qwen_image/qwen_image_text_to_image.json"
+
+    validated = validate_production_workflow_relative_path(
+        "qwen_image/qwen_image_text_to_image.json"
+    )
+    resolved = resolve_production_workflow_path(
+        tmp_path,
+        "qwen_image/qwen_image_text_to_image.json",
+    )
+
+    assert validated == PurePosixPath("qwen_image/qwen_image_text_to_image.json")
+    assert resolved == workflow_path.resolve()
+    assert not workflow_path.exists()
+    assert not (tmp_path / "workflows").exists()
+
+
+def test_generic_resolver_override_remains_supported_but_does_not_change_production_root(
+    tmp_path,
+):
+    generic_root = tmp_path / "generic-workflows"
+    resolution = WorkflowPathResolver(generic_root).resolve(
+        workflow_id=WORKFLOW_ID,
+        workflow_json_ref="fixture.json",
+        workflow_json_status="mapped_static_unverified",
+    )
+
+    assert resolution.resolved_path == str(generic_root / "fixture.json")
+    assert resolve_production_workflow_path(tmp_path, "fixture.json") == (
+        tmp_path / PRODUCTION_COMFYUI_WORKFLOW_ROOT / "fixture.json"
+    ).resolve()
+
+
+@pytest.mark.parametrize(
+    ("workflow_relative_path", "reason_code"),
+    [
+        pytest.param(None, "production_workflow_path_not_string", id="null"),
+        pytest.param(1, "production_workflow_path_not_string", id="integer"),
+        pytest.param("", "production_workflow_path_empty", id="empty"),
+        pytest.param("   ", "production_workflow_path_empty", id="blank"),
+        pytest.param("/tmp/a.json", "production_workflow_path_absolute", id="posix-absolute"),
+        pytest.param(r"C:\temp\a.json", "production_workflow_path_absolute", id="windows-drive"),
+        pytest.param(r"\\server\share\a.json", "production_workflow_path_absolute", id="windows-unc"),
+        pytest.param("~/a.json", "production_workflow_path_home_reference", id="home"),
+        pytest.param("../a.json", "production_workflow_path_traversal", id="parent-leading"),
+        pytest.param("a/../../b.json", "production_workflow_path_traversal", id="parent-multiple"),
+        pytest.param("a/../b.json", "production_workflow_path_traversal", id="parent-middle"),
+        pytest.param("./a.json", "production_workflow_path_traversal", id="dot-leading"),
+        pytest.param("a/./b.json", "production_workflow_path_traversal", id="dot-middle"),
+        pytest.param(r"a\b.json", "production_workflow_path_backslash", id="backslash"),
+        pytest.param("file:///tmp/a.json", "production_workflow_path_url", id="file-url"),
+        pytest.param("http://example.com/a.json", "production_workflow_path_url", id="http-url"),
+        pytest.param("https://example.com/a.json", "production_workflow_path_url", id="https-url"),
+        pytest.param("ftp://example.com/a.json", "production_workflow_path_url", id="ftp-url"),
+        pytest.param("workflows/comfyui/a.json", "production_workflow_path_root_prefix_repeated", id="root-prefix"),
+        pytest.param("a", "production_workflow_path_invalid_suffix", id="no-suffix"),
+        pytest.param("a.txt", "production_workflow_path_invalid_suffix", id="text-suffix"),
+        pytest.param("a.JSON", "production_workflow_path_invalid_suffix", id="uppercase-suffix"),
+        pytest.param(".json", "production_workflow_path_invalid_suffix", id="empty-stem"),
+        pytest.param("folder/", "production_workflow_path_invalid_suffix", id="directory"),
+        pytest.param("a\x00.json", "production_workflow_path_control_character", id="nul"),
+        pytest.param("a\n.json", "production_workflow_path_control_character", id="newline"),
+        pytest.param("a\t.json", "production_workflow_path_control_character", id="tab"),
+        pytest.param("a\x7f.json", "production_workflow_path_control_character", id="delete-control"),
+    ],
+)
+def test_production_workflow_relative_path_rejects_unsafe_values(
+    workflow_relative_path,
+    reason_code,
+):
+    with pytest.raises(ProductionWorkflowPathError) as exc_info:
+        validate_production_workflow_relative_path(workflow_relative_path)
+
+    assert exc_info.value.reason_code == reason_code
+    assert str(exc_info.value) == reason_code
+
+
+def test_production_workflow_path_rejects_existing_symlink_parent_escape(tmp_path):
+    production_root = tmp_path / PRODUCTION_COMFYUI_WORKFLOW_ROOT
+    outside_root = tmp_path / "outside"
+    production_root.mkdir(parents=True)
+    outside_root.mkdir()
+    (production_root / "link").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ProductionWorkflowPathError) as exc_info:
+        resolve_production_workflow_path(tmp_path, "link/a.json")
+
+    assert exc_info.value.reason_code == "production_workflow_path_symlink_escape"
+
+
+def test_production_workflow_path_rejects_production_root_symlink_outside_repository(
+    tmp_path,
+):
+    workflows_root = tmp_path / "workflows"
+    outside_root = tmp_path.parent / f"{tmp_path.name}-outside"
+    workflows_root.mkdir()
+    outside_root.mkdir()
+    (workflows_root / "comfyui").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ProductionWorkflowPathError) as exc_info:
+        resolve_production_workflow_path(tmp_path, "a.json")
+
+    assert exc_info.value.reason_code == "production_workflow_path_outside_root"
+
+
+def test_production_workflow_path_apis_do_not_read_workflow_content(tmp_path, monkeypatch):
+    calls = []
+
+    def forbidden_content_read(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("workflow content read is forbidden")
+
+    monkeypatch.setattr("builtins.open", forbidden_content_read)
+    monkeypatch.setattr(Path, "read_text", forbidden_content_read)
+    monkeypatch.setattr(Path, "read_bytes", forbidden_content_read)
+    monkeypatch.setattr(json, "load", forbidden_content_read)
+    monkeypatch.setattr(json, "loads", forbidden_content_read)
+
+    assert validate_production_workflow_relative_path("missing.json") == PurePosixPath(
+        "missing.json"
+    )
+    assert resolve_production_workflow_path(tmp_path, "missing.json") == (
+        tmp_path / PRODUCTION_COMFYUI_WORKFLOW_ROOT / "missing.json"
+    ).resolve()
+    assert calls == []
+
+
+def test_production_workflow_schema_rejects_unsafe_paths():
+    schema = _load_json("configs/image-generation-workflow-contract-schema.json")
+    pattern = re.compile(schema["$defs"]["productionWorkflowRelativePath"]["pattern"])
+
+    assert pattern.fullmatch("qwen_image_text_to_image.json")
+    assert pattern.fullmatch("qwen_image/qwen_image_text_to_image.json")
+    for value in (
+        "",
+        "   ",
+        "/tmp/a.json",
+        r"C:\temp\a.json",
+        r"\\server\share\a.json",
+        "../a.json",
+        "a/../b.json",
+        "./a.json",
+        "a/./b.json",
+        "file:///tmp/a.json",
+        "http://example.com/a.json",
+        "https://example.com/a.json",
+        "ftp://example.com/a.json",
+        "workflows/comfyui/a.json",
+        r"a\b.json",
+        "a",
+        "a.txt",
+        "a.JSON",
+        ".json",
+        "folder/",
+        "a\x00.json",
+        "a\n.json",
+        "a\t.json",
+        "a\x7f.json",
+    ):
+        assert pattern.fullmatch(value) is None, value
 
 
 def test_real_registry_and_manifest_remain_compatible_and_byte_unchanged():
@@ -318,6 +519,41 @@ def test_registry_frozen_status_requires_non_empty_workflow_path(
     errors = validate_workflow_registry(registry)
 
     assert any("requires a non-empty workflow_json_ref" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("workflow_json_ref", "reason_code"),
+    [
+        pytest.param("/tmp/a.json", "production_workflow_path_absolute", id="absolute"),
+        pytest.param("../a.json", "production_workflow_path_traversal", id="traversal"),
+        pytest.param("http://example.com/a.json", "production_workflow_path_url", id="url"),
+        pytest.param(
+            "workflows/comfyui/a.json",
+            "production_workflow_path_root_prefix_repeated",
+            id="root-prefix",
+        ),
+        pytest.param("a.txt", "production_workflow_path_invalid_suffix", id="suffix"),
+    ],
+)
+def test_registry_frozen_status_rejects_unsafe_production_workflow_path(
+    workflow_json_ref,
+    reason_code,
+):
+    registry = _registry_with_frozen_workflow()
+    registry["workflows"][WORKFLOW_ID]["workflow_json_ref"] = workflow_json_ref
+
+    errors = validate_workflow_registry(registry)
+
+    assert any(reason_code in error for error in errors), errors
+
+
+def test_registry_frozen_status_reports_stable_missing_path_reason():
+    registry = _registry_with_frozen_workflow()
+    registry["workflows"][WORKFLOW_ID].pop("workflow_json_ref")
+
+    errors = validate_workflow_registry(registry)
+
+    assert any("production_workflow_path_missing" in error for error in errors), errors
 
 
 def test_registry_rejects_unknown_or_manifest_only_status():
