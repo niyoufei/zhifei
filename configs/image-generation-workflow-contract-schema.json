@@ -12,6 +12,11 @@
         "production_api_workflow_frozen"
       ]
     },
+    "productionWorkflowRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![~/])(?![A-Za-z]:)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!workflows/comfyui(?:/|$))(?!.*\\\\)(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))(?!.*[\\u0000-\\u001F\\u007F-\\u009F])(?!\\.json$).+\\.json$"
+    },
     "manifestWorkflowJsonStatus": {
       "enum": [
         "pending_real_workflow",
@@ -166,9 +171,7 @@
         ],
         "properties": {
           "workflow_json_ref": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": ".*\\S.*"
+            "$ref": "#/$defs/productionWorkflowRelativePath"
           }
         }
       }

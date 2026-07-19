@@ -6,6 +6,10 @@ from image_generation.workflows.workflow_input_binding import (
     PRODUCTION_BINDING_CONTRACT_KEYS,
     PRODUCTION_BINDING_DESCRIPTOR_FIELDS,
 )
+from image_generation.workflows.workflow_path_resolver import (
+    ProductionWorkflowPathError,
+    validate_production_workflow_relative_path,
+)
 
 
 REQUIRED_WORKFLOW_IDS = {
@@ -303,12 +307,26 @@ def validate_workflow_registry(registry: dict) -> list[str]:
             errors.append(
                 f"{workflow_id} registry workflow_json_status is not allowed"
             )
-        if workflow_json_status == PRODUCTION_API_WORKFLOW_FROZEN and not _is_non_empty_string(
-            entry.get("workflow_json_ref")
-        ):
-            errors.append(
-                f"{workflow_id} production_api_workflow_frozen requires a non-empty workflow_json_ref"
-            )
+        if workflow_json_status == PRODUCTION_API_WORKFLOW_FROZEN:
+            if "workflow_json_ref" not in entry:
+                errors.append(
+                    f"{workflow_id} production_workflow_path_missing: "
+                    "production_api_workflow_frozen requires a non-empty workflow_json_ref"
+                )
+            else:
+                try:
+                    validate_production_workflow_relative_path(entry.get("workflow_json_ref"))
+                except ProductionWorkflowPathError as exc:
+                    message = f"{workflow_id} {exc.reason_code}"
+                    if exc.reason_code in {
+                        "production_workflow_path_not_string",
+                        "production_workflow_path_empty",
+                    }:
+                        message += (
+                            ": production_api_workflow_frozen requires a non-empty "
+                            "workflow_json_ref"
+                        )
+                    errors.append(message)
         if entry.get("runtime_enabled") is not False:
             errors.append(f"{workflow_id} runtime_enabled must be false")
         if entry.get("no_video_generation") is not True:
