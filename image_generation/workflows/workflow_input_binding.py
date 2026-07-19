@@ -6,6 +6,25 @@ from dataclasses import dataclass
 from typing import Any
 
 
+PRODUCTION_BINDING_CONTRACT_KEYS = frozenset(
+    {
+        "positive_prompt",
+        "negative_prompt",
+        "candidate_seed",
+        "width",
+        "height",
+        "batch_size",
+        "steps",
+        "cfg",
+        "sampler",
+        "scheduler",
+        "output_prefix",
+    }
+)
+
+PRODUCTION_BINDING_DESCRIPTOR_FIELDS = frozenset({"node_id", "input_name"})
+
+
 DEFAULT_GENERATION_OPTIONS = {
     "width": 1024,
     "height": 1024,

@@ -5,8 +5,13 @@ import json
 
 import pytest
 
+import image_generation.workflows.project_prompt_payload_adapter as adapter_module
 from image_generation.workflows.project_prompt_payload_adapter import (
     build_comfyui_prompt_payload,
+)
+from image_generation.workflows.workflow_input_binding import (
+    PRODUCTION_BINDING_CONTRACT_KEYS,
+    PRODUCTION_BINDING_DESCRIPTOR_FIELDS,
 )
 
 
@@ -132,6 +137,42 @@ def test_builds_deterministic_serializable_single_image_payload_without_mutation
         "width": 1024, "height": 768, "batch_size": 1
     }
     assert payload["api_prompt"]["5"]["inputs"]["filename_prefix"] == payload["output_prefix"]
+
+
+def test_binding_contract_uses_the_shared_immutable_key_and_descriptor_sources():
+    bindings = _contract()["bindings"]
+
+    assert adapter_module.PRODUCTION_BINDING_CONTRACT_KEYS is PRODUCTION_BINDING_CONTRACT_KEYS
+    assert (
+        adapter_module.PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+        is PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+    )
+    assert not hasattr(adapter_module, "_REQUIRED_BINDINGS")
+    assert frozenset(bindings) == PRODUCTION_BINDING_CONTRACT_KEYS
+    assert all(
+        frozenset(descriptor) == PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+        for descriptor in bindings.values()
+    )
+
+
+@pytest.mark.parametrize("missing_key", sorted(PRODUCTION_BINDING_CONTRACT_KEYS))
+def test_binding_contract_still_rejects_each_missing_required_key(missing_key):
+    contract = _contract()
+    contract["bindings"].pop(missing_key)
+
+    with pytest.raises(ValueError, match="must contain exactly the allowed binding fields"):
+        _build(contract=contract)
+
+
+def test_binding_contract_still_rejects_an_extra_key():
+    contract = _contract()
+    contract["bindings"]["extra_binding"] = {
+        "node_id": "6",
+        "input_name": "extra",
+    }
+
+    with pytest.raises(ValueError, match="must contain exactly the allowed binding fields"):
+        _build(contract=contract)
 
 
 @pytest.mark.parametrize(
