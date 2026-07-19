@@ -7,6 +7,11 @@ import json
 import re
 from typing import Any
 
+from image_generation.workflows.workflow_input_binding import (
+    PRODUCTION_BINDING_CONTRACT_KEYS,
+    PRODUCTION_BINDING_DESCRIPTOR_FIELDS,
+)
+
 
 PAYLOAD_TYPE = "comfyui_api_prompt_payload"
 PAYLOAD_VERSION = "027n-r12-a"
@@ -15,19 +20,6 @@ PLAN_VERSION = "027n-r11-a"
 WORKFLOW_ID = "qwen_image_text_to_image"
 INPUT_BINDING_PROFILE = "qwen_image_text_to_image_inputs"
 
-_REQUIRED_BINDINGS = {
-    "positive_prompt",
-    "negative_prompt",
-    "candidate_seed",
-    "width",
-    "height",
-    "batch_size",
-    "steps",
-    "cfg",
-    "sampler",
-    "scheduler",
-    "output_prefix",
-}
 _VIDEO_MARKERS = ("video", "svd", "wanvideo", "animatediff")
 _IMAGE_EDIT_INPUTS = {
     "source_image",
@@ -168,10 +160,13 @@ def _validate_binding_contract(contract: object) -> dict:
     if contract.get("input_binding_profile") != INPUT_BINDING_PROFILE:
         raise ValueError(f"binding_contract.input_binding_profile must be {INPUT_BINDING_PROFILE}")
     bindings = contract.get("bindings")
-    if not isinstance(bindings, dict) or set(bindings) != _REQUIRED_BINDINGS:
+    if not isinstance(bindings, dict) or set(bindings) != PRODUCTION_BINDING_CONTRACT_KEYS:
         raise ValueError("binding_contract.bindings must contain exactly the allowed binding fields")
     for field, target in bindings.items():
-        if not isinstance(target, dict) or set(target) != {"node_id", "input_name"}:
+        if (
+            not isinstance(target, dict)
+            or set(target) != PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+        ):
             raise ValueError(f"binding_contract target for {field} must define node_id and input_name")
         if not isinstance(target["node_id"], (str, int)) or isinstance(target["node_id"], bool):
             raise ValueError(f"binding_contract node_id for {field} is invalid")

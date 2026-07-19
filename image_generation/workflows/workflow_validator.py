@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from image_generation.workflows.workflow_input_binding import (
+    PRODUCTION_BINDING_CONTRACT_KEYS,
+    PRODUCTION_BINDING_DESCRIPTOR_FIELDS,
+)
+
 
 REQUIRED_WORKFLOW_IDS = {
     "qwen_image_text_to_image",
@@ -9,10 +14,24 @@ REQUIRED_WORKFLOW_IDS = {
     "flux_realistic_text_to_image",
 }
 
-ALLOWED_WORKFLOW_JSON_STATUSES = {
-    "pending_real_workflow",
-    "mapped_static_unverified",
-}
+PRODUCTION_API_WORKFLOW_FROZEN = "production_api_workflow_frozen"
+PRODUCTION_BINDING_CONTRACT_VERIFIED = "production_binding_contract_verified"
+
+ALLOWED_REGISTRY_WORKFLOW_JSON_STATUSES = frozenset(
+    {
+        "pending_real_workflow",
+        "mapped_static_unverified",
+        PRODUCTION_API_WORKFLOW_FROZEN,
+    }
+)
+
+ALLOWED_MANIFEST_WORKFLOW_JSON_STATUSES = frozenset(
+    {
+        "pending_real_workflow",
+        "mapped_static_unverified",
+        PRODUCTION_BINDING_CONTRACT_VERIFIED,
+    }
+)
 
 ALLOWED_MAPPING_CONFIDENCES = {"HIGH", "MEDIUM", "LOW"}
 
@@ -251,6 +270,8 @@ def validate_workflow_registry(registry: dict) -> list[str]:
     """Return static registry errors; do not inspect runtime state."""
 
     errors: list[str] = []
+    if _contains_mapping_key(registry, "production_binding_contract"):
+        errors.append("production_binding_contract is not allowed in workflow registry")
     if registry.get("video_generation_enabled") is not False:
         errors.append("registry video_generation_enabled must be false")
 
@@ -262,6 +283,7 @@ def validate_workflow_registry(registry: dict) -> list[str]:
     if missing_ids:
         errors.append(f"registry missing required workflows: {missing_ids}")
 
+    seen_workflow_ids: set[str] = set()
     for workflow_id, entry in workflows.items():
         if not isinstance(entry, dict):
             errors.append(f"{workflow_id} registry entry must be an object")
@@ -269,11 +291,23 @@ def validate_workflow_registry(registry: dict) -> list[str]:
         missing = sorted(REGISTRY_REQUIRED_FIELDS - set(entry.keys()))
         if missing:
             errors.append(f"{workflow_id} registry missing fields: {missing}")
-        if entry.get("workflow_id") != workflow_id:
+        entry_workflow_id = entry.get("workflow_id")
+        if entry_workflow_id != workflow_id:
             errors.append(f"{workflow_id} workflow_id must match registry key")
-        if entry.get("workflow_json_status") not in ALLOWED_WORKFLOW_JSON_STATUSES:
+        if isinstance(entry_workflow_id, str):
+            if entry_workflow_id in seen_workflow_ids:
+                errors.append(f"{workflow_id} duplicate registry workflow_id {entry_workflow_id}")
+            seen_workflow_ids.add(entry_workflow_id)
+        workflow_json_status = entry.get("workflow_json_status")
+        if workflow_json_status not in ALLOWED_REGISTRY_WORKFLOW_JSON_STATUSES:
             errors.append(
-                f"{workflow_id} workflow_json_status must be pending_real_workflow or mapped_static_unverified"
+                f"{workflow_id} registry workflow_json_status is not allowed"
+            )
+        if workflow_json_status == PRODUCTION_API_WORKFLOW_FROZEN and not _is_non_empty_string(
+            entry.get("workflow_json_ref")
+        ):
+            errors.append(
+                f"{workflow_id} production_api_workflow_frozen requires a non-empty workflow_json_ref"
             )
         if entry.get("runtime_enabled") is not False:
             errors.append(f"{workflow_id} runtime_enabled must be false")
@@ -293,6 +327,14 @@ def validate_workflow_manifest(manifest: dict) -> list[str]:
     errors: list[str] = []
     if manifest.get("video_generation_enabled") is not False:
         errors.append("manifest video_generation_enabled must be false")
+    for field, value in manifest.items():
+        if field == "workflows":
+            continue
+        if field == "production_binding_contract" or _contains_mapping_key(
+            value,
+            "production_binding_contract",
+        ):
+            errors.append("production_binding_contract is not allowed outside manifest workflows")
 
     workflows = manifest.get("workflows")
     if not isinstance(workflows, dict):
@@ -302,6 +344,7 @@ def validate_workflow_manifest(manifest: dict) -> list[str]:
     if missing_ids:
         errors.append(f"manifest missing required workflows: {missing_ids}")
 
+    seen_workflow_ids: set[str] = set()
     for workflow_id, entry in workflows.items():
         if not isinstance(entry, dict):
             errors.append(f"{workflow_id} manifest entry must be an object")
@@ -309,11 +352,43 @@ def validate_workflow_manifest(manifest: dict) -> list[str]:
         missing = sorted(MANIFEST_REQUIRED_FIELDS - set(entry.keys()))
         if missing:
             errors.append(f"{workflow_id} manifest missing fields: {missing}")
-        if entry.get("workflow_id") != workflow_id:
+        entry_workflow_id = entry.get("workflow_id")
+        if entry_workflow_id != workflow_id:
             errors.append(f"{workflow_id} workflow_id must match manifest key")
-        if entry.get("workflow_json_status") not in ALLOWED_WORKFLOW_JSON_STATUSES:
+        if isinstance(entry_workflow_id, str):
+            if entry_workflow_id in seen_workflow_ids:
+                errors.append(f"{workflow_id} duplicate manifest workflow_id {entry_workflow_id}")
+            seen_workflow_ids.add(entry_workflow_id)
+        workflow_json_status = entry.get("workflow_json_status")
+        if workflow_json_status not in ALLOWED_MANIFEST_WORKFLOW_JSON_STATUSES:
             errors.append(
-                f"{workflow_id} manifest workflow_json_status must be pending_real_workflow or mapped_static_unverified"
+                f"{workflow_id} manifest workflow_json_status is not allowed"
+            )
+        contract_present = "production_binding_contract" in entry
+        for field, value in entry.items():
+            if field != "production_binding_contract" and _contains_mapping_key(
+                value,
+                "production_binding_contract",
+            ):
+                errors.append(
+                    f"{workflow_id} production_binding_contract is not allowed at nested field {field}"
+                )
+        if workflow_json_status == PRODUCTION_BINDING_CONTRACT_VERIFIED:
+            if not contract_present:
+                errors.append(
+                    f"{workflow_id} production_binding_contract_verified requires production_binding_contract"
+                )
+            else:
+                errors.extend(
+                    _validate_production_binding_contract(
+                        workflow_id,
+                        entry.get("production_binding_contract"),
+                    )
+                )
+        elif contract_present:
+            errors.append(
+                f"{workflow_id} production_binding_contract is only allowed for "
+                "production_binding_contract_verified"
             )
         if entry.get("runtime_enabled") is not False:
             errors.append(f"{workflow_id} manifest runtime_enabled must be false")
@@ -398,6 +473,7 @@ def validate_r4b_static_configs(
     return (
         validate_workflow_registry(registry)
         + validate_workflow_manifest(manifest)
+        + validate_registry_manifest_eligibility(registry, manifest)
         + validate_prompt_template_workflow_mapping(prompt_templates, registry)
     )
 
@@ -500,6 +576,106 @@ def _validate_static_mapping_metadata(workflow_id: str, entry: dict) -> list[str
         errors.append(f"{workflow_id} model_reference_hint must be a string")
 
     return errors
+
+
+def _validate_production_binding_contract(workflow_id: str, contract: object) -> list[str]:
+    if not isinstance(contract, dict):
+        return [f"{workflow_id} production_binding_contract must be an object"]
+
+    errors: list[str] = []
+    contract_keys = frozenset(contract)
+    if contract_keys != PRODUCTION_BINDING_CONTRACT_KEYS:
+        missing = sorted(PRODUCTION_BINDING_CONTRACT_KEYS - contract_keys, key=repr)
+        extra = sorted(contract_keys - PRODUCTION_BINDING_CONTRACT_KEYS, key=repr)
+        errors.append(
+            f"{workflow_id} production_binding_contract keys must match exactly; "
+            f"missing={missing}, extra={extra}"
+        )
+
+    seen_targets: set[tuple[str, str]] = set()
+    for semantic_key in sorted(contract_keys & PRODUCTION_BINDING_CONTRACT_KEYS):
+        descriptor = contract[semantic_key]
+        if (
+            not isinstance(descriptor, dict)
+            or frozenset(descriptor) != PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+        ):
+            errors.append(
+                f"{workflow_id} production_binding_contract.{semantic_key} must define "
+                "exactly node_id and input_name"
+            )
+            continue
+
+        node_id = descriptor["node_id"]
+        input_name = descriptor["input_name"]
+        node_id_valid = (
+            isinstance(node_id, (str, int))
+            and not isinstance(node_id, bool)
+            and (not isinstance(node_id, str) or bool(node_id.strip()))
+        )
+        if not node_id_valid:
+            errors.append(
+                f"{workflow_id} production_binding_contract.{semantic_key}.node_id is invalid"
+            )
+        input_name_valid = isinstance(input_name, str) and bool(input_name.strip())
+        if not input_name_valid:
+            errors.append(
+                f"{workflow_id} production_binding_contract.{semantic_key}.input_name is invalid"
+            )
+
+        if node_id_valid and input_name_valid:
+            normalized_target = (str(node_id), input_name)
+            if normalized_target in seen_targets:
+                errors.append(
+                    f"{workflow_id} production_binding_contract contains duplicate target "
+                    f"{normalized_target[0]}.{normalized_target[1]}"
+                )
+            seen_targets.add(normalized_target)
+
+    return errors
+
+
+def validate_registry_manifest_eligibility(registry: dict, manifest: dict) -> list[str]:
+    registry_workflows = registry.get("workflows")
+    manifest_workflows = manifest.get("workflows")
+    if not isinstance(registry_workflows, dict) or not isinstance(manifest_workflows, dict):
+        return []
+
+    errors: list[str] = []
+    for manifest_key, manifest_entry in manifest_workflows.items():
+        if not isinstance(manifest_entry, dict):
+            continue
+        workflow_id = manifest_entry.get("workflow_id")
+        if not isinstance(workflow_id, str):
+            errors.append(
+                f"{manifest_key} manifest workflow_id must exist in registry with the same workflow_id"
+            )
+            continue
+        registry_entry = registry_workflows.get(workflow_id)
+        if not isinstance(registry_entry, dict):
+            errors.append(
+                f"{manifest_key} manifest workflow_id must exist in registry with the same workflow_id"
+            )
+            continue
+        if (
+            manifest_entry.get("workflow_json_status")
+            == PRODUCTION_BINDING_CONTRACT_VERIFIED
+            and registry_entry.get("workflow_json_status") != PRODUCTION_API_WORKFLOW_FROZEN
+        ):
+            errors.append(
+                f"{manifest_key} production_binding_contract_verified requires registry "
+                "production_api_workflow_frozen"
+            )
+    return errors
+
+
+def _contains_mapping_key(value: object, target_key: str) -> bool:
+    if isinstance(value, dict):
+        return target_key in value or any(
+            _contains_mapping_key(child, target_key) for child in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_mapping_key(child, target_key) for child in value)
+    return False
 
 
 def _template_requires_admission(template_key: str, template: dict) -> bool:

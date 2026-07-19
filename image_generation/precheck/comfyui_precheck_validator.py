@@ -23,8 +23,12 @@ from image_generation.precheck.comfyui_precheck_plan import (
 from image_generation.workflows.workflow_input_binding import DEFAULT_INPUT_BINDING_PROFILES
 from image_generation.workflows.workflow_output_policy import DEFAULT_OUTPUT_POLICIES
 from image_generation.workflows.workflow_validator import (
-    ALLOWED_WORKFLOW_JSON_STATUSES,
+    ALLOWED_MANIFEST_WORKFLOW_JSON_STATUSES,
+    ALLOWED_REGISTRY_WORKFLOW_JSON_STATUSES,
     REQUIRED_WORKFLOW_IDS,
+    validate_registry_manifest_eligibility,
+    validate_workflow_manifest,
+    validate_workflow_registry,
 )
 
 
@@ -227,6 +231,22 @@ def _validate_workflow_surfaces(registry: dict[str, Any], manifest: dict[str, An
         )
         results.extend(_validate_workflow_entries(label, workflows, target))
 
+    eligibility_errors = (
+        validate_workflow_registry(registry)
+        + validate_workflow_manifest(manifest)
+        + validate_registry_manifest_eligibility(registry, manifest)
+    )
+    results.append(
+        _result(
+            "production_eligibility_contract",
+            PrecheckStatus.FAIL if eligibility_errors else PrecheckStatus.PASS,
+            f"production eligibility errors: {eligibility_errors}"
+            if eligibility_errors
+            else "production eligibility contract passed",
+            "configs/image-generation-workflow-registry.json; configs/comfyui-workflow-manifest.json",
+        )
+    )
+
     video_disabled = (
         registry.get("video_generation_enabled") is False
         and manifest.get("video_generation_enabled") is False
@@ -252,6 +272,11 @@ def _validate_workflow_entries(label: str, workflows: dict[str, Any], target: st
     mapped_static_unverified: list[str] = []
     ref_errors: list[str] = []
     input_errors: list[str] = []
+    allowed_statuses = (
+        ALLOWED_REGISTRY_WORKFLOW_JSON_STATUSES
+        if label == "registry"
+        else ALLOWED_MANIFEST_WORKFLOW_JSON_STATUSES
+    )
     for workflow_id, entry in workflows.items():
         if not isinstance(entry, dict):
             runtime_errors.append(workflow_id)
@@ -261,7 +286,7 @@ def _validate_workflow_entries(label: str, workflows: dict[str, Any], target: st
         if entry.get("no_video_generation") is not True:
             video_errors.append(workflow_id)
         workflow_json_status = entry.get("workflow_json_status")
-        if workflow_json_status not in ALLOWED_WORKFLOW_JSON_STATUSES:
+        if workflow_json_status not in allowed_statuses:
             status_errors.append(workflow_id)
         if workflow_json_status == "mapped_static_unverified":
             mapped_static_unverified.append(workflow_id)
@@ -271,7 +296,7 @@ def _validate_workflow_entries(label: str, workflows: dict[str, Any], target: st
         if profile_id not in DEFAULT_INPUT_BINDING_PROFILES:
             input_errors.append(workflow_id)
 
-    status_message = "workflow_json_status must be pending_real_workflow or mapped_static_unverified"
+    status_message = f"workflow_json_status must be one of {sorted(allowed_statuses)}"
     if mapped_static_unverified and not status_errors:
         status_pass_message = (
             f"{label} workflow_json_status accepted; mapped_static_unverified remains "

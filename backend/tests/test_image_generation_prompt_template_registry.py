@@ -1,25 +1,42 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+from image_generation.precheck.comfyui_precheck_models import PrecheckStatus
+from image_generation.precheck.comfyui_precheck_validator import (
+    _validate_workflow_surfaces,
+    validate_static_precheck,
+)
 from image_generation.prompts.project_template_prompt_plan import (
     build_project_template_prompt_plan,
 )
+from image_generation.router.router import ImageGenerationRouter
 from image_generation.router.validators import validate_prompt_templates
 from image_generation.workflows.workflow_bridge import WorkflowBridge
+from image_generation.workflows.workflow_input_binding import (
+    PRODUCTION_BINDING_CONTRACT_KEYS,
+    PRODUCTION_BINDING_DESCRIPTOR_FIELDS,
+)
 from image_generation.workflows.workflow_validator import (
+    PRODUCTION_API_WORKFLOW_FROZEN,
+    PRODUCTION_BINDING_CONTRACT_VERIFIED,
     validate_project_template_instance,
     validate_r4b_static_configs,
+    validate_workflow_manifest,
+    validate_workflow_registry,
 )
 
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_ID = "qwen_image_tender_municipal_trench_lifting_v1"
 WORKFLOW_ID = "qwen_image_text_to_image"
+REGISTRY_BASELINE_SHA256 = "44419a63b3c9dcd14943026216ac4a19fa73e1b45f5af6af932cd010e82398c1"
+MANIFEST_BASELINE_SHA256 = "c326f0af92cebd85af1ea274f45be473ddae0a8da94476c4cfe95e2cc7837758"
 
 
 def _load_json(path: str) -> dict:
@@ -33,6 +50,35 @@ def _load_static_configs() -> tuple[dict, dict, dict]:
         _load_json("configs/image-generation-workflow-registry.json"),
         _load_json("configs/comfyui-workflow-manifest.json"),
     )
+
+
+def _valid_production_binding_contract() -> dict:
+    return {
+        semantic_key: {
+            "node_id": str(index),
+            "input_name": f"input_{index}",
+        }
+        for index, semantic_key in enumerate(
+            sorted(PRODUCTION_BINDING_CONTRACT_KEYS),
+            start=1,
+        )
+    }
+
+
+def _registry_with_frozen_workflow() -> dict:
+    _, registry, _ = _load_static_configs()
+    entry = registry["workflows"][WORKFLOW_ID]
+    entry["workflow_json_status"] = PRODUCTION_API_WORKFLOW_FROZEN
+    entry["workflow_json_ref"] = "fixtures/qwen-image-api-workflow.json"
+    return registry
+
+
+def _manifest_with_verified_contract() -> dict:
+    _, _, manifest = _load_static_configs()
+    entry = manifest["workflows"][WORKFLOW_ID]
+    entry["workflow_json_status"] = PRODUCTION_BINDING_CONTRACT_VERIFIED
+    entry["production_binding_contract"] = _valid_production_binding_contract()
+    return manifest
 
 
 def _new_template(case_id: str, prompt_templates: dict) -> tuple[str, dict]:
@@ -126,6 +172,396 @@ def _set_retention_policy(field: str, value: object):
         template["generation_policy"]["retention_policy"][field] = value
 
     return mutate
+
+
+def test_production_eligibility_schema_freezes_only_the_authorized_states_and_contract():
+    schema = _load_json("configs/image-generation-workflow-contract-schema.json")
+
+    registry_statuses = set(schema["$defs"]["registryWorkflowJsonStatus"]["enum"])
+    manifest_statuses = set(schema["$defs"]["manifestWorkflowJsonStatus"]["enum"])
+    assert registry_statuses == {
+        "pending_real_workflow",
+        "mapped_static_unverified",
+        PRODUCTION_API_WORKFLOW_FROZEN,
+    }
+    assert manifest_statuses == {
+        "pending_real_workflow",
+        "mapped_static_unverified",
+        PRODUCTION_BINDING_CONTRACT_VERIFIED,
+    }
+    assert PRODUCTION_BINDING_CONTRACT_VERIFIED not in registry_statuses
+    assert PRODUCTION_API_WORKFLOW_FROZEN not in manifest_statuses
+    assert schema["properties"]["workflow_json_status"] == {
+        "$ref": "#/$defs/registryWorkflowJsonStatus"
+    }
+
+    manifest_record_schema = schema["$defs"]["manifestWorkflowRecord"]
+    assert manifest_record_schema["properties"]["workflow_json_status"] == {
+        "$ref": "#/$defs/manifestWorkflowJsonStatus"
+    }
+    assert "production_binding_contract" not in schema["properties"]
+    assert manifest_record_schema["properties"]["production_binding_contract"] == {
+        "$ref": "#/$defs/productionBindingContract"
+    }
+
+    contract_schema = schema["$defs"]["productionBindingContract"]
+    assert contract_schema["type"] == "object"
+    assert contract_schema["additionalProperties"] is False
+    assert frozenset(contract_schema["required"]) == PRODUCTION_BINDING_CONTRACT_KEYS
+    assert frozenset(contract_schema["properties"]) == PRODUCTION_BINDING_CONTRACT_KEYS
+    descriptor_schema = schema["$defs"]["productionBindingDescriptor"]
+    assert descriptor_schema["additionalProperties"] is False
+    assert frozenset(descriptor_schema["required"]) == PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+    assert frozenset(descriptor_schema["properties"]) == PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+    assert descriptor_schema["properties"]["node_id"]["pattern"] == ".*\\S.*"
+    assert descriptor_schema["properties"]["input_name"]["pattern"] == ".*\\S.*"
+
+    frozen_rule = schema["allOf"][0]
+    assert (
+        frozen_rule["if"]["properties"]["workflow_json_status"]["const"]
+        == PRODUCTION_API_WORKFLOW_FROZEN
+    )
+    assert frozen_rule["then"]["required"] == ["workflow_json_ref"]
+    assert frozen_rule["then"]["properties"]["workflow_json_ref"]["pattern"] == ".*\\S.*"
+    verified_rule = manifest_record_schema["allOf"][0]
+    assert (
+        verified_rule["if"]["properties"]["workflow_json_status"]["const"]
+        == PRODUCTION_BINDING_CONTRACT_VERIFIED
+    )
+    assert verified_rule["then"]["required"] == ["production_binding_contract"]
+    assert verified_rule["else"]["not"]["required"] == ["production_binding_contract"]
+
+
+def test_real_registry_and_manifest_remain_compatible_and_byte_unchanged():
+    registry_path = ROOT / "configs/image-generation-workflow-registry.json"
+    manifest_path = ROOT / "configs/comfyui-workflow-manifest.json"
+    before = (registry_path.read_bytes(), manifest_path.read_bytes())
+    assert hashlib.sha256(before[0]).hexdigest() == REGISTRY_BASELINE_SHA256
+    assert hashlib.sha256(before[1]).hexdigest() == MANIFEST_BASELINE_SHA256
+    prompt_templates, registry, manifest = _load_static_configs()
+
+    assert {
+        entry["workflow_json_status"] for entry in registry["workflows"].values()
+    } == {"pending_real_workflow"}
+    assert {
+        entry["workflow_json_status"] for entry in manifest["workflows"].values()
+    } == {"mapped_static_unverified"}
+    assert validate_r4b_static_configs(registry, manifest, prompt_templates) == []
+    assert (registry_path.read_bytes(), manifest_path.read_bytes()) == before
+
+
+def test_static_precheck_accepts_the_real_configs_without_runtime_access():
+    report = validate_static_precheck(ROOT)
+
+    assert report.status is PrecheckStatus.PASS
+    assert report.policy.allow_start_comfyui is False
+    assert report.policy.allow_access_localhost is False
+    assert report.policy.allow_image_generation is False
+    assert not [result for result in report.results if result.status is PrecheckStatus.FAIL]
+
+
+def test_static_precheck_reuses_fail_closed_production_eligibility_validation():
+    registry = _registry_with_frozen_workflow()
+    registry["workflows"][WORKFLOW_ID]["workflow_json_ref"] = None
+    manifest = _manifest_with_verified_contract()
+    manifest["workflows"][WORKFLOW_ID]["production_binding_contract"] = {}
+
+    results = _validate_workflow_surfaces(registry, manifest)
+    eligibility = next(
+        result for result in results if result.check_id == "production_eligibility_contract"
+    )
+
+    assert eligibility.status is PrecheckStatus.FAIL
+    assert "requires a non-empty workflow_json_ref" in eligibility.message
+    assert "keys must match exactly" in eligibility.message
+
+
+def test_image_generation_router_preserves_static_qwen_routing():
+    routing_config = _load_json("configs/local-image-generation-routing.json")
+    prompt_templates = _load_json("configs/image-generation-prompt-templates.json")
+    router = ImageGenerationRouter(routing_config, prompt_templates)
+
+    decision = router.decide("technical_bid_illustration")
+
+    assert decision.selected_role == "qwen_image_primary"
+    assert decision.workflow_key == WORKFLOW_ID
+    assert decision.prompt_template_key == "technical_bid_cover"
+    assert router.is_video_generation_enabled() is False
+
+
+def test_registry_accepts_production_frozen_fixture_without_reading_workflow_file():
+    registry = _registry_with_frozen_workflow()
+
+    assert validate_workflow_registry(registry) == []
+
+
+@pytest.mark.parametrize(
+    ("path_present", "workflow_json_ref"),
+    [
+        pytest.param(False, None, id="missing"),
+        pytest.param(True, None, id="null"),
+        pytest.param(True, "", id="empty"),
+        pytest.param(True, "   ", id="blank"),
+    ],
+)
+def test_registry_frozen_status_requires_non_empty_workflow_path(
+    path_present,
+    workflow_json_ref,
+):
+    registry = _registry_with_frozen_workflow()
+    entry = registry["workflows"][WORKFLOW_ID]
+    if not path_present:
+        entry.pop("workflow_json_ref")
+    else:
+        entry["workflow_json_ref"] = workflow_json_ref
+
+    errors = validate_workflow_registry(registry)
+
+    assert any("requires a non-empty workflow_json_ref" in error for error in errors), errors
+
+
+def test_registry_rejects_unknown_or_manifest_only_status():
+    for status in ("unknown_workflow_status", PRODUCTION_BINDING_CONTRACT_VERIFIED):
+        registry = _registry_with_frozen_workflow()
+        registry["workflows"][WORKFLOW_ID]["workflow_json_status"] = status
+
+        errors = validate_workflow_registry(registry)
+
+        assert any("registry workflow_json_status is not allowed" in error for error in errors), errors
+
+
+def test_registry_rejects_key_id_mismatch_and_duplicate_workflow_id():
+    _, registry, _ = _load_static_configs()
+    registry["workflows"]["duplicate_alias"] = deepcopy(
+        registry["workflows"][WORKFLOW_ID]
+    )
+
+    errors = validate_workflow_registry(registry)
+
+    assert any("workflow_id must match registry key" in error for error in errors), errors
+    assert any("duplicate registry workflow_id" in error for error in errors), errors
+
+
+def test_registry_rejects_manifest_only_production_contract_field():
+    registry = _registry_with_frozen_workflow()
+    registry["workflows"][WORKFLOW_ID][
+        "production_binding_contract"
+    ] = _valid_production_binding_contract()
+
+    errors = validate_workflow_registry(registry)
+
+    assert any("is not allowed in workflow registry" in error for error in errors), errors
+
+
+def test_manifest_accepts_verified_contract_fixture():
+    manifest = _manifest_with_verified_contract()
+
+    assert validate_workflow_manifest(manifest) == []
+
+
+@pytest.mark.parametrize(
+    ("contract_present", "contract_value"),
+    [
+        pytest.param(False, None, id="missing"),
+        pytest.param(True, None, id="null"),
+        pytest.param(True, {}, id="empty"),
+    ],
+)
+def test_manifest_verified_status_requires_non_empty_contract(
+    contract_present,
+    contract_value,
+):
+    manifest = _manifest_with_verified_contract()
+    entry = manifest["workflows"][WORKFLOW_ID]
+    if not contract_present:
+        entry.pop("production_binding_contract")
+    else:
+        entry["production_binding_contract"] = contract_value
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("production_binding_contract" in error for error in errors), errors
+
+
+@pytest.mark.parametrize("missing_key", sorted(PRODUCTION_BINDING_CONTRACT_KEYS))
+def test_manifest_verified_contract_rejects_each_missing_semantic_key(missing_key):
+    manifest = _manifest_with_verified_contract()
+    manifest["workflows"][WORKFLOW_ID]["production_binding_contract"].pop(missing_key)
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("keys must match exactly" in error for error in errors), errors
+
+
+@pytest.mark.parametrize("extra_key", ["extra_binding", ""])
+def test_manifest_verified_contract_rejects_extra_or_empty_semantic_key(extra_key):
+    manifest = _manifest_with_verified_contract()
+    manifest["workflows"][WORKFLOW_ID]["production_binding_contract"][extra_key] = {
+        "node_id": "99",
+        "input_name": "extra",
+    }
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("keys must match exactly" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("semantic_key", "misspelled_or_alias_key"),
+    [
+        ("candidate_seed", "candidate_sead"),
+        ("output_prefix", "output_prefx"),
+        ("positive_prompt", "prompt"),
+    ],
+)
+def test_manifest_verified_contract_rejects_misspelled_or_alias_keys(
+    semantic_key,
+    misspelled_or_alias_key,
+):
+    manifest = _manifest_with_verified_contract()
+    contract = manifest["workflows"][WORKFLOW_ID]["production_binding_contract"]
+    contract[misspelled_or_alias_key] = contract.pop(semantic_key)
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("keys must match exactly" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("descriptor", "expected_error"),
+    [
+        ({"node_id": "", "input_name": "input"}, ".node_id is invalid"),
+        ({"node_id": "1", "input_name": ""}, ".input_name is invalid"),
+        ({"node_id": [], "input_name": "input"}, ".node_id is invalid"),
+        ({"node_id": "1", "input_name": 1}, ".input_name is invalid"),
+        ("not-an-object", "must define exactly node_id and input_name"),
+        ({"node_id": "1"}, "must define exactly node_id and input_name"),
+        (
+            {"node_id": "1", "input_name": "input", "extra": "forbidden"},
+            "must define exactly node_id and input_name",
+        ),
+    ],
+)
+def test_manifest_verified_contract_rejects_invalid_descriptors(descriptor, expected_error):
+    manifest = _manifest_with_verified_contract()
+    semantic_key = sorted(PRODUCTION_BINDING_CONTRACT_KEYS)[0]
+    manifest["workflows"][WORKFLOW_ID]["production_binding_contract"][semantic_key] = descriptor
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any(expected_error in error for error in errors), errors
+
+
+def test_manifest_verified_contract_rejects_duplicate_node_input_mapping():
+    manifest = _manifest_with_verified_contract()
+    contract = manifest["workflows"][WORKFLOW_ID]["production_binding_contract"]
+    first_key, second_key = sorted(PRODUCTION_BINDING_CONTRACT_KEYS)[:2]
+    contract[second_key] = deepcopy(contract[first_key])
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("contains duplicate target" in error for error in errors), errors
+
+
+def test_manifest_unverified_status_rejects_production_contract():
+    _, _, manifest = _load_static_configs()
+    manifest["workflows"][WORKFLOW_ID][
+        "production_binding_contract"
+    ] = _valid_production_binding_contract()
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("is only allowed for production_binding_contract_verified" in error for error in errors), errors
+
+
+def test_manifest_rejects_unknown_or_registry_only_status():
+    for status in ("unknown_manifest_status", PRODUCTION_API_WORKFLOW_FROZEN):
+        _, _, manifest = _load_static_configs()
+        manifest["workflows"][WORKFLOW_ID]["workflow_json_status"] = status
+
+        errors = validate_workflow_manifest(manifest)
+
+        assert any("manifest workflow_json_status is not allowed" in error for error in errors), errors
+
+
+def test_manifest_rejects_contract_outside_authorized_workflow_location():
+    _, _, manifest = _load_static_configs()
+    manifest["production_binding_contract"] = _valid_production_binding_contract()
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("not allowed outside manifest workflows" in error for error in errors), errors
+
+
+def test_manifest_rejects_key_id_mismatch_and_duplicate_workflow_id():
+    _, _, manifest = _load_static_configs()
+    manifest["workflows"]["duplicate_alias"] = deepcopy(
+        manifest["workflows"][WORKFLOW_ID]
+    )
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("workflow_id must match manifest key" in error for error in errors), errors
+    assert any("duplicate manifest workflow_id" in error for error in errors), errors
+
+
+def test_joint_validator_requires_verified_manifest_to_match_frozen_registry():
+    prompt_templates, registry, _ = _load_static_configs()
+    manifest = _manifest_with_verified_contract()
+
+    errors = validate_r4b_static_configs(registry, manifest, prompt_templates)
+
+    assert any("requires registry production_api_workflow_frozen" in error for error in errors), errors
+
+    registry = _registry_with_frozen_workflow()
+    assert validate_r4b_static_configs(registry, manifest, prompt_templates) == []
+
+
+def test_production_eligibility_validation_has_no_file_network_or_process_side_effects(
+    monkeypatch,
+):
+    import builtins
+    import os
+    import socket
+    import subprocess
+    from urllib import request
+
+    import image_generation.runtime.single_shot_submission_authorization as authorization_module
+    import image_generation.runtime.single_shot_submission_coordinator as coordinator_module
+    from image_generation.runtime.local_comfyui_transport import LocalComfyUITransport
+
+    prompt_templates, _, _ = _load_static_configs()
+    registry = _registry_with_frozen_workflow()
+    manifest = _manifest_with_verified_contract()
+
+    def unexpected_side_effect(*_args, **_kwargs):
+        raise AssertionError("production eligibility validator attempted a runtime side effect")
+
+    monkeypatch.setattr(builtins, "open", unexpected_side_effect)
+    monkeypatch.setattr(Path, "open", unexpected_side_effect)
+    monkeypatch.setattr(Path, "read_text", unexpected_side_effect)
+    monkeypatch.setattr(Path, "read_bytes", unexpected_side_effect)
+    monkeypatch.setattr(os, "stat", unexpected_side_effect)
+    monkeypatch.setattr(socket, "socket", unexpected_side_effect)
+    monkeypatch.setattr(socket, "create_connection", unexpected_side_effect)
+    monkeypatch.setattr(request, "urlopen", unexpected_side_effect)
+    monkeypatch.setattr(subprocess, "Popen", unexpected_side_effect)
+    monkeypatch.setattr(subprocess, "run", unexpected_side_effect)
+    monkeypatch.setattr(
+        authorization_module,
+        "build_single_shot_submission_authorization_envelope",
+        unexpected_side_effect,
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "dispatch_single_shot_submission",
+        unexpected_side_effect,
+    )
+    monkeypatch.setattr(LocalComfyUITransport, "check", unexpected_side_effect)
+    monkeypatch.setattr(LocalComfyUITransport, "get_state", unexpected_side_effect)
+    monkeypatch.setattr(LocalComfyUITransport, "submit", unexpected_side_effect)
+
+    assert validate_r4b_static_configs(registry, manifest, prompt_templates) == []
 
 
 def test_qwen_image_tender_municipal_trench_lifting_template_is_registered():

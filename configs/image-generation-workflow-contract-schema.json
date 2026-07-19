@@ -4,6 +4,176 @@
   "title": "ZDoc Image Generation Workflow Contract Schema",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "registryWorkflowJsonStatus": {
+      "enum": [
+        "pending_real_workflow",
+        "mapped_static_unverified",
+        "production_api_workflow_frozen"
+      ]
+    },
+    "manifestWorkflowJsonStatus": {
+      "enum": [
+        "pending_real_workflow",
+        "mapped_static_unverified",
+        "production_binding_contract_verified"
+      ]
+    },
+    "productionBindingDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "input_name"
+      ],
+      "properties": {
+        "node_id": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "minLength": 1,
+          "pattern": ".*\\S.*"
+        },
+        "input_name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": ".*\\S.*"
+        }
+      }
+    },
+    "productionBindingContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "positive_prompt",
+        "negative_prompt",
+        "candidate_seed",
+        "width",
+        "height",
+        "batch_size",
+        "steps",
+        "cfg",
+        "sampler",
+        "scheduler",
+        "output_prefix"
+      ],
+      "properties": {
+        "positive_prompt": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "negative_prompt": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "candidate_seed": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "width": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "height": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "batch_size": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "steps": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "cfg": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "sampler": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "scheduler": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        },
+        "output_prefix": {
+          "$ref": "#/$defs/productionBindingDescriptor"
+        }
+      }
+    },
+    "manifestWorkflowRecord": {
+      "type": "object",
+      "required": [
+        "workflow_id",
+        "workflow_json_ref",
+        "workflow_json_status"
+      ],
+      "properties": {
+        "workflow_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": ".*\\S.*"
+        },
+        "workflow_json_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workflow_json_status": {
+          "$ref": "#/$defs/manifestWorkflowJsonStatus"
+        },
+        "production_binding_contract": {
+          "$ref": "#/$defs/productionBindingContract"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "workflow_json_status"
+            ],
+            "properties": {
+              "workflow_json_status": {
+                "const": "production_binding_contract_verified"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "production_binding_contract"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "production_binding_contract"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "workflow_json_status"
+        ],
+        "properties": {
+          "workflow_json_status": {
+            "const": "production_api_workflow_frozen"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "workflow_json_ref"
+        ],
+        "properties": {
+          "workflow_json_ref": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*"
+          }
+        }
+      }
+    }
+  ],
   "required": [
     "workflow_id",
     "intended_model",
@@ -119,10 +289,7 @@
       ]
     },
     "workflow_json_status": {
-      "enum": [
-        "pending_real_workflow",
-        "mapped_static_unverified"
-      ]
+      "$ref": "#/$defs/registryWorkflowJsonStatus"
     },
     "alternative_workflow_json_refs": {
       "type": "array",
