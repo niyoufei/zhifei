@@ -4,9 +4,11 @@ import ast
 import importlib
 import inspect
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 
 import pytest
 
@@ -24,6 +26,16 @@ class _FailingOpener:
 
 def _raise_keyboard_interrupt(_handle) -> None:
     raise KeyboardInterrupt
+
+
+def _source_line_number(function, statement: str) -> int:
+    source_lines, first_line = inspect.getsourcelines(function)
+    offset = next(
+        index
+        for index, source_line in enumerate(source_lines)
+        if statement in source_line
+    )
+    return first_line + offset
 
 
 class _FakeProcess:
@@ -302,6 +314,188 @@ def test_stop_escalates_from_terminate_to_kill_on_the_same_handle() -> None:
     )
 
 
+def test_main_terminate_return_boundary_dispatch_is_interrupt_atomic(
+    launch_paths,
+    monkeypatch,
+    capsys,
+) -> None:
+    python_executable, comfyui_root, _ = launch_paths
+    fake_process = _FakeProcess(wait_effects=[0])
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    dispatch_commit_line = _source_line_number(
+        launcher_module._dispatch_stop_action,
+        "dispatch.state = _StopDispatchState.DISPATCHED",
+    )
+    injected = False
+
+    def inject_after_terminate_return(frame, event, _arg):
+        nonlocal injected
+        if (
+            not injected
+            and event == "line"
+            and frame.f_code is launcher_module._dispatch_stop_action.__code__
+            and frame.f_lineno == dispatch_commit_line
+            and frame.f_locals["phase"] == "terminate"
+        ):
+            injected = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return inject_after_terminate_return
+
+    monkeypatch.setattr(launcher_module, "_port_is_available", lambda: True)
+    monkeypatch.setattr(
+        launcher_module.subprocess, "Popen", lambda *_args, **_kwargs: fake_process
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_wait_for_readiness",
+        _raise_keyboard_interrupt,
+    )
+
+    sys.settrace(inject_after_terminate_return)
+    try:
+        exit_code = launcher_module.main(
+            [
+                "start",
+                "--python-executable",
+                str(python_executable),
+                "--comfyui-root",
+                str(comfyui_root),
+            ]
+        )
+    finally:
+        sys.settrace(None)
+    payloads = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    assert injected is True
+    assert exit_code == 130
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 0
+    assert fake_process.poll() == 0
+    assert [payload["status"] for payload in payloads] == ["stopped"]
+    assert signal.getsignal(signal.SIGINT) is previous_sigint
+    assert signal.getsignal(signal.SIGTERM) is previous_sigterm
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+
+
+def test_stop_kill_return_boundary_dispatch_is_interrupt_atomic() -> None:
+    fake_process = _FakeProcess(
+        wait_effects=[subprocess.TimeoutExpired(["comfyui"], 0.01), 0]
+    )
+    previous_sigint = signal.signal(
+        signal.SIGINT, launcher_module._raise_operator_interrupt
+    )
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    dispatch_commit_line = _source_line_number(
+        launcher_module._dispatch_stop_action,
+        "dispatch.state = _StopDispatchState.DISPATCHED",
+    )
+    injected = False
+
+    def inject_after_kill_return(frame, event, _arg):
+        nonlocal injected
+        if (
+            not injected
+            and event == "line"
+            and frame.f_code is launcher_module._dispatch_stop_action.__code__
+            and frame.f_lineno == dispatch_commit_line
+            and frame.f_locals["phase"] == "kill"
+        ):
+            injected = True
+            os.kill(os.getpid(), signal.SIGINT)
+        return inject_after_kill_return
+
+    sys.settrace(inject_after_kill_return)
+    try:
+        launcher_module.ComfyUIProcess(fake_process).stop(timeout_seconds=0.01)
+    finally:
+        sys.settrace(None)
+        signal.signal(signal.SIGINT, previous_sigint)
+
+    assert injected is True
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 1
+    assert fake_process.poll() == 0
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+
+
+def test_stop_pre_call_interrupt_does_not_lose_terminate() -> None:
+    fake_process = _FakeProcess(wait_effects=[0])
+    previous_sigint = signal.signal(
+        signal.SIGINT, launcher_module._raise_operator_interrupt
+    )
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    dispatch_start_line = _source_line_number(
+        launcher_module._dispatch_stop_action,
+        "dispatch.state = _StopDispatchState.DISPATCHING",
+    )
+    injected = False
+
+    def inject_before_terminate_call(frame, event, _arg):
+        nonlocal injected
+        if (
+            not injected
+            and event == "line"
+            and frame.f_code is launcher_module._dispatch_stop_action.__code__
+            and frame.f_lineno == dispatch_start_line
+            and frame.f_locals["phase"] == "terminate"
+        ):
+            injected = True
+            os.kill(os.getpid(), signal.SIGINT)
+        return inject_before_terminate_call
+
+    sys.settrace(inject_before_terminate_call)
+    try:
+        launcher_module.ComfyUIProcess(fake_process).stop(timeout_seconds=0.01)
+    finally:
+        sys.settrace(None)
+        signal.signal(signal.SIGINT, previous_sigint)
+
+    assert injected is True
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 0
+    assert fake_process.poll() == 0
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+
+
+@pytest.mark.parametrize("ambiguous_phase", ["terminate", "kill"])
+def test_stop_does_not_repeat_ambiguous_action_failure(
+    ambiguous_phase: str,
+    monkeypatch,
+) -> None:
+    fake_process = _FakeProcess(
+        wait_effects=[
+            subprocess.TimeoutExpired(["comfyui"], 0.01),
+            0
+            if ambiguous_phase == "terminate"
+            else subprocess.TimeoutExpired(["comfyui"], 0.01),
+        ]
+    )
+
+    def fail_ambiguously() -> None:
+        if ambiguous_phase == "terminate":
+            fake_process.terminate_calls += 1
+        else:
+            fake_process.kill_calls += 1
+        raise OSError("dispatch result is ambiguous")
+
+    monkeypatch.setattr(fake_process, ambiguous_phase, fail_ambiguously)
+    handle = launcher_module.ComfyUIProcess(fake_process)
+
+    if ambiguous_phase == "terminate":
+        handle.stop(timeout_seconds=0.01)
+        assert fake_process.poll() == 0
+    else:
+        with pytest.raises(launcher_module.ComfyUILauncherError) as caught:
+            handle.stop(timeout_seconds=0.01)
+        assert caught.value.code == "COMFYUI_PROCESS_STOP_TIMEOUT"
+        assert fake_process.poll() is None
+
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 1
+
+
 def test_main_readiness_interrupt_survives_secondary_cleanup_interrupt(
     launch_paths,
     monkeypatch,
@@ -471,6 +665,10 @@ def test_dry_run_outputs_machine_readable_contract_without_runtime_side_effects(
 
     monkeypatch.setattr(launcher_module.subprocess, "Popen", unexpected_side_effect)
     monkeypatch.setattr(launcher_module.socket, "socket", unexpected_side_effect)
+    monkeypatch.setattr(launcher_module.signal, "signal", unexpected_side_effect)
+    monkeypatch.setattr(
+        launcher_module.signal, "pthread_sigmask", unexpected_side_effect
+    )
     monkeypatch.setattr(LocalComfyUITransport, "check", unexpected_side_effect)
 
     exit_code = launcher_module.main(

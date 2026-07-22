@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from enum import Enum, auto
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,41 @@ class _ProcessPort(Protocol):
     def terminate(self) -> None: ...
 
     def kill(self) -> None: ...
+
+
+class _StopDispatchState(Enum):
+    NOT_DISPATCHED = auto()
+    DISPATCHING = auto()
+    DISPATCHED = auto()
+
+
+@dataclass(slots=True)
+class _StopActionDispatch:
+    state: _StopDispatchState = _StopDispatchState.NOT_DISPATCHED
+
+
+def _dispatch_stop_action(
+    process: _ProcessPort,
+    *,
+    phase: str,
+    dispatch: _StopActionDispatch,
+) -> None:
+    previous_mask = signal.pthread_sigmask(
+        signal.SIG_BLOCK,
+        {signal.SIGINT, signal.SIGTERM},
+    )
+    try:
+        dispatch.state = _StopDispatchState.DISPATCHING
+        try:
+            if phase == "terminate":
+                process.terminate()
+            else:
+                process.kill()
+        except Exception:
+            return
+        dispatch.state = _StopDispatchState.DISPATCHED
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +127,7 @@ class ComfyUIProcess:
 
     def stop(self, *, timeout_seconds: float = STOP_TIMEOUT_SECONDS) -> None:
         phase = "terminate"
-        action_sent = False
+        dispatch = _StopActionDispatch()
         deadline = time.monotonic() + timeout_seconds
         timeout_cause: subprocess.TimeoutExpired | None = None
 
@@ -104,7 +140,7 @@ class ComfyUIProcess:
                 if remaining <= 0:
                     if phase == "terminate":
                         phase = "kill"
-                        action_sent = False
+                        dispatch = _StopActionDispatch()
                         deadline = time.monotonic() + timeout_seconds
                         continue
                     raise ComfyUILauncherError(
@@ -112,12 +148,12 @@ class ComfyUIProcess:
                         "the launched ComfyUI process did not stop within the bounded timeout",
                     ) from timeout_cause
 
-                if not action_sent:
-                    if phase == "terminate":
-                        self._process.terminate()
-                    else:
-                        self._process.kill()
-                    action_sent = True
+                if dispatch.state is _StopDispatchState.NOT_DISPATCHED:
+                    _dispatch_stop_action(
+                        self._process,
+                        phase=phase,
+                        dispatch=dispatch,
+                    )
 
                 self._process.wait(timeout=remaining)
             except KeyboardInterrupt:
@@ -128,7 +164,7 @@ class ComfyUIProcess:
                     return
                 if phase == "terminate":
                     phase = "kill"
-                    action_sent = False
+                    dispatch = _StopActionDispatch()
                     deadline = time.monotonic() + timeout_seconds
                     continue
                 raise ComfyUILauncherError(
