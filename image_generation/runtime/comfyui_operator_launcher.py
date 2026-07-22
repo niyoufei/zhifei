@@ -90,21 +90,51 @@ class ComfyUIProcess:
         return self._process.wait()
 
     def stop(self, *, timeout_seconds: float = STOP_TIMEOUT_SECONDS) -> None:
-        if self._process.poll() is not None:
-            return
-        self._process.terminate()
-        try:
-            self._process.wait(timeout=timeout_seconds)
-            return
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-        try:
-            self._process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            raise ComfyUILauncherError(
-                "COMFYUI_PROCESS_STOP_TIMEOUT",
-                "the launched ComfyUI process did not stop within the bounded timeout",
-            ) from exc
+        phase = "terminate"
+        action_sent = False
+        deadline = time.monotonic() + timeout_seconds
+        timeout_cause: subprocess.TimeoutExpired | None = None
+
+        while True:
+            try:
+                if self._process.poll() is not None:
+                    return
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if phase == "terminate":
+                        phase = "kill"
+                        action_sent = False
+                        deadline = time.monotonic() + timeout_seconds
+                        continue
+                    raise ComfyUILauncherError(
+                        "COMFYUI_PROCESS_STOP_TIMEOUT",
+                        "the launched ComfyUI process did not stop within the bounded timeout",
+                    ) from timeout_cause
+
+                if not action_sent:
+                    if phase == "terminate":
+                        self._process.terminate()
+                    else:
+                        self._process.kill()
+                    action_sent = True
+
+                self._process.wait(timeout=remaining)
+            except KeyboardInterrupt:
+                continue
+            except subprocess.TimeoutExpired as exc:
+                timeout_cause = exc
+                if self._process.poll() is not None:
+                    return
+                if phase == "terminate":
+                    phase = "kill"
+                    action_sent = False
+                    deadline = time.monotonic() + timeout_seconds
+                    continue
+                raise ComfyUILauncherError(
+                    "COMFYUI_PROCESS_STOP_TIMEOUT",
+                    "the launched ComfyUI process did not stop within the bounded timeout",
+                ) from exc
 
 
 def build_launch_spec(
@@ -152,6 +182,23 @@ def launch_comfyui(
 ) -> ComfyUIProcess:
     """Start ComfyUI only after an explicit operator request and readiness check."""
 
+    handle = _start_comfyui_process(
+        python_executable,
+        comfyui_root,
+        explicit_operator_request=explicit_operator_request,
+    )
+    _wait_for_readiness_or_cleanup(handle)
+    return handle
+
+
+def _start_comfyui_process(
+    python_executable: str | Path,
+    comfyui_root: str | Path,
+    *,
+    explicit_operator_request: bool,
+) -> ComfyUIProcess:
+    """Create the owned process and return its handle before readiness work."""
+
     if explicit_operator_request is not True:
         raise ComfyUILauncherError(
             "EXPLICIT_OPERATOR_LAUNCH_REQUIRED",
@@ -178,12 +225,20 @@ def launch_comfyui(
         ) from exc
 
     handle = ComfyUIProcess(process)
+    return handle
+
+
+def _wait_for_readiness_or_cleanup(handle: ComfyUIProcess) -> None:
+    """Preserve the readiness failure unless owned-process cleanup fails."""
+
     try:
         _wait_for_readiness(handle)
-    except BaseException:
-        handle.stop()
+    except BaseException as original_exc:
+        try:
+            handle.stop()
+        except ComfyUILauncherError as cleanup_exc:
+            raise cleanup_exc from original_exc
         raise
-    return handle
 
 
 def _resolve_python_executable(value: str | Path) -> Path:
@@ -362,6 +417,18 @@ def _emit_json(payload: dict[str, object]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
+def _emit_launcher_error(exc: ComfyUILauncherError) -> None:
+    _emit_json(
+        {
+            "status": "error",
+            "launcher": CANONICAL_MODULE,
+            "error_code": exc.code,
+            "message": str(exc),
+            "would_start": False,
+        }
+    )
+
+
 def _raise_operator_interrupt(_signum: int, _frame: object) -> None:
     raise KeyboardInterrupt
 
@@ -377,17 +444,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         previous_sigterm = signal.signal(signal.SIGTERM, _raise_operator_interrupt)
-        handle = launch_comfyui(
+        handle = _start_comfyui_process(
             args.python_executable,
             args.comfyui_root,
             explicit_operator_request=True,
         )
+        _wait_for_readiness_or_cleanup(handle)
         started = build_launch_spec(args.python_executable, args.comfyui_root).as_dict(
             would_start=True
         )
         started.update({"status": "ready", "pid": handle.pid})
         _emit_json(started)
         return_code = handle.wait()
+        if handle.poll() is None:
+            raise ComfyUILauncherError(
+                "COMFYUI_PROCESS_STOP_TIMEOUT",
+                "the launched ComfyUI process exit was not confirmed",
+            )
         _emit_json(
             {
                 "status": "stopped",
@@ -398,19 +471,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return return_code if return_code >= 0 else 1
     except ComfyUILauncherError as exc:
-        _emit_json(
-            {
-                "status": "error",
-                "launcher": CANONICAL_MODULE,
-                "error_code": exc.code,
-                "message": str(exc),
-                "would_start": False,
-            }
-        )
+        _emit_launcher_error(exc)
         return 2
     except KeyboardInterrupt:
-        if handle is not None:
+        if handle is None:
+            return 130
+        try:
             handle.stop()
+        except ComfyUILauncherError as exc:
+            _emit_launcher_error(exc)
+            return 2
+        if handle.poll() is None:
+            _emit_launcher_error(
+                ComfyUILauncherError(
+                    "COMFYUI_PROCESS_STOP_TIMEOUT",
+                    "the launched ComfyUI process exit was not confirmed",
+                )
+            )
+            return 2
         _emit_json(
             {
                 "status": "stopped",

@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 from pathlib import Path
+import signal
 import subprocess
 
 import pytest
@@ -21,24 +22,35 @@ class _FailingOpener:
         raise OSError("offline")
 
 
+def _raise_keyboard_interrupt(_handle) -> None:
+    raise KeyboardInterrupt
+
+
 class _FakeProcess:
-    def __init__(self, *, pid: int = 4321) -> None:
+    def __init__(
+        self,
+        *,
+        pid: int = 4321,
+        wait_effects: list[BaseException | int] | None = None,
+    ) -> None:
         self.pid = pid
         self.return_code: int | None = None
         self.terminate_calls = 0
         self.kill_calls = 0
         self.wait_calls: list[float | None] = []
-        self.timeout_once = False
+        self.wait_effects = list(wait_effects or [])
 
     def poll(self) -> int | None:
         return self.return_code
 
     def wait(self, timeout: float | None = None) -> int:
         self.wait_calls.append(timeout)
-        if self.timeout_once:
-            self.timeout_once = False
-            raise subprocess.TimeoutExpired(["comfyui"], timeout)
-        self.return_code = 0
+        effect: BaseException | int = (
+            self.wait_effects.pop(0) if self.wait_effects else 0
+        )
+        if isinstance(effect, BaseException):
+            raise effect
+        self.return_code = effect
         return self.return_code
 
     def terminate(self) -> None:
@@ -274,15 +286,167 @@ def test_readiness_failure_stops_only_the_new_process(
 
 
 def test_stop_escalates_from_terminate_to_kill_on_the_same_handle() -> None:
-    fake_process = _FakeProcess()
-    fake_process.timeout_once = True
+    fake_process = _FakeProcess(
+        wait_effects=[subprocess.TimeoutExpired(["comfyui"], 0.01)]
+    )
     handle = launcher_module.ComfyUIProcess(fake_process)
 
     handle.stop(timeout_seconds=0.01)
 
     assert fake_process.terminate_calls == 1
     assert fake_process.kill_calls == 1
-    assert fake_process.wait_calls == [0.01, 0.01]
+    assert len(fake_process.wait_calls) == 2
+    assert all(
+        wait_timeout is not None and 0 < wait_timeout <= 0.01
+        for wait_timeout in fake_process.wait_calls
+    )
+
+
+def test_main_readiness_interrupt_survives_secondary_cleanup_interrupt(
+    launch_paths,
+    monkeypatch,
+    capsys,
+) -> None:
+    python_executable, comfyui_root, _ = launch_paths
+    fake_process = _FakeProcess(wait_effects=[KeyboardInterrupt(), 0])
+    monkeypatch.setattr(launcher_module, "_port_is_available", lambda: True)
+    monkeypatch.setattr(
+        launcher_module.subprocess, "Popen", lambda *_args, **_kwargs: fake_process
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_wait_for_readiness",
+        _raise_keyboard_interrupt,
+    )
+
+    exit_code = launcher_module.main(
+        [
+            "start",
+            "--python-executable",
+            str(python_executable),
+            "--comfyui-root",
+            str(comfyui_root),
+        ]
+    )
+    payloads = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    assert exit_code == 130
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 0
+    assert fake_process.poll() == 0
+    assert [payload["status"] for payload in payloads] == ["stopped"]
+
+
+def test_main_supervision_interrupt_reports_structured_kill_timeout(
+    launch_paths,
+    monkeypatch,
+    capsys,
+) -> None:
+    python_executable, comfyui_root, _ = launch_paths
+    fake_process = _FakeProcess(
+        wait_effects=[
+            KeyboardInterrupt(),
+            subprocess.TimeoutExpired(["comfyui"], 10.0),
+            subprocess.TimeoutExpired(["comfyui"], 10.0),
+        ]
+    )
+    monkeypatch.setattr(launcher_module, "_port_is_available", lambda: True)
+    monkeypatch.setattr(launcher_module, "_wait_for_readiness", lambda _handle: None)
+    monkeypatch.setattr(
+        launcher_module.subprocess, "Popen", lambda *_args, **_kwargs: fake_process
+    )
+
+    exit_code = launcher_module.main(
+        [
+            "start",
+            "--python-executable",
+            str(python_executable),
+            "--comfyui-root",
+            str(comfyui_root),
+        ]
+    )
+    payloads = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    assert exit_code == 2
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 1
+    assert [payload["status"] for payload in payloads] == ["ready", "error"]
+    assert payloads[-1]["error_code"] == "COMFYUI_PROCESS_STOP_TIMEOUT"
+
+
+def test_main_readiness_interrupt_reports_cleanup_timeout_and_restores_signals(
+    launch_paths,
+    monkeypatch,
+    capsys,
+) -> None:
+    python_executable, comfyui_root, _ = launch_paths
+    fake_process = _FakeProcess(
+        wait_effects=[
+            subprocess.TimeoutExpired(["comfyui"], 10.0),
+            subprocess.TimeoutExpired(["comfyui"], 10.0),
+        ]
+    )
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(launcher_module, "_port_is_available", lambda: True)
+    monkeypatch.setattr(
+        launcher_module.subprocess, "Popen", lambda *_args, **_kwargs: fake_process
+    )
+    monkeypatch.setattr(
+        launcher_module,
+        "_wait_for_readiness",
+        _raise_keyboard_interrupt,
+    )
+
+    exit_code = launcher_module.main(
+        [
+            "start",
+            "--python-executable",
+            str(python_executable),
+            "--comfyui-root",
+            str(comfyui_root),
+        ]
+    )
+    payloads = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    assert exit_code == 2
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 1
+    assert [payload["status"] for payload in payloads] == ["error"]
+    assert payloads[0]["error_code"] == "COMFYUI_PROCESS_STOP_TIMEOUT"
+    assert signal.getsignal(signal.SIGINT) is previous_sigint
+    assert signal.getsignal(signal.SIGTERM) is previous_sigterm
+
+
+def test_main_supervision_interrupt_stops_confirmed_process(
+    launch_paths,
+    monkeypatch,
+    capsys,
+) -> None:
+    python_executable, comfyui_root, _ = launch_paths
+    fake_process = _FakeProcess(wait_effects=[KeyboardInterrupt(), 0])
+    monkeypatch.setattr(launcher_module, "_port_is_available", lambda: True)
+    monkeypatch.setattr(launcher_module, "_wait_for_readiness", lambda _handle: None)
+    monkeypatch.setattr(
+        launcher_module.subprocess, "Popen", lambda *_args, **_kwargs: fake_process
+    )
+
+    exit_code = launcher_module.main(
+        [
+            "start",
+            "--python-executable",
+            str(python_executable),
+            "--comfyui-root",
+            str(comfyui_root),
+        ]
+    )
+    payloads = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    assert exit_code == 130
+    assert fake_process.terminate_calls == 1
+    assert fake_process.kill_calls == 0
+    assert fake_process.poll() == 0
+    assert [payload["status"] for payload in payloads] == ["ready", "stopped"]
 
 
 def test_stop_does_nothing_for_an_already_exited_process() -> None:
