@@ -450,7 +450,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _emit_json(payload: dict[str, object]) -> None:
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
 
 
 def _emit_launcher_error(exc: ComfyUILauncherError) -> None:
