@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import subprocess
 import sys
@@ -82,6 +83,59 @@ def launch_paths(tmp_path: Path) -> tuple[Path, Path, Path]:
     comfyui_main = comfyui_root / "main.py"
     comfyui_main.write_text("# fixture\n", encoding="utf-8")
     return python_executable, comfyui_root, comfyui_main
+
+
+def test_emit_json_flushes_single_sorted_unicode_record(monkeypatch) -> None:
+    print_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def capture_print(*args: object, **kwargs: object) -> None:
+        print_calls.append((args, kwargs))
+
+    monkeypatch.setattr("builtins.print", capture_print)
+
+    launcher_module._emit_json({"zeta": "中文", "alpha": 1})
+
+    assert print_calls == [(('{"alpha": 1, "zeta": "中文"}',), {"flush": True})]
+    assert json.loads(print_calls[0][0][0]) == {"alpha": 1, "zeta": "中文"}
+
+
+def test_emit_json_ready_is_observable_through_pipe_before_process_exit() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    child_environment = os.environ.copy()
+    child_environment.pop("PYTHONUNBUFFERED", None)
+    child_script = "\n".join(
+        (
+            "import time",
+            "from image_generation.runtime import comfyui_operator_launcher",
+            'comfyui_operator_launcher._emit_json({"status": "ready"})',
+            "time.sleep(2.0)",
+        )
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child_script],
+        cwd=repository_root,
+        env=child_environment,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        assert process.stdout is not None
+        readable, _, _ = select.select([process.stdout], [], [], 1.0)
+        assert readable
+        output_line = process.stdout.readline()
+
+        assert json.loads(output_line) == {"status": "ready"}
+        assert process.poll() is None
+        assert process.wait(timeout=3.0) == 0
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 def test_frozen_argv_is_exact_and_contains_each_required_value_once(
