@@ -171,6 +171,170 @@ python3 scripts/smoke_api.py
 python3 scripts/smoke_api.py http://127.0.0.1:8000
 ```
 
+### P0 静态就绪检查（不启动服务）
+
+P0 readiness 是 local-only static gate，只读取本地仓库结构、现有 git 元数据、脱敏 demo 配置和路径级风险类别；不启动 runtime、不访问 endpoint、不读取真实资料正文或密钥。
+
+```bash
+python3 scripts/p0_readiness.py --json
+```
+
+状态含义：
+- `PASS_P0_READINESS_STATIC`：静态边界检查通过，可提交给后续受控 runtime/endpoint gate 复核。
+- `NO-GO_P0_READINESS_STATIC`：存在 `failures` 阻断原因，需要先处理或由总控确认。
+
+常见阻断：
+- `worktree_not_clean`：当前工作区仍有未提交修改或未跟踪文件；P0 实施文件尚未提交/收口时出现该 NO-GO 属预期门控。
+- clean worktree 后，重新运行 `python3 scripts/p0_readiness.py --json`，确认 `status` 为 `PASS_P0_READINESS_STATIC` 且 `failures` 为空。
+
+脱敏 demo 位于 `projects/_demo_p0/project.json`。后续如需访问 `/p0/readiness`、`/health` 或运行端到端 smoke，必须进入单独 runtime/endpoint gate。
+
+### Phase 1 本地基线索引（不启动服务）
+
+Phase 1 local-only 当前基线为 `a241e68603d1be06c4b9412043760a5536f9c328`。本地入口、readiness 分层、demo、launcher、测试与禁止边界已记录在：
+
+- `docs/openclaw-zhifei-doc-phase1-local-baseline.md`
+
+该索引只说明本地自治建设起点，不代表允许 runtime、endpoint、launcher、push 或 held config 正文审查。`local-launcher-v1/mock-config.json` 仍保持 metadata-only hold，任何内容读取、launcher smoke 或 endpoint smoke 都必须另开单独 gate。
+
+### Phase 1B 静态 demo workflow（不启动服务）
+
+Phase 1B 将 `projects/_demo_p0/project.json` 串成本地静态链路：项目登记、P0 readiness、静态边界检查、计划输出索引和后续 runtime/endpoint gate handoff。命令只读取 sanitized demo metadata 和本地静态 readiness 证据，不生成业务产物、不访问 endpoint、不启动 launcher：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_demo_workflow.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase1b-demo-workflow.md`
+
+### Phase 1C readiness / delivery index（不启动服务）
+
+Phase 1C 汇总 P0 与 Phase 1B 的静态证据，形成本地 readiness 分层、delivery entry 索引、产物索引规则与禁止边界矩阵。该命令不生成 Markdown/HTML/Word/Excel/PPTX/PDF 业务产物，不写 runtime `build/` 结果：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_delivery_index.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase1c-readiness-delivery-index.md`
+
+### Phase 1D docs / RUNBOOK closure（不启动服务）
+
+Phase 1D 将 README、`backend/RUNBOOK.md` 和 Phase 1 docs 串成本地静态路线图。操作者可以从这里看清 P0 static readiness、Phase 1 local-only baseline、Phase 1B demo workflow、Phase 1C readiness / delivery index、Phase 1D 当前文档闭合成果，以及 Phase 1E static test matrix 的后续入口。
+
+闭合索引记录在：
+
+- `docs/openclaw-zhifei-doc-phase1d-docs-runbook-closure.md`
+
+Phase 1D 仍是 docs-only gate：不 push、不 fetch/pull/merge/rebase、不启动 runtime、不访问 endpoint、不启动 launcher、不读取真实业务资料或 secret、不读取 `local-launcher-v1/mock-config.json` 正文。runtime smoke gate、endpoint smoke gate、launcher smoke gate 和 config content review gate 仍是互相独立的后续人工门。
+
+### Phase 1E static test matrix（后续入口）
+
+Phase 1E 建立 no-runtime / no-endpoint 静态测试矩阵，覆盖 P0、Phase 1B、Phase 1C、Phase 1D docs closure、docs 链接、clean-worktree PASS、dirty-worktree NO-GO、失败诊断和硬闸门 negative proof：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase1_static_matrix.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase1e-static-test-matrix.md`
+
+Phase 1E 通过后，可进入 `PHASE1_LOCAL_STATIC_BASELINE_CLOSEOUT_READONLY` 只读 closeout 计划；不得自动进入 Phase 2 代码建设。
+
+### Phase 2A business input contract（静态写门）
+
+Phase 2A 建立 Phase 2 业务引擎的静态输入契约、脱敏合成样例和 no-runtime 校验器。该阶段只使用 synthetic fixture、mock metadata 和手工构造测试；不得读取真实招标文件、图纸、清单、客户资料正文，不得读取 `local-launcher-v1/mock-config.json` 正文。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_business_input_contract
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_business_input_contract.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2-business-input-contract.md`
+
+Phase 2A 通过后，只能建议进入 `PHASE2B_SCORING_RESPONSE_MATRIX_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
+### Phase 2B scoring response matrix（静态写门）
+
+Phase 2B 在 Phase 2A synthetic business input 基础上生成 deterministic scoring response matrix，覆盖评分项、响应策略、工程对象、证据锚点、青天 AI 评标友好字段、缺项诊断和审计状态。该阶段仍只使用 synthetic fixture；不得读取真实招标文件、图纸、清单、客户资料正文，不得读取 `local-launcher-v1/mock-config.json` 正文。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_scoring_response_matrix
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_scoring_response_matrix.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2b-scoring-response-matrix.md`
+
+Phase 2B 通过后，只能建议进入 `PHASE2C_RISK_OBJECT_BINDING_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
+### Phase 2C risk object binding（静态写门）
+
+Phase 2C 基于 Phase 2A synthetic business input 与 Phase 2B scoring response matrix，生成 deterministic risk-object binding，覆盖 risk clue、工程对象、评分矩阵行、response controls、evidence requirements、Qingtian tags 和 audit traceability。该阶段仍只使用 synthetic fixture；不得读取真实招标文件、图纸、清单、客户资料正文，不得读取 `local-launcher-v1/mock-config.json` 正文。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_risk_object_binding
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_risk_object_binding.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2c-risk-object-binding.md`
+
+Phase 2C 通过后，只能建议进入 `PHASE2D_QINGTIAN_FRIENDLY_CHECKLIST_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
+### Phase 2D Qingtian friendly checklist（静态写门）
+
+Phase 2D 基于 Phase 2A business input、Phase 2B scoring response matrix 与 Phase 2C risk object binding，生成 deterministic Qingtian-friendly static checklist，用于检查 AI 可解析、评分项可响应、工程对象可绑定、证据可追溯、风险措施可诊断等静态条件。该 checklist 是 static / preview-only，不代表真实评标结果，不输出评分结果，不连接真实青天系统；真实资料、runtime、endpoint 均需后续硬闸门。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_qingtian_friendly_checklist
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_qingtian_friendly_checklist.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2d-qingtian-friendly-checklist.md`
+
+Phase 2D 通过后，只能建议进入 `PHASE2E_FINAL_REVIEW_ISSUE_LIST_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、连接真实青天系统、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
+### Phase 2E final review issue list（静态写门）
+
+Phase 2E 基于 Phase 2A business input、Phase 2B scoring response matrix、Phase 2C risk object binding 与 Phase 2D Qingtian friendly checklist，生成 deterministic final review issue list。该 issue list 只用于 static / preview-only 复核缺项、风险、证据不足、可解析性不足、追溯链断点与人工复核项，不代表正式终审结论，不写回文件，不导出成果，不输出官方评分，不连接真实青天系统；真实资料、runtime、endpoint、export、formal writeback 均需后续硬闸门。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_final_review_issue_list
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_final_review_issue_list.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2e-final-review-issue-list.md`
+
+Phase 2E 通过后，只能建议进入 `PHASE2F_OUTPUT_PRE_INDEX_PLAN_OR_WRITE_GATE`；不得自动启动 runtime、访问 endpoint、启动 launcher、连接真实青天系统、导出成果、正式写回、push/fetch/merge 或读取真实资料。
+
+### Phase 2F output pre-index（静态写门）
+
+Phase 2F 基于 Phase 2A business input、Phase 2B scoring response matrix、Phase 2C risk object binding、Phase 2D Qingtian friendly checklist 与 Phase 2E final review issue list，生成 deterministic output pre-index。该 pre-index 只登记后续可能请求的报告、矩阵、问题清单、审计索引、交付包索引、交接摘要和证据追溯索引条目；不生成正式成果文件，不导出，不写回，不输出官方评分，不连接真实青天系统；真实资料、runtime、endpoint、export、formal writeback 均需后续硬闸门。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 -m unittest backend.tests.test_phase2_output_pre_index
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD python3 scripts/phase2_output_pre_index.py --json
+```
+
+设计与验收边界记录在：
+
+- `docs/openclaw-zhifei-doc-phase2f-output-pre-index.md`
+
+Phase 2F 通过后，只能建议进入 Phase 2 closeout 的只读计划或闸门；不得自动启动 runtime、访问 endpoint、启动 launcher、连接真实青天系统、导出成果、正式写回、push/fetch/merge、声明 release-ready、声明 official score ready 或读取真实资料。
+
 ## Web 控制台（不需终端）
 
 施工组织设计智能编制 Web 控制台支持多种启动方式，**无需依赖终端**：

@@ -76,7 +76,16 @@ def health():
         "config_version": cfg_version,
         "config_version_auto": cfg_version_auto,
         "audit_ready": audit_ready,
+        "p0_readiness_supported": True,
+        "p0_readiness_path": "/p0/readiness",
     }
+
+
+@app.get("/p0/readiness")
+def p0_readiness():
+    from backend.zhifei_autoplan.p0_readiness import build_p0_readiness_snapshot
+
+    return build_p0_readiness_snapshot(Path(".").resolve())
 
 
 @app.get("/capabilities")
