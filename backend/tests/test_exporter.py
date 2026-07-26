@@ -12,51 +12,71 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 
 import pytest
-from docx import Document
-from docx.shared import Cm
 
-from backend.tests.export_test_contract_fixtures import export_admissible_sections
-from backend.zhifei_autoplan.local_acceptance_hook import validate_before_export
-from backend.zhifei_autoplan.exporter import (
-    _append_field_run,
-    _apply_footer_page_numbers,
-    _apply_style,
-    _auto_density_images_for_pages,
-    _build_report_paths,
-    _build_static_toc_entries,
-    _clear_block_container,
-    _cover_image_caption,
-    _format_cover_year_month,
-    _format_toc_display_title,
-    _hide_paragraph,
-    _infer_toc_level,
-    _insert_auto_toc,
-    _insert_cover_page,
-    _insert_full_index_page,
-    _normalize_front_matter_page_mode,
-    _normalize_full_index_enabled,
-    _paginate_toc_entries,
-    _resolve_cover_meta,
-    _render_toc_line,
-    _resolve_front_matter_plan,
-    _set_cell_border,
-    _set_cell_shading,
-    _set_cell_width,
-    _set_table_all_borders,
-    _style_cover_paragraph,
-    _toc_entry_style,
-    _topic_to_cover_project_name,
-    _to_cn_month,
-    _usable_page_width_cm,
-    export_autoplan_docx,
-    export_autoplan_compare_docx,
-    export_autoplan_docx_from_file,
+from backend.tests.export_test_contract_fixtures import (
+    export_admissible_sections,
+    isolated_export_module_bindings,
 )
+
+
+_EXPORTER_ATTRIBUTE_NAMES = (
+    "_append_field_run",
+    "_apply_footer_page_numbers",
+    "_apply_style",
+    "_auto_density_images_for_pages",
+    "_build_report_paths",
+    "_build_static_toc_entries",
+    "_clear_block_container",
+    "_cover_image_caption",
+    "_format_cover_year_month",
+    "_format_toc_display_title",
+    "_hide_paragraph",
+    "_infer_toc_level",
+    "_insert_auto_toc",
+    "_insert_cover_page",
+    "_insert_full_index_page",
+    "_normalize_front_matter_page_mode",
+    "_normalize_full_index_enabled",
+    "_paginate_toc_entries",
+    "_resolve_cover_meta",
+    "_render_toc_line",
+    "_resolve_front_matter_plan",
+    "_set_cell_border",
+    "_set_cell_shading",
+    "_set_cell_width",
+    "_set_table_all_borders",
+    "_style_cover_paragraph",
+    "_toc_entry_style",
+    "_topic_to_cover_project_name",
+    "_to_cn_month",
+    "_usable_page_width_cm",
+    "export_autoplan_docx",
+    "export_autoplan_compare_docx",
+    "export_autoplan_docx_from_file",
+)
+_EXPORTER_RUNTIME_BINDINGS = {
+    "Document": ("docx", "Document"),
+    "Cm": ("docx.shared", "Cm"),
+    "validate_before_export": (
+        "backend.zhifei_autoplan.local_acceptance_hook",
+        "validate_before_export",
+    ),
+    **{
+        binding_name: ("backend.zhifei_autoplan.exporter", binding_name)
+        for binding_name in _EXPORTER_ATTRIBUTE_NAMES
+    },
+}
 
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_exporter_runtime_modules():
+    with isolated_export_module_bindings(globals(), _EXPORTER_RUNTIME_BINDINGS):
+        yield
+
 
 @pytest.fixture
 def temp_dir():

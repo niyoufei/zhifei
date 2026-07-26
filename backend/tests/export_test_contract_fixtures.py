@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from copy import deepcopy
+from importlib import import_module
+import sys
 from typing import Any, Iterable, Mapping
 
 
@@ -14,6 +17,72 @@ _ADMISSIBLE_EXPORT_SECTION: dict[str, Any] = {
     ),
     "evidence_refs": ["user_param:r144_export_contract_fixture"],
 }
+
+_EXPORT_TEST_MODULE_PREFIXES = (
+    "backend.app",
+    "backend.kg_loader",
+    "backend.zhifei_autoplan",
+    "docx",
+    "openpyxl",
+)
+_MISSING = object()
+
+
+def _matches_export_test_module_scope(module_name: str) -> bool:
+    return any(
+        module_name == prefix or module_name.startswith(f"{prefix}.")
+        for prefix in _EXPORT_TEST_MODULE_PREFIXES
+    )
+
+
+@contextmanager
+def isolated_export_module_bindings(
+    namespace: dict[str, Any],
+    bindings: Mapping[str, tuple[str, str]],
+):
+    """Lazily bind Export dependencies and restore their exact module delta."""
+    baseline_modules = frozenset(sys.modules)
+    previous_bindings = {
+        binding_name: namespace.get(binding_name, _MISSING)
+        for binding_name in bindings
+    }
+
+    try:
+        for binding_name, (module_name, attribute_name) in bindings.items():
+            module = import_module(module_name)
+            namespace[binding_name] = getattr(module, attribute_name)
+        yield
+    finally:
+        for binding_name, previous_value in previous_bindings.items():
+            if previous_value is _MISSING:
+                namespace.pop(binding_name, None)
+            else:
+                namespace[binding_name] = previous_value
+
+        introduced_modules = {
+            module_name
+            for module_name in sys.modules
+            if module_name not in baseline_modules
+            and _matches_export_test_module_scope(module_name)
+        }
+        for module_name in sorted(
+            introduced_modules,
+            key=lambda name: (name.count("."), len(name)),
+            reverse=True,
+        ):
+            sys.modules.pop(module_name, None)
+
+        remaining_modules = sorted(
+            module_name
+            for module_name in sys.modules
+            if module_name not in baseline_modules
+            and _matches_export_test_module_scope(module_name)
+        )
+        if remaining_modules:
+            raise AssertionError(
+                "Export test module cleanup left scoped modules loaded: "
+                f"{remaining_modules}"
+            )
 
 
 def export_admissible_sections(

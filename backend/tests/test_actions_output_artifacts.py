@@ -3,8 +3,26 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from backend.tests.export_test_contract_fixtures import export_admissible_sections
-from backend.app.routers.actions_bridge import _save_outputs
+import pytest
+
+from backend.tests.export_test_contract_fixtures import (
+    export_admissible_sections,
+    isolated_export_module_bindings,
+)
+
+
+_ACTIONS_OUTPUT_RUNTIME_BINDINGS = {
+    "_save_outputs": ("backend.app.routers.actions_bridge", "_save_outputs"),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_actions_output_runtime_modules():
+    with isolated_export_module_bindings(
+        globals(),
+        _ACTIONS_OUTPUT_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 def test_save_outputs_includes_new_artifacts(tmp_path: Path, monkeypatch):

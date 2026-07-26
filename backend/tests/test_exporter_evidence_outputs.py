@@ -2,14 +2,35 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from docx import Document
-from openpyxl import load_workbook
+import pytest
 
-from backend.tests.export_test_contract_fixtures import export_admissible_sections
-from backend.zhifei_autoplan.exporter import (
-    export_expert_review_brief_docx,
-    export_scoring_evidence_overview_xlsx,
+from backend.tests.export_test_contract_fixtures import (
+    export_admissible_sections,
+    isolated_export_module_bindings,
 )
+
+
+_EVIDENCE_OUTPUT_RUNTIME_BINDINGS = {
+    "Document": ("docx", "Document"),
+    "load_workbook": ("openpyxl", "load_workbook"),
+    "export_expert_review_brief_docx": (
+        "backend.zhifei_autoplan.exporter",
+        "export_expert_review_brief_docx",
+    ),
+    "export_scoring_evidence_overview_xlsx": (
+        "backend.zhifei_autoplan.exporter",
+        "export_scoring_evidence_overview_xlsx",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_evidence_output_runtime_modules():
+    with isolated_export_module_bindings(
+        globals(),
+        _EVIDENCE_OUTPUT_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 def test_export_scoring_evidence_overview_xlsx(tmp_path: Path):
