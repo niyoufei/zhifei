@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from backend.tests.export_test_contract_fixtures import export_admissible_sections
 from backend.app.routers.actions_bridge import _save_outputs
 
 
@@ -13,7 +14,7 @@ def test_save_outputs_includes_new_artifacts(tmp_path: Path, monkeypatch):
         "project_id": "P-OUT-1",
         "style": {"body_font": "宋体", "title_font": "宋体"},
         "outline": ["工程概况", "主要施工方法"],
-        "sections": [
+        "sections": export_admissible_sections([
             {
                 "title": "工程概况",
                 "content": "项目概况及施工范围。",
@@ -21,7 +22,7 @@ def test_save_outputs_includes_new_artifacts(tmp_path: Path, monkeypatch):
                 "image_selection_pack": {"enabled": True, "match_reason": "selected_image_ids", "images": [{"image_id": "image-1"}]},
             },
             {"title": "主要施工方法", "content": "施工流程与质量控制。"},
-        ],
+        ]),
         "case_reference_pack": {
             "enabled": True,
             "chapters": [{"matched_chapter": "工程概况", "match_reason": "selected_case_ids", "hit_count": 1}],

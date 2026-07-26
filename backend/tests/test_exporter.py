@@ -15,6 +15,8 @@ import pytest
 from docx import Document
 from docx.shared import Cm
 
+from backend.tests.export_test_contract_fixtures import export_admissible_sections
+from backend.zhifei_autoplan.local_acceptance_hook import validate_before_export
 from backend.zhifei_autoplan.exporter import (
     _append_field_run,
     _apply_footer_page_numbers,
@@ -75,7 +77,7 @@ def basic_data():
             "title_size": 16,
             "line_spacing": 1.5,
         },
-        "sections": [
+        "sections": export_admissible_sections([
             {
                 "title": "第一章 工程概述",
                 "content": "本工程位于某市某区，总投资约1000万元。",
@@ -85,7 +87,7 @@ def basic_data():
                 "title": "第二章 施工部署",
                 "content": "施工总平面布置合理，资源配置优化。",
             },
-        ],
+        ]),
     }
 
 
@@ -126,7 +128,7 @@ def data_with_quality_checks(basic_data):
 @pytest.fixture
 def data_with_llm_remediation(basic_data):
     """Test data with LLM remediation compare."""
-    basic_data["sections"] = [
+    basic_data["sections"] = export_admissible_sections([
         {
             "title": "第一章 工程概述",
             "content": "整改后的内容，更加详细完整。",
@@ -137,8 +139,19 @@ def data_with_llm_remediation(basic_data):
             "title": "第二章 施工部署",
             "content": "无需整改的内容。",
         },
-    ]
+    ])
     return basic_data
+
+
+def test_export_admissible_sections_are_isolated_and_gate_compliant():
+    first = export_admissible_sections()
+    second = export_admissible_sections()
+
+    assert first is not second
+    assert first[0] is not second[0]
+    first[0]["content"] = "mutated"
+    assert second[0]["content"] != "mutated"
+    assert validate_before_export({"sections": second})["export_allowed"] is True
 
 
 # =============================================================================
@@ -591,13 +604,16 @@ class TestExportAutoplanDocx:
                 "full_index_page_count": 1,
             },
             "chapter_pages": {"第一章 工程概况": 2},
-            "sections": [
-                {
-                    "title": "第一章 工程概况",
-                    "content": "本章用于锁定当前导出正文基线。",
-                    "agent_role": "项目经理",
-                }
-            ],
+            "sections": export_admissible_sections(
+                [
+                    {
+                        "title": "第一章 工程概况",
+                        "content": "本章用于锁定当前导出正文基线。",
+                        "agent_role": "项目经理",
+                    }
+                ],
+                preserve_section_count=True,
+            ),
         }
 
         export_autoplan_docx(data, str(output_path))
@@ -652,16 +668,24 @@ class TestExportAutoplanDocx:
         assert output_path.exists()
 
     def test_export_with_empty_data(self, temp_dir):
-        """Test export with empty data dict."""
+        """Empty input is rejected by the mandatory-content contract."""
         output_path = Path(temp_dir) / "empty.docx"
-        result = export_autoplan_docx({}, str(output_path))
-        
-        assert output_path.exists()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            export_autoplan_docx({}, str(output_path))
+
+        payload = json.loads(str(exc_info.value))
+        issue_codes = {issue["code"] for issue in payload["issues"]}
+        assert payload["export_allowed"] is False
+        assert "MANDATORY_CONTENT_MISSING" in issue_codes
+        assert "CHAPTER_16_RISK_MEASURES_MISSING" in issue_codes
+        assert "PARAMETER_TRACE_MISSING" in issue_codes
+        assert not output_path.exists()
 
     def test_export_default_topic(self, temp_dir):
         """Test export uses default topic when not provided."""
         output_path = Path(temp_dir) / "default.docx"
-        data = {"sections": []}
+        data = {"sections": export_admissible_sections()}
         result = export_autoplan_docx(data, str(output_path))
         
         doc = Document(str(output_path))
@@ -682,7 +706,9 @@ class TestExportAutoplanDocx:
         output_path = Path(temp_dir) / "no_role.docx"
         data = {
             "topic": "测试",
-            "sections": [{"title": "章节", "content": "内容"}],
+            "sections": export_admissible_sections(
+                [{"title": "章节", "content": "内容"}]
+            ),
         }
         export_autoplan_docx(data, str(output_path))
         
@@ -898,7 +924,7 @@ class TestExportAutoplanDocx:
     def test_export_no_style(self, temp_dir):
         """Test export with no style config."""
         output_path = Path(temp_dir) / "no_style.docx"
-        data = {"topic": "测试", "sections": []}
+        data = {"topic": "测试", "sections": export_admissible_sections()}
         
         export_autoplan_docx(data, str(output_path))
         assert output_path.exists()
@@ -918,7 +944,9 @@ class TestExportAutoplanDocx:
                 "headings": {"h1_size": 16, "h2_size": 13},
                 "margins_cm": {"top": 2.54, "bottom": 2.54, "left": 3.0, "right": 2.5},
             },
-            "sections": [{"title": "第一章", "content": "正文内容"}],
+            "sections": export_admissible_sections(
+                [{"title": "第一章", "content": "正文内容"}]
+            ),
         }
 
         export_autoplan_docx(data, str(output_path))
@@ -930,7 +958,9 @@ class TestExportAutoplanDocx:
         data = {
             "topic": "测试",
             "chapter_pages": {"第一章": 2},
-            "sections": [{"title": "第一章", "content": "内容" * 120}],
+            "sections": export_admissible_sections(
+                [{"title": "第一章", "content": "内容" * 120}]
+            ),
         }
 
         export_autoplan_docx(data, str(output_path))
@@ -946,7 +976,9 @@ class TestExportAutoplanDocx:
         data = {
             "topic": "测试",
             "chapter_pages": {"第一章": {"pages": 3}},
-            "sections": [{"title": "第一章", "content": "内容" * 160}],
+            "sections": export_admissible_sections(
+                [{"title": "第一章", "content": "内容" * 160}]
+            ),
         }
 
         export_autoplan_docx(data, str(output_path))
@@ -955,26 +987,39 @@ class TestExportAutoplanDocx:
         assert "目标3页" in text
 
     def test_export_empty_sections(self, temp_dir):
-        """Test export with empty sections list."""
+        """An empty sections list is rejected by the real export gate."""
         output_path = Path(temp_dir) / "empty_sections.docx"
         data = {"topic": "测试", "sections": []}
-        
-        export_autoplan_docx(data, str(output_path))
-        assert output_path.exists()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            export_autoplan_docx(data, str(output_path))
+
+        payload = json.loads(str(exc_info.value))
+        issue_codes = {issue["code"] for issue in payload["issues"]}
+        assert payload["export_allowed"] is False
+        assert "MANDATORY_CONTENT_MISSING" in issue_codes
+        assert "CHAPTER_16_RISK_MEASURES_MISSING" in issue_codes
+        assert "PARAMETER_TRACE_MISSING" in issue_codes
+        assert not output_path.exists()
 
     def test_export_section_default_title_and_content(self, temp_dir):
-        """Test export handles sections with missing title/content."""
+        """An empty section is rejected instead of being silently rendered."""
         output_path = Path(temp_dir) / "defaults.docx"
         data = {
             "topic": "测试",
             "sections": [{}],  # Empty section
         }
-        
-        export_autoplan_docx(data, str(output_path))
-        
-        doc = Document(str(output_path))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        assert "章节" in text  # Default title
+
+        with pytest.raises(RuntimeError) as exc_info:
+            export_autoplan_docx(data, str(output_path))
+
+        payload = json.loads(str(exc_info.value))
+        issue_codes = {issue["code"] for issue in payload["issues"]}
+        assert payload["export_allowed"] is False
+        assert "MANDATORY_CONTENT_MISSING" in issue_codes
+        assert "CHAPTER_16_RISK_MEASURES_MISSING" in issue_codes
+        assert "PARAMETER_TRACE_MISSING" in issue_codes
+        assert not output_path.exists()
 
     def test_auto_density_image_rule_under_200_and_skip_overview(self, temp_dir):
         output_path = Path(temp_dir) / "auto_density_under_200.docx"
@@ -991,10 +1036,10 @@ class TestExportAutoplanDocx:
                 "工程概况": 1,
                 "主要施工方法": 2,
             },
-            "sections": [
+            "sections": export_admissible_sections([
                 {"title": "工程概况", "content": "项目概况章节。"},
                 {"title": "主要施工方法", "content": "控制间距900mm，抽检频次2次/班，风险-控制-验证闭环。"},
-            ],
+            ]),
         }
         export_autoplan_docx(data, str(output_path))
         doc = Document(str(output_path))
@@ -1019,10 +1064,10 @@ class TestExportAutoplanDocx:
                 "工程概况": 199,  # 仅用于触发 total_pages > 200
                 "主要施工方法": 4,
             },
-            "sections": [
+            "sections": export_admissible_sections([
                 {"title": "工程概况", "content": "项目概况章节。"},
                 {"title": "主要施工方法", "content": "控制间距900mm，抽检频次2次/班，风险-控制-验证闭环。"},
-            ],
+            ]),
         }
         export_autoplan_docx(data, str(output_path))
         doc = Document(str(output_path))
@@ -1144,14 +1189,14 @@ class TestExportAutoplanCompareDocx:
         output_path = Path(temp_dir) / "empty_original.docx"
         data = {
             "topic": "测试",
-            "sections": [
+            "sections": export_admissible_sections([
                 {
                     "title": "章节",
                     "content": "新内容",
                     "original_content": "",  # Empty, should be skipped
                     "auto_remediated": "llm",
                 }
-            ],
+            ]),
         }
         
         export_autoplan_compare_docx(data, str(output_path))
@@ -1205,7 +1250,11 @@ class TestExportAutoplanDocxFromFile:
 
     def test_export_from_file_with_empty_variants(self, temp_dir):
         """Test export from file with empty variants array."""
-        data = {"variants": [], "topic": "直接数据"}
+        data = {
+            "variants": [],
+            "topic": "直接数据",
+            "sections": export_admissible_sections(),
+        }
         json_path = Path(temp_dir) / "empty_variants.json"
         json_path.write_text(json.dumps(data), encoding="utf-8")
         
@@ -1249,9 +1298,9 @@ class TestExportAutoplanDocxFromFile:
         """Test export from file with unicode content."""
         data = {
             "topic": "中文标题 日本語 한국어",
-            "sections": [
+            "sections": export_admissible_sections([
                 {"title": "特殊字符 ™ © ® €", "content": "内容 αβγ ∑∏∫"},
-            ],
+            ]),
         }
         json_path = Path(temp_dir) / "unicode.json"
         json_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -1275,19 +1324,30 @@ class TestEdgeCases:
     def test_export_with_none_style(self, temp_dir):
         """Test export with style explicitly set to None."""
         output_path = Path(temp_dir) / "none_style.docx"
-        data = {"topic": "测试", "style": None, "sections": []}
+        data = {
+            "topic": "测试",
+            "style": None,
+            "sections": export_admissible_sections(),
+        }
         
         export_autoplan_docx(data, str(output_path))
         assert output_path.exists()
 
     def test_export_with_none_sections(self, temp_dir):
-        """Test export with sections explicitly set to None."""
+        """None sections are rejected by the mandatory-content contract."""
         output_path = Path(temp_dir) / "none_sections.docx"
         data = {"topic": "测试", "sections": None}
-        
-        # Should handle None sections gracefully
-        export_autoplan_docx(data, str(output_path))
-        assert output_path.exists()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            export_autoplan_docx(data, str(output_path))
+
+        payload = json.loads(str(exc_info.value))
+        issue_codes = {issue["code"] for issue in payload["issues"]}
+        assert payload["export_allowed"] is False
+        assert "MANDATORY_CONTENT_MISSING" in issue_codes
+        assert "CHAPTER_16_RISK_MEASURES_MISSING" in issue_codes
+        assert "PARAMETER_TRACE_MISSING" in issue_codes
+        assert not output_path.exists()
 
     def test_export_with_none_media(self, temp_dir, basic_data):
         """Test export with media explicitly set to None."""
@@ -1335,7 +1395,10 @@ class TestEdgeCases:
             {"title": f"第{i}章", "content": f"内容{i}" * 100, "agent_role": f"角色{i}"}
             for i in range(50)
         ]
-        data = {"topic": "大型文档测试", "sections": sections}
+        data = {
+            "topic": "大型文档测试",
+            "sections": export_admissible_sections(sections),
+        }
         output_path = Path(temp_dir) / "large.docx"
         
         export_autoplan_docx(data, str(output_path))
@@ -1353,7 +1416,7 @@ class TestEdgeCases:
                 "title_size": "18",
                 "line_spacing": "1.5",
             },
-            "sections": [],
+            "sections": export_admissible_sections(),
         }
         
         export_autoplan_docx(data, str(output_path))
@@ -1364,7 +1427,7 @@ class TestEdgeCases:
         output_path = Path(temp_dir) / "no_ok.docx"
         data = {
             "topic": "测试",
-            "sections": [],
+            "sections": export_admissible_sections(),
             "quality_checks": {
                 "structure": {"note": "仅有备注"},
             },

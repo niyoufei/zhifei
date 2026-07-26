@@ -4,6 +4,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from backend.tests.export_test_contract_fixtures import export_admissible_sections
 from backend.zhifei_autoplan.exporter import export_autoplan_focus_xlsx
 
 
@@ -24,7 +25,7 @@ def test_export_autoplan_focus_xlsx_includes_focus_card_columns(tmp_path: Path):
     data = {
         "topic": "t1",
         "project_id": "p1",
-        "sections": sections,
+        "sections": export_admissible_sections(sections),
         "quality_checks": {"issue_list": [], "auto_revision_suggestions": []},
         "cross_index": {
             "project_id": "p1",
@@ -78,7 +79,7 @@ def test_export_autoplan_focus_xlsx_includes_variant_similarity_sheet(tmp_path: 
     data = {
         "topic": "t1",
         "project_id": "p1",
-        "sections": [],
+        "sections": export_admissible_sections(),
         "quality_checks": {"issue_list": [], "auto_revision_suggestions": []},
         "cross_index": {"project_id": "p1", "focus_items": []},
         "variant_similarity": {
