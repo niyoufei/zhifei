@@ -3,13 +3,34 @@ import os
 import tempfile
 import pytest
 from unittest.mock import MagicMock, patch
-from docx import Document
-from docx.shared import Pt, Cm
-from docx.enum.text import WD_LINE_SPACING, WD_ALIGN_PARAGRAPH
 
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from utils_write_docx import _set_paragraph, write_compose_to_docx
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_WRITE_DOCX_RUNTIME_BINDINGS = {
+    "Document": ("docx", "Document"),
+    "Pt": ("docx.shared", "Pt"),
+    "Cm": ("docx.shared", "Cm"),
+    "WD_LINE_SPACING": ("docx.enum.text", "WD_LINE_SPACING"),
+    "WD_ALIGN_PARAGRAPH": ("docx.enum.text", "WD_ALIGN_PARAGRAPH"),
+    "_set_paragraph": ("backend.utils_write_docx", "_set_paragraph"),
+    "write_compose_to_docx": (
+        "backend.utils_write_docx",
+        "write_compose_to_docx",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_write_docx_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _WRITE_DOCX_RUNTIME_BINDINGS,
+        module_prefixes=("backend.utils_write_docx",),
+    ):
+        yield
 
 
 def approx_emu(expected_cm, tolerance=0.01):

@@ -2,10 +2,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from docx import Document
-from PIL import Image
+import pytest
 
-from backend.zhifei_autoplan.v2.docx_generator import generate_v2_docx
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_V2_DOCX_RUNTIME_BINDINGS = {
+    "Document": ("docx", "Document"),
+    "Image": ("PIL.Image", None),
+    "generate_v2_docx": (
+        "backend.zhifei_autoplan.v2.docx_generator",
+        "generate_v2_docx",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_v2_docx_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _V2_DOCX_RUNTIME_BINDINGS,
+        module_prefixes=("PIL",),
+    ):
+        yield
 
 
 def test_generate_v2_docx_with_visual_guardrails(tmp_path: Path) -> None:

@@ -7,10 +7,31 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
 
-from backend.zhifei_autoplan.zbid_snapshot_mapper import FORBIDDEN_KEYS
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_ACTIONS_ZBID_RUNTIME_BINDINGS = {
+    "FastAPI": ("fastapi", "FastAPI"),
+    "HTTPException": ("fastapi", "HTTPException"),
+    "TestClient": ("fastapi.testclient", "TestClient"),
+    "FORBIDDEN_KEYS": (
+        "backend.zhifei_autoplan.zbid_snapshot_mapper",
+        "FORBIDDEN_KEYS",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_actions_zbid_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _ACTIONS_ZBID_RUNTIME_BINDINGS,
+        module_prefixes=("fastapi", "starlette", "httpx"),
+    ):
+        yield
 
 
 ZBID_PREVIEW_PATH = "/actions/zbid/snapshot_draft_input/preview"

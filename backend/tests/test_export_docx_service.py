@@ -2,7 +2,28 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from backend.zhifei_autoplan import export_docx_service
+import pytest
+
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_EXPORT_DOCX_SERVICE_RUNTIME_BINDINGS = {
+    "export_docx_service": (
+        "backend.zhifei_autoplan.export_docx_service",
+        None,
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_export_docx_service_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _EXPORT_DOCX_SERVICE_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 def test_execute_export_docx_request_builds_payload_and_updates_job():

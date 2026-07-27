@@ -7,10 +7,36 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
 
-from backend.app.main import app
-from backend.app.routers import local_llm_preview_safe
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_LOCAL_LLM_PREVIEW_RUNTIME_BINDINGS = {
+    "TestClient": ("fastapi.testclient", "TestClient"),
+    "app": ("backend.app.main", "app"),
+    "local_llm_preview_safe": (
+        "backend.app.routers.local_llm_preview_safe",
+        None,
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_local_llm_preview_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _LOCAL_LLM_PREVIEW_RUNTIME_BINDINGS,
+        module_prefixes=(
+            "compose_engine",
+            "fastapi",
+            "httpx",
+            "starlette",
+            "utils_write_docx",
+        ),
+    ):
+        yield
 
 
 SAFE_PATH = "/local-llm/preview-safe"

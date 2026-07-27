@@ -1,6 +1,27 @@
 from __future__ import annotations
 
-from backend.app.routers.actions_bridge import _review_items_for_variant
+import pytest
+
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_ACTIONS_REVIEW_RUNTIME_BINDINGS = {
+    "_review_items_for_variant": (
+        "backend.app.routers.actions_bridge",
+        "_review_items_for_variant",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_actions_review_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _ACTIONS_REVIEW_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 def test_review_items_merge_issue_and_suggestion():
