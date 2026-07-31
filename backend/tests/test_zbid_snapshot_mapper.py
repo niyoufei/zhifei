@@ -2,10 +2,41 @@ import copy
 
 import pytest
 
-from backend.zhifei_autoplan.zbid_snapshot_mapper import (
-    FORBIDDEN_KEYS,
-    map_zbid_snapshot_to_zdoc_draft_input,
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
 )
+
+
+_ZBID_SNAPSHOT_RUNTIME_BINDINGS = {
+    "FORBIDDEN_KEYS": (
+        "backend.zhifei_autoplan.zbid_snapshot_mapper",
+        "FORBIDDEN_KEYS",
+    ),
+    "map_zbid_snapshot_to_zdoc_draft_input": (
+        "backend.zhifei_autoplan.zbid_snapshot_mapper",
+        "map_zbid_snapshot_to_zdoc_draft_input",
+    ),
+}
+_FORBIDDEN_KEY_PARAMS = (
+    "apply",
+    "build_output",
+    "export",
+    "formal_apply",
+    "generate_async",
+    "job",
+    "llm",
+    "ollama",
+    "result_bundle",
+)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_zbid_snapshot_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _ZBID_SNAPSHOT_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 def _valid_snapshot() -> dict:
@@ -206,7 +237,7 @@ def test_safety_boundary_must_remain_draft_only(field: str, bad_value: bool, exp
         map_zbid_snapshot_to_zdoc_draft_input(snapshot)
 
 
-@pytest.mark.parametrize("field", sorted(FORBIDDEN_KEYS))
+@pytest.mark.parametrize("field", _FORBIDDEN_KEY_PARAMS)
 def test_forbidden_field_at_top_level_raises(field: str) -> None:
     snapshot = _valid_snapshot()
     snapshot[field] = True
@@ -215,7 +246,7 @@ def test_forbidden_field_at_top_level_raises(field: str) -> None:
         map_zbid_snapshot_to_zdoc_draft_input(snapshot)
 
 
-@pytest.mark.parametrize("field", sorted(FORBIDDEN_KEYS))
+@pytest.mark.parametrize("field", _FORBIDDEN_KEY_PARAMS)
 def test_forbidden_field_nested_raises(field: str) -> None:
     snapshot = _valid_snapshot()
     snapshot["project"]["nested"] = {field: True}

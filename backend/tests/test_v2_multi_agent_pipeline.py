@@ -5,7 +5,26 @@ from pathlib import Path
 
 import pytest
 
-from backend.zhifei_autoplan.v2.multi_agent_pipeline import MultiAgentDocPipeline
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_V2_PIPELINE_RUNTIME_BINDINGS = {
+    "MultiAgentDocPipeline": (
+        "backend.zhifei_autoplan.v2.multi_agent_pipeline",
+        "MultiAgentDocPipeline",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_v2_pipeline_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _V2_PIPELINE_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 @pytest.mark.asyncio

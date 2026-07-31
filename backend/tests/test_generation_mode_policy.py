@@ -1,4 +1,29 @@
-from backend.app.routers.actions_bridge import _apply_generation_mode_policy, _planned_total_pages
+import pytest
+
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_GENERATION_MODE_RUNTIME_BINDINGS = {
+    "_apply_generation_mode_policy": (
+        "backend.app.routers.actions_bridge",
+        "_apply_generation_mode_policy",
+    ),
+    "_planned_total_pages": (
+        "backend.app.routers.actions_bridge",
+        "_planned_total_pages",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_generation_mode_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _GENERATION_MODE_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 def test_planned_total_pages_prefers_total_pages_target():
@@ -67,4 +92,3 @@ def test_generation_mode_hq_speed_policy():
     assert out["agent_parallelism"] >= 6
     assert out["variant_parallelism"] >= 1
     assert out["generate_images"] is False
-

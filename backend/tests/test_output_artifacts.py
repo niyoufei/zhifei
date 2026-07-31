@@ -3,8 +3,32 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from backend.zhifei_autoplan import output_artifacts
-from backend.zhifei_autoplan import exporter as exporter_module
+import pytest
+
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_OUTPUT_ARTIFACTS_RUNTIME_BINDINGS = {
+    "output_artifacts": (
+        "backend.zhifei_autoplan.output_artifacts",
+        None,
+    ),
+    "exporter_module": (
+        "backend.zhifei_autoplan.exporter",
+        None,
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_output_artifacts_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _OUTPUT_ARTIFACTS_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 def test_save_outputs_writes_expected_artifact_bundle(tmp_path: Path, monkeypatch):

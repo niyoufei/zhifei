@@ -8,10 +8,30 @@ from pathlib import Path
 import sys
 import types
 
-from backend.zhifei_autoplan.orchestrator import (
-    _build_weights_and_penalties,
-    run_autoplan,
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
 )
+
+
+_ORCHESTRATOR_RUNTIME_BINDINGS = {
+    "_build_weights_and_penalties": (
+        "backend.zhifei_autoplan.orchestrator",
+        "_build_weights_and_penalties",
+    ),
+    "run_autoplan": (
+        "backend.zhifei_autoplan.orchestrator",
+        "run_autoplan",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_orchestrator_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _ORCHESTRATOR_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)

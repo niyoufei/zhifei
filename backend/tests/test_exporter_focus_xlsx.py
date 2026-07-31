@@ -2,9 +2,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from openpyxl import load_workbook
+import pytest
 
-from backend.zhifei_autoplan.exporter import export_autoplan_focus_xlsx
+from backend.tests.export_test_contract_fixtures import (
+    export_admissible_sections,
+    isolated_export_module_bindings,
+)
+
+
+_FOCUS_XLSX_RUNTIME_BINDINGS = {
+    "load_workbook": ("openpyxl", "load_workbook"),
+    "export_autoplan_focus_xlsx": (
+        "backend.zhifei_autoplan.exporter",
+        "export_autoplan_focus_xlsx",
+    ),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_focus_xlsx_runtime_modules():
+    with isolated_export_module_bindings(
+        globals(),
+        _FOCUS_XLSX_RUNTIME_BINDINGS,
+    ):
+        yield
 
 
 def test_export_autoplan_focus_xlsx_includes_focus_card_columns(tmp_path: Path):
@@ -24,7 +45,7 @@ def test_export_autoplan_focus_xlsx_includes_focus_card_columns(tmp_path: Path):
     data = {
         "topic": "t1",
         "project_id": "p1",
-        "sections": sections,
+        "sections": export_admissible_sections(sections),
         "quality_checks": {"issue_list": [], "auto_revision_suggestions": []},
         "cross_index": {
             "project_id": "p1",
@@ -78,7 +99,7 @@ def test_export_autoplan_focus_xlsx_includes_variant_similarity_sheet(tmp_path: 
     data = {
         "topic": "t1",
         "project_id": "p1",
-        "sections": [],
+        "sections": export_admissible_sections(),
         "quality_checks": {"issue_list": [], "auto_revision_suggestions": []},
         "cross_index": {"project_id": "p1", "focus_items": []},
         "variant_similarity": {
