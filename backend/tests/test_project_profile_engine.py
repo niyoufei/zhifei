@@ -17,8 +17,38 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from project_profile_engine import ProjectProfileEngine
 
 
+@pytest.fixture
+def synthetic_project_profile_rule_path(tmp_path):
+    """Create the minimal sanitized rule asset needed by positive tests."""
+    rule_file = tmp_path / "synthetic_project_profile_rules.json"
+    rule_file.write_text(
+        """{
+  "meta": {
+    "version": "synthetic-test-v1",
+    "source": "pytest-tmp-path"
+  },
+  "strategy": {
+    "synthetic_baseline": {}
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    return rule_file
+
+
 class TestProjectProfileEngine:
     """测试 ProjectProfileEngine 类"""
+
+    @pytest.fixture(autouse=True)
+    def _bind_synthetic_rule_asset(
+        self, monkeypatch, synthetic_project_profile_rule_path
+    ):
+        """Keep valid-rule tests independent from private mounted assets."""
+        monkeypatch.setattr(
+            "project_profile_engine.get_project_profile_rule_path",
+            lambda: synthetic_project_profile_rule_path,
+        )
 
     def test_init_loads_rules(self):
         """测试初始化成功加载规则"""
