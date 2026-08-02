@@ -860,6 +860,129 @@ def search_dispatch_graphs(
     return out
 
 
+def search_dispatch_graphs_batch(
+    requests: List[Dict[str, Any]],
+) -> List[List[Dict[str, Any]]]:
+    """Search multiple graph requests while normalizing shared graph data once.
+
+    The result at each position is behavior-equivalent to calling
+    ``search_dispatch_graphs`` for the corresponding request. Cached source
+    documents are never returned directly: every hit remains a fresh dict.
+    """
+
+    normalized_cache: Dict[tuple[str, ...], List[str]] = {}
+
+    def normalized_domains(values: Iterable[Any]) -> List[str]:
+        materialized = tuple(_norm_text(value) for value in values)
+        cached = normalized_cache.get(materialized)
+        if cached is None:
+            cached = _normalize_domain_keys(materialized)
+            normalized_cache[materialized] = cached
+        return cached
+
+    def domains_overlap(left: List[str], right: List[str]) -> bool:
+        if not left or not right:
+            return False
+        if "general" in left or "general" in right:
+            return True
+        return not set(left).isdisjoint(right)
+
+    graph_cache: Dict[
+        tuple[str, str, tuple[str, ...], tuple[str, ...]],
+        tuple[List[str], List[str], List[tuple[Dict[str, Any], List[str]]]],
+    ] = {}
+
+    def prepared_graph(
+        graph: Dict[str, Any],
+    ) -> tuple[List[str], List[str], List[tuple[Dict[str, Any], List[str]]]] | None:
+        filename = _norm_text(graph.get("filename"))
+        graph_name = _norm_text(graph.get("graph_name")) or filename
+        if not filename:
+            return None
+        raw_domains = tuple(str(x) for x in (graph.get("domain_tags") or []))
+        keywords = tuple(
+            str(x).strip()
+            for x in (graph.get("keywords") or [])
+            if str(x).strip()
+        )
+        key = (filename, graph_name, raw_domains, keywords)
+        prepared = graph_cache.get(key)
+        if prepared is not None:
+            return prepared
+        graph_domains = normalized_domains(raw_domains)
+        docs: List[tuple[Dict[str, Any], List[str]]] = []
+        for document in _docs_for_graph_file(filename, graph_name):
+            raw_doc_domains = document.get("domain_tags") or graph_domains
+            doc_domains = normalized_domains(raw_doc_domains)
+            docs.append((dict(document), doc_domains))
+        prepared = (graph_domains, list(keywords), docs)
+        graph_cache[key] = prepared
+        return prepared
+
+    output: List[List[Dict[str, Any]]] = []
+    for request in requests:
+        query = str(request.get("query") or "")
+        tokens = _tokenize(query)
+        if not tokens:
+            output.append([])
+            continue
+        allowed_domains = normalized_domains(request.get("allowed_domains") or [])
+        scored: List[tuple[float, Dict[str, Any], List[str]]] = []
+        for graph in request.get("graphs") or []:
+            if not isinstance(graph, dict):
+                continue
+            prepared = prepared_graph(graph)
+            if prepared is None:
+                continue
+            graph_name = _norm_text(graph.get("graph_name")) or _norm_text(
+                graph.get("filename")
+            )
+            graph_domains, graph_keywords, documents = prepared
+            if (
+                allowed_domains
+                and graph_domains
+                and not domains_overlap(graph_domains, allowed_domains)
+            ):
+                continue
+            for document, doc_domains in documents:
+                if (
+                    allowed_domains
+                    and doc_domains
+                    and not domains_overlap(doc_domains, allowed_domains)
+                ):
+                    continue
+                text = (
+                    f"{document.get('title')}\n"
+                    f"{document.get('text')}\n"
+                    f"{graph_name}"
+                )
+                score = 0.0
+                for token in tokens:
+                    if token in text:
+                        score += 1.0
+                for keyword in graph_keywords:
+                    if keyword and keyword in query:
+                        score += 0.4
+                if score > 0:
+                    scored.append((score, document, doc_domains))
+        scored.sort(key=lambda row: row[0], reverse=True)
+        hits: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for score, document, doc_domains in scored:
+            key = f"{document.get('logical_node')}:{document.get('title')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            item = dict(document)
+            item["score"] = score
+            item["domain_tags"] = list(doc_domains)
+            hits.append(item)
+            if len(hits) >= max(1, int(request.get("top_k", 8))):
+                break
+        output.append(hits)
+    return output
+
+
 def extract_experience_values(
     graph_hits: List[Dict[str, Any]],
     *,
