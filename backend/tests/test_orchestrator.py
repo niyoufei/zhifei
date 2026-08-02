@@ -1090,6 +1090,328 @@ class TestOrchestratorIntegration:
         # Time difference between first and last call should be minimal
         assert call_times[-1] - call_times[0] < 0.2  # allow CI scheduling jitter
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("requested_parallelism", "expected_bound"),
+        [(1, 1), (3, 3), (99, 16)],
+    )
+    async def test_section_workers_are_bounded_and_results_keep_input_order(
+        self,
+        full_mocks,
+        requested_parallelism,
+        expected_bound,
+    ):
+        outline = [f"章节{i:02d}" for i in range(20)]
+        active = 0
+        peak_active = 0
+        worker_tasks = []
+        real_create_task = asyncio.create_task
+
+        async def reverse_order_write(title, ctx):
+            nonlocal active, peak_active
+            active += 1
+            peak_active = max(peak_active, active)
+            try:
+                index = int(title[-2:])
+                await asyncio.sleep((len(outline) - index) * 0.0005)
+                return {
+                    "title": title,
+                    "content": "content",
+                    "agent_role": ctx.get("agent_role"),
+                }
+            finally:
+                active -= 1
+
+        def tracked_create_task(coro):
+            task = real_create_task(coro)
+            worker_tasks.append(task)
+            return task
+
+        full_mocks["writer"].write = AsyncMock(side_effect=reverse_order_write)
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.search_dispatch_graphs_batch",
+            return_value=[[] for _ in outline],
+        ) as batch_search, patch(
+            "backend.zhifei_autoplan.orchestrator.asyncio.create_task",
+            side_effect=tracked_create_task,
+        ):
+            result = await run_autoplan(
+                {
+                    "outline": outline,
+                    "strict_tender_outline": True,
+                    "agent_parallelism": requested_parallelism,
+                }
+            )
+
+        assert batch_search.call_count == 1
+        assert len(worker_tasks) == expected_bound
+        assert peak_active <= expected_bound
+        assert peak_active == expected_bound
+        assert all(task.done() for task in worker_tasks)
+        assert [section["title"] for section in result["sections"]] == outline
+
+    @pytest.mark.asyncio
+    async def test_concurrent_workers_materially_outperform_forced_serial_control(
+        self,
+        full_mocks,
+    ):
+        outline = ["章节1", "章节2", "章节3", "章节4"]
+
+        async def measured_run(parallelism):
+            active = 0
+            peak = 0
+            first_start = None
+            last_finish = None
+
+            async def measured_write(title, ctx):
+                nonlocal active, peak, first_start, last_finish
+                now = asyncio.get_running_loop().time()
+                first_start = now if first_start is None else min(first_start, now)
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(0.04)
+                    return {
+                        "title": title,
+                        "content": "content",
+                        "agent_role": ctx.get("agent_role"),
+                    }
+                finally:
+                    active -= 1
+                    last_finish = asyncio.get_running_loop().time()
+
+            full_mocks["writer"].write = AsyncMock(side_effect=measured_write)
+            with patch(
+                "backend.zhifei_autoplan.orchestrator.search_dispatch_graphs_batch",
+                return_value=[[] for _ in outline],
+            ):
+                result = await run_autoplan(
+                    {
+                        "outline": outline,
+                        "strict_tender_outline": True,
+                        "agent_parallelism": parallelism,
+                    }
+                )
+            return last_finish - first_start, peak, result
+
+        concurrent_elapsed, concurrent_peak, concurrent_result = await measured_run(4)
+        serial_elapsed, serial_peak, serial_result = await measured_run(1)
+
+        assert concurrent_peak == 4
+        assert serial_peak == 1
+        assert concurrent_elapsed < serial_elapsed * 0.75
+        assert [s["title"] for s in concurrent_result["sections"]] == outline
+        assert [s["title"] for s in serial_result["sections"]] == outline
+
+    @pytest.mark.asyncio
+    async def test_worker_exception_cancels_and_reclaims_siblings(self, full_mocks):
+        class PreparationFailure(RuntimeError):
+            pass
+
+        marker = PreparationFailure("graph-adjacent preparation failed")
+        calls = 0
+        blocker = asyncio.Event()
+        worker_tasks = []
+        real_create_task = asyncio.create_task
+
+        def fail_first_search(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise marker
+            return {"results": []}
+
+        async def blocked_write(title, ctx):
+            await blocker.wait()
+            return {"title": title, "content": "content"}
+
+        def tracked_create_task(coro):
+            task = real_create_task(coro)
+            worker_tasks.append(task)
+            return task
+
+        full_mocks["kg"].side_effect = fail_first_search
+        full_mocks["writer"].write = AsyncMock(side_effect=blocked_write)
+        outline = ["章节1", "章节2", "章节3"]
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.search_dispatch_graphs_batch",
+            return_value=[[] for _ in outline],
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.asyncio.create_task",
+            side_effect=tracked_create_task,
+        ):
+            with pytest.raises(PreparationFailure) as caught:
+                await run_autoplan(
+                    {
+                        "outline": outline,
+                        "strict_tender_outline": True,
+                        "agent_parallelism": 3,
+                    }
+                )
+
+        assert caught.value is marker
+        assert len(worker_tasks) == 3
+        assert all(task.done() for task in worker_tasks)
+
+    @pytest.mark.asyncio
+    async def test_external_cancellation_reclaims_all_workers(self, full_mocks):
+        outline = ["章节1", "章节2", "章节3", "章节4"]
+        two_writers_started = asyncio.Event()
+        release_writers = asyncio.Event()
+        active = 0
+        worker_tasks = []
+        real_create_task = asyncio.create_task
+
+        async def blocked_write(title, ctx):
+            nonlocal active
+            active += 1
+            if active == 2:
+                two_writers_started.set()
+            try:
+                await release_writers.wait()
+                return {"title": title, "content": "content"}
+            finally:
+                active -= 1
+
+        def tracked_create_task(coro):
+            task = real_create_task(coro)
+            worker_tasks.append(task)
+            return task
+
+        full_mocks["writer"].write = AsyncMock(side_effect=blocked_write)
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.search_dispatch_graphs_batch",
+            return_value=[[] for _ in outline],
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.asyncio.create_task",
+            side_effect=tracked_create_task,
+        ):
+            parent = real_create_task(
+                run_autoplan(
+                    {
+                        "outline": outline,
+                        "strict_tender_outline": True,
+                        "agent_parallelism": 2,
+                    }
+                )
+            )
+            await asyncio.wait_for(two_writers_started.wait(), timeout=5)
+            parent.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await parent
+
+        assert active == 0
+        assert len(worker_tasks) == 2
+        assert all(task.done() for task in worker_tasks)
+
+    @pytest.mark.asyncio
+    async def test_writer_exception_keeps_existing_error_record_behavior(self, full_mocks):
+        full_mocks["writer"].write = AsyncMock(side_effect=RuntimeError("writer failed"))
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.search_dispatch_graphs_batch",
+            return_value=[[]],
+        ):
+            result = await run_autoplan(
+                {
+                    "outline": ["章节1"],
+                    "strict_tender_outline": True,
+                    "agent_parallelism": 1,
+                }
+            )
+
+        assert result["sections"][0]["error"] == "section_write_failed: writer failed"
+
+
+class TestGraphDispatchBatch:
+    def test_batch_matches_legacy_order_domains_and_fresh_result_contract(self, monkeypatch):
+        from backend.zhifei_autoplan import graph_dispatcher as gd
+
+        source_docs = {
+            "bridge.json": [
+                {
+                    "title": "桩基节点",
+                    "text": "桥梁桩基厚度 30mm，检验频次每日一次",
+                    "path": "$.bridge",
+                    "graph_file": "bridge.json",
+                    "graph_name": "桥梁图谱",
+                    "logical_node": "bridge.json#$.bridge",
+                    "domain_tags": ["市政桥梁工程"],
+                },
+                {
+                    "title": "安全节点",
+                    "text": "桥梁施工安全防护检查",
+                    "path": "$.safety",
+                    "graph_file": "bridge.json",
+                    "graph_name": "桥梁图谱",
+                    "logical_node": "bridge.json#$.safety",
+                    "domain_tags": ["bridge"],
+                },
+            ],
+            "general.json": [
+                {
+                    "title": "通用质量节点",
+                    "text": "施工质量验收与检查频次",
+                    "path": "$.quality",
+                    "graph_file": "general.json",
+                    "graph_name": "通用图谱",
+                    "logical_node": "general.json#$.quality",
+                    "domain_tags": ["general"],
+                }
+            ],
+        }
+        monkeypatch.setattr(
+            gd,
+            "_docs_for_graph_file",
+            lambda filename, graph_name: source_docs.get(filename, []),
+        )
+        graphs = [
+            {
+                "filename": "bridge.json",
+                "graph_name": "桥梁图谱",
+                "keywords": ["桩基", "桥梁"],
+                "domain_tags": ["bridge"],
+            },
+            {
+                "filename": "general.json",
+                "graph_name": "通用图谱",
+                "keywords": ["质量"],
+                "domain_tags": ["general"],
+            },
+        ]
+        requests = [
+            {
+                "query": "桥梁桩基 厚度 频次",
+                "graphs": graphs,
+                "top_k": 4,
+                "allowed_domains": ["市政桥梁工程"],
+            },
+            {
+                "query": "施工质量 验收",
+                "graphs": graphs,
+                "top_k": 2,
+                "allowed_domains": None,
+            },
+            {
+                "query": "",
+                "graphs": graphs,
+                "top_k": 2,
+                "allowed_domains": ["bridge"],
+            },
+        ]
+
+        expected = [
+            gd.search_dispatch_graphs(**request)
+            for request in requests
+        ]
+        actual = gd.search_dispatch_graphs_batch(requests)
+
+        assert actual == expected
+        assert len(actual) == len(requests)
+        assert actual[0] is not expected[0]
+        assert actual[0][0] is not source_docs["bridge.json"][0]
+        actual[0][0]["title"] = "mutated result"
+        assert source_docs["bridge.json"][0]["title"] == "桩基节点"
+
 
 # =============================================================================
 # Tests for _pick_agent_role config file loading (lines 57-71)

@@ -27,6 +27,10 @@ from backend.zhifei_autoplan.outline_planner import (
     recommend_chart_every_n,
 )
 from backend.zhifei_autoplan.multi_agent_runtime import build_multi_agent_plan
+from backend.zhifei_autoplan.graph_dispatcher import (
+    extract_experience_values,
+    search_dispatch_graphs_batch,
+)
 from backend.zhifei_autoplan.enterprise_params import get_enterprise_profile
 from backend.zhifei_autoplan.boq_schedule import build_boq_wbs_cpm
 from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
@@ -697,7 +701,6 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         agent_parallelism = 4
     agent_parallelism = max(1, min(16, agent_parallelism))
-    section_sem = asyncio.Semaphore(agent_parallelism)
 
     def _build_case_pack_for_section(title: str) -> dict[str, Any]:
         try:
@@ -797,6 +800,35 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "chapters": chapter_summaries,
             "warning_list": warnings,
         }
+
+    graph_agents: List[Dict[str, Any]] = []
+    graph_requests: List[Dict[str, Any]] = []
+    for title in outline:
+        agents = multi_agent_plan.chapter_agents(str(title))
+        graphs = list(agents.get("graphs") or [])
+        if not graphs:
+            graphs = list(multi_agent_plan.dispatch.get("selected_graphs") or [])[:3]
+        allowed_domains = [
+            str(x).strip()
+            for x in (agents.get("domain_tags") or [])
+            if str(x).strip()
+        ]
+        if not allowed_domains:
+            allowed_domains = [
+                str(x).strip()
+                for x in (multi_agent_plan.dispatch.get("involved_domains") or [])
+                if str(x).strip()
+            ]
+        graph_agents.append(agents)
+        graph_requests.append(
+            {
+                "query": f"{topic} {title} 施工组织 质量 安全 工期 图纸 清单",
+                "graphs": graphs,
+                "top_k": 6,
+                "allowed_domains": allowed_domains or None,
+            }
+        )
+    graph_hits_by_section = search_dispatch_graphs_batch(graph_requests)
 
     async def build_section(idx: int, title: str):
         # 章节级重试：多模型轮询重试，最多尝试 3 个 provider（主+备1+备2）
@@ -901,12 +933,32 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             section_requirements.append(f"危险品材料清单：{'；'.join(boq_focus.get('hazardous_materials')[:10])}")
         if boq_focus.get("ppe_items"):
             section_requirements.append(f"劳保用品清单：{'；'.join(boq_focus.get('ppe_items')[:10])}")
-        graph_ctx = multi_agent_plan.chapter_graph_context(
-            title=title,
-            query=f"{topic} {title} 施工组织 质量 安全 工期 图纸 清单",
-            section_requirements=section_requirements,
-            top_k=6,
+        graph_hits = graph_hits_by_section[idx]
+        node_bindings = []
+        seen_nodes = set()
+        for hit in graph_hits:
+            node = str(hit.get("logical_node") or "").strip()
+            if not node or node in seen_nodes:
+                continue
+            seen_nodes.add(node)
+            node_bindings.append(node)
+            if len(node_bindings) >= 8:
+                break
+        need_experience = not any(
+            any(ch.isdigit() for ch in str(line or ""))
+            for line in section_requirements
         )
+        graph_ctx = {
+            "hits": graph_hits,
+            "node_bindings": node_bindings,
+            "experience_values": (
+                extract_experience_values(graph_hits, limit=4)
+                if need_experience
+                else []
+            ),
+            "need_experience": need_experience,
+            "agents": graph_agents[idx],
+        }
         graph_hits = graph_ctx.get("hits") or []
         for gh in graph_hits[:6]:
             gname = str(gh.get("graph_name") or gh.get("graph_file") or "图谱").strip()
@@ -1089,11 +1141,29 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             return last
         return _attach_section_meta({"title": title, "content": "章节生成失败"}) or {"title": title, "content": "章节生成失败"}
 
-    async def _build_section_with_limit(idx: int, title: str):
-        async with section_sem:
-            return await build_section(idx, title)
+    section_results: List[Dict[str, Any] | None] = [None] * len(outline)
+    next_section_index = 0
 
-    sections = await asyncio.gather(*[_build_section_with_limit(i, t) for i, t in enumerate(outline)])
+    async def _section_worker() -> None:
+        nonlocal next_section_index
+        while next_section_index < len(outline):
+            idx = next_section_index
+            next_section_index += 1
+            section_results[idx] = await build_section(idx, outline[idx])
+
+    workers = [
+        asyncio.create_task(_section_worker())
+        for _ in range(min(len(outline), agent_parallelism))
+    ]
+    try:
+        await asyncio.gather(*workers)
+    except BaseException:
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
+    sections = list(section_results)
     for sec in sections:
         sec["content"] = strip_nonconcrete_language(sec.get("content") or "")
     for sec in sections:
