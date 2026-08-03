@@ -10,6 +10,24 @@ import pytest
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_ACTIONS_REFERENCE_LIBRARIES_RUNTIME_BINDINGS = {
+    "actions_bridge": ("backend.app.routers.actions_bridge", None),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_actions_reference_libraries_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _ACTIONS_REFERENCE_LIBRARIES_RUNTIME_BINDINGS,
+    ):
+        yield
+
 
 def _write_audit(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -6,6 +6,24 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_ACTIONS_OLLAMA_PREVIEW_RUNTIME_BINDINGS = {
+    "actions_bridge": ("backend.app.routers.actions_bridge", None),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_actions_ollama_preview_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _ACTIONS_OLLAMA_PREVIEW_RUNTIME_BINDINGS,
+    ):
+        yield
+
 
 def _file_count(path: str) -> int:
     root = Path(path)

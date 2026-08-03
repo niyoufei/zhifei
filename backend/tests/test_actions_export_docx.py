@@ -5,6 +5,24 @@ from unittest.mock import patch
 
 import pytest
 
+from backend.tests.export_test_contract_fixtures import (
+    isolated_test_module_bindings,
+)
+
+
+_ACTIONS_EXPORT_DOCX_RUNTIME_BINDINGS = {
+    "actions_bridge": ("backend.app.routers.actions_bridge", None),
+}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_actions_export_docx_runtime_modules():
+    with isolated_test_module_bindings(
+        globals(),
+        _ACTIONS_EXPORT_DOCX_RUNTIME_BINDINGS,
+    ):
+        yield
+
 
 @pytest.mark.asyncio
 async def test_actions_export_docx_delegates_to_service():
