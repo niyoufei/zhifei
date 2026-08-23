@@ -1,0 +1,1296 @@
+from __future__ import annotations
+
+from copy import deepcopy
+import hashlib
+import json
+from pathlib import Path
+from pathlib import PurePosixPath
+import re
+
+import pytest
+
+from image_generation.precheck.comfyui_precheck_models import PrecheckStatus
+from image_generation.precheck.comfyui_precheck_validator import (
+    _validate_workflow_surfaces,
+    validate_static_precheck,
+)
+from image_generation.prompts.project_template_prompt_plan import (
+    build_project_template_prompt_plan,
+)
+from image_generation.router.router import ImageGenerationRouter
+from image_generation.router.validators import validate_prompt_templates
+from image_generation.workflows.workflow_bridge import WorkflowBridge
+from image_generation.workflows.workflow_input_binding import (
+    PRODUCTION_BINDING_CONTRACT_KEYS,
+    PRODUCTION_BINDING_DESCRIPTOR_FIELDS,
+)
+from image_generation.workflows.workflow_path_resolver import (
+    PRODUCTION_COMFYUI_WORKFLOW_ROOT,
+    ProductionWorkflowPathError,
+    WorkflowPathResolver,
+    resolve_production_workflow_path,
+    validate_production_workflow_relative_path,
+)
+from image_generation.workflows.workflow_validator import (
+    PRODUCTION_API_WORKFLOW_FROZEN,
+    PRODUCTION_BINDING_CONTRACT_VERIFIED,
+    validate_project_template_instance,
+    validate_r4b_static_configs,
+    validate_workflow_manifest,
+    validate_workflow_registry,
+)
+
+
+ROOT = Path(__file__).resolve().parents[2]
+TEMPLATE_ID = "qwen_image_tender_municipal_trench_lifting_v1"
+WORKFLOW_ID = "qwen_image_text_to_image"
+REGISTRY_BASELINE_SHA256 = "44419a63b3c9dcd14943026216ac4a19fa73e1b45f5af6af932cd010e82398c1"
+MANIFEST_BASELINE_SHA256 = "c326f0af92cebd85af1ea274f45be473ddae0a8da94476c4cfe95e2cc7837758"
+
+
+def _load_json(path: str) -> dict:
+    with (ROOT / path).open(encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _load_static_configs() -> tuple[dict, dict, dict]:
+    return (
+        _load_json("configs/image-generation-prompt-templates.json"),
+        _load_json("configs/image-generation-workflow-registry.json"),
+        _load_json("configs/comfyui-workflow-manifest.json"),
+    )
+
+
+def _valid_production_binding_contract() -> dict:
+    return {
+        semantic_key: {
+            "node_id": str(index),
+            "input_name": f"input_{index}",
+        }
+        for index, semantic_key in enumerate(
+            sorted(PRODUCTION_BINDING_CONTRACT_KEYS),
+            start=1,
+        )
+    }
+
+
+def _registry_with_frozen_workflow() -> dict:
+    _, registry, _ = _load_static_configs()
+    entry = registry["workflows"][WORKFLOW_ID]
+    entry["workflow_json_status"] = PRODUCTION_API_WORKFLOW_FROZEN
+    entry["workflow_json_ref"] = "fixtures/qwen-image-api-workflow.json"
+    return registry
+
+
+def _manifest_with_verified_contract() -> dict:
+    _, _, manifest = _load_static_configs()
+    entry = manifest["workflows"][WORKFLOW_ID]
+    entry["workflow_json_status"] = PRODUCTION_BINDING_CONTRACT_VERIFIED
+    entry["production_binding_contract"] = _valid_production_binding_contract()
+    return manifest
+
+
+def _new_template(case_id: str, prompt_templates: dict) -> tuple[str, dict]:
+    template_key = f"admission_{case_id}"
+    template = deepcopy(prompt_templates["templates"][TEMPLATE_ID])
+    template["template_id"] = template_key
+    return template_key, template
+
+
+def _validate_prompt_template_admission(prompt_templates: dict) -> list[str]:
+    registry = _load_json("configs/image-generation-workflow-registry.json")
+    manifest = _load_json("configs/comfyui-workflow-manifest.json")
+    return validate_r4b_static_configs(registry, manifest, prompt_templates)
+
+
+def _valid_project_template_instance() -> dict:
+    return {
+        "schema_type": "project_template_instance",
+        "schema_version": "027n-r10-c",
+        "project_id": "project-027n-r10c-demo",
+        "project_name": "市政雨污分流沟槽管道吊装示例项目",
+        "template_id": TEMPLATE_ID,
+        "workflow_id": WORKFLOW_ID,
+        "created_time": "2026-07-08T00:00:00+08:00",
+        "operator": "manual-review-operator",
+        "variables": {
+            "project_type": "市政道路工程",
+            "construction_scene": "雨污分流沟槽开挖与管道吊装",
+            "key_equipment": "汽车吊、挖掘机、管道吊具",
+            "safety_controls": "硬质围挡、吊装警戒区、专人指挥",
+            "environmental_controls": "雾炮降尘、材料覆盖、出入口冲洗",
+            "site_context": "城市道路半幅封闭施工现场",
+        },
+        "policy_refs": {
+            "generation_policy": "template:generation_policy",
+            "review_policy": "template:review_policy",
+            "retention_policy": "template:retention_policy",
+        },
+        "locked_policy_flags": {
+            "video_generation_enabled": False,
+            "batch_generation_enabled": False,
+            "auto_publish_enabled": False,
+        },
+        "review": {
+            "status": "approved_for_bid",
+            "previous_status": "selected",
+            "approved_time": "2026-07-08T01:00:00+08:00",
+            "reviewer": "technical-bid-reviewer",
+            "review_notes": "人工终审确认可用于技术标插图。",
+            "checks": {
+                "template_applicable": True,
+                "variables_complete": True,
+                "manual_review_completed": True,
+                "no_watermark_logo": True,
+                "no_obvious_ai_artifacts": True,
+                "safety_civilized_construction_correct": True,
+                "technical_bid_illustration_fit": True,
+            },
+        },
+    }
+
+
+def _validate_project_instance(instance: dict) -> list[str]:
+    prompt_templates, registry, _ = _load_static_configs()
+    return validate_project_template_instance(instance, prompt_templates, registry)
+
+
+def _remove(field: str):
+    def mutate(template: dict) -> None:
+        template.pop(field)
+
+    return mutate
+
+
+def _set_generation_policy(field: str, value: object):
+    def mutate(template: dict) -> None:
+        template["generation_policy"][field] = value
+
+    return mutate
+
+
+def _set_review_policy(field: str, value: object):
+    def mutate(template: dict) -> None:
+        template["review_policy"][field] = value
+
+    return mutate
+
+
+def _set_retention_policy(field: str, value: object):
+    def mutate(template: dict) -> None:
+        template["generation_policy"]["retention_policy"][field] = value
+
+    return mutate
+
+
+def test_production_eligibility_schema_freezes_only_the_authorized_states_and_contract():
+    schema = _load_json("configs/image-generation-workflow-contract-schema.json")
+
+    registry_statuses = set(schema["$defs"]["registryWorkflowJsonStatus"]["enum"])
+    manifest_statuses = set(schema["$defs"]["manifestWorkflowJsonStatus"]["enum"])
+    assert registry_statuses == {
+        "pending_real_workflow",
+        "mapped_static_unverified",
+        PRODUCTION_API_WORKFLOW_FROZEN,
+    }
+    assert manifest_statuses == {
+        "pending_real_workflow",
+        "mapped_static_unverified",
+        PRODUCTION_BINDING_CONTRACT_VERIFIED,
+    }
+    assert PRODUCTION_BINDING_CONTRACT_VERIFIED not in registry_statuses
+    assert PRODUCTION_API_WORKFLOW_FROZEN not in manifest_statuses
+    assert schema["properties"]["workflow_json_status"] == {
+        "$ref": "#/$defs/registryWorkflowJsonStatus"
+    }
+
+    manifest_record_schema = schema["$defs"]["manifestWorkflowRecord"]
+    assert manifest_record_schema["properties"]["workflow_json_status"] == {
+        "$ref": "#/$defs/manifestWorkflowJsonStatus"
+    }
+    assert "production_binding_contract" not in schema["properties"]
+    assert manifest_record_schema["properties"]["production_binding_contract"] == {
+        "$ref": "#/$defs/productionBindingContract"
+    }
+
+    contract_schema = schema["$defs"]["productionBindingContract"]
+    assert contract_schema["type"] == "object"
+    assert contract_schema["additionalProperties"] is False
+    assert frozenset(contract_schema["required"]) == PRODUCTION_BINDING_CONTRACT_KEYS
+    assert frozenset(contract_schema["properties"]) == PRODUCTION_BINDING_CONTRACT_KEYS
+    descriptor_schema = schema["$defs"]["productionBindingDescriptor"]
+    assert descriptor_schema["additionalProperties"] is False
+    assert frozenset(descriptor_schema["required"]) == PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+    assert frozenset(descriptor_schema["properties"]) == PRODUCTION_BINDING_DESCRIPTOR_FIELDS
+    assert descriptor_schema["properties"]["node_id"]["pattern"] == ".*\\S.*"
+    assert descriptor_schema["properties"]["input_name"]["pattern"] == ".*\\S.*"
+
+    frozen_rule = schema["allOf"][0]
+    assert (
+        frozen_rule["if"]["properties"]["workflow_json_status"]["const"]
+        == PRODUCTION_API_WORKFLOW_FROZEN
+    )
+    assert frozen_rule["then"]["required"] == ["workflow_json_ref"]
+    assert frozen_rule["then"]["properties"]["workflow_json_ref"] == {
+        "$ref": "#/$defs/productionWorkflowRelativePath"
+    }
+    production_path_schema = schema["$defs"]["productionWorkflowRelativePath"]
+    assert production_path_schema["type"] == "string"
+    assert production_path_schema["minLength"] == 1
+    assert production_path_schema["pattern"].startswith("^")
+    assert production_path_schema["pattern"].endswith("$")
+    verified_rule = manifest_record_schema["allOf"][0]
+    assert (
+        verified_rule["if"]["properties"]["workflow_json_status"]["const"]
+        == PRODUCTION_BINDING_CONTRACT_VERIFIED
+    )
+    assert verified_rule["then"]["required"] == ["production_binding_contract"]
+    assert verified_rule["else"]["not"]["required"] == ["production_binding_contract"]
+
+
+def test_production_workflow_root_is_fixed_and_production_api_cannot_override_it(
+    tmp_path,
+):
+    assert PRODUCTION_COMFYUI_WORKFLOW_ROOT == Path("workflows/comfyui")
+
+    resolved = resolve_production_workflow_path(
+        tmp_path,
+        "qwen_image_text_to_image.json",
+    )
+
+    assert resolved == (
+        tmp_path / "workflows/comfyui/qwen_image_text_to_image.json"
+    ).resolve()
+    with pytest.raises(TypeError):
+        resolve_production_workflow_path(
+            tmp_path,
+            "qwen_image_text_to_image.json",
+            production_root=tmp_path / "override",
+        )
+
+
+def test_production_workflow_path_accepts_nested_missing_file_without_creating_it(
+    tmp_path,
+):
+    workflow_path = tmp_path / "workflows/comfyui/qwen_image/qwen_image_text_to_image.json"
+
+    validated = validate_production_workflow_relative_path(
+        "qwen_image/qwen_image_text_to_image.json"
+    )
+    resolved = resolve_production_workflow_path(
+        tmp_path,
+        "qwen_image/qwen_image_text_to_image.json",
+    )
+
+    assert validated == PurePosixPath("qwen_image/qwen_image_text_to_image.json")
+    assert resolved == workflow_path.resolve()
+    assert not workflow_path.exists()
+    assert not (tmp_path / "workflows").exists()
+
+
+def test_generic_resolver_override_remains_supported_but_does_not_change_production_root(
+    tmp_path,
+):
+    generic_root = tmp_path / "generic-workflows"
+    resolution = WorkflowPathResolver(generic_root).resolve(
+        workflow_id=WORKFLOW_ID,
+        workflow_json_ref="fixture.json",
+        workflow_json_status="mapped_static_unverified",
+    )
+
+    assert resolution.resolved_path == str(generic_root / "fixture.json")
+    assert resolve_production_workflow_path(tmp_path, "fixture.json") == (
+        tmp_path / PRODUCTION_COMFYUI_WORKFLOW_ROOT / "fixture.json"
+    ).resolve()
+
+
+@pytest.mark.parametrize(
+    ("workflow_relative_path", "reason_code"),
+    [
+        pytest.param(None, "production_workflow_path_not_string", id="null"),
+        pytest.param(1, "production_workflow_path_not_string", id="integer"),
+        pytest.param("", "production_workflow_path_empty", id="empty"),
+        pytest.param("   ", "production_workflow_path_empty", id="blank"),
+        pytest.param("/tmp/a.json", "production_workflow_path_absolute", id="posix-absolute"),
+        pytest.param(r"C:\temp\a.json", "production_workflow_path_absolute", id="windows-drive"),
+        pytest.param(r"\\server\share\a.json", "production_workflow_path_absolute", id="windows-unc"),
+        pytest.param("~/a.json", "production_workflow_path_home_reference", id="home"),
+        pytest.param("../a.json", "production_workflow_path_traversal", id="parent-leading"),
+        pytest.param("a/../../b.json", "production_workflow_path_traversal", id="parent-multiple"),
+        pytest.param("a/../b.json", "production_workflow_path_traversal", id="parent-middle"),
+        pytest.param("./a.json", "production_workflow_path_traversal", id="dot-leading"),
+        pytest.param("a/./b.json", "production_workflow_path_traversal", id="dot-middle"),
+        pytest.param(r"a\b.json", "production_workflow_path_backslash", id="backslash"),
+        pytest.param("file:///tmp/a.json", "production_workflow_path_url", id="file-url"),
+        pytest.param("http://example.com/a.json", "production_workflow_path_url", id="http-url"),
+        pytest.param("https://example.com/a.json", "production_workflow_path_url", id="https-url"),
+        pytest.param("ftp://example.com/a.json", "production_workflow_path_url", id="ftp-url"),
+        pytest.param("workflows/comfyui/a.json", "production_workflow_path_root_prefix_repeated", id="root-prefix"),
+        pytest.param("a", "production_workflow_path_invalid_suffix", id="no-suffix"),
+        pytest.param("a.txt", "production_workflow_path_invalid_suffix", id="text-suffix"),
+        pytest.param("a.JSON", "production_workflow_path_invalid_suffix", id="uppercase-suffix"),
+        pytest.param(".json", "production_workflow_path_invalid_suffix", id="empty-stem"),
+        pytest.param("folder/", "production_workflow_path_invalid_suffix", id="directory"),
+        pytest.param("a\x00.json", "production_workflow_path_control_character", id="nul"),
+        pytest.param("a\n.json", "production_workflow_path_control_character", id="newline"),
+        pytest.param("a\t.json", "production_workflow_path_control_character", id="tab"),
+        pytest.param("a\x7f.json", "production_workflow_path_control_character", id="delete-control"),
+    ],
+)
+def test_production_workflow_relative_path_rejects_unsafe_values(
+    workflow_relative_path,
+    reason_code,
+):
+    with pytest.raises(ProductionWorkflowPathError) as exc_info:
+        validate_production_workflow_relative_path(workflow_relative_path)
+
+    assert exc_info.value.reason_code == reason_code
+    assert str(exc_info.value) == reason_code
+
+
+def test_production_workflow_path_rejects_existing_symlink_parent_escape(tmp_path):
+    production_root = tmp_path / PRODUCTION_COMFYUI_WORKFLOW_ROOT
+    outside_root = tmp_path / "outside"
+    production_root.mkdir(parents=True)
+    outside_root.mkdir()
+    (production_root / "link").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ProductionWorkflowPathError) as exc_info:
+        resolve_production_workflow_path(tmp_path, "link/a.json")
+
+    assert exc_info.value.reason_code == "production_workflow_path_symlink_escape"
+
+
+def test_production_workflow_path_rejects_production_root_symlink_outside_repository(
+    tmp_path,
+):
+    workflows_root = tmp_path / "workflows"
+    outside_root = tmp_path.parent / f"{tmp_path.name}-outside"
+    workflows_root.mkdir()
+    outside_root.mkdir()
+    (workflows_root / "comfyui").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ProductionWorkflowPathError) as exc_info:
+        resolve_production_workflow_path(tmp_path, "a.json")
+
+    assert exc_info.value.reason_code == "production_workflow_path_outside_root"
+
+
+def test_production_workflow_path_apis_do_not_read_workflow_content(tmp_path, monkeypatch):
+    calls = []
+
+    def forbidden_content_read(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("workflow content read is forbidden")
+
+    monkeypatch.setattr("builtins.open", forbidden_content_read)
+    monkeypatch.setattr(Path, "read_text", forbidden_content_read)
+    monkeypatch.setattr(Path, "read_bytes", forbidden_content_read)
+    monkeypatch.setattr(json, "load", forbidden_content_read)
+    monkeypatch.setattr(json, "loads", forbidden_content_read)
+
+    assert validate_production_workflow_relative_path("missing.json") == PurePosixPath(
+        "missing.json"
+    )
+    assert resolve_production_workflow_path(tmp_path, "missing.json") == (
+        tmp_path / PRODUCTION_COMFYUI_WORKFLOW_ROOT / "missing.json"
+    ).resolve()
+    assert calls == []
+
+
+def test_production_workflow_schema_rejects_unsafe_paths():
+    schema = _load_json("configs/image-generation-workflow-contract-schema.json")
+    pattern = re.compile(schema["$defs"]["productionWorkflowRelativePath"]["pattern"])
+
+    assert pattern.fullmatch("qwen_image_text_to_image.json")
+    assert pattern.fullmatch("qwen_image/qwen_image_text_to_image.json")
+    for value in (
+        "",
+        "   ",
+        "/tmp/a.json",
+        r"C:\temp\a.json",
+        r"\\server\share\a.json",
+        "../a.json",
+        "a/../b.json",
+        "./a.json",
+        "a/./b.json",
+        "file:///tmp/a.json",
+        "http://example.com/a.json",
+        "https://example.com/a.json",
+        "ftp://example.com/a.json",
+        "workflows/comfyui/a.json",
+        r"a\b.json",
+        "a",
+        "a.txt",
+        "a.JSON",
+        ".json",
+        "folder/",
+        "a\x00.json",
+        "a\n.json",
+        "a\t.json",
+        "a\x7f.json",
+    ):
+        assert pattern.fullmatch(value) is None, value
+
+
+def test_real_registry_and_manifest_remain_compatible_and_byte_unchanged():
+    registry_path = ROOT / "configs/image-generation-workflow-registry.json"
+    manifest_path = ROOT / "configs/comfyui-workflow-manifest.json"
+    before = (registry_path.read_bytes(), manifest_path.read_bytes())
+    assert hashlib.sha256(before[0]).hexdigest() == REGISTRY_BASELINE_SHA256
+    assert hashlib.sha256(before[1]).hexdigest() == MANIFEST_BASELINE_SHA256
+    prompt_templates, registry, manifest = _load_static_configs()
+
+    assert {
+        entry["workflow_json_status"] for entry in registry["workflows"].values()
+    } == {"pending_real_workflow"}
+    assert {
+        entry["workflow_json_status"] for entry in manifest["workflows"].values()
+    } == {"mapped_static_unverified"}
+    assert validate_r4b_static_configs(registry, manifest, prompt_templates) == []
+    assert (registry_path.read_bytes(), manifest_path.read_bytes()) == before
+
+
+def test_static_precheck_accepts_the_real_configs_without_runtime_access():
+    report = validate_static_precheck(ROOT)
+
+    assert report.status is PrecheckStatus.PASS
+    assert report.policy.allow_start_comfyui is False
+    assert report.policy.allow_access_localhost is False
+    assert report.policy.allow_image_generation is False
+    assert not [result for result in report.results if result.status is PrecheckStatus.FAIL]
+
+
+def test_static_precheck_reuses_fail_closed_production_eligibility_validation():
+    registry = _registry_with_frozen_workflow()
+    registry["workflows"][WORKFLOW_ID]["workflow_json_ref"] = None
+    manifest = _manifest_with_verified_contract()
+    manifest["workflows"][WORKFLOW_ID]["production_binding_contract"] = {}
+
+    results = _validate_workflow_surfaces(registry, manifest)
+    eligibility = next(
+        result for result in results if result.check_id == "production_eligibility_contract"
+    )
+
+    assert eligibility.status is PrecheckStatus.FAIL
+    assert "requires a non-empty workflow_json_ref" in eligibility.message
+    assert "keys must match exactly" in eligibility.message
+
+
+def test_image_generation_router_preserves_static_qwen_routing():
+    routing_config = _load_json("configs/local-image-generation-routing.json")
+    prompt_templates = _load_json("configs/image-generation-prompt-templates.json")
+    router = ImageGenerationRouter(routing_config, prompt_templates)
+
+    decision = router.decide("technical_bid_illustration")
+
+    assert decision.selected_role == "qwen_image_primary"
+    assert decision.workflow_key == WORKFLOW_ID
+    assert decision.prompt_template_key == "technical_bid_cover"
+    assert router.is_video_generation_enabled() is False
+
+
+def test_registry_accepts_production_frozen_fixture_without_reading_workflow_file():
+    registry = _registry_with_frozen_workflow()
+
+    assert validate_workflow_registry(registry) == []
+
+
+@pytest.mark.parametrize(
+    ("path_present", "workflow_json_ref"),
+    [
+        pytest.param(False, None, id="missing"),
+        pytest.param(True, None, id="null"),
+        pytest.param(True, "", id="empty"),
+        pytest.param(True, "   ", id="blank"),
+    ],
+)
+def test_registry_frozen_status_requires_non_empty_workflow_path(
+    path_present,
+    workflow_json_ref,
+):
+    registry = _registry_with_frozen_workflow()
+    entry = registry["workflows"][WORKFLOW_ID]
+    if not path_present:
+        entry.pop("workflow_json_ref")
+    else:
+        entry["workflow_json_ref"] = workflow_json_ref
+
+    errors = validate_workflow_registry(registry)
+
+    assert any("requires a non-empty workflow_json_ref" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("workflow_json_ref", "reason_code"),
+    [
+        pytest.param("/tmp/a.json", "production_workflow_path_absolute", id="absolute"),
+        pytest.param("../a.json", "production_workflow_path_traversal", id="traversal"),
+        pytest.param("http://example.com/a.json", "production_workflow_path_url", id="url"),
+        pytest.param(
+            "workflows/comfyui/a.json",
+            "production_workflow_path_root_prefix_repeated",
+            id="root-prefix",
+        ),
+        pytest.param("a.txt", "production_workflow_path_invalid_suffix", id="suffix"),
+    ],
+)
+def test_registry_frozen_status_rejects_unsafe_production_workflow_path(
+    workflow_json_ref,
+    reason_code,
+):
+    registry = _registry_with_frozen_workflow()
+    registry["workflows"][WORKFLOW_ID]["workflow_json_ref"] = workflow_json_ref
+
+    errors = validate_workflow_registry(registry)
+
+    assert any(reason_code in error for error in errors), errors
+
+
+def test_registry_frozen_status_reports_stable_missing_path_reason():
+    registry = _registry_with_frozen_workflow()
+    registry["workflows"][WORKFLOW_ID].pop("workflow_json_ref")
+
+    errors = validate_workflow_registry(registry)
+
+    assert any("production_workflow_path_missing" in error for error in errors), errors
+
+
+def test_registry_rejects_unknown_or_manifest_only_status():
+    for status in ("unknown_workflow_status", PRODUCTION_BINDING_CONTRACT_VERIFIED):
+        registry = _registry_with_frozen_workflow()
+        registry["workflows"][WORKFLOW_ID]["workflow_json_status"] = status
+
+        errors = validate_workflow_registry(registry)
+
+        assert any("registry workflow_json_status is not allowed" in error for error in errors), errors
+
+
+def test_registry_rejects_key_id_mismatch_and_duplicate_workflow_id():
+    _, registry, _ = _load_static_configs()
+    registry["workflows"]["duplicate_alias"] = deepcopy(
+        registry["workflows"][WORKFLOW_ID]
+    )
+
+    errors = validate_workflow_registry(registry)
+
+    assert any("workflow_id must match registry key" in error for error in errors), errors
+    assert any("duplicate registry workflow_id" in error for error in errors), errors
+
+
+def test_registry_rejects_manifest_only_production_contract_field():
+    registry = _registry_with_frozen_workflow()
+    registry["workflows"][WORKFLOW_ID][
+        "production_binding_contract"
+    ] = _valid_production_binding_contract()
+
+    errors = validate_workflow_registry(registry)
+
+    assert any("is not allowed in workflow registry" in error for error in errors), errors
+
+
+def test_manifest_accepts_verified_contract_fixture():
+    manifest = _manifest_with_verified_contract()
+
+    assert validate_workflow_manifest(manifest) == []
+
+
+@pytest.mark.parametrize(
+    ("contract_present", "contract_value"),
+    [
+        pytest.param(False, None, id="missing"),
+        pytest.param(True, None, id="null"),
+        pytest.param(True, {}, id="empty"),
+    ],
+)
+def test_manifest_verified_status_requires_non_empty_contract(
+    contract_present,
+    contract_value,
+):
+    manifest = _manifest_with_verified_contract()
+    entry = manifest["workflows"][WORKFLOW_ID]
+    if not contract_present:
+        entry.pop("production_binding_contract")
+    else:
+        entry["production_binding_contract"] = contract_value
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("production_binding_contract" in error for error in errors), errors
+
+
+@pytest.mark.parametrize("missing_key", sorted(PRODUCTION_BINDING_CONTRACT_KEYS))
+def test_manifest_verified_contract_rejects_each_missing_semantic_key(missing_key):
+    manifest = _manifest_with_verified_contract()
+    manifest["workflows"][WORKFLOW_ID]["production_binding_contract"].pop(missing_key)
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("keys must match exactly" in error for error in errors), errors
+
+
+@pytest.mark.parametrize("extra_key", ["extra_binding", ""])
+def test_manifest_verified_contract_rejects_extra_or_empty_semantic_key(extra_key):
+    manifest = _manifest_with_verified_contract()
+    manifest["workflows"][WORKFLOW_ID]["production_binding_contract"][extra_key] = {
+        "node_id": "99",
+        "input_name": "extra",
+    }
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("keys must match exactly" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("semantic_key", "misspelled_or_alias_key"),
+    [
+        ("candidate_seed", "candidate_sead"),
+        ("output_prefix", "output_prefx"),
+        ("positive_prompt", "prompt"),
+    ],
+)
+def test_manifest_verified_contract_rejects_misspelled_or_alias_keys(
+    semantic_key,
+    misspelled_or_alias_key,
+):
+    manifest = _manifest_with_verified_contract()
+    contract = manifest["workflows"][WORKFLOW_ID]["production_binding_contract"]
+    contract[misspelled_or_alias_key] = contract.pop(semantic_key)
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("keys must match exactly" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("descriptor", "expected_error"),
+    [
+        ({"node_id": "", "input_name": "input"}, ".node_id is invalid"),
+        ({"node_id": "1", "input_name": ""}, ".input_name is invalid"),
+        ({"node_id": [], "input_name": "input"}, ".node_id is invalid"),
+        ({"node_id": "1", "input_name": 1}, ".input_name is invalid"),
+        ("not-an-object", "must define exactly node_id and input_name"),
+        ({"node_id": "1"}, "must define exactly node_id and input_name"),
+        (
+            {"node_id": "1", "input_name": "input", "extra": "forbidden"},
+            "must define exactly node_id and input_name",
+        ),
+    ],
+)
+def test_manifest_verified_contract_rejects_invalid_descriptors(descriptor, expected_error):
+    manifest = _manifest_with_verified_contract()
+    semantic_key = sorted(PRODUCTION_BINDING_CONTRACT_KEYS)[0]
+    manifest["workflows"][WORKFLOW_ID]["production_binding_contract"][semantic_key] = descriptor
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any(expected_error in error for error in errors), errors
+
+
+def test_manifest_verified_contract_rejects_duplicate_node_input_mapping():
+    manifest = _manifest_with_verified_contract()
+    contract = manifest["workflows"][WORKFLOW_ID]["production_binding_contract"]
+    first_key, second_key = sorted(PRODUCTION_BINDING_CONTRACT_KEYS)[:2]
+    contract[second_key] = deepcopy(contract[first_key])
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("contains duplicate target" in error for error in errors), errors
+
+
+def test_manifest_unverified_status_rejects_production_contract():
+    _, _, manifest = _load_static_configs()
+    manifest["workflows"][WORKFLOW_ID][
+        "production_binding_contract"
+    ] = _valid_production_binding_contract()
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("is only allowed for production_binding_contract_verified" in error for error in errors), errors
+
+
+def test_manifest_rejects_unknown_or_registry_only_status():
+    for status in ("unknown_manifest_status", PRODUCTION_API_WORKFLOW_FROZEN):
+        _, _, manifest = _load_static_configs()
+        manifest["workflows"][WORKFLOW_ID]["workflow_json_status"] = status
+
+        errors = validate_workflow_manifest(manifest)
+
+        assert any("manifest workflow_json_status is not allowed" in error for error in errors), errors
+
+
+def test_manifest_rejects_contract_outside_authorized_workflow_location():
+    _, _, manifest = _load_static_configs()
+    manifest["production_binding_contract"] = _valid_production_binding_contract()
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("not allowed outside manifest workflows" in error for error in errors), errors
+
+
+def test_manifest_rejects_key_id_mismatch_and_duplicate_workflow_id():
+    _, _, manifest = _load_static_configs()
+    manifest["workflows"]["duplicate_alias"] = deepcopy(
+        manifest["workflows"][WORKFLOW_ID]
+    )
+
+    errors = validate_workflow_manifest(manifest)
+
+    assert any("workflow_id must match manifest key" in error for error in errors), errors
+    assert any("duplicate manifest workflow_id" in error for error in errors), errors
+
+
+def test_joint_validator_requires_verified_manifest_to_match_frozen_registry():
+    prompt_templates, registry, _ = _load_static_configs()
+    manifest = _manifest_with_verified_contract()
+
+    errors = validate_r4b_static_configs(registry, manifest, prompt_templates)
+
+    assert any("requires registry production_api_workflow_frozen" in error for error in errors), errors
+
+    registry = _registry_with_frozen_workflow()
+    assert validate_r4b_static_configs(registry, manifest, prompt_templates) == []
+
+
+def test_production_eligibility_validation_has_no_file_network_or_process_side_effects(
+    monkeypatch,
+):
+    import builtins
+    import os
+    import socket
+    import subprocess
+    from urllib import request
+
+    import image_generation.runtime.single_shot_submission_authorization as authorization_module
+    import image_generation.runtime.single_shot_submission_coordinator as coordinator_module
+    from image_generation.runtime.local_comfyui_transport import LocalComfyUITransport
+
+    prompt_templates, _, _ = _load_static_configs()
+    registry = _registry_with_frozen_workflow()
+    manifest = _manifest_with_verified_contract()
+
+    def unexpected_side_effect(*_args, **_kwargs):
+        raise AssertionError("production eligibility validator attempted a runtime side effect")
+
+    monkeypatch.setattr(builtins, "open", unexpected_side_effect)
+    monkeypatch.setattr(Path, "open", unexpected_side_effect)
+    monkeypatch.setattr(Path, "read_text", unexpected_side_effect)
+    monkeypatch.setattr(Path, "read_bytes", unexpected_side_effect)
+    monkeypatch.setattr(os, "stat", unexpected_side_effect)
+    monkeypatch.setattr(socket, "socket", unexpected_side_effect)
+    monkeypatch.setattr(socket, "create_connection", unexpected_side_effect)
+    monkeypatch.setattr(request, "urlopen", unexpected_side_effect)
+    monkeypatch.setattr(subprocess, "Popen", unexpected_side_effect)
+    monkeypatch.setattr(subprocess, "run", unexpected_side_effect)
+    monkeypatch.setattr(
+        authorization_module,
+        "build_single_shot_submission_authorization_envelope",
+        unexpected_side_effect,
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "dispatch_single_shot_submission",
+        unexpected_side_effect,
+    )
+    monkeypatch.setattr(LocalComfyUITransport, "check", unexpected_side_effect)
+    monkeypatch.setattr(LocalComfyUITransport, "get_state", unexpected_side_effect)
+    monkeypatch.setattr(LocalComfyUITransport, "submit", unexpected_side_effect)
+
+    assert validate_r4b_static_configs(registry, manifest, prompt_templates) == []
+
+
+def test_qwen_image_tender_municipal_trench_lifting_template_is_registered():
+    prompt_templates, registry, manifest = _load_static_configs()
+
+    assert validate_prompt_templates(prompt_templates) == []
+    assert validate_r4b_static_configs(registry, manifest, prompt_templates) == []
+
+    template = prompt_templates["templates"][TEMPLATE_ID]
+    assert template["template_name"] == "市政雨污分流沟槽管道吊装技术标插图模板"
+    assert template["model_role"] == WORKFLOW_ID
+    assert template["workflow_contract_id"] == WORKFLOW_ID
+    assert template["workflow_id"] == WORKFLOW_ID
+    assert template["workflow_json_ref"] == "blueprints/Text to Image (Qwen-Image).json"
+    assert template["variable_fields"] == [
+        "project_type",
+        "construction_scene",
+        "key_equipment",
+        "safety_controls",
+        "environmental_controls",
+        "site_context",
+    ]
+    assert template["fixed_parameters"] == {
+        "workflow": WORKFLOW_ID,
+        "width": 1024,
+        "height": 768,
+        "batch_size": 1,
+        "steps": 8,
+        "cfg": 1,
+        "sampler": "euler",
+        "scheduler": "simple",
+    }
+    policy = template["generation_policy"]
+    assert policy["max_candidates_per_task"] == 3
+    assert policy["recommended_candidates_per_task"] == 2
+    assert policy["recommended_candidates_per_task"] <= policy["max_candidates_per_task"]
+    assert policy["single_image_only_by_default"] is True
+    assert policy["candidate_generation_mode"] == "serial_single_image"
+    assert policy["seed_required"] is True
+    assert policy["manual_review_required"] is True
+    assert policy["auto_publish_enabled"] is False
+    assert policy["video_generation_enabled"] is False
+    assert policy["batch_generation_enabled"] is False
+    assert policy["cross_model_comparison_enabled"] is False
+    assert policy["requires_manual_review"] is True
+    assert (
+        policy["output_naming_pattern"]
+        == "project_slug__template_id__scene_type__seed-{seed}__{width}x{height}__{timestamp}__review-{review_status}.png"
+    )
+    assert policy["review_status_enum"] == [
+        "draft",
+        "candidate",
+        "selected",
+        "rejected",
+        "needs_regeneration",
+        "approved_for_bid",
+    ]
+    review_policy = template["review_policy"]
+    assert set(review_policy) == {
+        "required",
+        "manual_review_required",
+        "review_status_enum",
+        "checklist",
+        "approval_required_before_bid",
+    }
+    assert review_policy["required"] is True
+    assert review_policy["manual_review_required"] is True
+    assert review_policy["review_status_enum"] == policy["review_status_enum"]
+    assert review_policy["checklist"] == [
+        "technical_bid_scene_fit",
+        "watermark_logo_check",
+        "text_artifact_check",
+        "safety_civilized_construction_check",
+        "person_equipment_integrity_check",
+        "formal_document_suitability_check",
+    ]
+    assert review_policy["approval_required_before_bid"] is True
+    assert policy["retention_policy"] == {
+        "keep_original_outputs": True,
+        "keep_selected_outputs": True,
+        "allow_cleanup_rejected_candidates": True,
+        "cleanup_requires_manifest": True,
+        "auto_delete_enabled": False,
+        "never_clear_output_dir": True,
+        "never_delete_model_files": True,
+    }
+    assert policy["duplicate_model_cleanup_policy"] == {
+        "keep_current_workflow_target_models": True,
+        "keep_hf_cache_symlink_shards_by_default": True,
+        "delete_uncertain_assets": False,
+        "cleanup_requires_separate_gate": True,
+        "forbid_wildcard_rm": True,
+        "verify_required_models_after_cleanup": True,
+    }
+    assert template["model_family"] == "qwen_image"
+    assert template["workflow_contract_id"] != "flux_realistic_text_to_image"
+    assert template["workflow_contract_id"] != "qwen_image_edit_image_to_image"
+    assert "不适用于视频生成" in template["limitations"]
+    assert "不适用于 image edit" in template["limitations"]
+    assert "不适用于 FLUX 对比" in template["limitations"]
+    assert "/Users/" not in json.dumps(template, ensure_ascii=False)
+
+
+def test_qwen_image_tender_template_builds_static_single_image_workflow_plan():
+    prompt_templates, registry, manifest = _load_static_configs()
+    bridge = WorkflowBridge(registry, manifest, prompt_templates)
+
+    assert bridge.workflow_id_for_template(TEMPLATE_ID) == WORKFLOW_ID
+
+    template = prompt_templates["templates"][TEMPLATE_ID]
+    plan = bridge.build_plan(
+        workflow_id=WORKFLOW_ID,
+        prompt_template_key=TEMPLATE_ID,
+        generation_options=template["fixed_parameters"],
+    )
+
+    assert plan.workflow_id == WORKFLOW_ID
+    assert plan.workflow_json_ref == "blueprints/Text to Image (Qwen-Image).json"
+    assert plan.runtime_enabled is False
+    assert plan.no_video_generation is True
+    assert plan.output_policy["max_images"] == 1
+    assert plan.output_policy["batch_generation"] is False
+    assert plan.input_binding.bindings["width"] == 1024
+    assert plan.input_binding.bindings["height"] == 768
+    assert plan.input_binding.bindings["steps"] == 8
+    assert plan.input_binding.bindings["cfg"] == 1
+    assert plan.input_binding.bindings["sampler"] == "euler"
+    assert plan.input_binding.bindings["scheduler"] == "simple"
+    assert plan.input_binding.source_image_required is False
+    assert plan.input_binding.bindings["source_image"]["read_file_in_r4b"] is False
+
+
+def test_prompt_template_admission_rejects_duplicate_template_id():
+    prompt_templates, _, _ = _load_static_configs()
+    template = deepcopy(prompt_templates["templates"][TEMPLATE_ID])
+    prompt_templates["templates"]["duplicate_qwen_template"] = template
+
+    errors = _validate_prompt_template_admission(prompt_templates)
+
+    assert any("duplicate template_id" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("case_id", "mutate", "expected_error"),
+    [
+        (
+            "missing_workflow_id",
+            _remove("workflow_id"),
+            "workflow_id must be a non-empty string",
+        ),
+        (
+            "missing_fixed_parameters",
+            _remove("fixed_parameters"),
+            "fixed_parameters must be an object",
+        ),
+        (
+            "missing_variable_fields",
+            _remove("variable_fields"),
+            "variable_fields must be a string array",
+        ),
+        (
+            "missing_generation_policy",
+            _remove("generation_policy"),
+            "generation_policy must be an object",
+        ),
+        (
+            "batch_generation_enabled_true",
+            _set_generation_policy("batch_generation_enabled", True),
+            "generation_policy.batch_generation_enabled must be false",
+        ),
+        (
+            "video_generation_enabled_true",
+            _set_generation_policy("video_generation_enabled", True),
+            "generation_policy.video_generation_enabled must be false",
+        ),
+        (
+            "manual_review_required_false",
+            _set_generation_policy("manual_review_required", False),
+            "generation_policy.manual_review_required must be true",
+        ),
+        (
+            "auto_publish_enabled_true",
+            _set_generation_policy("auto_publish_enabled", True),
+            "generation_policy.auto_publish_enabled must be false",
+        ),
+        (
+            "review_required_false",
+            _set_review_policy("required", False),
+            "review_policy.required must be true",
+        ),
+        (
+            "cleanup_requires_manifest_false",
+            _set_retention_policy("cleanup_requires_manifest", False),
+            "retention_policy.cleanup_requires_manifest must be true",
+        ),
+        (
+            "auto_delete_enabled_true",
+            _set_retention_policy("auto_delete_enabled", True),
+            "retention_policy.auto_delete_enabled must be false",
+        ),
+        (
+            "unknown_workflow_id",
+            lambda template: template.__setitem__("workflow_id", "missing_workflow"),
+            "workflow_id must exist in registry",
+        ),
+    ],
+)
+def test_prompt_template_admission_rejects_invalid_new_templates(
+    case_id: str,
+    mutate,
+    expected_error: str,
+):
+    prompt_templates, _, _ = _load_static_configs()
+    template_key, template = _new_template(case_id, prompt_templates)
+    mutate(template)
+    prompt_templates["templates"][template_key] = template
+
+    errors = _validate_prompt_template_admission(prompt_templates)
+
+    assert any(expected_error in error for error in errors), errors
+
+
+def test_project_template_instance_accepts_valid_instance():
+    errors = _validate_project_instance(_valid_project_template_instance())
+
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("case_id", "mutate", "expected_error"),
+    [
+        (
+            "missing_project_id",
+            lambda instance: instance.pop("project_id"),
+            "project_template_instance missing fields: ['project_id']",
+        ),
+        (
+            "missing_variables_field",
+            lambda instance: instance.pop("variables"),
+            "project_template_instance missing fields: ['variables']",
+        ),
+        (
+            "missing_variables_site_context",
+            lambda instance: instance["variables"].pop("site_context"),
+            "variables missing fields: ['site_context']",
+        ),
+        (
+            "variables_empty_value",
+            lambda instance: instance["variables"].__setitem__("site_context", "  "),
+            "variables.site_context must be a non-empty string",
+        ),
+        (
+            "variables_tbd_value",
+            lambda instance: instance["variables"].__setitem__("site_context", "TBD"),
+            "variables.site_context contains forbidden placeholder value",
+        ),
+        (
+            "missing_policy_refs",
+            lambda instance: instance.pop("policy_refs"),
+            "project_template_instance missing fields: ['policy_refs']",
+        ),
+        (
+            "missing_locked_policy_flags",
+            lambda instance: instance.pop("locked_policy_flags"),
+            "project_template_instance missing fields: ['locked_policy_flags']",
+        ),
+        (
+            "video_generation_enabled_true",
+            lambda instance: instance["locked_policy_flags"].__setitem__(
+                "video_generation_enabled",
+                True,
+            ),
+            "locked_policy_flags.video_generation_enabled must be false",
+        ),
+        (
+            "batch_generation_enabled_true",
+            lambda instance: instance["locked_policy_flags"].__setitem__(
+                "batch_generation_enabled",
+                True,
+            ),
+            "locked_policy_flags.batch_generation_enabled must be false",
+        ),
+        (
+            "auto_publish_enabled_true",
+            lambda instance: instance["locked_policy_flags"].__setitem__(
+                "auto_publish_enabled",
+                True,
+            ),
+            "locked_policy_flags.auto_publish_enabled must be false",
+        ),
+        (
+            "draft_direct_to_approved",
+            lambda instance: instance["review"].__setitem__("previous_status", "draft"),
+            "review transition draft -> approved_for_bid is not allowed",
+        ),
+        (
+            "candidate_direct_to_approved",
+            lambda instance: instance["review"].__setitem__("previous_status", "candidate"),
+            "review transition candidate -> approved_for_bid is not allowed",
+        ),
+        (
+            "approved_missing_reviewer",
+            lambda instance: instance["review"].pop("reviewer"),
+            "review missing approved_for_bid fields: ['reviewer']",
+        ),
+        (
+            "approved_check_false",
+            lambda instance: instance["review"]["checks"].__setitem__(
+                "variables_complete",
+                False,
+            ),
+            "review.checks.variables_complete must be true for approved_for_bid",
+        ),
+    ],
+)
+def test_project_template_instance_rejects_invalid_instances(
+    case_id: str,
+    mutate,
+    expected_error: str,
+):
+    instance = _valid_project_template_instance()
+    mutate(instance)
+
+    errors = _validate_project_instance(instance)
+
+    assert any(expected_error in error for error in errors), errors
+
+
+def test_project_template_prompt_plan_builds_deterministic_safe_plan():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+
+    plan = build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+
+    assert plan == build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+    assert plan["plan_type"] == "project_template_prompt_plan"
+    assert plan["plan_version"] == "027n-r11-a"
+    assert plan["project_id"] == instance["project_id"]
+    assert plan["project_name"] == instance["project_name"]
+    assert plan["template_id"] == TEMPLATE_ID
+    assert plan["workflow_id"] == WORKFLOW_ID
+    assert plan["candidate_seed"] == 0
+    for value in instance["variables"].values():
+        assert value in plan["positive_prompt"]
+    assert "{" not in plan["positive_prompt"]
+    assert "{" not in plan["negative_prompt"]
+    assert (
+        plan["negative_prompt"]
+        == prompt_templates["templates"][TEMPLATE_ID]["negative_prompt_template"]
+    )
+    assert plan["fixed_parameters"]["batch_size"] == 1
+    assert plan["review_status"] == "candidate"
+    assert plan["runtime_execution_authorized"] is False
+    assert json.loads(json.dumps(plan, ensure_ascii=False)) == plan
+
+
+def test_project_template_prompt_plan_rejects_unknown_template_id():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+    instance["template_id"] = "missing_template"
+
+    with pytest.raises(ValueError, match="template_id must reference an existing template"):
+        build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+
+
+def test_project_template_prompt_plan_rejects_workflow_mismatch():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+    instance["workflow_id"] = "qwen_image_edit_image_to_image"
+
+    with pytest.raises(ValueError, match="workflow_id must match template workflow_id"):
+        build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+
+
+@pytest.mark.parametrize("candidate_seed", [-1, True, 1.0, "1"])
+def test_project_template_prompt_plan_rejects_invalid_candidate_seed(candidate_seed):
+    prompt_templates, registry, _ = _load_static_configs()
+
+    with pytest.raises(ValueError, match="candidate_seed must be a non-negative integer"):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            candidate_seed,
+        )
+
+
+@pytest.mark.parametrize("batch_size", [2, True])
+def test_project_template_prompt_plan_rejects_batch_size_other_than_one(batch_size):
+    prompt_templates, registry, _ = _load_static_configs()
+    prompt_templates["templates"][TEMPLATE_ID]["fixed_parameters"]["batch_size"] = batch_size
+
+    with pytest.raises(ValueError, match="fixed_parameters.batch_size must be 1"):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            0,
+        )
+
+
+@pytest.mark.parametrize(
+    "policy_field",
+    ["video_generation_enabled", "batch_generation_enabled", "auto_publish_enabled"],
+)
+def test_project_template_prompt_plan_rejects_enabled_unsafe_policy(policy_field: str):
+    prompt_templates, registry, _ = _load_static_configs()
+    prompt_templates["templates"][TEMPLATE_ID]["generation_policy"][policy_field] = True
+
+    with pytest.raises(ValueError, match=rf"generation_policy\.{policy_field} must be false"):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            0,
+        )
+
+
+def test_project_template_prompt_plan_does_not_mutate_inputs_and_detaches_snapshots():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+    original_prompt_templates = deepcopy(prompt_templates)
+    original_registry = deepcopy(registry)
+    original_instance = deepcopy(instance)
+
+    plan = build_project_template_prompt_plan(instance, prompt_templates, registry, 7)
+
+    assert instance == original_instance
+    assert prompt_templates == original_prompt_templates
+    assert registry == original_registry
+    template = prompt_templates["templates"][TEMPLATE_ID]
+    assert plan["fixed_parameters"] == template["fixed_parameters"]
+    assert plan["fixed_parameters"] is not template["fixed_parameters"]
+    assert plan["generation_policy"] == template["generation_policy"]
+    assert plan["generation_policy"] is not template["generation_policy"]
+    assert plan["review_policy"] == template["review_policy"]
+    assert plan["review_policy"] is not template["review_policy"]
+    assert plan["retention_policy"] == template["generation_policy"]["retention_policy"]
+    assert plan["retention_policy"] is not template["generation_policy"]["retention_policy"]
+
+    plan["fixed_parameters"]["batch_size"] = 99
+    plan["generation_policy"]["video_generation_enabled"] = True
+    plan["generation_policy"]["retention_policy"]["auto_delete_enabled"] = True
+    plan["review_policy"]["required"] = False
+    plan["review_policy"]["checklist"].append("synthetic-check")
+    plan["retention_policy"]["auto_delete_enabled"] = True
+    assert prompt_templates == original_prompt_templates
+
+
+def test_project_template_prompt_plan_rejects_undeclared_prompt_variable():
+    prompt_templates, registry, _ = _load_static_configs()
+    prompt_templates["templates"][TEMPLATE_ID][
+        "positive_prompt_template"
+    ] += "，{outside_field}"
+
+    with pytest.raises(ValueError, match="contains undeclared variables"):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            0,
+        )
+
+
+def test_project_template_prompt_plan_rejects_instance_policy_override():
+    prompt_templates, registry, _ = _load_static_configs()
+    instance = _valid_project_template_instance()
+    instance["generation_policy"] = {"batch_generation_enabled": False}
+
+    with pytest.raises(ValueError, match="generation_policy must not be defined"):
+        build_project_template_prompt_plan(instance, prompt_templates, registry, 0)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_error"),
+    [
+        ("api_token", "synthetic-test-value", "must not contain token fields"),
+        ("model_path", "/synthetic/model", "must not contain model or output path fields"),
+        ("output_path", "/synthetic/output", "must not contain model or output path fields"),
+    ],
+)
+def test_project_template_prompt_plan_rejects_sensitive_runtime_fields(
+    field: str,
+    value: str,
+    expected_error: str,
+):
+    prompt_templates, registry, _ = _load_static_configs()
+    prompt_templates["templates"][TEMPLATE_ID]["fixed_parameters"][field] = value
+
+    with pytest.raises(ValueError, match=expected_error):
+        build_project_template_prompt_plan(
+            _valid_project_template_instance(),
+            prompt_templates,
+            registry,
+            0,
+        )

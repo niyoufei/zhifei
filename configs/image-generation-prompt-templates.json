@@ -1,0 +1,506 @@
+{
+  "schema_version": "027n-r3a",
+  "deployment_mode": "local_only",
+  "runtime_status": "configured_not_runtime_verified",
+  "templates": {
+    "foundation_pit_construction": {
+      "task_type": "realistic_construction_scene",
+      "recommended_model_role": "flux_realistic",
+      "template_id": "foundation_pit_construction",
+      "workflow_contract_id": "flux_realistic_text_to_image",
+      "model_family": "flux",
+      "generator": "flux_realistic",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计技术标插图，市政基坑开挖施工场景，标准化围挡、临边防护、降尘设施、材料分区堆放、机械作业区与人员通道清晰，工人穿戴安全帽反光背心，画面整洁真实。",
+      "flux_prompt_en": "realistic documentary construction site photo of municipal foundation pit excavation, standardized fencing, edge protection, dust suppression, organized material zones, excavator working area, workers wearing helmets and reflective PPE, clean technical bid visual style",
+      "negative_prompt": "unsafe behavior, missing PPE, cluttered site, fake brand logos, project ownership claims, distorted text, low resolution, messy materials",
+      "style_tags": [
+        "technical_bid",
+        "standardized_site",
+        "realistic_construction"
+      ],
+      "quality_constraints": [
+        "clear spatial hierarchy",
+        "high detail",
+        "readable safety signage"
+      ],
+      "construction_constraints": [
+        "workers wear PPE",
+        "edge protection is visible",
+        "materials are stacked by zone",
+        "dust control equipment is present"
+      ]
+    },
+    "rebar_binding": {
+      "task_type": "technical_bid_illustration",
+      "recommended_model_role": "qwen_image_primary",
+      "template_id": "rebar_binding",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "model_family": "qwen_image",
+      "generator": "qwen_image_primary",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计技术标配图，钢筋绑扎作业面，钢筋间距规整、马凳筋和保护层垫块可见，工人佩戴安全帽和手套，材料堆放整齐，现场设置安全警示牌和通行分隔。",
+      "flux_prompt_en": "technical construction documentation illustration of rebar binding work area, orderly steel bars, visible spacers, workers with helmets gloves and reflective PPE, organized material stacking, safety signage and separated walkway",
+      "negative_prompt": "unsafe posture, missing PPE, chaotic steel bars, fake brand logos, unreadable signage, low resolution",
+      "style_tags": [
+        "construction_process",
+        "technical_bid",
+        "clean_layout"
+      ],
+      "quality_constraints": [
+        "process is easy to understand",
+        "materials are visually separated",
+        "no exaggerated effects"
+      ],
+      "construction_constraints": [
+        "PPE is worn",
+        "steel bars are organized",
+        "walkway is separated",
+        "safety signage is present"
+      ]
+    },
+    "formwork_installation": {
+      "task_type": "technical_bid_illustration",
+      "recommended_model_role": "qwen_image_primary",
+      "template_id": "formwork_installation",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "model_family": "qwen_image",
+      "generator": "qwen_image_primary",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计技术标插图，模板安装施工场景，支撑体系整齐稳定，作业平台防护到位，木方和模板分类堆放，工人穿戴安全帽、安全带和反光背心，现场文明施工。",
+      "flux_prompt_en": "technical bid style construction illustration of formwork installation, orderly temporary supports, guarded working platform, sorted timber and form panels, workers with helmets harnesses and reflective PPE, clean civilized construction site",
+      "negative_prompt": "unstable support, missing guardrails, missing PPE, fake brand logos, messy site, low resolution",
+      "style_tags": [
+        "technical_bid",
+        "formwork",
+        "standardized_site"
+      ],
+      "quality_constraints": [
+        "stable composition",
+        "visible safety measures",
+        "clear work zone"
+      ],
+      "construction_constraints": [
+        "support system is orderly",
+        "platform guardrails are visible",
+        "materials are stacked by category",
+        "workers wear PPE"
+      ]
+    },
+    "concrete_pouring": {
+      "task_type": "realistic_construction_scene",
+      "recommended_model_role": "flux_realistic",
+      "template_id": "concrete_pouring",
+      "workflow_contract_id": "flux_realistic_text_to_image",
+      "model_family": "flux",
+      "generator": "flux_realistic",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计技术标配图，混凝土浇筑现场，泵车、振捣设备、收面区域协调布置，工人佩戴安全帽雨靴和反光背心，临边防护、材料堆放、车辆引导和文明施工标识清晰。",
+      "flux_prompt_en": "realistic construction site photo of concrete pouring, pump truck and vibration equipment arranged safely, finishing area visible, workers wearing helmets rubber boots and reflective PPE, edge protection, organized materials, vehicle guidance, standardized safety signs",
+      "negative_prompt": "unsafe pouring, missing PPE, blocked access, fake logos, ownership claims, blurry image, clutter",
+      "style_tags": [
+        "realistic_construction",
+        "concrete_work",
+        "technical_bid"
+      ],
+      "quality_constraints": [
+        "balanced equipment layout",
+        "clear safety controls",
+        "documentary realism"
+      ],
+      "construction_constraints": [
+        "vehicle route is controlled",
+        "workers wear PPE",
+        "materials are separated",
+        "edge protection is visible"
+      ]
+    },
+    "hoisting_operation": {
+      "task_type": "machinery_operation_scene",
+      "recommended_model_role": "flux_realistic",
+      "template_id": "hoisting_operation",
+      "workflow_contract_id": "flux_realistic_text_to_image",
+      "model_family": "flux",
+      "generator": "flux_realistic",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计技术标插图，吊装作业安全管理场景，起重机械作业半径隔离，指挥人员、吊装构件、警戒线和机械停放区清晰，工人佩戴安全帽反光背心，现场秩序规范。",
+      "flux_prompt_en": "realistic construction safety scene of crane hoisting management, isolated lifting radius, signal person, lifted component, warning line and machinery parking zone clearly visible, workers wearing helmets and reflective PPE, orderly standardized site",
+      "negative_prompt": "unsafe lifting, people under suspended load, missing PPE, fake brand logos, chaotic site, low resolution",
+      "style_tags": [
+        "machinery_operation",
+        "safety_management",
+        "realistic_construction"
+      ],
+      "quality_constraints": [
+        "clear machinery boundary",
+        "safe scene only",
+        "no dramatic danger"
+      ],
+      "construction_constraints": [
+        "lifting radius is isolated",
+        "signal person is visible",
+        "workers wear PPE",
+        "warning line is present"
+      ]
+    },
+    "temporary_facility_layout": {
+      "task_type": "temporary_facility_layout",
+      "recommended_model_role": "qwen_image_primary",
+      "template_id": "temporary_facility_layout",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "model_family": "qwen_image",
+      "generator": "qwen_image_primary",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计总平面附图风格，临时设施布置场景，办公区、生活区、材料堆场、机械停放区、消防通道、围挡和门禁分区清晰，标识牌采用中文技术标表达。",
+      "flux_prompt_en": "clean technical site layout rendering for temporary construction facilities, office zone, living zone, material yard, machinery parking, fire access road, fencing and gate control clearly separated, standardized construction site style",
+      "negative_prompt": "unclear zoning, blocked fire route, fake brand logos, unreadable text, chaotic layout, low resolution",
+      "style_tags": [
+        "site_layout",
+        "technical_bid",
+        "standardized_site"
+      ],
+      "quality_constraints": [
+        "zones are easy to distinguish",
+        "labels are concise",
+        "layout is readable"
+      ],
+      "construction_constraints": [
+        "fire access remains clear",
+        "materials are zoned",
+        "fencing and gate control are visible",
+        "safety signage is present"
+      ]
+    },
+    "safe_civilized_construction": {
+      "task_type": "safety_civilization_scene",
+      "recommended_model_role": "qwen_image_primary",
+      "template_id": "safe_civilized_construction",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "model_family": "qwen_image",
+      "generator": "qwen_image_primary",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计安全文明施工展示图，中建式标准化施工现场风格，围挡整洁、喷淋降尘、材料码放、洗车槽、实名制门禁和安全标语清晰，工人佩戴安全帽反光背心。",
+      "flux_prompt_en": "standardized safe and civilized construction site scene, clean fencing, spray dust control, organized material stacking, wheel washing area, access control gate, safety signage, workers wearing helmets and reflective PPE, technical bid visual style",
+      "negative_prompt": "unsafe behavior, missing PPE, fake brand logos, ownership claims, dirty site, unreadable signage, low resolution",
+      "style_tags": [
+        "safe_civilized_construction",
+        "standardized_site",
+        "technical_bid"
+      ],
+      "quality_constraints": [
+        "site cleanliness is visible",
+        "safety signs are readable",
+        "no brand ownership claim"
+      ],
+      "construction_constraints": [
+        "PPE is worn",
+        "dust suppression is visible",
+        "materials are stacked neatly",
+        "access control is present"
+      ]
+    },
+    "material_yard_management": {
+      "task_type": "material_yard_scene",
+      "recommended_model_role": "flux_realistic",
+      "template_id": "material_yard_management",
+      "workflow_contract_id": "flux_realistic_text_to_image",
+      "model_family": "flux",
+      "generator": "flux_realistic",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计材料堆场管理图，钢筋、模板、管材、砂石等材料分区挂牌堆放，防雨覆盖、消防器材、通道线和围挡清晰，工人佩戴安全帽反光背心进行巡检。",
+      "flux_prompt_en": "realistic construction material yard management scene, steel bars formwork pipes aggregates stored in labeled zones, rain cover, fire equipment, clear access lanes and fencing, workers wearing helmets and reflective PPE inspecting the area",
+      "negative_prompt": "mixed materials, blocked access, missing PPE, fake brand logos, low resolution, messy yard",
+      "style_tags": [
+        "material_yard",
+        "realistic_construction",
+        "site_management"
+      ],
+      "quality_constraints": [
+        "material categories are legible",
+        "access lanes remain open",
+        "realistic lighting"
+      ],
+      "construction_constraints": [
+        "materials are zoned",
+        "fire equipment is visible",
+        "PPE is worn",
+        "weather protection is present"
+      ]
+    },
+    "road_pipeline_construction": {
+      "task_type": "construction_process_diagram",
+      "recommended_model_role": "qwen_image_primary",
+      "template_id": "road_pipeline_construction",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "model_family": "qwen_image",
+      "generator": "qwen_image_primary",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计工序流程图风格，道路管线施工场景，沟槽开挖、管节吊放、回填压实、临边防护、交通导改和材料堆放分区清晰，中文标注简洁规范。",
+      "flux_prompt_en": "technical construction process diagram for road pipeline works, trench excavation, pipe placement, backfilling and compaction, edge protection, traffic diversion and material zones clearly arranged, clean engineering documentation style",
+      "negative_prompt": "unsafe trench, missing protection, fake brand logos, unreadable labels, cluttered process, low resolution",
+      "style_tags": [
+        "process_diagram",
+        "municipal_work",
+        "technical_bid"
+      ],
+      "quality_constraints": [
+        "process sequence is clear",
+        "labels are concise",
+        "work zones are separated"
+      ],
+      "construction_constraints": [
+        "trench protection is visible",
+        "traffic diversion is shown",
+        "materials are separated",
+        "workers wear PPE"
+      ]
+    },
+    "campus_renovation_scene": {
+      "task_type": "site_photo_edit",
+      "recommended_model_role": "qwen_image_edit",
+      "template_id": "campus_renovation_scene",
+      "workflow_contract_id": "qwen_image_edit_image_to_image",
+      "model_family": "qwen_image_edit",
+      "generator": "qwen_image_edit",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计现场照片优化方向，校园改造施工场景，保留既有建筑环境，补充围挡、临时通道、安全警示、材料整齐堆放和工人 PPE，画面适合技术标展示。",
+      "flux_prompt_en": "realistic campus renovation construction scene, existing school building context preserved, temporary fencing, safe pedestrian route, warning signs, organized material stacking and workers wearing helmets and reflective PPE, clean bid presentation style",
+      "negative_prompt": "fake school branding, unsafe pedestrian conflict, missing PPE, messy materials, ownership claims, low resolution",
+      "style_tags": [
+        "site_photo_edit",
+        "campus_renovation",
+        "technical_bid"
+      ],
+      "quality_constraints": [
+        "existing context remains plausible",
+        "safety controls are prominent",
+        "natural perspective"
+      ],
+      "construction_constraints": [
+        "temporary route is separated",
+        "materials are organized",
+        "PPE is worn",
+        "warning signs are visible"
+      ]
+    },
+    "municipal_drainage_construction": {
+      "task_type": "construction_process_diagram",
+      "recommended_model_role": "qwen_image_primary",
+      "template_id": "municipal_drainage_construction",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "model_family": "qwen_image",
+      "generator": "qwen_image_primary",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计市政排水工程技术插图，雨污水管道施工、检查井砌筑、沟槽支护、材料堆放、机械作业区和安全围挡清晰，中文说明符合技术标表达。",
+      "flux_prompt_en": "technical bid illustration of municipal drainage construction, stormwater and sewage pipe works, inspection chamber masonry, trench shoring, organized materials, machinery work zone and safety fencing clearly visible",
+      "negative_prompt": "unsafe trench, missing PPE, fake brand logos, unreadable text, cluttered materials, low resolution",
+      "style_tags": [
+        "municipal_drainage",
+        "process_diagram",
+        "technical_bid"
+      ],
+      "quality_constraints": [
+        "engineering elements are identifiable",
+        "clear annotations",
+        "orderly work area"
+      ],
+      "construction_constraints": [
+        "trench support is visible",
+        "machinery zone is separated",
+        "materials are stacked by category",
+        "workers wear PPE"
+      ]
+    },
+    "qwen_image_tender_municipal_trench_lifting_v1": {
+      "task_type": "construction_process_diagram",
+      "recommended_model_role": "qwen_image_primary",
+      "model_role": "qwen_image_text_to_image",
+      "template_id": "qwen_image_tender_municipal_trench_lifting_v1",
+      "template_name": "市政雨污分流沟槽管道吊装技术标插图模板",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "workflow_id": "qwen_image_text_to_image",
+      "workflow_json_ref": "blueprints/Text to Image (Qwen-Image).json",
+      "model_family": "qwen_image",
+      "generator": "qwen_image_primary",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "{project_type}，{construction_scene}，市政道路雨污分流沟槽开挖与管道吊装现场，{key_equipment}，硬质围挡，吊装警戒区，专人指挥，工人佩戴安全帽和反光背心，{safety_controls}，{environmental_controls}，{site_context}，真实摄影风格，技术标正文插图，无可读文字。",
+      "positive_prompt_template": "{project_type}，{construction_scene}，市政道路雨污分流沟槽开挖与管道吊装现场，{key_equipment}，硬质围挡，吊装警戒区，专人指挥，工人佩戴安全帽和反光背心，{safety_controls}，{environmental_controls}，{site_context}，真实摄影风格，技术标正文插图，无可读文字。",
+      "flux_prompt_en": "technical bid illustration of municipal stormwater and sewage diversion trench excavation and pipe lifting site, hard fencing, lifting warning zone, dedicated signal person, workers wearing helmets and reflective vests, safety and environmental controls, realistic documentary construction style, no readable text",
+      "negative_prompt": "可读文字，乱码文字，水印，logo，卡通，油画，科幻，视频帧，多图拼接，人物畸形，机械畸形，错误吊装，危险作业，管道错误，过曝，过暗，大面积空白，模糊。",
+      "negative_prompt_template": "可读文字，乱码文字，水印，logo，卡通，油画，科幻，视频帧，多图拼接，人物畸形，机械畸形，错误吊装，危险作业，管道错误，过曝，过暗，大面积空白，模糊。",
+      "variable_fields": [
+        "project_type",
+        "construction_scene",
+        "key_equipment",
+        "safety_controls",
+        "environmental_controls",
+        "site_context"
+      ],
+      "fixed_parameters": {
+        "workflow": "qwen_image_text_to_image",
+        "width": 1024,
+        "height": 768,
+        "batch_size": 1,
+        "steps": 8,
+        "cfg": 1,
+        "sampler": "euler",
+        "scheduler": "simple"
+      },
+      "usage_scope": [
+        "施工组织设计技术标正文插图",
+        "市政道路雨污分流施工场景",
+        "沟槽开挖与管道吊装",
+        "安全文明施工示意图"
+      ],
+      "limitations": [
+        "不适用于正式批量图集",
+        "不适用于视频生成",
+        "不适用于 image edit",
+        "不适用于 FLUX 对比",
+        "不适用于未经人工终审的正式发布图"
+      ],
+      "quality_notes": [
+        "R6-C 相比 R6-A 技术标适配性更优",
+        "保留风险：雨污分流双线关系不强、局部吊装/喷雾略理想化",
+        "正式投标使用前需人工终审"
+      ],
+      "generation_policy": {
+        "single_image_only_by_default": true,
+        "max_candidates_per_task": 3,
+        "recommended_candidates_per_task": 2,
+        "candidate_generation_mode": "serial_single_image",
+        "seed_required": true,
+        "manual_review_required": true,
+        "auto_publish_enabled": false,
+        "video_generation_enabled": false,
+        "batch_generation_enabled": false,
+        "cross_model_comparison_enabled": false,
+        "requires_manual_review": true,
+        "output_naming_pattern": "project_slug__template_id__scene_type__seed-{seed}__{width}x{height}__{timestamp}__review-{review_status}.png",
+        "review_status_enum": [
+          "draft",
+          "candidate",
+          "selected",
+          "rejected",
+          "needs_regeneration",
+          "approved_for_bid"
+        ],
+        "retention_policy": {
+          "keep_original_outputs": true,
+          "keep_selected_outputs": true,
+          "allow_cleanup_rejected_candidates": true,
+          "cleanup_requires_manifest": true,
+          "auto_delete_enabled": false,
+          "never_clear_output_dir": true,
+          "never_delete_model_files": true
+        },
+        "duplicate_model_cleanup_policy": {
+          "keep_current_workflow_target_models": true,
+          "keep_hf_cache_symlink_shards_by_default": true,
+          "delete_uncertain_assets": false,
+          "cleanup_requires_separate_gate": true,
+          "forbid_wildcard_rm": true,
+          "verify_required_models_after_cleanup": true
+        }
+      },
+      "review_policy": {
+        "required": true,
+        "manual_review_required": true,
+        "review_status_enum": [
+          "draft",
+          "candidate",
+          "selected",
+          "rejected",
+          "needs_regeneration",
+          "approved_for_bid"
+        ],
+        "checklist": [
+          "technical_bid_scene_fit",
+          "watermark_logo_check",
+          "text_artifact_check",
+          "safety_civilized_construction_check",
+          "person_equipment_integrity_check",
+          "formal_document_suitability_check"
+        ],
+        "approval_required_before_bid": true
+      },
+      "style_tags": [
+        "technical_bid",
+        "municipal_drainage",
+        "trench_lifting",
+        "realistic_construction"
+      ],
+      "quality_constraints": [
+        "realistic technical-bid body illustration",
+        "no readable text",
+        "manual final review required"
+      ],
+      "construction_constraints": [
+        "stormwater and sewage diversion context is visible",
+        "trench excavation and pipe lifting are shown",
+        "lifting warning zone and signal person are present",
+        "workers wear helmets and reflective vests"
+      ]
+    },
+    "birdseye_site_render": {
+      "task_type": "birdseye_render",
+      "recommended_model_role": "flux_realistic",
+      "template_id": "birdseye_site_render",
+      "workflow_contract_id": "flux_realistic_text_to_image",
+      "model_family": "flux",
+      "generator": "flux_realistic",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计鸟瞰效果图，施工现场总体布置，办公生活区、材料堆场、机械区、道路、围挡、消防通道和安全文明设施分区清晰，适合技术标总平面说明。",
+      "flux_prompt_en": "realistic birdseye render of construction site overall layout, office and living areas, material yards, machinery zone, internal roads, fencing, fire access and safety facilities clearly separated, technical bid presentation quality",
+      "negative_prompt": "unclear zoning, blocked routes, fake brand logos, ownership claims, low resolution, cluttered layout",
+      "style_tags": [
+        "birdseye_render",
+        "site_layout",
+        "realistic_construction"
+      ],
+      "quality_constraints": [
+        "birdseye perspective is stable",
+        "zoning is clear",
+        "routes remain readable"
+      ],
+      "construction_constraints": [
+        "fire access is clear",
+        "materials are zoned",
+        "fencing is continuous",
+        "safety facilities are shown"
+      ]
+    },
+    "technical_bid_cover": {
+      "task_type": "cover_image",
+      "recommended_model_role": "flux_realistic",
+      "template_id": "technical_bid_cover",
+      "workflow_contract_id": "flux_realistic_text_to_image",
+      "model_family": "flux",
+      "generator": "flux_realistic",
+      "renderer": "comfyui",
+      "qwen_prompt_zh": "施工组织设计技术标封面图，现代标准化施工现场，塔吊、围挡、工人 PPE、材料堆放、绿色文明施工设施和城市背景协调，庄重、专业、干净，不体现真实项目归属。",
+      "flux_prompt_en": "professional technical bid cover image, modern standardized construction site with crane, fencing, workers wearing PPE, organized materials, green civilized construction facilities and urban background, serious clean presentation, no real project ownership",
+      "negative_prompt": "fake brand logos, project ownership claims, missing PPE, unsafe scene, low resolution, messy composition",
+      "style_tags": [
+        "cover_image",
+        "technical_bid",
+        "professional_presentation"
+      ],
+      "quality_constraints": [
+        "cover-ready composition",
+        "professional lighting",
+        "no false branding"
+      ],
+      "construction_constraints": [
+        "PPE is visible",
+        "materials are organized",
+        "fencing is clean",
+        "safety and green construction elements are shown"
+      ]
+    }
+  },
+  "governance": {
+    "baseline_commit": "50777774409d9015584222ef5d1f84b60abdda60",
+    "node": "LOCAL-LAUNCHER-027N-R3A-IMAGE-GENERATION-ROUTER-SCAFFOLD-GATE"
+  }
+}

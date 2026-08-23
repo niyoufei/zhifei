@@ -1,0 +1,98 @@
+{
+  "schema_version": "027n-r4b",
+  "deployment_mode": "local_only",
+  "video_generation_enabled": false,
+  "runtime_enabled": false,
+  "no_video_generation": true,
+  "workflows": {
+    "qwen_image_text_to_image": {
+      "workflow_id": "qwen_image_text_to_image",
+      "workflow_contract_id": "qwen_image_text_to_image",
+      "intended_model": "Qwen/Qwen-Image",
+      "model_family": "qwen_image",
+      "task_type": "text_to_image",
+      "allowed_task_type": [
+        "technical_bid_illustration",
+        "safety_civilization_scene",
+        "temporary_facility_layout",
+        "construction_process_diagram",
+        "chinese_signage_scene"
+      ],
+      "prompt_field": "qwen_prompt_zh",
+      "negative_prompt_field": "negative_prompt",
+      "input_type": "text_prompt",
+      "output_type": "image",
+      "workflow_json_ref": null,
+      "workflow_json_status": "pending_real_workflow",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "r6_single_image_required": true,
+      "no_video_generation": true,
+      "enabled": true,
+      "model_reference_id": "qwen_image_primary",
+      "input_binding_profile": "qwen_image_text_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "notes": "Static R4B registry entry only; no ComfyUI workflow is executed."
+    },
+    "qwen_image_edit_image_to_image": {
+      "workflow_id": "qwen_image_edit_image_to_image",
+      "workflow_contract_id": "qwen_image_edit_image_to_image",
+      "intended_model": "Qwen/Qwen-Image-Edit",
+      "model_family": "qwen_image_edit",
+      "task_type": "image_to_image",
+      "allowed_task_type": [
+        "site_photo_edit"
+      ],
+      "prompt_field": "qwen_prompt_zh",
+      "negative_prompt_field": "negative_prompt",
+      "input_type": "image_plus_text_prompt",
+      "output_type": "edited_image",
+      "workflow_json_ref": null,
+      "workflow_json_status": "pending_real_workflow",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "r6_single_image_required": true,
+      "no_video_generation": true,
+      "enabled": true,
+      "model_reference_id": "qwen_image_edit",
+      "input_binding_profile": "qwen_image_edit_image_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "notes": "Static edit workflow entry; source_image is declared but never read in R4B."
+    },
+    "flux_realistic_text_to_image": {
+      "workflow_id": "flux_realistic_text_to_image",
+      "workflow_contract_id": "flux_realistic_text_to_image",
+      "intended_model": "black-forest-labs/FLUX.1-dev",
+      "model_family": "flux",
+      "task_type": "text_to_image",
+      "allowed_task_type": [
+        "realistic_construction_scene",
+        "machinery_operation_scene",
+        "material_yard_scene",
+        "birdseye_render",
+        "cover_image"
+      ],
+      "prompt_field": "flux_prompt_en",
+      "negative_prompt_field": "negative_prompt",
+      "input_type": "text_prompt",
+      "output_type": "image",
+      "workflow_json_ref": null,
+      "workflow_json_status": "pending_real_workflow",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "r6_single_image_required": true,
+      "no_video_generation": true,
+      "enabled": true,
+      "model_reference_id": "flux_realistic",
+      "input_binding_profile": "flux_realistic_text_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "notes": "Static realistic rendering workflow entry; FLUX runtime remains disabled in R4B."
+    }
+  },
+  "video_generation": {
+    "enabled": false,
+    "runtime_enabled": false,
+    "registry_enabled_entries": 0,
+    "notes": "Video workflow runtime is out of scope for R4B."
+  }
+}

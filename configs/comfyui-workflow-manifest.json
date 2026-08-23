@@ -1,0 +1,108 @@
+{
+  "schema_version": "027n-r4b",
+  "deployment_mode": "local_only",
+  "video_generation_enabled": false,
+  "r5k_environment_mapping_status": "mapped_static_unverified",
+  "mapping_source": "R5K-B static ComfyUI blueprint review",
+  "mapped_from_comfyui_root_policy": "Use environment-neutral blueprints/* references only; do not persist local ComfyUI absolute paths.",
+  "workflows": {
+    "qwen_image_text_to_image": {
+      "workflow_id": "qwen_image_text_to_image",
+      "workflow_json_ref": "blueprints/Text to Image (Qwen-Image).json",
+      "workflow_json_status": "mapped_static_unverified",
+      "alternative_workflow_json_refs": [
+        "blueprints/Text to Image (Qwen-Image 2512).json"
+      ],
+      "mapping_confidence": "HIGH",
+      "manual_confirmation_required": false,
+      "model_reference_hint": "qwen_image_fp8_e4m3fn.safetensors",
+      "mapping_source": "R5K-B static blueprint filename and model-reference review",
+      "mapped_from_comfyui_root_policy": "relative blueprints/* reference; no local absolute path",
+      "node_type_summary": [
+        "text_prompt_input",
+        "negative_prompt_input",
+        "qwen_image_model_loader",
+        "image_sampler",
+        "image_output"
+      ],
+      "model_reference_id": "qwen_image_primary",
+      "custom_nodes_required": [],
+      "custom_nodes_mapping_status": "unresolved",
+      "inferred_custom_node_types": [],
+      "package_mapping_unverified": true,
+      "input_binding_profile": "qwen_image_text_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "no_video_generation": true,
+      "disabled_video_generation": true
+    },
+    "qwen_image_edit_image_to_image": {
+      "workflow_id": "qwen_image_edit_image_to_image",
+      "workflow_json_ref": "blueprints/Image Edit (Qwen 2511).json",
+      "workflow_json_status": "mapped_static_unverified",
+      "alternative_workflow_json_refs": [
+        "blueprints/Image Edit (Qwen 2509).json"
+      ],
+      "mapping_confidence": "MEDIUM",
+      "manual_confirmation_required": true,
+      "manual_confirmation_reason": "2511 是否作为默认 edit 版本，以及多图输入是否纳入当前 binding，需后续确认。",
+      "model_reference_hint": "qwen_image_edit_2511_bf16.safetensors",
+      "mapping_source": "R5K-B static blueprint filename and model-reference review",
+      "mapped_from_comfyui_root_policy": "relative blueprints/* reference; no local absolute path",
+      "node_type_summary": [
+        "source_image_input",
+        "text_prompt_input",
+        "negative_prompt_input",
+        "qwen_image_edit_model_loader",
+        "image_edit_sampler",
+        "image_output"
+      ],
+      "model_reference_id": "qwen_image_edit",
+      "custom_nodes_required": [],
+      "custom_nodes_mapping_status": "unresolved",
+      "inferred_custom_node_types": [],
+      "package_mapping_unverified": true,
+      "input_binding_profile": "qwen_image_edit_image_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "no_video_generation": true,
+      "disabled_video_generation": true
+    },
+    "flux_realistic_text_to_image": {
+      "workflow_id": "flux_realistic_text_to_image",
+      "workflow_json_ref": "blueprints/Text to Image (Flux.1 Dev).json",
+      "workflow_json_status": "mapped_static_unverified",
+      "alternative_workflow_json_refs": [],
+      "mapping_confidence": "HIGH",
+      "manual_confirmation_required": false,
+      "model_reference_hint": "flux1-dev.safetensors",
+      "mapping_source": "R5K-B static blueprint filename and model-reference review",
+      "mapped_from_comfyui_root_policy": "relative blueprints/* reference; no local absolute path",
+      "node_type_summary": [
+        "text_prompt_input",
+        "negative_prompt_input",
+        "flux_model_loader",
+        "image_sampler",
+        "image_output"
+      ],
+      "model_reference_id": "flux_realistic",
+      "custom_nodes_required": [],
+      "custom_nodes_mapping_status": "unresolved",
+      "inferred_custom_node_types": [],
+      "package_mapping_unverified": true,
+      "input_binding_profile": "flux_realistic_text_to_image_inputs",
+      "output_policy_id": "single_image_local_only",
+      "runtime_enabled": false,
+      "r5_precheck_required": true,
+      "no_video_generation": true,
+      "disabled_video_generation": true
+    }
+  },
+  "video_generation": {
+    "enabled": false,
+    "runtime_enabled": false,
+    "notes": "Video workflows are not registered for R4B."
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "schema_version": "027n-r3a",
+  "deployment_mode": "local_only",
+  "video_generation_enabled": false,
+  "runtime_status": "configured_not_runtime_verified",
+  "models": {
+    "qwen_image_primary": {
+      "repo_id": "Qwen/Qwen-Image",
+      "status": "downloaded_not_runtime_verified",
+      "local_cache_status": "downloaded_not_runtime_verified",
+      "runtime_status": "configured_not_runtime_verified",
+      "primary_use": [
+        "technical_bid_illustration",
+        "construction_process_diagram",
+        "temporary_facility_layout",
+        "chinese_signage_scene"
+      ],
+      "supports_chinese_text": true,
+      "supports_photo_edit": false,
+      "supports_realistic_render": true,
+      "supports_controlnet": false,
+      "is_active": true,
+      "notes": "Primary local Chinese technical-bid illustration role; runtime verification is deferred."
+    },
+    "qwen_image_edit": {
+      "repo_id": "Qwen/Qwen-Image-Edit",
+      "status": "downloaded_not_runtime_verified",
+      "local_cache_status": "downloaded_not_runtime_verified",
+      "runtime_status": "configured_not_runtime_verified",
+      "primary_use": [
+        "site_photo_edit",
+        "chinese_signage_edit",
+        "existing_scene_correction"
+      ],
+      "supports_chinese_text": true,
+      "supports_photo_edit": true,
+      "supports_realistic_render": true,
+      "supports_controlnet": false,
+      "is_active": true,
+      "notes": "Local image editing role; no image files are read by this scaffold."
+    },
+    "flux_realistic": {
+      "repo_id": "black-forest-labs/FLUX.1-dev",
+      "status": "downloaded_not_runtime_verified",
+      "local_cache_status": "downloaded_not_runtime_verified",
+      "runtime_status": "configured_not_runtime_verified",
+      "primary_use": [
+        "realistic_construction_scene",
+        "birdseye_render",
+        "cover_image",
+        "machinery_operation_scene",
+        "material_yard_scene"
+      ],
+      "supports_chinese_text": false,
+      "supports_photo_edit": false,
+      "supports_realistic_render": true,
+      "supports_controlnet": false,
+      "is_active": true,
+      "notes": "Realistic local rendering role; runtime verification is deferred."
+    },
+    "qwen_image_edit_latest_candidate": {
+      "repo_id": "Qwen/Qwen-Image-Edit-2509",
+      "status": "planned_download_not_active",
+      "local_cache_status": "planned_download_not_active",
+      "runtime_status": "not_configured_not_runtime_verified",
+      "primary_use": [
+        "multi_image_edit",
+        "controlnet_conditioned_edit",
+        "advanced_chinese_text_edit"
+      ],
+      "supports_chinese_text": true,
+      "supports_photo_edit": true,
+      "supports_realistic_render": true,
+      "supports_controlnet": true,
+      "is_active": false,
+      "notes": "Planned candidate only; not an active route target in this node."
+    },
+    "disabled_video": {
+      "repo_id": "",
+      "status": "disabled_not_deployed",
+      "local_cache_status": "disabled_not_deployed",
+      "runtime_status": "disabled",
+      "primary_use": [],
+      "supports_chinese_text": false,
+      "supports_photo_edit": false,
+      "supports_realistic_render": false,
+      "supports_controlnet": false,
+      "is_active": false,
+      "notes": "Video generation is disabled for 027N-R3A."
+    }
+  },
+  "routing_rules": {
+    "technical_bid_illustration": {
+      "primary": "qwen_image_primary",
+      "fallback": "flux_realistic",
+      "prompt_template_key": "technical_bid_cover",
+      "workflow_key": "qwen_image_text_to_image"
+    },
+    "realistic_construction_scene": {
+      "primary": "flux_realistic",
+      "fallback": "qwen_image_primary",
+      "prompt_template_key": "foundation_pit_construction",
+      "workflow_key": "flux_realistic_text_to_image"
+    },
+    "site_photo_edit": {
+      "primary": "qwen_image_edit",
+      "fallback": "qwen_image_primary",
+      "prompt_template_key": "campus_renovation_scene",
+      "workflow_key": "qwen_image_edit_image_to_image"
+    },
+    "safety_civilization_scene": {
+      "primary": "qwen_image_primary",
+      "fallback": "flux_realistic",
+      "prompt_template_key": "safe_civilized_construction",
+      "workflow_key": "qwen_image_text_to_image"
+    },
+    "temporary_facility_layout": {
+      "primary": "qwen_image_primary",
+      "fallback": "flux_realistic",
+      "prompt_template_key": "temporary_facility_layout",
+      "workflow_key": "qwen_image_text_to_image"
+    },
+    "machinery_operation_scene": {
+      "primary": "flux_realistic",
+      "fallback": "qwen_image_primary",
+      "prompt_template_key": "hoisting_operation",
+      "workflow_key": "flux_realistic_text_to_image"
+    },
+    "material_yard_scene": {
+      "primary": "flux_realistic",
+      "fallback": "qwen_image_primary",
+      "prompt_template_key": "material_yard_management",
+      "workflow_key": "flux_realistic_text_to_image"
+    },
+    "construction_process_diagram": {
+      "primary": "qwen_image_primary",
+      "fallback": "qwen_image_edit",
+      "prompt_template_key": "road_pipeline_construction",
+      "workflow_key": "qwen_image_text_to_image"
+    },
+    "birdseye_render": {
+      "primary": "flux_realistic",
+      "fallback": "qwen_image_primary",
+      "prompt_template_key": "birdseye_site_render",
+      "workflow_key": "flux_realistic_text_to_image"
+    },
+    "cover_image": {
+      "primary": "flux_realistic",
+      "fallback": "qwen_image_primary",
+      "prompt_template_key": "technical_bid_cover",
+      "workflow_key": "flux_realistic_text_to_image"
+    },
+    "chinese_signage_scene": {
+      "primary": "qwen_image_primary",
+      "fallback": "qwen_image_edit",
+      "prompt_template_key": "safe_civilized_construction",
+      "workflow_key": "qwen_image_text_to_image"
+    }
+  },
+  "activation_policy": {
+    "do_not_auto_start_comfyui": true,
+    "do_not_auto_run_inference": true,
+    "do_not_auto_download_models": true,
+    "require_runtime_precheck_before_generation": true,
+    "require_user_selected_task_before_generation": true
+  },
+  "governance": {
+    "baseline_commit": "50777774409d9015584222ef5d1f84b60abdda60",
+    "baseline_tag": "v0.1.716-local-launcher-027m-local-model-fleet-routing-baseline",
+    "node": "LOCAL-LAUNCHER-027N-R3A-IMAGE-GENERATION-ROUTER-SCAFFOLD-GATE"
+  }
+}
