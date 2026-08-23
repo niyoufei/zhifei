@@ -74,7 +74,7 @@ class TestLoadDefaults:
         config_dir.mkdir(parents=True)
         config_file = config_dir / "config.json"
         config_file.write_text(json.dumps(config_data), encoding="utf-8")
-        
+
         monkeypatch.chdir(tmp_path)
         result = LLMClient.load_defaults()
         assert result == config_data
@@ -91,7 +91,7 @@ class TestLoadDefaults:
         config_dir.mkdir(parents=True)
         config_file = config_dir / "config.json"
         config_file.write_text("invalid json {{{", encoding="utf-8")
-        
+
         monkeypatch.chdir(tmp_path)
         result = LLMClient.load_defaults()
         assert result == {}
@@ -307,12 +307,12 @@ class TestComplete:
             result = await client.complete("test prompt")
             mock.assert_not_called()
 
-        assert result == {
-            "provider": "ollama",
-            "model": "qwen3:0.6b",
-            "text": "",
-            "error": "ollama_provider_disabled",
-        }
+        assert result["provider"] == "ollama"
+        assert result["model"] == "qwen3:0.6b"
+        assert result["text"] == ""
+        assert result["error"] == "ollama_provider_disabled"
+        assert result["error_info"]["code"] == "ollama_provider_disabled"
+        assert result["attempts"] == 0
 
     @pytest.mark.asyncio
     async def test_complete_ollama_enabled_uses_mock_provider(self, monkeypatch):
@@ -351,11 +351,11 @@ class TestComplete:
         """成功调用 provider"""
         mock_impl = MagicMock()
         mock_impl.complete = AsyncMock(return_value={"text": "response", "provider": "test"})
-        
+
         with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
             client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             result = await client.complete("test prompt", temperature=0.7)
-            
+
             mock_impl.complete.assert_called_once_with("test prompt", temperature=0.7)
             assert result["text"] == "response"
 
@@ -364,11 +364,11 @@ class TestComplete:
         """超时处理"""
         mock_impl = MagicMock()
         mock_impl.complete = AsyncMock(side_effect=TimeoutError())
-        
+
         with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
             client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             result = await client.complete("test prompt")
-            
+
             assert result["error"] == "timeout"
             assert result["provider"] == "openai"
             assert result["model"] == "gpt-4"
@@ -378,11 +378,11 @@ class TestComplete:
         """异常处理"""
         mock_impl = MagicMock()
         mock_impl.complete = AsyncMock(side_effect=ValueError("test error"))
-        
+
         with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
             client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             result = await client.complete("test prompt")
-            
+
             assert "ValueError" in result["error"]
             assert "test error" in result["error"]
             assert result["provider"] == "openai"
@@ -393,19 +393,24 @@ class TestComplete:
         """带额外参数调用"""
         mock_impl = MagicMock()
         mock_impl.complete = AsyncMock(return_value={"text": "response"})
-        
+
         with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
             client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             await client.complete("test", max_tokens=100, temperature=0.5, top_p=0.9)
-            
+
             mock_impl.complete.assert_called_once_with(
                 "test", max_tokens=100, temperature=0.5, top_p=0.9
             )
 
 
-def test_llm_client_import_does_not_pull_main_chain_modules():
-    assert "backend.zhifei_autoplan.orchestrator" not in sys.modules
-    assert "backend.zhifei_autoplan.job_store" not in sys.modules
-    assert "backend.zhifei_autoplan.output_artifacts" not in sys.modules
-    assert "backend.zhifei_autoplan.exporter" not in sys.modules
-    assert "backend.zhifei_autoplan.export_docx_service" not in sys.modules
+def test_llm_client_import_does_not_pull_main_chain_modules(assert_clean_import):
+    assert_clean_import(
+        "backend.zhifei_autoplan.utils.llm_client",
+        {
+            "backend.zhifei_autoplan.orchestrator",
+            "backend.zhifei_autoplan.job_store",
+            "backend.zhifei_autoplan.output_artifacts",
+            "backend.zhifei_autoplan.exporter",
+            "backend.zhifei_autoplan.export_docx_service",
+        },
+    )

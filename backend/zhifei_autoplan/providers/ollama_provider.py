@@ -10,7 +10,7 @@ from backend.zhifei_autoplan.providers.base import BaseProvider
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_MODEL = "qwen3:0.6b"
+DEFAULT_MODEL = "qwen3.5:4b"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 
 Transport = Callable[[str, dict[str, Any], float], dict[str, Any]]

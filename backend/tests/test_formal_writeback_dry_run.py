@@ -535,11 +535,13 @@ def test_dry_run_id_is_deterministic():
     assert explicit["dry_run_id"] == "fixed-formal-writeback-dry-run-id"
 
 
-def test_importing_helper_does_not_pull_main_export_docx_or_zbid_modules():
-    leaked_modules = MAIN_EXPORT_DOCX_OR_ZBID_MODULES.intersection(sys.modules)
+def test_importing_helper_does_not_pull_main_export_docx_or_zbid_modules(assert_clean_import):
+    assert_clean_import(
+        "backend.zhifei_autoplan.formal_writeback_dry_run",
+        MAIN_EXPORT_DOCX_OR_ZBID_MODULES,
+    )
     source = helper_source()
 
-    assert leaked_modules == set()
     assert "from docx" not in source
     assert "import docx" not in source
     assert "python_docx" not in source

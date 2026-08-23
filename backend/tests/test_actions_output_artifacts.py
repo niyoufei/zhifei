@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from backend.app.routers.actions_bridge import _save_outputs
+
+
+pytestmark = pytest.mark.usefixtures("allow_legacy_export_contract")
 
 
 def test_save_outputs_includes_new_artifacts(tmp_path: Path, monkeypatch):

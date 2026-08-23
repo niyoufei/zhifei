@@ -87,27 +87,18 @@ def _sha12(text: str) -> str:
 
 
 def _ensure_hd_image(path: str) -> str:
-    try:
-        from PIL import Image
-    except Exception:
-        return str(path or "")
     img_path = Path(str(path or "")).expanduser()
-    if not img_path.exists():
-        return str(path or "")
+    if not img_path.exists() or not img_path.is_file():
+        return ""
     try:
-        with Image.open(img_path) as im:
-            im = im.convert("RGB")
-            if im.width >= 1920 and im.height >= 1080:
-                return str(img_path)
-            scale = max(1920 / max(1, im.width), 1080 / max(1, im.height))
-            resized = im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))))
-            canvas = Image.new("RGB", (1920, 1080), color=(255, 255, 255))
-            offset = ((1920 - resized.width) // 2, (1080 - resized.height) // 2)
-            canvas.paste(resized, offset)
-            canvas.save(img_path, format="PNG")
-            return str(img_path)
+        from backend.zhifei_autoplan.media_quality import validate_media_item
+
+        receipt = validate_media_item({"path": str(img_path)})
+        # Never upscale or crop an apparently low-resolution result and call it
+        # HD.  Formal delivery accepts original, decodable assets only.
+        return str(img_path) if receipt.get("ok") else ""
     except Exception:
-        return str(path or "")
+        return ""
 
 
 def _ocr_image_text(path: str) -> str:
@@ -166,19 +157,21 @@ def build_semantic_image_item(
     workspace_dir: str | None = None,
 ) -> dict[str, Any] | None:
     from backend.zhifei_autoplan.media import generate_section_visuals
+    from backend.zhifei_autoplan.media_quality import validate_media_item
 
     query_terms = extract_semantic_image_terms(title, content, topic=topic, limit=6)
     require_chinese_ocr_gate = True
+    generation_attempts: list[dict[str, Any]] = []
 
     for slot in image_slots or []:
         provider = str(getattr(slot, "provider", "") or "").strip().lower()
-        if provider != "google":
+        if provider not in {"openai", "google"}:
             continue
         api_key = str(getattr(slot, "api_key", "") or "").strip()
         if not api_key:
             continue
         try:
-            from backend.zhifei_autoplan.image_runtime import generate_image_gemini
+            from backend.zhifei_autoplan.image_runtime import generate_image
 
             prompt = _build_generation_prompt(
                 title=title,
@@ -186,7 +179,8 @@ def build_semantic_image_item(
                 query_terms=query_terms,
                 require_chinese_ocr_gate=require_chinese_ocr_gate,
             )
-            resp = generate_image_gemini(
+            resp = generate_image(
+                provider=provider,
                 prompt=prompt,
                 api_key=api_key,
                 model=str(getattr(slot, "model", "") or "").strip() or None,
@@ -195,13 +189,24 @@ def build_semantic_image_item(
             )
             paths = resp.get("paths") if isinstance(resp, dict) else []
             if not isinstance(paths, list) or not paths:
+                generation_attempts.append(
+                    {
+                        "provider": provider,
+                        "status": "failed",
+                        "error": str((resp or {}).get("error") or "no_image_path") if isinstance(resp, dict) else "no_image_path",
+                    }
+                )
                 continue
             source_path = _ensure_hd_image(paths[0])
+            if not source_path:
+                generation_attempts.append({"provider": provider, "status": "rejected", "error": "image_quality_gate_failed"})
+                continue
             ocr_text = _ocr_image_text(source_path)
             if ocr_text and contains_foreign_text(ocr_text):
+                generation_attempts.append({"provider": provider, "status": "rejected", "error": "foreign_text_detected"})
                 continue
             caption = f"{str(title or '').strip() or '本章'}相关工程场景示意图"
-            return {
+            item = {
                 "image_id": f"generated:{_sha12(source_path)}",
                 "title": caption,
                 "source_path": source_path,
@@ -216,8 +221,12 @@ def build_semantic_image_item(
                 "provider": provider,
                 "model": str(getattr(slot, 'model', '') or '').strip() or None,
                 "ocr_text": ocr_text,
+                "generation_attempts": generation_attempts + [{"provider": provider, "status": "accepted"}],
             }
-        except Exception:
+            item["quality_receipt"] = validate_media_item(item, chapter_title=str(title or ""))
+            return item
+        except Exception as exc:
+            generation_attempts.append({"provider": provider, "status": "failed", "error": type(exc).__name__})
             continue
 
     visuals = generate_section_visuals(
@@ -225,14 +234,13 @@ def build_semantic_image_item(
         content=content,
         image_count=1,
         include_mindmap=False,
-        workspace_dir=workspace_dir,
     )
     if not visuals:
         return None
     first = visuals[0] if isinstance(visuals[0], dict) else {}
     source_path = _ensure_hd_image(str(first.get("path") or "").strip())
     caption = str(first.get("caption") or f"{str(title or '').strip()}相关工程示意图").strip()
-    return {
+    item = {
         "image_id": f"generated:{_sha12(source_path)}",
         "title": caption,
         "source_path": source_path,
@@ -247,4 +255,10 @@ def build_semantic_image_item(
         "provider": "builtin",
         "model": "section_visuals",
         "ocr_text": "",
+        "generation_attempts": generation_attempts + [{"provider": "builtin", "status": "accepted"}],
     }
+    receipt = validate_media_item(item, chapter_title=str(title or ""))
+    if not receipt.get("ok"):
+        return None
+    item["quality_receipt"] = receipt
+    return item

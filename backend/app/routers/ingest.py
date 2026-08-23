@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
@@ -153,7 +153,7 @@ async def _persist_upload_file(
     target_dir: Path,
 ) -> tuple[Path | None, str | None, int]:
     filename = Path(str(uf.filename or "upload.bin")).name or "upload.bin"
-    temp_name = f".upload_{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}_{filename}"
+    temp_name = f".upload_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}_{filename}"
     temp_path = target_dir / temp_name
     digest = hashlib.sha256()
     total_bytes = 0
@@ -438,7 +438,7 @@ async def _handle_upload(
 
     workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
     ws_paths = workspace_paths(workspace["workspace_dir"])
-    day = datetime.utcnow().strftime("%Y%m%d")
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
     target_dir = ws_paths["uploads"] / day
     target_dir.mkdir(parents=True, exist_ok=True)
     extract_dir = ws_paths["extracts"]
@@ -475,15 +475,20 @@ async def _handle_upload(
         if not out_path or not digest or total_bytes <= 0:
             continue
 
-        parsed = _extract_text_path(ext, out_path)
+        # PDF extraction, CAD parsing, thumbnail rendering, and large extract
+        # writes are blocking operations.  Run them outside the ASGI event loop
+        # so health checks and job polling stay responsive during ingestion.
+        parsed = await asyncio.to_thread(_extract_text_path, ext, out_path)
         parsed_type = None
         parsed_meta = None
         if parsed.get("extract_text") is None and ext not in {"txt", "md", "pdf"}:
             try:
-                from modules.parser.parser_unify import UnifiedParser
+                def _parse_unified() -> Dict[str, Any]:
+                    from modules.parser.parser_unify import UnifiedParser
 
-                uni = UnifiedParser(str(out_path))
-                uret = uni.parse()
+                    return UnifiedParser(str(out_path)).parse()
+
+                uret = await asyncio.to_thread(_parse_unified)
                 parsed_type = uret.get("type")
                 parsed_meta = uret.get("meta")
                 utext = uret.get("text")
@@ -512,20 +517,25 @@ async def _handle_upload(
             preview_name = f"{digest[:8]}_preview.png"
             preview_out = preview_dir / preview_name
             if ext in {"png", "jpg", "jpeg"}:
-                preview_path = _make_preview_image(out_path, preview_out)
+                preview_path = await asyncio.to_thread(_make_preview_image, out_path, preview_out)
             elif ext == "pdf":
-                preview_path = _make_preview_pdf_first_page(out_path, preview_out, scale=2.0)
+                preview_path = await asyncio.to_thread(
+                    _make_preview_pdf_first_page,
+                    out_path,
+                    preview_out,
+                    2.0,
+                )
         except Exception:
             preview_path = None
 
         extract_path = None
         if parsed.get("extract_text") is not None:
             extract_path = extract_dir / f"{digest[:8]}.txt"
-            extract_path.write_text(parsed["extract_text"], encoding="utf-8")
+            await asyncio.to_thread(extract_path.write_text, parsed["extract_text"], encoding="utf-8")
             parsed.pop("extract_text", None)
 
         rec = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "module": "ingest",
             "project_id": pid,
             "workspace_dir": workspace["workspace_dir"],

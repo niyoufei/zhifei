@@ -187,10 +187,13 @@ def test_local_trial_preview_only_route_blocks_formal_requests_without_triggerin
         assert reason in result["blocked_reasons"]
 
 
-def test_local_trial_preview_only_route_module_does_not_import_main_chain_or_writeback_modules():
-    loaded_modules = set(sys.modules)
-
-    assert not (MAIN_CHAIN_OR_WRITEBACK_MODULES & loaded_modules)
+def test_local_trial_preview_only_route_module_does_not_import_main_chain_or_writeback_modules(
+    assert_clean_import,
+):
+    assert_clean_import(
+        "backend.app.routers.local_trial_preview_only",
+        MAIN_CHAIN_OR_WRITEBACK_MODULES,
+    )
 
 
 def test_local_trial_preview_only_route_source_does_not_call_formal_routes_or_zbid_writeback():

@@ -14,8 +14,10 @@ def test_contains_foreign_text_detects_latin_letters():
 def test_build_semantic_image_item_falls_back_to_deterministic_visual(tmp_path: Path):
     from backend.zhifei_autoplan.semantic_image_enhancer import build_semantic_image_item
 
+    from PIL import Image
+
     png_path = tmp_path / "section-visual.png"
-    png_path.write_bytes(b"fake-image")
+    Image.effect_noise((960, 640), 32).convert("RGB").save(png_path)
 
     with patch(
         "backend.zhifei_autoplan.media.generate_section_visuals",

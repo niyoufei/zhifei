@@ -37,7 +37,7 @@ def test_review_items_merge_issue_and_suggestion():
     assert isinstance(rows, list)
     # issue_list 1条 + auto_revision_suggestions 去重后 1条
     assert len(rows) == 2
-    assert any(r.get("issue_id", "").startswith("I") for r in rows)
-    assert any(r.get("issue_id", "").startswith("R") for r in rows)
+    assert all(r.get("issue_id", "").startswith("ISS-") for r in rows)
+    assert len({r.get("issue_id") for r in rows}) == 2
     # High severity should rank first
     assert rows[0].get("severity") == "high"

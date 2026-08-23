@@ -4,11 +4,15 @@ from pathlib import Path
 
 from docx import Document
 from openpyxl import load_workbook
+import pytest
 
 from backend.zhifei_autoplan.exporter import (
     export_expert_review_brief_docx,
     export_scoring_evidence_overview_xlsx,
 )
+
+
+pytestmark = pytest.mark.usefixtures("allow_legacy_export_contract")
 
 
 def test_export_scoring_evidence_overview_xlsx(tmp_path: Path):

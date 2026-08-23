@@ -145,3 +145,39 @@ def test_search_dispatch_graphs_isolated_by_allowed_domains(monkeypatch):
     )
     assert hits
     assert all("bridge" in (h.get("domain_tags") or []) for h in hits)
+
+
+def test_ai_markdown_catalog_is_loaded_dispatched_and_searchable(monkeypatch, tmp_path):
+    _reset_caches()
+    root = tmp_path / "知识图谱"
+    catalog = root / "AI知识图谱大全" / "学校房建"
+    catalog.mkdir(parents=True)
+    (catalog / "学校房建规则.md").write_text(
+        "# 主体结构施工\n\n学校房建主体结构施工应设置质量控制点、安全检查频次和验收闭环。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gd, "_iter_project_kg_roots", lambda: [root])
+
+    pack_index = gd._load_pack_index()
+    ai_filenames = [name for name in pack_index if name.startswith("AIKG::学校房建/")]
+    assert ai_filenames == ["AIKG::学校房建/学校房建规则.md"]
+    assert pack_index[ai_filenames[0]]["project_type"] == "学校房建"
+
+    dispatch = gd.detect_specialty_dispatch(
+        topic="学校房建施工组织设计",
+        outline=["主体结构施工"],
+        requirements=["质量 安全 验收"],
+        tender={},
+    )
+    selected = [dispatch.get("master")] + list(dispatch.get("specialists") or [])
+    ai_graphs = [item for item in selected if isinstance(item, dict) and item.get("source") == "ai_knowledge_graph"]
+    assert ai_graphs
+
+    hits = gd.search_dispatch_graphs(
+        query="学校房建施工组织设计 主体结构施工 质量 安全 验收",
+        graphs=ai_graphs,
+        top_k=5,
+    )
+    assert hits
+    assert all(str(hit.get("graph_file") or "").startswith("AIKG::学校房建/") for hit in hits)
+    assert all(hit.get("source") == "ai_knowledge_graph" for hit in hits)

@@ -232,7 +232,22 @@ def test_build_export_docx_payload_keeps_image_selection_pack_media_when_generat
         build_export_media_fn=lambda **kwargs: [{"path": "/tmp/ignored.png", "caption": "不应出现"}],
     )
 
-    assert payload["media"] == [{"path": "/tmp/site-plan.png", "caption": "现场平面示意"}]
+    assert payload["media"] == [
+        {
+            "path": "/tmp/site-plan.png",
+            "caption": "现场平面示意",
+            "image_id": None,
+            "chapter_scope": [],
+            "semantic_terms": [],
+            "source_kind": "library_image",
+            "source_sha256": None,
+            "source_filename": None,
+            "source_page": None,
+            "is_project_source": False,
+            "required": False,
+            "explicit_selection": True,
+        }
+    ]
 
 
 def test_build_export_docx_payload_merges_preselected_media_and_generated_media():
@@ -267,7 +282,20 @@ def test_build_export_docx_payload_merges_preselected_media_and_generated_media(
 
     assert payload["media"] == [
         {"path": "/tmp/preselected.png", "caption": "预选图片"},
-        {"path": "/tmp/site-plan.png", "caption": "现场平面示意"},
+        {
+            "path": "/tmp/site-plan.png",
+            "caption": "现场平面示意",
+            "image_id": None,
+            "chapter_scope": [],
+            "semantic_terms": [],
+            "source_kind": "library_image",
+            "source_sha256": None,
+            "source_filename": None,
+            "source_page": None,
+            "is_project_source": False,
+            "required": False,
+            "explicit_selection": True,
+        },
         {"path": "/tmp/generated.png", "caption": "生成图"},
     ]
 
@@ -523,13 +551,14 @@ def test_build_export_docx_evidence_and_media_attachment_have_safe_fallbacks():
     assert media == []
 
 
-def test_build_export_media_includes_logo_and_google_mindmap():
+def test_build_export_media_keeps_logo_in_branding_and_allows_explicit_outline_image():
     branding_calls: list[dict] = []
     mindmap_calls: list[dict] = []
 
     out = export_docx_service.build_export_media(
         raw_request={
             "topic": "媒体测试",
+            "include_outline_mindmap": True,
             "bidder_company": "ACME",
             "bidder_domain": "acme.test",
             "logo_url": "https://example.com/logo.png",
@@ -560,7 +589,6 @@ def test_build_export_media_includes_logo_and_google_mindmap():
     assert out == [
         {"path": "/tmp/chart.png", "caption": "统计图"},
         {"path": "/tmp/preview.png", "caption": "预览"},
-        {"path": "/tmp/logo-embed.png", "caption": "投标单位LOGO"},
         {"path": "/tmp/mindmap.png", "caption": "脑图"},
     ]
     assert branding_calls == [
@@ -582,13 +610,15 @@ def test_build_export_media_includes_logo_and_google_mindmap():
             "topic": "媒体测试",
             "outline": ["施工部署"],
             "kwargs": {
-                "api_key": "g-key",
-                "model": "g-model",
+                "provider": "openai",
+                "api_key": "skip",
+                "model": "m0",
                 "aspect_ratio": "4:3",
                 "logo_path": "/tmp/logo-embed.png",
                 "bidder_company": "ACME",
                 "logo_url": "https://example.com/logo.png",
                 "bidder_domain": "acme.test",
+                "fallback_to_deterministic": False,
                 "workspace_dir": "/tmp/ws-media",
             },
         }
@@ -612,6 +642,7 @@ def test_build_export_media_accepts_current_media_and_branding_signatures():
         topic,
         outline,
         *,
+        provider=None,
         api_key=None,
         model=None,
         aspect_ratio=None,
@@ -648,8 +679,6 @@ def test_build_export_media_accepts_current_media_and_branding_signatures():
     assert out == [
         {"path": "/tmp/current-chart.png", "caption": "统计图"},
         {"path": "/tmp/preview-P-CURRENT-6.png", "caption": "预览"},
-        {"path": "/tmp/current-logo-embed.png", "caption": "投标单位LOGO"},
-        {"path": "/tmp/current-mindmap.png", "caption": "脑图"},
     ]
     assert branding_calls == [
         {
@@ -665,23 +694,17 @@ def test_build_export_media_accepts_current_media_and_branding_signatures():
             "merge": True,
         }
     ]
-    assert mindmap_calls == [
-        {
-            "topic": "当前媒体签名",
-            "outline": ["施工部署"],
-            "logo_path": "/tmp/current-logo-embed.png",
-        }
-    ]
+    assert mindmap_calls == []
 
 
-def test_build_export_mindmap_media_returns_none_when_google_slot_missing():
+def test_build_export_mindmap_media_returns_none_when_supported_slot_missing():
     out = export_docx_service.build_export_mindmap_media(
         raw_request={"topic": "媒体测试"},
         outline=["工程概况"],
         workspace_dir="/tmp/ws-media",
         aspect_ratio="16:9",
         logo_embed=None,
-        iterate_image_failover_slots_fn=lambda: [SimpleNamespace(provider="openai", api_key="o-key", model="o-model")],
+        iterate_image_failover_slots_fn=lambda: [SimpleNamespace(provider="unsupported", api_key="o-key", model="o-model")],
         generate_outline_mindmap_fn=lambda *args, **kwargs: {"path": "/tmp/should-not-run.png"},
     )
 

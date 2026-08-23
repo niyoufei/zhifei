@@ -1,0 +1,29 @@
+{
+  "schema": "zhifei.technical_bid_quality_contract.v1",
+  "paper": "A4",
+  "page_width_cm": 21.0,
+  "page_height_cm": 29.7,
+  "margins_cm": {
+    "top": 2.5,
+    "right": 2.0,
+    "bottom": 2.0,
+    "left": 2.0
+  },
+  "body": {
+    "font_family": "宋体",
+    "size_pt": 14.0,
+    "line_spacing_pt": 22.0
+  },
+  "required_fields": [
+    "TOC",
+    "PAGE",
+    "NUMPAGES"
+  ],
+  "update_fields_on_open": true,
+  "visual": {
+    "blank_pages_allowed": 0,
+    "consecutive_sparse_pages_allowed": 1,
+    "systemic_clipping_pages_allowed": 1,
+    "page_geometry_outliers_allowed": 0
+  }
+}

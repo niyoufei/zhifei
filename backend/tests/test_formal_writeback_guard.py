@@ -455,8 +455,11 @@ def test_writeback_guard_id_is_deterministic():
     assert first["writeback_guard_id"] != changed["writeback_guard_id"]
 
 
-def test_importing_helper_does_not_pull_main_chain_modules():
-    assert MAIN_CHAIN_MODULES.isdisjoint(sys.modules)
+def test_importing_helper_does_not_pull_main_chain_modules(assert_clean_import):
+    assert_clean_import(
+        "backend.zhifei_autoplan.formal_writeback_guard",
+        MAIN_CHAIN_MODULES,
+    )
 
 
 def test_helper_does_not_write_output_job_or_export():

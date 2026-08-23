@@ -12,16 +12,20 @@ class SectionWriter:
     async def write(self, title: str, context: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._build_prompt(title, context)
         if not self.llm:
-            return {"title": title, "content": self._fallback(title, context), "prompt": prompt}
+            return {
+                "title": title,
+                "content": self._fallback(title, context),
+                "prompt": prompt,
+                "generation_mode": "fallback",
+            }
         resp = await self.llm.complete(prompt)
         text = resp.get("text") or ""
         if not text.strip() or resp.get("error"):
-            # 失败降级：回退模板 + 证据摘要
+            # Raw KG/document evidence belongs in review artifacts, not prose.
             text = self._fallback(title, context)
-            text += "\n\n【证据摘要】\n"
-            text += "\n".join(context.get("kg_evidence", [])[:3])
-            text += "\n"
-            text += "\n".join(context.get("doc_evidence", [])[:3])
+            generation_mode = "fallback"
+        else:
+            generation_mode = "llm"
         return {
             "title": title,
             "content": text,
@@ -29,6 +33,7 @@ class SectionWriter:
             "provider": resp.get("provider"),
             "model": resp.get("model"),
             "error": resp.get("error"),
+            "generation_mode": generation_mode,
         }
 
     def _build_prompt(self, title: str, context: Dict[str, Any]) -> str:
@@ -59,6 +64,11 @@ class SectionWriter:
         role = context.get("agent_role") or "总负责人"
         master_agent = str(context.get("master_agent") or "").strip()
         specialist_agents = [str(x).strip() for x in (context.get("specialist_agents") or []) if str(x).strip()]
+        auxiliary_agents = [
+            dict(x)
+            for x in (context.get("auxiliary_agents") or [])
+            if isinstance(x, dict) and str(x.get("name") or "").strip()
+        ]
         compliance_agent = str(context.get("compliance_agent") or "").strip()
         graph_nodes = [str(x).strip() for x in (context.get("graph_nodes") or []) if str(x).strip()]
         variant_id = context.get("variant_id")
@@ -68,6 +78,7 @@ class SectionWriter:
             variant_id = 1
         project_type = str(context.get("project_type") or "").strip()
         global_instruction = str(context.get("global_instruction") or "").strip()
+        standard_citation_policy = str(context.get("standard_citation_policy") or "").strip()
 
         logic = context.get("logic_template") if isinstance(context.get("logic_template"), dict) else {}
         logic_id = str(logic.get("id") or "").strip() or ""
@@ -134,7 +145,12 @@ class SectionWriter:
         params_text = "\n".join([f"- {ln}" for ln in param_lines if ln.strip()])
         project_type_block = f"【项目类型】{project_type}\n" if project_type else ""
         global_instruction_block = (
-            f"【系统全局指令（必须无条件执行）】\n{global_instruction}\n" if global_instruction else ""
+            "【系统级合规底线】\n"
+            f"{global_instruction}\n"
+            "- 约束边界：不得覆盖招标文件、澄清答疑、审查合格设计文件或工程量清单中的明确要求；"
+            "发生冲突时必须标记并停止自行裁决。\n"
+            if global_instruction
+            else ""
         )
         agent_block = ""
         if master_agent or specialist_agents or compliance_agent:
@@ -145,6 +161,13 @@ class SectionWriter:
                 agent_block += f"- 专业：{'；'.join(specialist_agents[:6])}\n"
             if compliance_agent:
                 agent_block += f"- 合规：{compliance_agent}\n"
+            if auxiliary_agents:
+                agent_block += "- 专项复核职责：\n"
+                for item in auxiliary_agents[:8]:
+                    name = str(item.get("name") or "").strip()
+                    directive = str(item.get("directive") or "").strip()
+                    if name and directive:
+                        agent_block += f"  - {name}：{directive}\n"
         graph_node_block = ""
         if graph_nodes:
             graph_node_block += "【图谱逻辑节点（必须绑定）】\n"
@@ -163,6 +186,9 @@ class SectionWriter:
 {logic_block}
 {bp_block}
 {graph_node_block}
+
+【规范编号引用边界】
+{standard_citation_policy}
 
 【编制要求】
 {req}
@@ -192,8 +218,7 @@ class SectionWriter:
 输出要求：
 1) 结构清晰，条理分明
 2) 体现质量/安全/进度/环保
-3) 引用证据中的关键点，并在句末用“【证据:来源】”标记
-   - 建议证据格式：文件名#定位符（例如：xx.pdf#1a2b3c4d@12345）
+3) 引用证据中的关键点；内部追溯标签仅供机器质控，严禁把文件哈希、偏移量、JSON路径或原始定位符写入投标正文
 4) 对扣分项做显式规避说明
 5) 若提供“目标页数”，请按目标页数控制篇幅
 6) 风险条目必须采用“风险→控制→验证”三元组表达，并逐条闭环
@@ -203,8 +228,10 @@ class SectionWriter:
    - 若涉及“四新/新技术/新工艺/新材料/新设备/信息化/绿色施工”，优先从“候选清单”中选2-4条落地：适用/投入/步骤/验收指标 + 风险→控制→验证 + 记录 + 偏差处置
 10) 全文禁止官话、套话、空话，不得出现“加强、确保、严格、压实责任、形成合力、高质量推进”等词
 11) 清单重点项必须逐项写清：工程量/材料要点/资源配置 + 量化指标 + 风险→控制→验证 + 证据标注
-12) 每节至少绑定1个图谱逻辑节点，正文中以“【图谱节点:xxx】”标注
-13) 当采用经验值补位时，必须写明“【经验值:同类工程】”及“【图谱经验值:来源】”
+12) 图谱节点、Agent分工、提示词、模型名、评分公式和质量检查对象仅供内部推理，不得出现在投标正文
+13) 采用经验值补位时，用自然语言标注“经验值，须由项目技术负责人复核”，不得输出内部节点ID或来源哈希
+14) 不得输出字典/JSON、字段名、文件路径、页偏移、内部主键或任何系统诊断信息
+15) 规范编号只能从“规范编号引用边界”的白名单中选用；没有白名单时不得自行输出规范编号
 """
 
     def _fallback(self, title: str, context: Dict[str, Any]) -> str:
@@ -260,10 +287,7 @@ class SectionWriter:
         except Exception:
             pass
 
-        role = context.get("agent_role") or "技术负责人"
         project_type = str(context.get("project_type") or "").strip()
-        global_instruction = str(context.get("global_instruction") or "").strip()
-        target_pages = context.get("chapter_target_pages")
         logic = context.get("logic_template") if isinstance(context.get("logic_template"), dict) else {}
         logic_id = str(logic.get("id") or "").strip().upper() or "A"
         is_qse_title = any(k in str(title) for k in ("质量", "安全", "文明", "环保", "环境", "绿色", "应急", "消防"))
@@ -274,30 +298,13 @@ class SectionWriter:
         bp_anchors = [str(x).strip() for x in bp_anchors if str(x).strip()]
 
         lines = []
-        lines.append(f"【范围】本章：{title}；负责人：{role}；逻辑模版={logic_id}。")
+        lines.append(f"【本章目标】围绕{title}形成可执行、可检查、可验收的施工安排。")
         if project_type:
             lines.append(f"【项目类型】{project_type}。")
-        if global_instruction:
-            lines.append(f"【系统全局指令】{global_instruction}。")
-        master_agent = str(context.get("master_agent") or "").strip()
-        specialist_agents = [str(x).strip() for x in (context.get("specialist_agents") or []) if str(x).strip()]
-        compliance_agent = str(context.get("compliance_agent") or "").strip()
-        if master_agent or specialist_agents or compliance_agent:
-            lines.append(
-                "【多Agent】"
-                + f"主控={master_agent or '主控Agent'}；"
-                + f"专业={'/'.join(specialist_agents[:4]) if specialist_agents else '专业Agent:通用施工'}；"
-                + f"合规={compliance_agent or '合规Agent'}。"
-            )
-        graph_nodes = [str(x).strip() for x in (context.get("graph_nodes") or []) if str(x).strip()]
-        if graph_nodes:
-            lines.append(f"【图谱节点绑定】{';'.join(graph_nodes[:4])}。")
         if bp_name:
             lines.append(f"【章节结构蓝图】{bp_name}。")
         if focus:
             lines.append(f"【清单重点项】{';'.join(focus[:6])}。")
-        if target_pages:
-            lines.append(f"【篇幅约束】目标页数：{target_pages}页（正文允许±20%浮动）。")
 
         # Common metric line (used across all templates)
         metric_line = (
@@ -550,5 +557,4 @@ class SectionWriter:
         except Exception:
             lines.append("- 四新技术：移动端隐蔽验收+二维码材料追溯；适用=材料批次多/隐蔽验收多；验收=台账字段齐全率100%。")
 
-        lines.append(f"【证据与追溯】证据标注格式：文件名#p页_sha@offset；本章可用示例：{evidence_src}。")
         return "\n".join(lines).strip() + "\n"

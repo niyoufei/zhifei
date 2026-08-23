@@ -123,10 +123,10 @@ def _resolve_llm_runtime(
     if not p:
         p = "google"
     default_model = {
-        "google": "gemini-3-pro-preview",
+        "google": "gemini-3.1-pro-preview",
         "openai": "gpt-5.2-pro",
         "grok": "grok-4-1-fast-reasoning",
-    }.get(p, "gemini-3-pro-preview")
+    }.get(p, "gemini-3.1-pro-preview")
     m = str(model or os.environ.get("ZF_LLM_MAIN_MODEL") or default_model).strip() or default_model
     k = str(api_key or os.environ.get("ZF_LLM_MAIN_API_KEY") or _resolve_api_key(p)).strip()
     return p, m, k

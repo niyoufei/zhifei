@@ -35,8 +35,8 @@ def _default_params() -> Dict[str, Any]:
             "夜间噪声阈值": "≤55dB",
         },
         "image_defaults": {
-            "provider": "google",
-            "model": "gemini-2.5-flash-image",
+            "provider": "openai",
+            "model": "gpt-image-2",
             "aspect_ratio": "16:9",
         },
         # Multi-variant (A/B/C/D/E) anti-paraphrase gate (editable).

@@ -17,6 +17,8 @@ _NUMERIC_UNIT_RE = re.compile(
 )
 _ASCII_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{1,}")
 _PROJECT_KG_GLOB = "ZF-KG-*.json"
+_AI_KG_DIRNAME = "AI知识图谱大全"
+_MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _ZF_ALIAS_MAP: Dict[str, List[str]] = {
     "housing": ["房建", "建筑工程", "主体结构"],
     "hospital": ["医院", "医疗", "医疗建筑"],
@@ -174,9 +176,77 @@ def _project_domain_tag_from_path(file_path: Path, root: Path) -> str:
         except Exception:
             return ""
     parts = list(rel.parts)
+    if len(parts) >= 3 and str(parts[0]).strip() == _AI_KG_DIRNAME:
+        return str(parts[1]).strip()
     if len(parts) >= 2:
         return str(parts[0]).strip()
     return ""
+
+
+def _parse_markdown_graph(file_path: Path, *, project_type: str) -> Dict[str, Any]:
+    """Convert a knowledge-graph Markdown file into traceable section nodes.
+
+    Markdown is intentionally kept as auxiliary professional knowledge.  The
+    resulting nodes retain their source path and project type so downstream
+    prompts can cite the correct corpus without treating it as project fact.
+    """
+
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        text = ""
+
+    sections: List[Dict[str, Any]] = []
+    current_title = file_path.stem
+    current_level = 0
+    current_lines: List[str] = []
+
+    def flush() -> None:
+        body = "\n".join(current_lines).strip()
+        if len(body) < 20:
+            return
+        sections.append(
+            {
+                "章节": current_title,
+                "层级": current_level,
+                "项目类型": project_type,
+                "内容": body[:12000],
+                "来源文件": str(file_path),
+                "知识属性": "辅助专业知识",
+            }
+        )
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        match = _MARKDOWN_HEADING_RE.match(line)
+        if match:
+            flush()
+            current_title = match.group(2).strip() or file_path.stem
+            current_level = len(match.group(1))
+            current_lines = []
+            continue
+        current_lines.append(line)
+    flush()
+
+    if not sections and text.strip():
+        sections.append(
+            {
+                "章节": file_path.stem,
+                "层级": 0,
+                "项目类型": project_type,
+                "内容": text.strip()[:12000],
+                "来源文件": str(file_path),
+                "知识属性": "辅助专业知识",
+            }
+        )
+
+    return {
+        "name": file_path.stem,
+        "工程领域": project_type,
+        "domain_tag": project_type,
+        "source_notice": "仅作辅助专业知识；不得覆盖招标文件、答疑、图纸、清单或已核验项目事实。",
+        "sections": sections,
+    }
 
 
 def _extract_domain_tags_from_content(content: Any) -> List[str]:
@@ -427,6 +497,51 @@ def _load_pack_index() -> Dict[str, Dict[str, Any]]:
                     path_hint=path_domain,
                 ),
             }
+
+        # The desktop AI knowledge-graph collection is copied into this
+        # namespace.  Load every Markdown asset into the same runtime graph
+        # index used by the production multi-agent generation path.
+        ai_root = root / _AI_KG_DIRNAME
+        if not ai_root.exists() or not ai_root.is_dir():
+            continue
+        markdown_files = sorted(list(ai_root.rglob("*.md")) + list(ai_root.rglob("*.markdown")))
+        for fp in markdown_files:
+            if not fp.exists() or not fp.is_file():
+                continue
+            try:
+                rel = fp.relative_to(ai_root)
+            except Exception:
+                continue
+            if len(rel.parts) < 2:
+                continue
+            project_type = str(rel.parts[0]).strip()
+            if not project_type:
+                continue
+            obj = _parse_markdown_graph(fp, project_type=project_type)
+            fn = f"AIKG::{rel.as_posix()}"
+            graph_name = f"{project_type} · {fp.stem}"
+            keyword_hints = _dedup_keep_order(
+                [project_type, fp.stem]
+                + _extract_keyword_hints(fp.name, obj),
+                limit=180,
+            )
+            out[fn] = {
+                "filename": fn,
+                "pack_path": str(ai_root),
+                "content": obj,
+                "content_path": str(fp),
+                "source": "ai_knowledge_graph",
+                "project_type": project_type,
+                "keyword_hints": keyword_hints,
+                "graph_name": graph_name,
+                "domain_tags": _resolve_domain_tags(
+                    filename=fp.name,
+                    graph_name=graph_name,
+                    keyword_hints=keyword_hints,
+                    content=obj,
+                    path_hint=project_type,
+                ),
+            }
     return out
 
 
@@ -436,6 +551,7 @@ def _extract_graph_docs(
     graph_file: str,
     graph_name: str,
     domain_tags: List[str] | None = None,
+    source: str = "project_kg",
     path: str = "$",
 ) -> List[Dict[str, Any]]:
     docs: List[Dict[str, Any]] = []
@@ -453,6 +569,7 @@ def _extract_graph_docs(
                 "graph_name": graph_name or graph_file,
                 "logical_node": f"{graph_file}#{p}",
                 "domain_tags": _normalize_domain_keys(domain_tags or []),
+                "source": source,
             }
         )
 
@@ -505,7 +622,13 @@ def _docs_for_graph_file(graph_file: str, graph_name: str) -> List[Dict[str, Any
     if content is None:
         return []
     domain_tags = _normalize_domain_keys(meta.get("domain_tags") or [])
-    return _extract_graph_docs(content, graph_file=graph_file, graph_name=graph_name, domain_tags=domain_tags)
+    return _extract_graph_docs(
+        content,
+        graph_file=graph_file,
+        graph_name=graph_name,
+        domain_tags=domain_tags,
+        source=_norm_text(meta.get("source")) or "project_kg",
+    )
 
 
 def _classify_graph_tier(filename: str, graph_name: str) -> int:
@@ -636,8 +759,10 @@ def detect_specialty_dispatch(
             else:
                 missing_files.append(filename)
 
-    # Additional fallback from embedded project KG files (ZF-KG-*.json), so the main
-    # Web pipeline can directly use the 57-domain graph set without manual switching.
+    # Additional candidates from the synchronized AI knowledge-graph catalogue
+    # and embedded ZF-KG files, so the main Web pipeline uses them without a
+    # separate manual switch.
+    ai_candidates: List[Dict[str, Any]] = []
     zf_candidates: List[Dict[str, Any]] = []
     generic_candidates: List[Dict[str, Any]] = []
     dm_filenames = {
@@ -653,24 +778,35 @@ def detect_specialty_dispatch(
         if not kws:
             continue
         score, hits = _score_map_hit(corpus, kws)
+        project_type = _norm_text(meta.get("project_type"))
+        if project_type and project_type in corpus:
+            score += 24
+            hits = _dedup_keep_order([project_type] + hits, limit=20)
         if score <= 0:
             continue
         rec = _record_for_meta(meta, score=score, hits=hits)
         if involved_domains and not _domains_overlap(rec.get("domain_tags") or [], involved_domains):
             continue
-        if fn.startswith("ZF-KG-"):
+        if _norm_text(meta.get("source")) == "ai_knowledge_graph":
+            ai_candidates.append(rec)
+        elif fn.startswith("ZF-KG-"):
             zf_candidates.append(rec)
         else:
             generic_candidates.append(rec)
 
+    ai_candidates.sort(key=lambda x: (int(x.get("score") or 0), len(x.get("hit_keywords") or [])), reverse=True)
     zf_candidates.sort(key=lambda x: (int(x.get("score") or 0), len(x.get("hit_keywords") or [])), reverse=True)
     generic_candidates.sort(key=lambda x: (int(x.get("score") or 0), len(x.get("hit_keywords") or [])), reverse=True)
 
-    # Prefer ZF-KG set as specialists when they match; this is the user's desktop 57-graph library.
+    # The folder-matched AI catalogue is the highest-priority auxiliary
+    # professional corpus.  Existing ZF-KG graphs remain available as a second
+    # specialist layer; universal packs remain the deterministic safety net.
+    if ai_candidates:
+        tier_hits[1].extend(ai_candidates[:8])
     if zf_candidates:
         tier_hits[1].extend(zf_candidates[:8])
         tier_hits[2].extend([x for x in zf_candidates if int(x.get("tier") or 1) == 2][:3])
-    else:
+    elif not ai_candidates:
         tier_hits[1].extend(generic_candidates[:6])
         tier_hits[2].extend([x for x in generic_candidates if int(x.get("tier") or 1) == 2][:3])
 
@@ -691,6 +827,9 @@ def detect_specialty_dispatch(
     master = tier_hits[0][0] if tier_hits[0] else None
     specialists = tier_hits[1][:8]
     universals = tier_hits[2][:5]
+    if ai_candidates and not any(str(x.get("source") or "") == "ai_knowledge_graph" for x in specialists):
+        ai_top = dict(ai_candidates[0])
+        specialists = [ai_top] + specialists[:7]
     if zf_candidates and not any(str(x.get("filename") or "").startswith("ZF-KG-") for x in specialists):
         zf_top = dict(zf_candidates[0])
         if len(specialists) >= 8:

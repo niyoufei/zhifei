@@ -15,11 +15,14 @@ def build_agent_contract(
     chapter_requirements: Dict[str, Any] | None,
     multi_agent_summary: Dict[str, Any] | None,
     chapter_specialties: Dict[str, List[Dict[str, Any]]] | None,
+    project_fact_ledger: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     cp = chapter_pages if isinstance(chapter_pages, dict) else {}
     cr = chapter_requirements if isinstance(chapter_requirements, dict) else {}
     mas = multi_agent_summary if isinstance(multi_agent_summary, dict) else {}
     csp = chapter_specialties if isinstance(chapter_specialties, dict) else {}
+    chapter_aux = mas.get("chapter_auxiliary_agents") if isinstance(mas.get("chapter_auxiliary_agents"), dict) else {}
+    role_catalog = mas.get("agent_role_catalog") if isinstance(mas.get("agent_role_catalog"), list) else []
 
     chapters: List[Dict[str, Any]] = []
     for i, t in enumerate([str(x).strip() for x in (outline or []) if str(x).strip()]):
@@ -51,6 +54,11 @@ def build_agent_contract(
                 specialist_agents.append(f"专业Agent:{g}")
         if not specialist_agents:
             specialist_agents = ["专业Agent:通用施工"]
+        auxiliary_agents = [
+            dict(x)
+            for x in (chapter_aux.get(t) or [])
+            if isinstance(x, dict) and str(x.get("name") or "").strip()
+        ]
 
         chapters.append(
             {
@@ -61,6 +69,7 @@ def build_agent_contract(
                 "agents": {
                     "master": str(mas.get("master_agent") or "主控Agent"),
                     "specialists": specialist_agents,
+                    "auxiliary": auxiliary_agents,
                     "compliance": str(mas.get("compliance_agent") or "合规Agent"),
                 },
                 "required_outputs": {
@@ -73,12 +82,35 @@ def build_agent_contract(
             }
         )
 
+    fact_ledger = project_fact_ledger if isinstance(project_fact_ledger, dict) else {}
+    fact_rows = fact_ledger.get("facts") if isinstance(fact_ledger.get("facts"), dict) else {}
+    fact_snapshot = {
+        str(field): {
+            "value": row.get("value"),
+            "unit": row.get("unit") or "",
+            "source_type": row.get("source_type"),
+            "evidence_digest": (
+                row.get("evidence", {}).get("evidence_digest")
+                if isinstance(row.get("evidence"), dict)
+                else None
+            ),
+        }
+        for field, row in fact_rows.items()
+        if isinstance(row, dict)
+    }
+
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.2",
         "topic": str(topic or ""),
+        "project_fact_ledger": {
+            "status": fact_ledger.get("status"),
+            "ledger_digest": fact_ledger.get("ledger_digest"),
+            "facts": fact_snapshot,
+        },
         "global_agents": {
             "master": str(mas.get("master_agent") or "主控Agent"),
             "compliance": str(mas.get("compliance_agent") or "合规Agent"),
+            "role_catalog": [dict(x) for x in role_catalog if isinstance(x, dict)],
         },
         "chapters": chapters,
     }

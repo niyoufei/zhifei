@@ -7,6 +7,10 @@ from datetime import datetime
 
 from compose_engine import Composer
 from utils_write_docx import write_compose_to_docx
+from backend.zhifei_autoplan.local_env import load_local_env
+
+
+load_local_env()
 
 app = FastAPI()
 
@@ -362,7 +366,7 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
                 project_profile = project_profile.dict()
             else:
                 project_profile = dict(project_profile)
-        
+
         # topic backfill + sanitize (remove Hefei suffix markers)
         _topic = project_profile.get('topic') if isinstance(project_profile, dict) else None
         if not _topic and isinstance(payload, dict):
@@ -375,7 +379,7 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
             _topic = _topic.strip()
         if isinstance(project_profile, dict) and _topic:
             project_profile['topic'] = _topic
-        
+
         # domain_key backfill: prefer kg_context.domain_resolution.domain_key, fallback decoration
         _dk = None
         if isinstance(kg_context, dict):
@@ -388,13 +392,13 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
             _dk = 'decoration'
         if isinstance(project_profile, dict):
             project_profile['domain_key'] = project_profile.get('domain_key') or _dk
-        
+
         # region_key backfill (if available)
         if isinstance(upgrade, dict):
             _rk = upgrade.get('region_key')
             if _rk and isinstance(project_profile, dict):
                 project_profile['region_key'] = project_profile.get('region_key') or _rk
-        
+
         with open('build/project_profile.json', 'w', encoding='utf-8') as _f_pp:
             _json_pp.dump(project_profile, _f_pp, ensure_ascii=False, indent=2)
     except Exception:

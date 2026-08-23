@@ -1,0 +1,141 @@
+{
+  "version": 2,
+  "root": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance",
+  "count": 4,
+  "verified_count": 4,
+  "generated_at": "2026-08-24T05:46:30",
+  "source_fingerprint": [
+    {
+      "name": "_official_registry.json",
+      "size": 3335,
+      "mtime_ns": 1787441258750830235
+    }
+  ],
+  "entries": [
+    {
+      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "filename": "_official_registry.json",
+      "standard_code": "CJJ 1-2008",
+      "code_key": "CJJ_1",
+      "code_year": 2008,
+      "prefix_tag": "CJJ",
+      "source_name": "城镇道路工程施工与质量验收规范",
+      "official_source": "https://jst.sc.gov.cn/scjst/otherDocument/2025/10/24/0efe317e006d45e9a102d8b66ae7959d/files/%E5%9B%9B%E5%B7%9D%E7%9C%81%E5%BB%BA%E8%AE%BE%E5%B7%A5%E7%A8%8B%E8%B4%A8%E9%87%8F%E6%A3%80%E6%B5%8B%E8%B5%84%E8%B4%A8%E6%8A%80%E6%9C%AF%E8%83%BD%E5%8A%9B%E4%BE%9D%E6%8D%AE%E6%A0%87%E5%87%86%E6%8C%87%E5%AF%BC%E6%89%8B%E5%86%8C.pdf",
+      "effective_status": "现行有效",
+      "current_version": "CJJ 1-2008",
+      "priority": "行业标准",
+      "conflicts": [],
+      "domain_tags": [
+        "市政道路",
+        "道路工程",
+        "市政工程",
+        "质量管理与验收"
+      ],
+      "generated_at": "2026-08-23",
+      "mandatory_count": 0,
+      "parameter_count": 0,
+      "search_text": "CJJ 1-2008 CJJ_1 城镇道路工程施工与质量验收规范 市政道路 道路工程 市政工程 质量管理与验收",
+      "latest": true,
+      "metadata_only": true,
+      "verification_note": "四川省住房和城乡建设厅2025年发布的现行检测依据手册列载。",
+      "superseded_clauses": [],
+      "verified": true
+    },
+    {
+      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "filename": "_official_registry.json",
+      "standard_code": "GB/T 50326-2017",
+      "code_key": "GB_T_50326",
+      "code_year": 2017,
+      "prefix_tag": "GB",
+      "source_name": "建设工程项目管理规范",
+      "official_source": "https://jst.sc.gov.cn/scjst/gongshitg/2025/4/15/e03795f7202742268c3da43ac03c0c64/files/%E4%B8%89%E3%80%81%E5%BB%BA%E7%AD%91%E5%B7%A5%E7%A8%8B%E6%96%BD%E5%B7%A5%E9%83%A8%E5%88%86%EF%BC%88%E4%B8%BB%E7%BC%96%E5%8D%95%E4%BD%8D%EF%BC%9A%E5%9B%9B%E5%B7%9D%E5%8D%8E%E8%A5%BF%E9%9B%86%E5%9B%A2%E6%9C%89%E9%99%90%E5%85%AC%E5%8F%B8%EF%BC%89.pdf",
+      "effective_status": "现行有效",
+      "current_version": "GB/T 50326-2017",
+      "priority": "国家推荐性标准",
+      "conflicts": [],
+      "domain_tags": [
+        "通用工程",
+        "项目管理"
+      ],
+      "generated_at": "2026-08-23",
+      "mandatory_count": 0,
+      "parameter_count": 0,
+      "search_text": "GB/T 50326-2017 GB_T_50326 建设工程项目管理规范 通用工程 项目管理",
+      "latest": true,
+      "metadata_only": true,
+      "verification_note": "四川省住房和城乡建设厅2025年现行标准体系文件列载。",
+      "superseded_clauses": [],
+      "verified": true
+    },
+    {
+      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "filename": "_official_registry.json",
+      "standard_code": "GB 50300-2013",
+      "code_key": "GB_50300",
+      "code_year": 2013,
+      "prefix_tag": "GB",
+      "source_name": "建筑工程施工质量验收统一标准",
+      "official_source": "https://zjj.sz.gov.cn/hdjl/ywzs/jsgcgl/qtl/content/post_8466200.html",
+      "effective_status": "现行有效",
+      "current_version": "GB 50300-2013",
+      "priority": "国家标准",
+      "conflicts": [],
+      "domain_tags": [
+        "房建",
+        "装修",
+        "房建工程",
+        "建筑工程",
+        "质量管理与验收"
+      ],
+      "generated_at": "2026-08-23",
+      "mandatory_count": 0,
+      "parameter_count": 0,
+      "search_text": "GB 50300-2013 GB_50300 建筑工程施工质量验收统一标准 房建 装修 房建工程 建筑工程 质量管理与验收",
+      "latest": true,
+      "metadata_only": true,
+      "verification_note": "深圳市住房和建设局2025年业务知识页面仍以该标准为验收依据；与GB 55032-2022冲突的指定强制性条款除外。",
+      "superseded_clauses": [
+        "5.0.8",
+        "6.0.6"
+      ],
+      "verified": true
+    },
+    {
+      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "filename": "_official_registry.json",
+      "standard_code": "GB 55032-2022",
+      "code_key": "GB_55032",
+      "code_year": 2022,
+      "prefix_tag": "GB",
+      "source_name": "建筑与市政工程施工质量控制通用规范",
+      "official_source": "https://szwb.sz.gov.cn/gwszwfw/zsk/hybz/content/post_10878088.html",
+      "effective_status": "现行有效",
+      "current_version": "GB 55032-2022",
+      "priority": "全文强制性工程建设规范",
+      "conflicts": [],
+      "domain_tags": [
+        "房建",
+        "装修",
+        "市政道路",
+        "市政排水",
+        "市政桥梁",
+        "市政排水站",
+        "综合管廊",
+        "房建工程",
+        "建筑工程",
+        "市政工程",
+        "质量管理与验收"
+      ],
+      "generated_at": "2026-08-23",
+      "mandatory_count": 0,
+      "parameter_count": 0,
+      "search_text": "GB 55032-2022 GB_55032 建筑与市政工程施工质量控制通用规范 房建 装修 市政道路 市政排水 市政桥梁 市政排水站 综合管廊 房建工程 建筑工程 市政工程 质量管理与验收",
+      "latest": true,
+      "metadata_only": true,
+      "verification_note": "政府主管部门公开页面载明自2023年3月1日起实施，且与现行标准冲突时以本规范为准。",
+      "superseded_clauses": [],
+      "verified": true
+    }
+  ]
+}

@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Optional, Dict, Any
+
+from backend.zhifei_autoplan.model_reliability import (
+    ModelReliabilityRuntime,
+    bounded_retry_delay,
+    classify_provider_error,
+)
+from backend.zhifei_autoplan.execution_control import (
+    ExecutionBudgetExceededError,
+    ExecutionCancelledError,
+    ExecutionControlRuntime,
+)
 
 from backend.zhifei_autoplan.providers.openai_provider import OpenAIProvider
 from backend.zhifei_autoplan.providers.anthropic_provider import AnthropicProvider
@@ -37,6 +49,10 @@ class LLMClient:
         base_url: Optional[str] = None,
         secret_key: Optional[str] = None,
         token_url: Optional[str] = None,
+        reliability_runtime: ModelReliabilityRuntime | None = None,
+        retry_attempts: int = 1,
+        retry_base_delay: float = 0.25,
+        execution_runtime: ExecutionControlRuntime | None = None,
     ):
         self.provider = provider
         self.model = model
@@ -44,6 +60,10 @@ class LLMClient:
         self.base_url = base_url
         self.secret_key = secret_key
         self.token_url = token_url
+        self.reliability_runtime = reliability_runtime
+        self.retry_attempts = max(1, min(5, int(retry_attempts or 1)))
+        self.retry_base_delay = max(0.0, min(8.0, float(retry_base_delay or 0.0)))
+        self.execution_runtime = execution_runtime
 
         self._impl = None
         self._init_error = None
@@ -117,15 +137,124 @@ class LLMClient:
 
     async def complete(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         if self._impl is None:
+            legacy_error = self._init_error or "provider_not_configured"
             return {
                 "provider": self.provider,
                 "model": self.model,
                 "text": "",
-                "error": self._init_error or "provider_not_configured",
+                "error": legacy_error,
+                "error_info": classify_provider_error(
+                    legacy_error,
+                    provider=self.provider,
+                    model=self.model,
+                ),
+                "attempts": 0,
             }
-        try:
-            return await self._impl.complete(prompt, **kwargs)
-        except TimeoutError:
-            return {"provider": self.provider, "model": self.model, "text": "", "error": "timeout"}
-        except Exception as e:
-            return {"provider": self.provider, "model": self.model, "text": "", "error": repr(e)}
+
+        runtime = self.reliability_runtime
+        if runtime is not None and runtime.is_open(self.provider, self.model):
+            error_info = classify_provider_error(
+                "circuit_open",
+                provider=self.provider,
+                model=self.model,
+            )
+            error_info.update(
+                {
+                    "code": "circuit_open",
+                    "retryable": False,
+                    "user_message": "该模型在本次任务中已被熔断。",
+                    "action": "系统将跳过它并尝试健康的备用模型。",
+                    "severity": "error",
+                }
+            )
+            return {
+                "provider": self.provider,
+                "model": self.model,
+                "text": "",
+                "error": "circuit_open",
+                "error_info": error_info,
+                "attempts": 0,
+            }
+
+        attempts = max(1, min(5, int(kwargs.pop("retry_attempts", self.retry_attempts) or 1)))
+        last_error: Any = "provider_error"
+        last_info: Dict[str, Any] | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                if self.execution_runtime is None:
+                    result = await self._impl.complete(prompt, **kwargs)
+                else:
+                    requested_output_tokens = kwargs.get("max_tokens") or kwargs.get("max_output_tokens") or 0
+                    async with self.execution_runtime.model_attempt(
+                        provider=self.provider,
+                        model=self.model,
+                        prompt_chars=len(str(prompt or "")),
+                        requested_output_tokens=int(requested_output_tokens or 0),
+                    ):
+                        result = await self._impl.complete(prompt, **kwargs)
+                        if isinstance(result, dict):
+                            self.execution_runtime.record_result(result)
+                if not isinstance(result, dict):
+                    result = {"text": str(result or "")}
+                text = str(result.get("text") or "").strip()
+                raw_error = result.get("error")
+                if text and not raw_error:
+                    if runtime is not None:
+                        runtime.record_success(self.provider, self.model)
+                    result.setdefault("provider", self.provider)
+                    result.setdefault("model", self.model)
+                    result["attempts"] = attempt
+                    return result
+                last_error = raw_error or "no_visible_text"
+                last_info = classify_provider_error(
+                    result.get("error_info") or last_error,
+                    provider=self.provider,
+                    model=self.model,
+                )
+            except (ExecutionCancelledError, ExecutionBudgetExceededError):
+                raise
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                last_error = "timeout"
+                last_info = classify_provider_error(exc, provider=self.provider, model=self.model)
+            except Exception as exc:
+                last_error = repr(exc)
+                last_info = classify_provider_error(exc, provider=self.provider, model=self.model)
+
+            if runtime is not None and last_info is not None:
+                runtime.record_failure(self.provider, self.model, last_info)
+            if not last_info or not bool(last_info.get("retryable")) or attempt >= attempts:
+                break
+            await bounded_retry_delay(
+                attempt,
+                retry_after=last_info.get("retry_after"),
+                base_delay=self.retry_base_delay,
+            )
+
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "text": "",
+            "error": last_error,
+            "error_info": last_info
+            or classify_provider_error(last_error, provider=self.provider, model=self.model),
+            "attempts": attempt,
+        }
+
+    async def preflight(self, *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Validate credentials/model availability with a minimal visible-text call."""
+
+        result = await self.complete(
+            "Reply with exactly OK.",
+            timeout=max(5.0, min(60.0, float(timeout or 30.0))),
+            max_tokens=8,
+            retry_attempts=min(2, self.retry_attempts),
+        )
+        text = str(result.get("text") or "").strip() if isinstance(result, dict) else ""
+        return {
+            "ok": bool(text) and not bool(result.get("error")),
+            "provider": self.provider,
+            "model": self.model,
+            "attempts": int(result.get("attempts") or 0),
+            "error": result.get("error"),
+            "error_info": result.get("error_info"),
+        }

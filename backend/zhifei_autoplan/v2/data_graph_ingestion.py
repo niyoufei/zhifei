@@ -204,6 +204,10 @@ def _extract_domain_tag_from_path(path: Path, *, root: Path) -> str:
         except Exception:
             return "通用"
     parts = list(rel.parts)
+    if len(parts) >= 3 and str(parts[0]).strip() == "AI知识图谱大全":
+        candidate = str(parts[1]).strip()
+        if candidate:
+            return candidate
     if len(parts) >= 2:
         candidate = str(parts[0]).strip()
         if candidate:

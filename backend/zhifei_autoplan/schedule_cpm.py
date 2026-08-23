@@ -12,6 +12,12 @@ _DUR_RE = re.compile(r"工期[^\d]{0,8}(\d+(?:\.\d+)?)\s*(天|日|月|h|小时)"
 _PEAK_RE = re.compile(r"(?:资源峰值|高峰投入|投入人员|投入设备|人数)[^\d]{0,8}(\d+(?:\.\d+)?)\s*(人|台|套)", re.IGNORECASE)
 _CP_RE = re.compile(r"关键线路(?:间隔|步距)?[^\d]{0,8}(\d+(?:\.\d+)?)\s*(天|日|h|小时)", re.IGNORECASE)
 _DEP_RE = re.compile(r"(?:前置|依赖|需在|在)[：:\s]*([^。；;\n]{2,80})(?:后|完成后|之后)")
+_LOCAL_ACTIVITY_HINT_RE = re.compile(r"(?:工序|作业|施工段|流水段|工作包|活动|任务|分项(?:工程)?)")
+_PROJECT_DURATION_HINT_RE = re.compile(r"(?:总工期|合同工期|项目工期|本项目工期|计划总工期)")
+_LOCAL_RESOURCE_RE = re.compile(
+    r"(?:投入人员|投入设备|作业人数|班组人数|配置人员|配置设备)[^\d]{0,8}(\d+(?:\.\d+)?)\s*(人|台|套)",
+    re.IGNORECASE,
+)
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -40,14 +46,25 @@ def _fmt_days(v: float) -> str:
 
 
 def _extract_first_duration_days(text: str) -> float | None:
-    m = _DUR_RE.search(text or "")
-    if not m:
-        return None
-    return max(0.01, _to_days(_f(m.group(1)), m.group(2)))
+    source = str(text or "")
+    for m in _DUR_RE.finditer(source):
+        # A project-level total repeated in several chapters is not the duration
+        # of each chapter.  Only an explicitly named activity may enter the CPM
+        # network as a local duration.
+        context = source[max(0, m.start() - 12) : m.end()]
+        local_context = source[max(0, m.start() - 32) : m.start()]
+        if _PROJECT_DURATION_HINT_RE.search(context):
+            continue
+        if not _LOCAL_ACTIVITY_HINT_RE.search(local_context):
+            continue
+        return max(0.01, _to_days(_f(m.group(1)), m.group(2)))
+    return None
 
 
 def _extract_first_resource(text: str) -> float | None:
-    m = _PEAK_RE.search(text or "")
+    # Project-level "资源峰值" is a canonical project metric, not a resource
+    # assignment that may be copied onto every chapter/activity.
+    m = _LOCAL_RESOURCE_RE.search(text or "")
     if not m:
         return None
     return max(0.0, _f(m.group(1)))
@@ -114,8 +131,13 @@ def _infer_dependencies(activities: List[Dict[str, Any]]) -> None:
                     aliases = _title_aliases(pname)
                     if any(token in alias or alias in token for alias in aliases if alias):
                         deps.add(pid)
-        if not deps and idx > 0:
+        if deps:
+            a["dependency_source"] = "section_metric"
+        elif idx > 0:
             deps.add(str(activities[idx - 1].get("id") or ""))
+            a["dependency_source"] = "sequential_fallback"
+        else:
+            a["dependency_source"] = "none"
         a["deps"] = [d for d in deps if d and d != str(a.get("id") or "")]
 
 
@@ -142,6 +164,7 @@ def build_activities_from_sections(
                 "source_text": text[:4000],
                 "duration_source": "section_metric" if dur_local is not None else "derived",
                 "resource_source": "section_metric" if res_local is not None else "derived",
+                "dependency_source": "derived",
                 "deps": [],
             }
         )
@@ -289,6 +312,9 @@ def run_cpm(activities: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "deps": list(g.predecessors(n)),
                 "duration_days": round(dur.get(n, 0.0), 3),
                 "resource_units": round(_f(a.get("resource_units"), 0.0), 3),
+                "duration_source": str(a.get("duration_source") or "unknown"),
+                "resource_source": str(a.get("resource_source") or "unknown"),
+                "dependency_source": str(a.get("dependency_source") or "unknown"),
                 "es": round(es.get(n, 0.0), 3),
                 "ef": round(ef.get(n, 0.0), 3),
                 "ls": round(ls.get(n, 0.0), 3),
@@ -383,10 +409,44 @@ def build_cpm_receipt(sections: List[Dict[str, Any]], canonical: Dict[str, str] 
     computed_duration = float(cpm.get("project_duration_days") or 0.0)
     computed_peak = float(cpm.get("resource_peak") or 0.0)
     computed_interval = float(cpm.get("critical_interval_days") or 0.0)
+    activity_rows = cpm.get("activities") or []
+    activity_count = len(activity_rows)
+    explicit_duration_count = sum(1 for a in activity_rows if a.get("duration_source") == "section_metric")
+    explicit_resource_count = sum(1 for a in activity_rows if a.get("resource_source") == "section_metric")
+    explicit_dependency_count = sum(1 for a in activity_rows if a.get("dependency_source") == "section_metric")
+    explicit_duration_ratio = (explicit_duration_count / activity_count) if activity_count else 0.0
+    explicit_resource_ratio = (explicit_resource_count / activity_count) if activity_count else 0.0
+
+    # Chapter prose is not automatically a construction activity network.  A
+    # comparison is admissible only when the document contains enough explicit
+    # activity-level inputs.  This prevents repeated project totals from being
+    # multiplied by the number of chapters and reported as high-risk conflicts.
+    duration_eligible = activity_count >= 2 and explicit_duration_count >= 2 and explicit_duration_ratio >= 0.5
+    dependency_eligible = explicit_dependency_count >= 1
+    resource_eligible = (
+        duration_eligible
+        and dependency_eligible
+        and explicit_resource_count >= 2
+        and explicit_resource_ratio >= 0.5
+    )
+    interval_eligible = duration_eligible and dependency_eligible
+    comparison_eligible = {
+        "工期": duration_eligible,
+        "资源峰值": resource_eligible,
+        "关键线路间隔": interval_eligible,
+    }
+    diagnostic_warnings: List[str] = []
+    if not duration_eligible:
+        diagnostic_warnings.append("cpm_duration_comparison_skipped_insufficient_activity_metrics")
+    if mentioned_peak is not None and not resource_eligible:
+        diagnostic_warnings.append("cpm_resource_comparison_skipped_unverified_activity_network")
+    if mentioned_cp_interval is not None and not interval_eligible:
+        diagnostic_warnings.append("cpm_interval_comparison_skipped_unverified_dependencies")
+
     conflicts: List[Dict[str, Any]] = []
-    c1 = _compare_metric("工期", mentioned_duration_days, computed_duration, tolerance=max(1.0, (mentioned_duration_days or 0.0) * 0.10))
-    c2 = _compare_metric("资源峰值", mentioned_peak, computed_peak, tolerance=max(1.0, (mentioned_peak or 0.0) * 0.15))
-    c3 = _compare_metric("关键线路间隔", mentioned_cp_interval, computed_interval, tolerance=max(0.5, (mentioned_cp_interval or 0.0) * 0.25))
+    c1 = _compare_metric("工期", mentioned_duration_days, computed_duration, tolerance=max(1.0, (mentioned_duration_days or 0.0) * 0.10)) if duration_eligible else None
+    c2 = _compare_metric("资源峰值", mentioned_peak, computed_peak, tolerance=max(1.0, (mentioned_peak or 0.0) * 0.15)) if resource_eligible else None
+    c3 = _compare_metric("关键线路间隔", mentioned_cp_interval, computed_interval, tolerance=max(0.5, (mentioned_cp_interval or 0.0) * 0.25)) if interval_eligible else None
     for x in (c1, c2, c3):
         if x:
             conflicts.append(x)
@@ -407,10 +467,25 @@ def build_cpm_receipt(sections: List[Dict[str, Any]], canonical: Dict[str, str] 
             "关键线路间隔": canonical.get("关键线路间隔") or (_fmt_days(float(cp_m.get("value"))) if cp_m else None),
         },
         "computed": {
+            "project_duration_days": round(computed_duration, 3) if duration_eligible else None,
+            "resource_peak": round(computed_peak, 3) if resource_eligible else None,
+            "critical_interval_days": round(computed_interval, 3) if interval_eligible else None,
+        },
+        "computed_diagnostic": {
             "project_duration_days": round(computed_duration, 3),
             "resource_peak": round(computed_peak, 3),
             "critical_interval_days": round(computed_interval, 3),
         },
+        "comparison_eligible": comparison_eligible,
+        "input_coverage": {
+            "activity_count": activity_count,
+            "explicit_duration_count": explicit_duration_count,
+            "explicit_resource_count": explicit_resource_count,
+            "explicit_dependency_count": explicit_dependency_count,
+            "explicit_duration_ratio": round(explicit_duration_ratio, 3),
+            "explicit_resource_ratio": round(explicit_resource_ratio, 3),
+        },
+        "diagnostic_warnings": diagnostic_warnings,
         "conflicts": conflicts,
         "graph": cpm.get("graph") or {},
         "activities": cpm.get("activities") or [],

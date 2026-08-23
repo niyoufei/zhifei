@@ -46,7 +46,7 @@ def _text_model_main() -> str:
     return (
         _env_first("OPENAI_TEXT_MODEL_MAIN", "ZF_OPENAI_TEXT_MODEL_ID")
         or latest_runtime_model_for("openai")
-        or "gpt-5.4"
+        or "gpt-5.6-sol"
     )
 
 
@@ -66,8 +66,83 @@ def _gemini_text_model() -> str:
     )
 
 
+def _anthropic_text_model() -> str:
+    return (
+        _env_first("ANTHROPIC_TEXT_MODEL_MAIN", "ZF_ANTHROPIC_TEXT_MODEL_ID")
+        or latest_runtime_model_for("anthropic")
+        or "claude-opus-5"
+    )
+
+
+def _anthropic_draft_model() -> str:
+    return _env_first("ANTHROPIC_TEXT_MODEL_DRAFT", "ZF_ANTHROPIC_DRAFT_MODEL") or "claude-sonnet-5"
+
+
+def _anthropic_document_render_model() -> str:
+    """Return the dedicated professional-document editor model.
+
+    This is deliberately separate from the normal drafting/review chain.  A
+    document may therefore be generated with one routing policy and later be
+    professionally refined without silently changing the generation model.
+    """
+
+    return (
+        _env_first(
+            "ANTHROPIC_DOCUMENT_RENDER_MODEL",
+            "ZF_ANTHROPIC_DOCUMENT_RENDER_MODEL",
+            "ANTHROPIC_TEXT_MODEL_DRAFT",
+            "ZF_ANTHROPIC_DRAFT_MODEL",
+        )
+        or "claude-sonnet-5"
+    )
+
+
+def _anthropic_review_model() -> str:
+    return _env_first("ANTHROPIC_TEXT_MODEL_REVIEW", "ZF_ANTHROPIC_REVIEW_MODEL") or "claude-opus-5"
+
+
+def _anthropic_escalation_model() -> str:
+    return _env_first("ANTHROPIC_TEXT_MODEL_ESCALATION", "ZF_ANTHROPIC_ESCALATION_MODEL") or "claude-fable-5"
+
+
+def _provider_text_model(provider: str, *, fallback: bool = False) -> str:
+    normalized = str(provider or "").strip().lower()
+    configured = _env_first("ZF_LLM_FALLBACK1_MODEL" if fallback else "ZF_LLM_MAIN_MODEL")
+    if configured:
+        return configured
+    if normalized == "anthropic":
+        return _anthropic_text_model()
+    if normalized == "google":
+        return _gemini_text_model()
+    if normalized == "openai":
+        return _text_model_backup() if fallback else _text_model_main()
+    return latest_runtime_model_for(normalized)
+
+
+def _provider_text_key(provider: str, *, fallback: bool = False) -> tuple[str, str]:
+    normalized = str(provider or "").strip().lower()
+    scoped = "ZF_LLM_FALLBACK1_API_KEY" if fallback else "ZF_LLM_MAIN_API_KEY"
+    if normalized == "anthropic":
+        return _env_first(scoped, "ANTHROPIC_API_KEY", "ZF_ANTHROPIC_API_KEY"), "ANTHROPIC_API_KEY"
+    if normalized == "google":
+        return (
+            _env_first(scoped, "GEMINI_API_KEY_A", "ZF_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"),
+            "GOOGLE_API_KEY",
+        )
+    if normalized == "openai":
+        aliases = (
+            scoped,
+            "OPENAI_API_KEY_TEXT_BACKUP" if fallback else "OPENAI_API_KEY_TEXT_MAIN",
+            "OPENAI_API_KEY",
+            "ZF_OPENAI_API_KEY",
+        )
+        return _env_first(*aliases), "OPENAI_API_KEY"
+    upper = normalized.upper()
+    return _env_first(scoped, f"{upper}_API_KEY", f"ZF_{upper}_API_KEY"), f"{upper}_API_KEY"
+
+
 def _gemini_image_model() -> str:
-    return _env_first("GEMINI_IMAGE_MODEL_A", "ZF_GEMINI_IMAGE_MODEL", "ZF_GOOGLE_IMAGE_MODEL") or "gemini-2.5-flash-image"
+    return _env_first("GEMINI_IMAGE_MODEL_A", "ZF_GEMINI_IMAGE_MODEL", "ZF_GOOGLE_IMAGE_MODEL") or "gemini-3-pro-image"
 
 
 def _gemini_image_model_backup() -> str:
@@ -76,6 +151,71 @@ def _gemini_image_model_backup() -> str:
 
 def resolve_text_slots() -> List[ProviderSlot]:
     slots: List[ProviderSlot] = []
+
+    configured_main_provider = _env_first("ZF_LLM_MAIN_PROVIDER").lower()
+    if configured_main_provider:
+        main_key, main_alias = _provider_text_key(configured_main_provider)
+        if configured_main_provider == "anthropic" and main_key:
+            slots.append(
+                ProviderSlot(
+                    slot="text_draft",
+                    role="text_draft",
+                    provider="anthropic",
+                    model=_anthropic_draft_model(),
+                    api_key=main_key,
+                    key_alias=main_alias,
+                )
+            )
+            slots.append(
+                ProviderSlot(
+                    slot="text_review",
+                    role="text_review",
+                    provider="anthropic",
+                    model=_anthropic_review_model(),
+                    api_key=main_key,
+                    key_alias=main_alias,
+                )
+            )
+            slots.append(
+                ProviderSlot(
+                    slot="text_escalation",
+                    role="text_escalation",
+                    provider="anthropic",
+                    model=_anthropic_escalation_model(),
+                    api_key=main_key,
+                    key_alias=main_alias,
+                )
+            )
+        else:
+            main_model = _provider_text_model(configured_main_provider)
+            if main_key and main_model:
+                slots.append(
+                    ProviderSlot(
+                        slot="text_main",
+                        role="text_main",
+                        provider=configured_main_provider,
+                        model=main_model,
+                        api_key=main_key,
+                        key_alias=main_alias,
+                    )
+                )
+
+        configured_backup_provider = _env_first("ZF_LLM_FALLBACK1_PROVIDER").lower()
+        if configured_backup_provider:
+            backup_key, backup_alias = _provider_text_key(configured_backup_provider, fallback=True)
+            backup_model = _provider_text_model(configured_backup_provider, fallback=True)
+            if backup_key and backup_model:
+                slots.append(
+                    ProviderSlot(
+                        slot="text_backup",
+                        role="text_backup",
+                        provider=configured_backup_provider,
+                        model=backup_model,
+                        api_key=backup_key,
+                        key_alias=backup_alias,
+                    )
+                )
+        return slots
 
     main_key = _env_first(
         "OPENAI_API_KEY_TEXT_MAIN",
@@ -124,6 +264,33 @@ def resolve_text_slots() -> List[ProviderSlot]:
     return slots
 
 
+def resolve_document_render_slot() -> ProviderSlot | None:
+    """Resolve the isolated Anthropic slot used for Word professionalization.
+
+    There is intentionally no cross-provider or cross-model fallback here: a
+    button labelled Sonnet 5 must either use the configured Anthropic model or
+    fail with an actionable configuration error.
+    """
+
+    api_key = _env_first(
+        "ANTHROPIC_DOCUMENT_RENDER_API_KEY",
+        "ZF_ANTHROPIC_DOCUMENT_RENDER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ZF_ANTHROPIC_API_KEY",
+        "ZF_LLM_MAIN_API_KEY",
+    )
+    if not api_key:
+        return None
+    return ProviderSlot(
+        slot="document_render",
+        role="document_render",
+        provider="anthropic",
+        model=_anthropic_document_render_model(),
+        api_key=api_key,
+        key_alias="ANTHROPIC_API_KEY",
+    )
+
+
 def resolve_automation_slot() -> ProviderSlot | None:
     api_key = _env_first("OPENAI_API_KEY_AUTOMATION")
     if not api_key:
@@ -140,6 +307,40 @@ def resolve_automation_slot() -> ProviderSlot | None:
 
 def resolve_image_slots() -> List[ProviderSlot]:
     slots: List[ProviderSlot] = []
+    configured_main = _env_first("ZF_IMAGE_MAIN_PROVIDER").lower()
+    if configured_main:
+        if configured_main == "openai":
+            primary = _env_first("ZF_IMAGE_MAIN_API_KEY", "OPENAI_IMAGE_API_KEY", "OPENAI_API_KEY", "ZF_OPENAI_API_KEY")
+            model = _env_first("ZF_IMAGE_MAIN_MODEL", "OPENAI_IMAGE_MODEL") or "gpt-image-2"
+            alias = "OPENAI_API_KEY"
+        elif configured_main == "google":
+            primary = _env_first("ZF_IMAGE_MAIN_API_KEY", "GEMINI_API_KEY_A", "ZF_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY")
+            model = _env_first("ZF_IMAGE_MAIN_MODEL") or _gemini_image_model()
+            alias = "GOOGLE_API_KEY"
+        else:
+            primary = ""
+            model = ""
+            alias = ""
+        if primary and model:
+            slots.append(ProviderSlot("image_main", "image_main", configured_main, model, primary, alias))
+
+        configured_backup = _env_first("ZF_IMAGE_FALLBACK1_PROVIDER").lower()
+        if configured_backup == "google":
+            backup = _env_first("ZF_IMAGE_FALLBACK1_API_KEY", "GEMINI_API_KEY_B", "GEMINI_API_KEY_A", "ZF_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY")
+            backup_model = _env_first("ZF_IMAGE_FALLBACK1_MODEL") or _gemini_image_model_backup()
+            backup_alias = "GOOGLE_API_KEY"
+        elif configured_backup == "openai":
+            backup = _env_first("ZF_IMAGE_FALLBACK1_API_KEY", "OPENAI_IMAGE_API_KEY", "OPENAI_API_KEY", "ZF_OPENAI_API_KEY")
+            backup_model = _env_first("ZF_IMAGE_FALLBACK1_MODEL", "OPENAI_IMAGE_MODEL") or "gpt-image-2"
+            backup_alias = "OPENAI_API_KEY"
+        else:
+            backup = ""
+            backup_model = ""
+            backup_alias = ""
+        if backup and backup_model:
+            slots.append(ProviderSlot("image_backup", "image_backup", configured_backup, backup_model, backup, backup_alias))
+        return slots
+
     primary = _env_first("GEMINI_API_KEY_A", "ZF_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY")
     if primary:
         slots.append(
@@ -210,8 +411,22 @@ def resolve_text_chain_profiles() -> Dict[str, List[str]]:
             normalized[key] = order
     if not normalized:
         normalized = {
-            "default": ["text_main", "text_backup", "text_compat_google"],
-            "cost_guard": ["text_backup", "text_compat_google", "text_main"],
+            "default": [
+                "text_draft",
+                "text_review",
+                "text_main",
+                "text_backup",
+                "text_escalation",
+                "text_compat_google",
+            ],
+            "cost_guard": [
+                "text_draft",
+                "text_backup",
+                "text_compat_google",
+                "text_review",
+                "text_escalation",
+                "text_main",
+            ],
         }
     return normalized
 
@@ -264,7 +479,7 @@ def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
             return out
         raise RuntimeError(
-            "text_provider_not_configured: missing OPENAI_API_KEY_TEXT_MAIN/OPENAI_API_KEY or compatible environment variables"
+            "text_provider_not_configured: no configured credential for the server-side primary or fallback text chain"
         )
     out["provider_chain"] = chain
     out["provider"] = str(chain[0]["provider"])
@@ -294,6 +509,10 @@ def resolve_text_slot_credentials(slot_id: str | None, provider: str | None) -> 
         compat = next((slot for slot in resolve_text_slots() if slot.provider == "google"), None)
         if compat:
             return compat.api_key, compat.key_alias
+    if normalized_provider == "anthropic":
+        main = next((slot for slot in resolve_text_slots() if slot.provider == "anthropic"), None)
+        if main:
+            return main.api_key, main.key_alias
     return None, None
 
 
@@ -325,30 +544,49 @@ def frontend_provider_status() -> Dict[str, Dict[str, Any]]:
     text_slots = resolve_text_slots()
     image_slots = resolve_image_slots()
     automation = resolve_automation_slot()
+    text_main_slot = next(
+        (slot for slot in text_slots if slot.role in {"text_review", "text_main"}),
+        None,
+    )
     return {
         "text_main": {
-            "configured": any(slot.role == "text_main" for slot in text_slots),
-            "env": "OPENAI_API_KEY_TEXT_MAIN",
-            "model": _text_model_main(),
+            "configured": text_main_slot is not None,
+            "env": text_main_slot.key_alias if text_main_slot else "ZF_LLM_MAIN_API_KEY",
+            "model": text_main_slot.model if text_main_slot else _provider_text_model(_env_first("ZF_LLM_MAIN_PROVIDER") or "openai"),
+        },
+        "text_draft": {
+            "configured": any(slot.role == "text_draft" for slot in text_slots),
+            "env": next((slot.key_alias for slot in text_slots if slot.role == "text_draft"), "ANTHROPIC_API_KEY"),
+            "model": next((slot.model for slot in text_slots if slot.role == "text_draft"), _anthropic_draft_model()),
+        },
+        "text_review": {
+            "configured": any(slot.role == "text_review" for slot in text_slots),
+            "env": next((slot.key_alias for slot in text_slots if slot.role == "text_review"), "ANTHROPIC_API_KEY"),
+            "model": next((slot.model for slot in text_slots if slot.role == "text_review"), _anthropic_review_model()),
+        },
+        "text_escalation": {
+            "configured": any(slot.role == "text_escalation" for slot in text_slots),
+            "env": next((slot.key_alias for slot in text_slots if slot.role == "text_escalation"), "ANTHROPIC_API_KEY"),
+            "model": next((slot.model for slot in text_slots if slot.role == "text_escalation"), _anthropic_escalation_model()),
         },
         "text_backup": {
             "configured": any(slot.role == "text_backup" for slot in text_slots),
-            "env": "OPENAI_API_KEY_TEXT_BACKUP",
-            "model": _text_model_backup(),
+            "env": next((slot.key_alias for slot in text_slots if slot.role == "text_backup"), "ZF_LLM_FALLBACK1_API_KEY"),
+            "model": next((slot.model for slot in text_slots if slot.role == "text_backup"), _provider_text_model(_env_first("ZF_LLM_FALLBACK1_PROVIDER") or "openai", fallback=True)),
         },
         "automation": {
             "configured": automation is not None,
             "env": "OPENAI_API_KEY_AUTOMATION",
             "model": _automation_model(),
         },
-        "gemini_a": {
-            "configured": any(slot.key_alias == "GEMINI_API_KEY_A" for slot in image_slots),
-            "env": "GEMINI_API_KEY_A",
-            "model": _gemini_image_model(),
+        "image_main": {
+            "configured": any(slot.role == "image_main" for slot in image_slots),
+            "env": next((slot.key_alias for slot in image_slots if slot.role == "image_main"), "ZF_IMAGE_MAIN_API_KEY"),
+            "model": next((slot.model for slot in image_slots if slot.role == "image_main"), _env_first("ZF_IMAGE_MAIN_MODEL") or "gpt-image-2"),
         },
-        "gemini_b": {
-            "configured": any(slot.key_alias == "GEMINI_API_KEY_B" for slot in image_slots),
-            "env": "GEMINI_API_KEY_B",
-            "model": _gemini_image_model_backup(),
+        "image_backup": {
+            "configured": any(slot.role == "image_backup" for slot in image_slots),
+            "env": next((slot.key_alias for slot in image_slots if slot.role == "image_backup"), "ZF_IMAGE_FALLBACK1_API_KEY"),
+            "model": next((slot.model for slot in image_slots if slot.role == "image_backup"), _env_first("ZF_IMAGE_FALLBACK1_MODEL") or _gemini_image_model_backup()),
         },
     }

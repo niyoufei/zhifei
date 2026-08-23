@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import time
@@ -10,6 +11,25 @@ from typing import Any
 
 import requests
 import streamlit as st
+from requests_toolbelt.multipart.encoder import MultipartEncoder
+
+from backend.zhifei_autoplan.compliance_policy import (
+    DEFAULT_GLOBAL_INSTRUCTION,
+    should_migrate_global_instruction,
+)
+from backend.zhifei_autoplan.job_activity import build_job_activity
+from backend.zhifei_autoplan.local_env import load_local_env
+from backend.zhifei_autoplan.ui_theme import (
+    EXPERT_SYSTEM_CSS,
+    activity_html,
+    hero_html,
+    launch_html,
+    section_heading_html,
+    workflow_html,
+)
+
+
+load_local_env()
 
 # Guard against low file-descriptor limits when launched from GUI contexts on macOS.
 try:
@@ -73,9 +93,11 @@ TEXT_PROVIDER_OPTIONS = [
 ]
 FALLBACK_PROVIDER_OPTIONS = [""] + TEXT_PROVIDER_OPTIONS
 LATEST_TEXT_MODELS = {
-    "google": "gemini-3-pro-preview",
-    "openai": "gpt-5.2-pro",
+    "google": "gemini-3.1-pro-preview",
+    "openai": "gpt-5.6-sol",
+    "anthropic": "claude-opus-5",
     "grok": "grok-4-1-fast-reasoning",
+    "deepseek": "deepseek-v4-pro",
 }
 GENERATION_MODE_OPTIONS = ["quality_200", "hq_speed_500"]
 GENERATION_MODE_LABELS = {
@@ -86,7 +108,18 @@ LOGIC_TEMPLATE_OPTIONS = ["A", "B", "C", "D", "E"]
 
 
 def _latest_model_for(provider: str | None) -> str:
-    return str(LATEST_TEXT_MODELS.get(str(provider or "").strip().lower()) or "")
+    normalized = str(provider or "").strip().lower()
+    env_map = {
+        "google": ("GEMINI_TEXT_MODEL", "ZF_GOOGLE_TEXT_MODEL_ID"),
+        "openai": ("OPENAI_TEXT_MODEL_MAIN", "ZF_OPENAI_TEXT_MODEL_ID"),
+        "anthropic": ("ANTHROPIC_TEXT_MODEL_MAIN", "ZF_ANTHROPIC_TEXT_MODEL_ID"),
+        "deepseek": ("DEEPSEEK_TEXT_MODEL", "ZF_DEEPSEEK_TEXT_MODEL_ID"),
+    }
+    for env_name in env_map.get(normalized, ()):
+        value = os.environ.get(env_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(LATEST_TEXT_MODELS.get(normalized) or "")
 
 
 def _normalize_template_selection(raw: Any) -> list[str]:
@@ -146,6 +179,23 @@ def _provider_key_from_env(provider: str | None) -> str:
         if isinstance(v, str) and v.strip():
             return v.strip()
     return ""
+
+
+def _sync_provider_model(provider_key: str, model_key: str) -> None:
+    provider = str(st.session_state.get(provider_key) or "").strip().lower()
+    latest = _latest_model_for(provider)
+    if latest:
+        st.session_state[model_key] = latest
+
+
+def _provider_status(provider: str | None) -> tuple[bool, str]:
+    name = str(provider or "").strip().lower()
+    if not name:
+        return False, "未选择提供商"
+    configured = bool(_provider_key_from_env(name))
+    if configured:
+        return True, "已连接本机安全凭据（密钥不在页面显示）"
+    return False, "尚未配置本机凭据；也可临时在下方输入"
 
 
 def _normalize_provider(raw: str | None, *, fallback: str) -> str:
@@ -429,9 +479,23 @@ def _apply_style_to_session(style: dict[str, Any], *, queue_only: bool = True) -
     line_spacing_pt = style.get("line_spacing_pt")
     if line_spacing_pt is None and font_cfg:
         line_spacing_pt = font_cfg.get("line_spacing_pt")
-    try:
-        _set("line_spacing_pt", float(line_spacing_pt if line_spacing_pt is not None else 22.0))
-    except Exception:
+    line_spacing = style.get("line_spacing")
+    if line_spacing is None and font_cfg:
+        line_spacing = font_cfg.get("line_spacing")
+    if line_spacing_pt is not None:
+        _set("line_spacing_mode", "fixed_pt")
+        try:
+            _set("line_spacing_pt", float(line_spacing_pt))
+        except Exception:
+            _set("line_spacing_pt", 22.0)
+    elif line_spacing is not None:
+        _set("line_spacing_mode", "multiple")
+        try:
+            _set("line_spacing_multiple", float(line_spacing))
+        except Exception:
+            _set("line_spacing_multiple", 1.5)
+    else:
+        _set("line_spacing_mode", "fixed_pt")
         _set("line_spacing_pt", 22.0)
 
     margins = style.get("margins_cm") if isinstance(style.get("margins_cm"), dict) else {}
@@ -551,6 +615,17 @@ def _post_json(
     return resp.json()
 
 
+def _is_stale_review_error(exc: Exception) -> bool:
+    return "STALE_REVIEW_STATE" in str(exc)
+
+
+def _render_review_apply_error(exc: Exception, *, prefix: str) -> None:
+    if _is_stale_review_error(exc):
+        st.warning("问题清单对应的文档版本已经变化，本次未写入。请重新载入问题清单后再操作。")
+        return
+    st.error(f"{prefix}: {exc}")
+
+
 def _get_json(
     base_url: str,
     path: str,
@@ -590,21 +665,56 @@ def _download_bytes(
     return resp.content
 
 
+def _uploaded_file_size(uploaded_file: Any) -> int:
+    raw_size = getattr(uploaded_file, "size", None)
+    if isinstance(raw_size, int) and raw_size >= 0:
+        return raw_size
+
+    original_pos = uploaded_file.tell()
+    try:
+        uploaded_file.seek(0, 2)
+        return int(uploaded_file.tell())
+    finally:
+        uploaded_file.seek(original_pos)
+
+
 def _ingest_docs(base_url: str, files: list[Any], project_id: str, source_hint: str | None = None) -> dict[str, Any]:
+    class _StreamingUploadReader:
+        def __init__(self, source: Any, size: int) -> None:
+            self._source = source
+            self._size = max(0, int(size))
+
+        @property
+        def len(self) -> int:
+            return max(0, self._size - int(self._source.tell()))
+
+        def read(self, size: int = -1) -> bytes:
+            return self._source.read(size)
+
     if not files:
         return {"saved": []}
     payload = []
     seen = set()
     for uf in files:
-        key = (uf.name, len(uf.getvalue()))
+        file_size = _uploaded_file_size(uf)
+        key = (uf.name, file_size)
         if key in seen:
             continue
         seen.add(key)
-        payload.append(("files", (uf.name, uf.getvalue(), "application/octet-stream")))
+        uf.seek(0)
+        content_type = mimetypes.guess_type(str(uf.name or ""))[0] or "application/octet-stream"
+        payload.append(("files", (uf.name, _StreamingUploadReader(uf, file_size), content_type)))
     params = {"project_id": project_id}
     if source_hint:
         params["source_hint"] = str(source_hint)
-    resp = requests.post(base_url.rstrip("/") + "/ingest/upload", params=params, files=payload, timeout=900)
+    body = MultipartEncoder(fields=payload)
+    resp = requests.post(
+        base_url.rstrip("/") + "/ingest/upload",
+        params=params,
+        data=body,
+        headers={"Content-Type": body.content_type},
+        timeout=900,
+    )
     if resp.status_code >= 400:
         raise RuntimeError(f"/ingest/upload 失败: {resp.status_code} {resp.text[:400]}")
     return resp.json()
@@ -691,7 +801,7 @@ def _build_ollama_preview_request_payload() -> dict[str, Any]:
         "content": content[:12000],
         "section_title": str(st.session_state.get("ollama_preview_section_title") or topic).strip() or topic,
         "instruction": instruction or "只做人工预览增强，指出缺项、风险和可人工采纳的优化建议；不要改写正文，不要生成新事实。",
-        "model": str(st.session_state.get("ollama_preview_model") or "qwen3:0.6b").strip() or "qwen3:0.6b",
+        "model": str(st.session_state.get("ollama_preview_model") or "qwen3.5:4b").strip() or "qwen3.5:4b",
         "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
         or "http://localhost:11434",
         "timeout": _ollama_preview_timeout_state(),
@@ -770,7 +880,10 @@ def _fetch_reference_items(
 
 def _render_case_library_panel(base_url: str, actions_key: str) -> None:
     st.markdown("**案例库**")
-    st.caption("默认关闭。启用后只作为格式、结构、表达方式参考，不覆盖招标文件、BoQ、图纸、答疑与企业参数。")
+    st.caption(
+        "启用后，仅将匹配到的可用案例作为章节结构、逻辑顺序、表达风格和方法组织提示；"
+        "案例不是项目事实源，不覆盖招标文件、清单、图纸、答疑、已核验规范与企业参数。"
+    )
     project_type = str(st.session_state.get("case_library_project_type") or st.session_state.get("project_type") or "").strip()
     items: list[dict[str, Any]] = []
     try:
@@ -783,17 +896,33 @@ def _render_case_library_panel(base_url: str, actions_key: str) -> None:
     current_selected = [x for x in _normalize_reference_text_list_ui(st.session_state.get("case_library_selected_ids") or []) if x in set(item_ids)]
     if current_selected != list(st.session_state.get("case_library_selected_ids") or []):
         st.session_state["case_library_selected_ids"] = current_selected
+    has_items = bool(item_ids)
+    if not has_items:
+        st.session_state["case_library_enabled"] = False
+        st.info("当前项目类型暂无可用案例；请先录入案例，系统不会启用空库增强。")
 
     c1, c2 = st.columns([1, 1])
     with c1:
-        st.checkbox("生成时启用案例库增强", key="case_library_enabled")
+        st.checkbox(
+            "生成时启用案例库安全增强",
+            key="case_library_enabled",
+            disabled=not has_items,
+            help="只有匹配到已启用且可用的案例时，提示才会进入章节起草。",
+        )
     with c2:
-        st.number_input("案例检索数量", min_value=1, max_value=8, key="case_library_top_k")
+        st.number_input(
+            "案例检索数量",
+            min_value=1,
+            max_value=8,
+            key="case_library_top_k",
+            disabled=not has_items,
+        )
     st.multiselect(
         "显式选择案例（可选）",
         options=item_ids,
         key="case_library_selected_ids",
         format_func=lambda value: labels.get(str(value), str(value)),
+        disabled=not has_items,
     )
     _render_reference_item_cards(items, id_key="case_id", selected_ids=st.session_state.get("case_library_selected_ids") or [])
 
@@ -846,17 +975,28 @@ def _render_image_library_panel(base_url: str, actions_key: str) -> None:
     current_selected = [x for x in _normalize_reference_text_list_ui(st.session_state.get("image_library_selected_ids") or []) if x in set(item_ids)]
     if current_selected != list(st.session_state.get("image_library_selected_ids") or []):
         st.session_state["image_library_selected_ids"] = current_selected
+    has_items = bool(item_ids)
+    if not has_items:
+        st.session_state["image_library_enabled"] = False
+        st.info("当前项目类型暂无可用图片；请先录入图片，系统不会启用空库增强或强行插图。")
 
     c1, c2 = st.columns([1, 1])
     with c1:
-        st.checkbox("生成时启用图片库增强", key="image_library_enabled")
+        st.checkbox("生成时启用图片库增强", key="image_library_enabled", disabled=not has_items)
     with c2:
-        st.number_input("图片检索数量", min_value=1, max_value=8, key="image_library_top_k")
+        st.number_input(
+            "图片检索数量",
+            min_value=1,
+            max_value=8,
+            key="image_library_top_k",
+            disabled=not has_items,
+        )
     st.multiselect(
         "显式选择图片（可选）",
         options=item_ids,
         key="image_library_selected_ids",
         format_func=lambda value: labels.get(str(value), str(value)),
+        disabled=not has_items,
     )
     _render_reference_item_cards(items, id_key="image_id", selected_ids=st.session_state.get("image_library_selected_ids") or [])
 
@@ -897,7 +1037,7 @@ def _render_image_library_panel(base_url: str, actions_key: str) -> None:
 
 
 def _render_reference_libraries_panel(base_url: str, actions_key: str) -> None:
-    with st.expander("参考库增强（默认关闭）", expanded=False):
+    with st.expander("参考库安全增强（按需启用）", expanded=False):
         case_tab, image_tab = st.tabs(["案例库", "图片库"])
         with case_tab:
             _render_case_library_panel(base_url, actions_key)
@@ -913,6 +1053,10 @@ def _render_ollama_preview_panel(base_url: str, actions_key: str) -> None:
             st.text_input("Ollama 地址", key="ollama_preview_base_url")
         with m2:
             st.text_input("本地模型", key="ollama_preview_model")
+            st.caption(
+                "推荐：qwen3.5:4b 用于默认质量预览；"
+                "deepseek-r1:1.5b 用于轻量推理复核。系统按需切换，一次只加载一个模型。"
+            )
         with m3:
             st.number_input("超时（秒）", min_value=1, max_value=300, key="ollama_preview_timeout")
         st.text_input("预览标题", key="ollama_preview_section_title")
@@ -976,42 +1120,35 @@ def _render_progress(percent: int, label: str) -> None:
             st.caption(txt)
 
 
+def _set_preflight_status(stage: int, label: str, *, state: str = "running") -> None:
+    st.session_state["preflight_status"] = {
+        "state": str(state or "running"),
+        "stage": max(0, min(6, int(stage))),
+        "label": str(label or "").strip(),
+        "updated_at": time.time(),
+    }
+
+
+def _render_task_status(container) -> None:
+    active = st.session_state.get("active_job") or {}
+    if active:
+        container.warning(f"任务执行中：{active.get('job_id')} | 状态：{active.get('status', 'queued')}")
+        return
+
+    preflight = st.session_state.get("preflight_status") or {}
+    state = str(preflight.get("state") or "").strip().lower()
+    stage = max(0, min(6, int(preflight.get("stage") or 0)))
+    label = str(preflight.get("label") or "").strip()
+    if state == "running":
+        container.warning(f"资料预检进行中（{stage}/6）：{label or '正在处理'}")
+    elif state == "failed":
+        container.error(f"上次预检失败（{stage}/6）：{label or '请查看下方错误日志'}")
+    else:
+        container.success("当前无运行中任务")
+
+
 def _inject_ui_style() -> None:
-    st.markdown(
-        """
-<style>
-div.block-container {
-  max-width: 1280px;
-  padding-top: 1.2rem;
-  padding-bottom: 1rem;
-}
-h1 {
-  letter-spacing: 0.2px;
-}
-[data-testid="stFileUploader"] {
-  border: 1px solid rgba(148, 163, 184, 0.28);
-  border-radius: 12px;
-  padding: 0.35rem 0.6rem 0.55rem 0.6rem;
-  background: rgba(15, 23, 42, 0.25);
-}
-[data-testid="stFileUploaderDropzone"] {
-  min-height: 88px;
-  padding: 0.5rem 0.75rem;
-}
-[data-testid="stFileUploaderDropzoneInstructions"] > div {
-  font-size: 0.92rem;
-}
-[data-testid="stFileUploaderDropzone"] button {
-  min-height: 2.2rem;
-}
-[data-testid="stExpander"] {
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 12px;
-}
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown(EXPERT_SYSTEM_CSS, unsafe_allow_html=True)
 
 
 def _init_state() -> None:
@@ -1020,19 +1157,21 @@ def _init_state() -> None:
         fallback="google",
     )
     env_main_model = _env_first("ZF_LLM_MAIN_MODEL") or _latest_model_for(env_main_provider) or _latest_model_for("google")
-    env_main_key = _env_first("ZF_LLM_MAIN_API_KEY") or _provider_key_from_env(env_main_provider)
+    env_main_key = _env_first("ZF_LLM_MAIN_API_KEY")
 
     env_f1_provider_raw = _env_first("ZF_LLM_FALLBACK1_PROVIDER")
     env_f1_provider = _normalize_provider(env_f1_provider_raw, fallback="") if env_f1_provider_raw else ""
     env_f1_model = _env_first("ZF_LLM_FALLBACK1_MODEL") or (_latest_model_for(env_f1_provider) if env_f1_provider else "")
-    env_f1_key = _env_first("ZF_LLM_FALLBACK1_API_KEY") or (_provider_key_from_env(env_f1_provider) if env_f1_provider else "")
-    env_f1_enabled = bool(env_f1_provider and env_f1_model and env_f1_key)
+    env_f1_key = _env_first("ZF_LLM_FALLBACK1_API_KEY")
+    env_f1_enabled = bool(env_f1_provider and env_f1_model and (env_f1_key or _provider_key_from_env(env_f1_provider)))
 
     env_f2_provider_raw = _env_first("ZF_LLM_FALLBACK2_PROVIDER")
     env_f2_provider = _normalize_provider(env_f2_provider_raw, fallback="") if env_f2_provider_raw else ""
     env_f2_model = _env_first("ZF_LLM_FALLBACK2_MODEL") or (_latest_model_for(env_f2_provider) if env_f2_provider else "")
-    env_f2_key = _env_first("ZF_LLM_FALLBACK2_API_KEY") or (_provider_key_from_env(env_f2_provider) if env_f2_provider else "")
-    env_f2_enabled = bool(env_f2_provider and env_f2_model and env_f2_key)
+    env_f2_key = _env_first("ZF_LLM_FALLBACK2_API_KEY")
+    env_f2_enabled = bool(env_f2_provider and env_f2_model and (env_f2_key or _provider_key_from_env(env_f2_provider)))
+    env_image_provider = _env_first("ZF_IMAGE_MAIN_PROVIDER") or "openai"
+    env_image_model = _env_first("ZF_IMAGE_MAIN_MODEL", "OPENAI_IMAGE_MODEL") or "gpt-image-2"
 
     defaults = {
         "topic_text": "施工组织设计方案",
@@ -1040,7 +1179,7 @@ def _init_state() -> None:
         "project_type": PROJECT_TYPES[0] if PROJECT_TYPES else "",
         "variants_value": 1,
         "selected_templates": ["A"],
-        "global_instruction": "严格遵守最新16条行业规定；所有工序采用A/B/C/D/E结构表达。",
+        "global_instruction": DEFAULT_GLOBAL_INSTRUCTION,
         "requirements_text": "严格按技术文件详细评审标准中的章目录组织内容，不新增顶层章节\n每节输出量化指标与风险-控制-验证闭环\n全文禁止官话、套话、空话",
         "outline_items": [],
         "outline_pages": [],
@@ -1049,11 +1188,12 @@ def _init_state() -> None:
         "quality_strict": True,
         "auto_remediate": True,
         "remediate_mode": "template",
+        "allow_fable_escalation": False,
         "agent_parallelism": 4,
         "variant_parallelism": 1,
         "generate_images": True,
-        "image_provider": "google",
-        "image_model": "banana",
+        "image_provider": env_image_provider,
+        "image_model": env_image_model,
         "provider_text": env_main_provider,
         "model_text": env_main_model,
         "api_key_text": env_main_key,
@@ -1074,6 +1214,8 @@ def _init_state() -> None:
         "body_size": 14,
         "title_size": 16,
         "line_spacing_pt": 22.0,
+        "line_spacing_mode": "fixed_pt",
+        "line_spacing_multiple": 1.5,
         "margin_top_cm": 2.5,
         "margin_right_cm": 2.0,
         "margin_bottom_cm": 2.0,
@@ -1104,7 +1246,7 @@ def _init_state() -> None:
         "image_library_upload_caption": "",
         "image_library_upload_description": "",
         "ollama_preview_base_url": "http://localhost:11434",
-        "ollama_preview_model": "qwen3:0.6b",
+        "ollama_preview_model": "qwen3.5:4b",
         "ollama_preview_timeout": 60,
         "ollama_preview_section_title": "",
         "ollama_preview_instruction": "只做人工预览增强，指出缺项、风险和可人工采纳的优化建议；不要改写正文，不要生成新事实。",
@@ -1125,9 +1267,8 @@ def _init_state() -> None:
         st.session_state["fallback_1_provider"] = ""
     if st.session_state.get("fallback_2_provider") not in FALLBACK_PROVIDER_OPTIONS:
         st.session_state["fallback_2_provider"] = ""
-    selected_templates = _normalize_template_selection(st.session_state.get("selected_templates"))
-    st.session_state["selected_templates"] = selected_templates or ["A"]
-    st.session_state["variants_value"] = len(st.session_state["selected_templates"])
+    selected_templates = _normalize_template_selection(st.session_state.get("selected_templates")) or ["A"]
+    st.session_state["variants_value"] = len(selected_templates)
     legacy_main_model_map = {
         "gemini-2.0-flash": _latest_model_for("google"),
         "gemini-2.5-flash": _latest_model_for("google"),
@@ -1162,10 +1303,55 @@ def _init_state() -> None:
         st.session_state["fallback_2_enabled"] = bool(st.session_state.get("fallback_2_enabled"))
         st.session_state["_ui_defaults_rev"] = defaults_rev
 
+    compliance_policy_rev = "2026-08-22-project-applicable-standards-v1"
+    if st.session_state.get("_compliance_policy_rev") != compliance_policy_rev:
+        if should_migrate_global_instruction(st.session_state.get("global_instruction")):
+            st.session_state["global_instruction"] = DEFAULT_GLOBAL_INSTRUCTION
+        st.session_state["_compliance_policy_rev"] = compliance_policy_rev
+
+    model_route_rev = "2026-08-22-anthropic-sonnet-opus-tiered-v2"
+    if st.session_state.get("_model_route_rev") != model_route_rev:
+        st.session_state["provider_text"] = env_main_provider
+        st.session_state["model_text"] = env_main_model
+        st.session_state["fallback_1_provider"] = env_f1_provider
+        st.session_state["fallback_1_model"] = env_f1_model
+        st.session_state["fallback_1_enabled"] = env_f1_enabled
+        st.session_state["image_provider"] = env_image_provider
+        st.session_state["image_model"] = env_image_model
+        st.session_state["allow_fable_escalation"] = False
+        st.session_state["_model_route_rev"] = model_route_rev
+
     st.session_state.setdefault("run_logs", [])
     st.session_state.setdefault("run_result", None)
     st.session_state.setdefault("active_job", None)
+    st.session_state.setdefault("preflight_status", None)
     st.session_state.setdefault("chapter_page_map", {})
+
+    # A browser disconnect or an app restart can interrupt the synchronous
+    # preflight before an async job exists. Preserve that fact instead of
+    # presenting the stale run as "no running task".
+    if (
+        not st.session_state.get("preflight_status")
+        and not st.session_state.get("active_job")
+        and not st.session_state.get("run_result")
+    ):
+        logs = st.session_state.get("run_logs") or []
+        last_stage = 0
+        has_terminal_marker = False
+        for entry in logs:
+            text = str(entry or "")
+            match = re.search(r"步骤\s+([1-6])/6", text)
+            if match:
+                last_stage = max(last_stage, int(match.group(1)))
+            if "任务已排队" in text or "失败:" in text:
+                has_terminal_marker = True
+        if last_stage and not has_terminal_marker:
+            st.session_state["preflight_status"] = {
+                "state": "failed",
+                "stage": last_stage,
+                "label": "上次预检意外中断；已选文件仍保留，可安全重试",
+                "updated_at": time.time(),
+            }
 
 
 def _set_outline_items(items: list[str]) -> None:
@@ -1207,7 +1393,10 @@ def _apply_template(template_key: str) -> None:
 
 
 def _render_outline_editor() -> list[str]:
-    st.markdown("#### 目录编辑器（默认按评审标准章目录，可实时改标题和顺序）")
+    st.markdown(
+        section_heading_html("03", "评审目录", "从招标评审标准提取章节，也可调整标题、顺序与目标页数。"),
+        unsafe_allow_html=True,
+    )
     items = list(st.session_state.get("outline_items") or [])
     pages = list(st.session_state.get("outline_pages") or [])
     if len(pages) < len(items):
@@ -1417,7 +1606,7 @@ def _build_ollama_section_review_request_payload(section: dict[str, Any], *, sec
         "section_title": section_title,
         "section_content": _section_review_content_ui(section)[:12000],
         "review_focus": review_focus or "章节完整性、缺项、风险点、可执行字段、证据支撑和表达清晰度",
-        "model": str(st.session_state.get("ollama_preview_model") or "qwen3:0.6b").strip() or "qwen3:0.6b",
+        "model": str(st.session_state.get("ollama_preview_model") or "qwen3.5:4b").strip() or "qwen3.5:4b",
         "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
         or "http://localhost:11434",
         "timeout": _ollama_preview_timeout_state(),
@@ -1651,7 +1840,7 @@ def _render_ollama_section_review_panel(
         )
         st.caption(
             f"当前章节：{section_title}；可复核正文长度={len(section_content)} 字；"
-            f"模型={st.session_state.get('ollama_preview_model') or 'qwen3:0.6b'}"
+            f"模型={st.session_state.get('ollama_preview_model') or 'qwen3.5:4b'}"
         )
 
         if st.button("本地模型复核本章", key=f"ollama_section_review_btn_v{variant}", type="secondary", use_container_width=True):
@@ -1674,7 +1863,7 @@ def _render_ollama_section_review_panel(
                     "ok": False,
                     "status": "fallback",
                     "review_type": "section_review",
-                    "model": str(st.session_state.get("ollama_preview_model") or "qwen3:0.6b"),
+                    "model": str(st.session_state.get("ollama_preview_model") or "qwen3.5:4b"),
                     "content": "",
                     "warning": str(e),
                 }
@@ -1781,7 +1970,7 @@ def _render_ollama_section_review_panel(
                             "original_content": section_content,
                             "draft_content": str(draft_content or "").strip(),
                             "provider": "ollama",
-                            "model": str(normalized.get("model") or st.session_state.get("ollama_preview_model") or "qwen3:0.6b"),
+                            "model": str(normalized.get("model") or st.session_state.get("ollama_preview_model") or "qwen3.5:4b"),
                             "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
                             or "http://localhost:11434",
                             "prompt": str(st.session_state.get("ollama_section_review_focus") or "").strip()
@@ -1897,7 +2086,7 @@ def _render_ollama_section_review_panel(
                         st.json(draft_preview_result.get("draft") or {})
 
 
-def _render_downloads() -> None:
+def _render_downloads(base_url: str, actions_key: str) -> None:
     result = st.session_state.get("run_result") or {}
     if not result:
         return
@@ -1906,20 +2095,47 @@ def _render_downloads() -> None:
     job_id = result.get("job_id", "")
     variants = int(result.get("variants") or 1)
     st.write(f"job_id: `{job_id}`")
+    delivery_receipt = result.get("delivery_receipt")
+    if isinstance(delivery_receipt, dict):
+        decision_digest = str(delivery_receipt.get("decision_digest") or "")
+        st.success(
+            "任务级交付凭证已通过：全部方案的内容、结构、图表、页面视觉和最终文件哈希均已封存。"
+        )
+        st.caption(
+            f"交付决策摘要：{decision_digest[:16] or '-'}…；"
+            f"方案数={delivery_receipt.get('variant_count') or variants}。"
+        )
+        st.download_button(
+            label="下载任务级质量与追溯凭证.json",
+            data=json.dumps(delivery_receipt, ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name=f"autoplan_{job_id}_delivery_receipt.json",
+            mime="application/json",
+            key="dl_delivery_receipt",
+            use_container_width=True,
+        )
 
     tabs = st.tabs([f"方案 v{i}" for i in range(1, variants + 1)])
     for i, tab in enumerate(tabs, start=1):
         with tab:
+            _render_review_insight_dashboard((result.get("insight_by_variant") or {}).get(i) or {}, i)
             files = result.get("artifacts", {}).get(i, {})
             if files.get("docx"):
+                st.success("专业 Word 已完成：Sonnet 5 内容精修、专业落版与质量闸门均已通过。")
                 st.download_button(
-                    label=f"下载施工组织设计 v{i}.docx",
+                    label=f"下载专业施工组织设计 v{i}.docx",
                     data=files["docx"],
                     file_name=f"autoplan_{job_id}_v{i}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     key=f"dl_docx_{i}",
                     use_container_width=True,
                 )
+                receipt = files.get("professional_render_receipt")
+                if isinstance(receipt, dict):
+                    st.caption(
+                        f"实际精修模型：{receipt.get('display_model') or 'Claude Sonnet 5'} "
+                        f"({receipt.get('model_id') or '-'})；招标排版约束优先；章节数="
+                        f"{receipt.get('section_count') or '-'}。中间稿仅供系统追溯，不对外展示。"
+                    )
             if files.get("compare_docx"):
                 st.download_button(
                     label=f"下载对照稿 v{i}.docx",
@@ -2029,6 +2245,70 @@ def _render_downloads() -> None:
             _render_ollama_section_review_panel(base_url, actions_key, result, i)
 
 
+def _format_ratio_ui(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.0f}%"
+    except (TypeError, ValueError):
+        return "待生成"
+
+
+def _render_review_insight_dashboard(insight: dict[str, Any], variant: int) -> None:
+    if not isinstance(insight, dict) or not insight:
+        return
+
+    st.markdown("#### 投标质量评审看板（内部质控）")
+    st.caption(str(insight.get("disclaimer") or "仅供内部质量控制，不代表官方评标结论。"))
+    metrics = insight.get("metrics") if isinstance(insight.get("metrics"), dict) else {}
+    quality_score = metrics.get("internal_quality_score")
+    quality_text = f"{float(quality_score):.0f}" if isinstance(quality_score, (int, float)) else "待生成"
+    columns = st.columns(6)
+    columns[0].metric("内部质量分", quality_text)
+    columns[1].metric("评分点覆盖", _format_ratio_ui(metrics.get("score_coverage_ratio")))
+    columns[2].metric("段落证据定位", _format_ratio_ui(metrics.get("evidence_traceability_ratio")))
+    columns[3].metric("章节证据覆盖", _format_ratio_ui(metrics.get("evidence_traceability_section_ratio")))
+    columns[4].metric("评分高风险", int(metrics.get("high_risk_score_item_count") or 0))
+    columns[5].metric("高等级问题", int(metrics.get("high_issue_count") or 0))
+
+    readiness_label = str(insight.get("readiness_label") or "待人工复核")
+    if str(insight.get("readiness") or "") == "human_final_review":
+        st.success(f"提交准备度：{readiness_label}")
+    else:
+        st.warning(f"提交准备度：{readiness_label}")
+
+    paragraph_count = int(metrics.get("evidence_paragraph_count") or 0)
+    traceable_paragraphs = int(metrics.get("evidence_traceable_paragraph_count") or 0)
+    section_count = int(metrics.get("evidence_section_count") or 0)
+    traceable_sections = int(metrics.get("evidence_traceable_section_count") or 0)
+    if paragraph_count or section_count:
+        st.caption(
+            f"证据定位明细：段落 {traceable_paragraphs}/{paragraph_count}；"
+            f"章节 {traceable_sections}/{section_count}。段落定位率低时不得用章节覆盖率替代。"
+        )
+
+    composite = insight.get("composite_score")
+    if isinstance(composite, (int, float)):
+        st.progress(max(0.0, min(1.0, float(composite) / 100.0)), text=f"内部综合质控 {float(composite):.1f} · {insight.get('quality_level') or '-'}")
+
+    dimensions = insight.get("dimensions") if isinstance(insight.get("dimensions"), list) else []
+    if dimensions:
+        st.dataframe(
+            [{"质控维度": row.get("dimension"), "状态": row.get("status")} for row in dimensions if isinstance(row, dict)],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    top_risks = insight.get("top_risks") if isinstance(insight.get("top_risks"), list) else []
+    if top_risks:
+        with st.expander(f"高风险评分项 · v{variant}", expanded=True):
+            st.dataframe(top_risks, use_container_width=True, hide_index=True)
+
+    actions = [str(item).strip() for item in (insight.get("priority_actions") or []) if str(item).strip()]
+    if actions:
+        with st.expander("优先整改与终审动作", expanded=True):
+            for index, action in enumerate(actions, start=1):
+                st.write(f"{index}. {action}")
+
+
 def _cancel_active_job(base_url: str, actions_key: str) -> None:
     active = st.session_state.get("active_job") or {}
     job_id = str(active.get("job_id") or "").strip()
@@ -2049,6 +2329,29 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
     artifacts: dict[int, dict[str, bytes]] = {}
     quality_map: dict[int, dict[str, Any]] = {}
     runtime_map: dict[int, dict[str, Any]] = {}
+    insight_map: dict[int, dict[str, Any]] = {}
+    from backend.zhifei_autoplan.review_insights import build_review_insight
+
+    delivery_receipt_bytes = _download_bytes(
+        base_url,
+        actions_key,
+        job_id,
+        "delivery_receipt",
+        1,
+        timeout=120,
+    )
+    delivery_receipt = json.loads(delivery_receipt_bytes.decode("utf-8"))
+    if not isinstance(delivery_receipt, dict):
+        raise RuntimeError("任务级交付凭证格式无效")
+    decision_digest = str(delivery_receipt.get("decision_digest") or "")
+    if (
+        str(delivery_receipt.get("status") or "").lower() != "pass"
+        or str(delivery_receipt.get("job_id") or "") != str(job_id)
+        or int(delivery_receipt.get("variant_count") or 0) != variants_n
+        or len(decision_digest) != 64
+    ):
+        raise RuntimeError("任务级交付凭证未通过一致性校验")
+
     for v in range(1, variants_n + 1):
         artifacts[v] = {}
         artifacts[v]["docx"] = _download_bytes(base_url, actions_key, job_id, "docx", v, timeout=600)
@@ -2079,6 +2382,29 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
             )
         except Exception:
             pass
+        # A completed job is deliverable only when the professional-render
+        # receipt is present and valid.  The public ``docx`` artifact above is
+        # already the Sonnet-refined Word file; the deterministic source DOCX
+        # is retained by the backend for audit and controlled re-rendering.
+        receipt_bytes = _download_bytes(
+            base_url,
+            actions_key,
+            job_id,
+            "professional_render_receipt",
+            v,
+            timeout=120,
+        )
+        professional_receipt = json.loads(receipt_bytes.decode("utf-8"))
+        if not isinstance(professional_receipt, dict):
+            raise RuntimeError(f"专业 Word 渲染回执格式无效（方案 {v}）")
+        quality_gate = professional_receipt.get("quality_gate")
+        if (
+            not isinstance(quality_gate, dict)
+            or not quality_gate
+            or any(value is not True for value in quality_gate.values())
+        ):
+            raise RuntimeError(f"专业 Word 质量门禁未通过（方案 {v}）")
+        artifacts[v]["professional_render_receipt"] = professional_receipt
         rec = variants_data[v - 1] if v <= len(variants_data) else {}
         qc = rec.get("quality_checks") or {}
         mode_policy = rec.get("mode_policy") if isinstance(rec.get("mode_policy"), dict) else {}
@@ -2108,6 +2434,7 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
             "boq_focus_item_typed_evidence": (qc.get("boq_focus_item_typed_evidence") or {}).get("ok"),
             "consistency": (qc.get("consistency") or {}).get("ok"),
         }
+        insight_map[v] = build_review_insight(rec if isinstance(rec, dict) else {})
 
     return {
         "job_id": job_id,
@@ -2115,6 +2442,9 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
         "artifacts": artifacts,
         "quality_by_variant": quality_map,
         "runtime_by_variant": runtime_map,
+        "insight_by_variant": insight_map,
+        "delivery_receipt": delivery_receipt,
+        "delivery_decision_digest": decision_digest,
         "result_json": raw_json,
     }
 
@@ -2142,6 +2472,8 @@ def _poll_active_job(base_url: str, actions_key: str, poll_sec: float) -> None:
 
     st.info(f"任务状态：{status}（job_id={job_id}）")
     if status in {"queued", "running"}:
+        activity_view = build_job_activity(job)
+        st.markdown(activity_html(activity_view), unsafe_allow_html=True)
         percent = _to_int(progress.get("percent") or 0, 0)
         percent = max(0, min(100, percent))
         if percent <= 0:
@@ -2157,9 +2489,11 @@ def _poll_active_job(base_url: str, actions_key: str, poll_sec: float) -> None:
         _render_progress(percent, line)
         ap = _to_int(agent_runtime.get("agent_parallelism") or 0, 0)
         vp = _to_int(agent_runtime.get("variant_parallelism") or 0, 0)
+        specialist_roles = _to_int(agent_runtime.get("specialist_role_count") or 14, 14)
         if ap > 0 or vp > 0:
             st.caption(
-                f"多Agent并行：章节并行={max(1, ap)}，方案并行={max(1, vp)}，"
+                f"专业角色={max(1, specialist_roles)}（按任务参与）；"
+                f"章节并行={max(1, ap)}，方案并行={max(1, vp)}，"
                 f"完成方案={max(0, variants_done)}/{max(1, variants_total)}"
             )
         return
@@ -2193,6 +2527,10 @@ def _review_cache_key(job_id: str, variant: int) -> str:
     return f"review_items_{job_id}_v{variant}"
 
 
+def _review_meta_key(job_id: str, variant: int) -> str:
+    return f"review_meta_{job_id}_v{variant}"
+
+
 def _load_review_items(base_url: str, actions_key: str, job_id: str, variant: int) -> list[dict[str, Any]]:
     resp = _get_json(
         base_url,
@@ -2220,6 +2558,11 @@ def _load_review_items(base_url: str, actions_key: str, job_id: str, variant: in
             }
         )
     st.session_state[_review_cache_key(job_id, variant)] = cleaned
+    st.session_state[_review_meta_key(job_id, variant)] = {
+        "result_version": str(resp.get("result_version") or ""),
+        "variant_version": str(resp.get("variant_version") or ""),
+        "issue_digest": str(resp.get("issue_digest") or ""),
+    }
     return cleaned
 
 
@@ -2245,9 +2588,15 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             st.error(f"载入失败: {e}")
 
     rows = st.session_state.get(_review_cache_key(job_id, int(variant))) or []
+    review_meta = st.session_state.get(_review_meta_key(job_id, int(variant))) or {}
     if not rows:
         st.info("点击“载入问题清单”后可进行审核回写。")
         return
+
+    st.caption(
+        "勾选项将由复核模型按章节精修，随后执行全量质检；仍有问题时自动进行至多一轮二次精修并重新导出。"
+        "“完整章节替换文本”仅供人工明确覆盖整章，通常请留空。"
+    )
 
     edited = st.data_editor(
         rows,
@@ -2264,12 +2613,12 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
             "problem": st.column_config.TextColumn("问题", width="large"),
             "suggestion": st.column_config.TextColumn("自动修订建议", width="large"),
             "section_excerpt": st.column_config.TextColumn("章节摘录", width="large"),
-            "replacement": st.column_config.TextColumn("替换文本（可选）", width="large"),
+            "replacement": st.column_config.TextColumn("完整章节替换文本（可选）", width="large"),
         },
     )
 
     b1, b2 = st.columns([1, 1])
-    if b1.button("应用勾选项并重写文档", key=f"apply_review_{job_id}_v{variant}", type="primary", use_container_width=True):
+    if b1.button("应用勾选项 · AI复核精修并重编", key=f"apply_review_{job_id}_v{variant}", type="primary", use_container_width=True):
         try:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
@@ -2284,47 +2633,137 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
                         "replacement": str(r.get("replacement") or ""),
                     }
                 )
-            resp = _post_json(
-                base_url,
-                "/actions/review/apply",
-                actions_key,
-                {"job_id": job_id, "variant": int(variant), "decisions": decisions, "apply_all": False},
-                timeout=900,
-            )
+            with st.spinner("正在执行章节精修、全量质检和二次复核，请勿关闭页面…"):
+                resp = _post_json(
+                    base_url,
+                    "/actions/review/apply",
+                    actions_key,
+                    {
+                        "job_id": job_id,
+                        "variant": int(variant),
+                        "decisions": decisions,
+                        "apply_all": False,
+                        "expected_result_version": review_meta.get("result_version", ""),
+                        "expected_variant_version": review_meta.get("variant_version", ""),
+                        "expected_issue_digest": review_meta.get("issue_digest", ""),
+                        "actor": "webui",
+                    },
+                    timeout=900,
+                )
             applied = int(resp.get("applied_count") or 0)
-            st.success(f"已回写 {applied} 项，正在刷新产物")
+            ai_chapters = int(resp.get("ai_rewritten_chapter_count") or 0)
+            second_round = int(resp.get("round_2_rewritten_chapter_count") or 0)
+            fallback_items = int(resp.get("template_fallback_item_count") or 0)
+            remaining = int(resp.get("remaining_issue_count") or 0)
+            st.success(
+                f"闭环完成：处理 {applied} 项，AI精修 {ai_chapters} 章，二次精修 {second_round} 章，"
+                f"模板降级 {fallback_items} 项；复核后剩余问题 {remaining} 项。正在刷新产物。"
+            )
             st.session_state["run_result"] = _collect_job_result(base_url, actions_key, job_id)
             _load_review_items(base_url, actions_key, job_id, int(variant))
             st.rerun()
         except Exception as e:
-            st.error(f"回写失败: {e}")
+            _render_review_apply_error(e, prefix="回写失败")
 
-    if b2.button("一键应用全部建议", key=f"apply_all_review_{job_id}_v{variant}", use_container_width=True):
+    if b2.button("全部问题 · AI复核精修并重编", key=f"apply_all_review_{job_id}_v{variant}", use_container_width=True):
         try:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
-            resp = _post_json(
-                base_url,
-                "/actions/review/apply",
-                actions_key,
-                {"job_id": job_id, "variant": int(variant), "apply_all": True, "decisions": []},
-                timeout=900,
-            )
+            with st.spinner("正在执行全量章节精修、质检和二次复核，请勿关闭页面…"):
+                resp = _post_json(
+                    base_url,
+                    "/actions/review/apply",
+                    actions_key,
+                    {
+                        "job_id": job_id,
+                        "variant": int(variant),
+                        "apply_all": True,
+                        "decisions": [],
+                        "expected_result_version": review_meta.get("result_version", ""),
+                        "expected_variant_version": review_meta.get("variant_version", ""),
+                        "expected_issue_digest": review_meta.get("issue_digest", ""),
+                        "actor": "webui",
+                    },
+                    timeout=900,
+                )
             applied = int(resp.get("applied_count") or 0)
-            st.success(f"已自动回写 {applied} 项，正在刷新产物")
+            ai_chapters = int(resp.get("ai_rewritten_chapter_count") or 0)
+            second_round = int(resp.get("round_2_rewritten_chapter_count") or 0)
+            fallback_items = int(resp.get("template_fallback_item_count") or 0)
+            remaining = int(resp.get("remaining_issue_count") or 0)
+            st.success(
+                f"全量闭环完成：处理 {applied} 项，AI精修 {ai_chapters} 章，二次精修 {second_round} 章，"
+                f"模板降级 {fallback_items} 项；复核后剩余问题 {remaining} 项。正在刷新产物。"
+            )
             st.session_state["run_result"] = _collect_job_result(base_url, actions_key, job_id)
             _load_review_items(base_url, actions_key, job_id, int(variant))
             st.rerun()
         except Exception as e:
-            st.error(f"全量回写失败: {e}")
+            _render_review_apply_error(e, prefix="全量回写失败")
+
+    with st.expander("安全版本与回退", expanded=False):
+        st.caption("每次回写前自动保留不可变版本；回退前也会先保存当前版本，避免误操作无法恢复。")
+        try:
+            revision_resp = _get_json(
+                base_url,
+                "/actions/review/revisions",
+                actions_key,
+                params={"job_id": job_id},
+                timeout=60,
+            )
+            revisions = revision_resp.get("revisions") if isinstance(revision_resp.get("revisions"), list) else []
+        except Exception as exc:
+            revisions = []
+            st.warning(f"版本列表暂不可用: {exc}")
+        if revisions:
+            revision_options = [str(row.get("revision_id") or "") for row in revisions if row.get("revision_id")]
+            selected_revision = st.selectbox(
+                "选择回退版本",
+                revision_options,
+                format_func=lambda revision_id: next(
+                    (
+                        f"{revision_id} · {row.get('reason', '')} · {row.get('created_at', '')}"
+                        for row in revisions
+                        if str(row.get("revision_id") or "") == revision_id
+                    ),
+                    revision_id,
+                ),
+                key=f"review_rollback_revision_{job_id}",
+            )
+            if st.button("回退到所选安全版本", key=f"review_rollback_{job_id}", use_container_width=True):
+                try:
+                    with st.spinner("正在验证版本并重新生成专业交付 Word…"):
+                        rollback_resp = _post_json(
+                            base_url,
+                            "/actions/review/rollback",
+                            actions_key,
+                            {
+                                "job_id": job_id,
+                                "revision_id": selected_revision,
+                                "expected_result_version": review_meta.get("result_version", ""),
+                                "actor": "webui",
+                            },
+                            timeout=900,
+                        )
+                    st.success(
+                        f"已安全回退到 {rollback_resp.get('restored_revision_id')}；"
+                        f"回退前版本保存在 {rollback_resp.get('safety_revision_id')}。"
+                    )
+                    st.session_state["run_result"] = _collect_job_result(base_url, actions_key, job_id)
+                    _load_review_items(base_url, actions_key, job_id, int(variant))
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"回退失败，当前 Word 未变更: {exc}")
+        else:
+            st.info("尚无回写前安全版本。首次应用问题清单后会自动建立。")
 
 
 _init_state()
 _apply_pending_widget_updates()
 _inject_ui_style()
 
-st.title("施组专家系统")
-st.caption("评审标准目录驱动 | 多Agent并行编制 | 全流程可追溯")
+st.markdown(hero_html(), unsafe_allow_html=True)
+st.markdown(workflow_html(), unsafe_allow_html=True)
 
 # 连接参数改为系统内置，不在页面展示。
 base_url = str(st.session_state.get("_base_url") or os.environ.get("ZF_BACKEND_BASE_URL", "http://127.0.0.1:8010")).strip()
@@ -2350,11 +2789,8 @@ if not identity_ok:
 
 status_col, stop_col = st.columns([4, 1])
 with status_col:
-    active = st.session_state.get("active_job") or {}
-    if active:
-        st.warning(f"任务执行中：{active.get('job_id')} | 状态：{active.get('status', 'queued')}")
-    else:
-        st.success("当前无运行中任务")
+    top_status_holder = st.empty()
+    _render_task_status(top_status_holder)
 with stop_col:
     if st.button("停止/中止任务", type="secondary", use_container_width=True):
         try:
@@ -2363,32 +2799,34 @@ with stop_col:
         except Exception as e:
             st.error(f"中止失败: {e}")
 
-col_left, col_right = st.columns([1, 1])
-
-with col_left:
-    st.subheader("资料上传")
-    st.caption("必传：招标文件/答疑、工程量清单；可选：图纸/标准资料、现场照片。")
-    up1, up2 = st.columns(2)
-    with up1:
+with st.container(border=True):
+    st.markdown(
+        section_heading_html("01", "资料上传", "必传招标文件与工程量清单；图纸、标准资料和现场照片可选。"),
+        unsafe_allow_html=True,
+    )
+    tender_col, boq_col, drawing_col, photo_col = st.columns(4)
+    with tender_col:
         tender_files = st.file_uploader(
             "招标文件/答疑",
             type=["pdf", "doc", "docx", "txt", "md"],
             accept_multiple_files=True,
             help="支持多选。",
         )
-        drawing_files = st.file_uploader(
-            "图纸/标准资料（含DXF ASCII）",
-            type=["pdf", "doc", "docx", "xlsx", "xls", "png", "jpg", "jpeg", "dwg", "dxf"],
-            accept_multiple_files=True,
-            help="支持多选。",
-        )
-    with up2:
+    with boq_col:
         boq_files = st.file_uploader(
             "工程量清单",
             type=["xlsx", "xls", "pdf", "doc", "docx"],
             accept_multiple_files=True,
             help="支持多选。",
         )
+    with drawing_col:
+        drawing_files = st.file_uploader(
+            "图纸/标准资料（含DXF ASCII）",
+            type=["pdf", "doc", "docx", "xlsx", "xls", "png", "jpg", "jpeg", "dwg", "dxf"],
+            accept_multiple_files=True,
+            help="支持多选。",
+        )
+    with photo_col:
         site_photo_files = st.file_uploader(
             "现场照片",
             type=["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
@@ -2400,34 +2838,67 @@ with col_left:
         f"图纸资料 {len(drawing_files or [])}，现场照片 {len(site_photo_files or [])}"
     )
 
-with col_right:
-    st.subheader("参数配置区")
-    st.selectbox("项目类型", options=PROJECT_TYPES, key="project_type")
-    st.selectbox(
-        "编制模式",
-        options=GENERATION_MODE_OPTIONS,
-        key="generation_mode",
-        format_func=lambda x: GENERATION_MODE_LABELS.get(str(x), str(x)),
+with st.container(border=True):
+    st.markdown(
+        section_heading_html("02", "项目配置", "设置项目属性、生成版本和评审目录策略。"),
+        unsafe_allow_html=True,
     )
-    st.text_input("项目主题", key="topic_text")
-    st.text_input("项目ID（自动取招标文件项目编号）", key="project_id_text")
-    st.multiselect("版本选择（A/B/C/D/E，可多选）", options=LOGIC_TEMPLATE_OPTIONS, key="selected_templates")
+    project_type_col, generation_mode_col, topic_col, project_id_col = st.columns(4)
+    with project_type_col:
+        st.selectbox("项目类型", options=PROJECT_TYPES, key="project_type")
+    with generation_mode_col:
+        st.selectbox(
+            "编制模式",
+            options=GENERATION_MODE_OPTIONS,
+            key="generation_mode",
+            format_func=lambda x: GENERATION_MODE_LABELS.get(str(x), str(x)),
+        )
+    with topic_col:
+        st.text_input("项目主题", key="topic_text")
+    with project_id_col:
+        st.text_input("项目 ID（自动识别）", key="project_id_text")
+
+    versions_col, pages_col, strict_outline_col = st.columns([2, 1, 1.35])
+    with versions_col:
+        st.multiselect(
+            "版本选择（A/B/C/D/E，可多选）",
+            options=LOGIC_TEMPLATE_OPTIONS,
+            key="selected_templates",
+        )
     sel_templates_now = _normalize_template_selection(st.session_state.get("selected_templates"))
     if not sel_templates_now:
-        st.session_state["selected_templates"] = ["A"]
         sel_templates_now = ["A"]
-    st.caption(f"当前将生成 {len(sel_templates_now)} 份：{' / '.join(sel_templates_now)}")
-    st.number_input("总页数目标（0=按招标）", min_value=0, max_value=2000, key="total_pages_target")
-    st.checkbox("目录严格对标评审标准（运行时覆盖当前目录）", key="strict_tender_outline")
-    st.caption("模式规则：模式1用于200页内质量优先；模式2用于500页以上高质量加速。")
+    with pages_col:
+        st.number_input("总页数目标（0=按招标）", min_value=0, max_value=2000, key="total_pages_target")
+    with strict_outline_col:
+        st.checkbox("目录严格对标评审标准", key="strict_tender_outline")
+    st.caption(
+        f"当前生成 {len(sel_templates_now)} 份：{' / '.join(sel_templates_now)}。"
+        "项目 ID 将在载入评审目录或启动生成时自动识别；模式1用于200页内质量优先，模式2用于500页以上高质量加速。"
+    )
 
-    st.text_area("全局指令（生成内容必须无条件服从）", key="global_instruction", height=90)
-    st.text_area("编制要求（每行一条）", key="requirements_text", height=120)
-
-_render_reference_libraries_panel(base_url, actions_key)
-_render_ollama_preview_panel(base_url, actions_key)
-current_case_library_options = _build_case_library_request_options()
-current_image_library_options = _build_image_library_request_options()
+constraint_lines = [
+    line.strip()
+    for line in str(st.session_state.get("requirements_text") or "").splitlines()
+    if line.strip()
+]
+with st.expander(
+    f"编制约束 · 已启用（合规底线 + {len(constraint_lines)} 条项目要求，点击展开修改）",
+    expanded=False,
+):
+    st.caption(
+        "高级设置：系统级合规底线自动作用于全部章节；项目补充要求按行进入生成、识别与检查链路。"
+        "日常使用无需展开。"
+    )
+    instruction_col, requirements_col = st.columns(2)
+    with instruction_col:
+        st.text_area("系统级合规底线（通常无需修改）", key="global_instruction", height=136)
+        st.caption(
+            "合规规则：不再使用固定“16条”。系统仅允许引用具有可追溯名称、编号、现行版本、"
+            "生效状态和官方来源的项目适用规范；未核验规范及冲突项不得自动裁决。"
+        )
+    with requirements_col:
+        st.text_area("项目补充编制要求（每行一条，可选）", key="requirements_text", height=120)
 
 outline = _render_outline_editor()
 
@@ -2526,7 +2997,12 @@ if c_health.button("检查后端连接", use_container_width=True):
     except Exception as e:
         st.error(f"连接失败: {e}")
 
-with st.expander("精细化排版渲染引擎", expanded=True):
+st.markdown(
+    section_heading_html("04", "排版与生成策略", "统一正文、标题、页边距和图表策略；专业参数默认收起。"),
+    unsafe_allow_html=True,
+)
+
+with st.expander("专业排版设置", expanded=False):
     st.markdown("**排版参数**")
     p1, p2, p3, p4 = st.columns(4)
     with p1:
@@ -2538,14 +3014,24 @@ with st.expander("精细化排版渲染引擎", expanded=True):
     with p4:
         st.number_input("标题字号", min_value=10, max_value=36, key="title_size")
 
-    p5, p6, p7 = st.columns([2, 1, 2])
+    p5, p6, p7, p8 = st.columns([1.25, 1.75, 1, 2])
     with p5:
-        st.number_input("行距（磅）", min_value=10.0, max_value=60.0, step=0.5, key="line_spacing_pt")
+        st.selectbox(
+            "行距方式（招标优先）",
+            options=["fixed_pt", "multiple"],
+            key="line_spacing_mode",
+            format_func=lambda value: "固定值（磅）" if value == "fixed_pt" else "倍数行距",
+        )
     with p6:
-        st.checkbox("章节另起新页", key="chapter_start_new_page")
+        if st.session_state.get("line_spacing_mode") == "multiple":
+            st.number_input("行距（倍）", min_value=1.0, max_value=3.0, step=0.1, key="line_spacing_multiple")
+        else:
+            st.number_input("行距（磅，无要求默认22）", min_value=10.0, max_value=60.0, step=0.5, key="line_spacing_pt")
     with p7:
+        st.checkbox("章节另起新页", key="chapter_start_new_page")
+    with p8:
         st.checkbox("启用图表策略", key="chart_enabled")
-        st.caption("自动策略：总页数<=200时每页2图；>200时每2页2图；“项目概况/工程概况”章节自动排除。")
+        st.caption("自动策略：每章按篇幅选取1–2幅有效图表，全篇最多24幅；工程概况自动排除；优先使用已上传图片，不重复填充。")
         st.selectbox("图表位置", options=["chapter", "end"], key="chart_position", format_func=lambda x: "按章节插入" if x == "chapter" else "文末集中")
 
     st.markdown("**页边距（cm）**")
@@ -2559,31 +3045,78 @@ with st.expander("精细化排版渲染引擎", expanded=True):
     with m4:
         st.number_input("左", min_value=0.5, max_value=6.0, step=0.1, key="margin_left_cm")
 
-    st.checkbox("按目标页数强制填充", key="enforce_chapter_pages")
+    st.checkbox(
+        "不足目标页数时强化技术内容（不补空白页）",
+        key="enforce_chapter_pages",
+        help=(
+            "仅在章节有效内容低于目标下限时，触发一次项目相关技术深化；"
+            "禁止插入空白页、重复段落、无关内容或虚构参数。"
+        ),
+    )
+    st.caption(
+        "目标页数用于内容规划和缺口提示，不作为机械凑页指标；"
+        "不足时只补充施工工序、资源配置、接口协调、风险控制、检验与验收证据等有效技术内容。"
+    )
     _outline_to_chapter_pages(outline)
     if outline:
         st.caption("每章页数请在“目录编辑器”中逐章设置（新增章节后可直接设置）。")
 
-with st.expander("高级参数（可选）", expanded=False):
+with st.expander("模型与生成策略（高级）", expanded=False):
     c1, c2, c3 = st.columns(3)
     with c1:
         st.checkbox("严格质控", key="quality_strict")
         st.checkbox("自动修订", key="auto_remediate")
         st.selectbox("修订模式", options=["template", "llm"], key="remediate_mode")
-        st.number_input("章节并行 Agent 数", min_value=1, max_value=16, key="agent_parallelism")
+        st.number_input(
+            "同时编写章节数（建议4）",
+            min_value=1,
+            max_value=16,
+            key="agent_parallelism",
+            help="控制同时调用模型编写的章节数量；不是专业Agent角色数量。提高该值会增加限流和失败风险。",
+        )
     with c2:
         st.checkbox("生成图片/思维导图", key="generate_images")
-        st.text_input("图片模型提供商", key="image_provider")
+        st.selectbox("图片模型提供商", options=["openai", "google"], key="image_provider")
         st.text_input("图片模型", key="image_model")
+        image_ready, image_status = _provider_status(st.session_state.get("image_provider"))
+        (st.success if image_ready else st.warning)(f"图片模型：{image_status}")
+        image_backup_provider = _env_first("ZF_IMAGE_FALLBACK1_PROVIDER")
+        image_backup_model = _env_first("ZF_IMAGE_FALLBACK1_MODEL")
+        if image_backup_provider and image_backup_model:
+            backup_ready, backup_status = _provider_status(image_backup_provider)
+            (st.success if backup_ready else st.warning)(
+                f"图片备用：{image_backup_provider}/{image_backup_model}；{backup_status}"
+            )
         st.number_input("方案并行数", min_value=1, max_value=5, key="variant_parallelism")
     with c3:
-        st.selectbox("主文本模型提供商", options=TEXT_PROVIDER_OPTIONS, key="provider_text")
+        st.selectbox(
+            "主文本模型提供商",
+            options=TEXT_PROVIDER_OPTIONS,
+            key="provider_text",
+            on_change=_sync_provider_model,
+            args=("provider_text", "model_text"),
+        )
         st.text_input("主文本模型", key="model_text")
         main_latest = _latest_model_for(st.session_state.get("provider_text"))
         if main_latest:
             st.caption(f"建议最新模型：{main_latest}")
+        main_ready, main_status = _provider_status(st.session_state.get("provider_text"))
+        (st.success if main_ready else st.warning)(main_status)
         st.text_input("主文本模型 API Key", key="api_key_text", type="password")
-    st.caption("并行说明：章节并行控制同一方案内的多Agent分工；方案并行控制A/B/C/D/E多份方案是否同时生成。")
+        if str(st.session_state.get("provider_text") or "").strip().lower() == "anthropic":
+            st.info(
+                "自动分级：Sonnet 5 负责目录解析与章节起草；Opus 5 负责关键章节精修和全文一致性终审。"
+            )
+            st.checkbox(
+                "允许 Fable 5 异常升级（默认关闭，仅在 Opus 无法完成时使用）",
+                key="allow_fable_escalation",
+            )
+    st.info(
+        "14个专业角色已启用：主控、合规、招标评分响应、证据溯源、技术深度、清单响应、图纸接口、"
+        "进度资源、风险闭环、图表质量、全篇一致性、专业渲染、文档视觉质检和交付验收。"
+        "系统按章节与交付阶段自动调度，不需要手工增加并发。"
+    )
+    st.caption("并行说明：章节并行只控制同时编写的章节数；方案并行控制A/B/C/D/E多份方案是否同时生成。")
 
     st.markdown("**文本模型备选链（主模型失败时自动切换）**")
     f1, f2 = st.columns(2)
@@ -2594,6 +3127,8 @@ with st.expander("高级参数（可选）", expanded=False):
             options=FALLBACK_PROVIDER_OPTIONS,
             key="fallback_1_provider",
             format_func=lambda x: "（不选择）" if str(x or "") == "" else str(x),
+            on_change=_sync_provider_model,
+            args=("fallback_1_provider", "fallback_1_model"),
         )
         st.text_input("备选1模型", key="fallback_1_model")
         f1_latest = _latest_model_for(st.session_state.get("fallback_1_provider"))
@@ -2607,6 +3142,8 @@ with st.expander("高级参数（可选）", expanded=False):
             options=FALLBACK_PROVIDER_OPTIONS,
             key="fallback_2_provider",
             format_func=lambda x: "（不选择）" if str(x or "") == "" else str(x),
+            on_change=_sync_provider_model,
+            args=("fallback_2_provider", "fallback_2_model"),
         )
         st.text_input("备选2模型", key="fallback_2_model")
         f2_latest = _latest_model_for(st.session_state.get("fallback_2_provider"))
@@ -2617,6 +3154,16 @@ with st.expander("高级参数（可选）", expanded=False):
     st.text_area("章级要求 JSON（可选）", key="chapter_requirements_text", height=100)
     st.text_area("参数覆盖 JSON（可选）", key="params_override_text", height=100)
 
+st.markdown(
+    section_heading_html("05", "知识资产与诊断工具", "案例库、图片库和本地模型预览默认收起，不干扰主编制流程。"),
+    unsafe_allow_html=True,
+)
+_render_reference_libraries_panel(base_url, actions_key)
+_render_ollama_preview_panel(base_url, actions_key)
+current_case_library_options = _build_case_library_request_options()
+current_image_library_options = _build_image_library_request_options()
+
+st.markdown(launch_html(), unsafe_allow_html=True)
 run_btn = st.button("一键生成", type="primary", use_container_width=True)
 
 progress_holder = st.empty()
@@ -2626,6 +3173,8 @@ log_holder = st.empty()
 if run_btn:
     st.session_state["run_logs"] = []
     st.session_state["run_result"] = None
+    _set_preflight_status(0, "正在校验输入")
+    _render_task_status(top_status_holder)
 
     try:
         if not actions_key.strip():
@@ -2644,7 +3193,6 @@ if run_btn:
         if not selected_templates:
             selected_templates = ["A"]
         variants_count = len(selected_templates)
-        st.session_state["selected_templates"] = selected_templates
         st.session_state["variants_value"] = variants_count
         total_pages_target_raw = int(st.session_state.get("total_pages_target") or 0)
         total_pages_target = total_pages_target_raw if total_pages_target_raw > 0 else None
@@ -2659,7 +3207,6 @@ if run_btn:
             "title_font": st.session_state.get("title_font"),
             "body_size": int(st.session_state.get("body_size") or 14),
             "title_size": int(st.session_state.get("title_size") or 16),
-            "line_spacing_pt": float(st.session_state.get("line_spacing_pt") or 22.0),
             "margins_cm": {
                 "top": float(st.session_state.get("margin_top_cm") or 2.5),
                 "right": float(st.session_state.get("margin_right_cm") or 2.0),
@@ -2675,11 +3222,17 @@ if run_btn:
                 "position": str(st.session_state.get("chart_position") or "chapter"),
             },
         }
+        if st.session_state.get("line_spacing_mode") == "multiple":
+            style["line_spacing"] = float(st.session_state.get("line_spacing_multiple") or 1.5)
+        else:
+            style["line_spacing_pt"] = float(st.session_state.get("line_spacing_pt") or 22.0)
         chapter_pages = _outline_to_chapter_pages(outline_now)
 
         pb = progress_holder.progress(0)
         status_holder.info("准备执行")
 
+        _set_preflight_status(1, "解析招标文件")
+        _render_task_status(top_status_holder)
         _append_log("步骤 1/6: 解析招标文件")
         _render_logs(log_holder)
         tender_parse_files = list(tender_files or [])
@@ -2761,9 +3314,11 @@ if run_btn:
         if isinstance(style.get("chart_policy"), dict):
             style["chart_policy"]["mode"] = "page_density_auto"
             style["chart_policy"]["every_n_chapters"] = int(chart_n)
-        _append_log("图表策略已启用：<=200页每页2图；>200页每2页2图；项目概况章节不插图。")
+        _append_log("图表策略已启用：每章按篇幅选取1–2幅有效图表，全篇最多24幅；项目概况章节不插图，不重复填充。")
         pb.progress(20)
 
+        _set_preflight_status(2, "解析工程量清单")
+        _render_task_status(top_status_holder)
         _append_log("步骤 2/6: 解析工程量清单")
         _render_logs(log_holder)
         _post_files(
@@ -2784,6 +3339,8 @@ if run_btn:
             ("现场照片", list(site_photo_files or []), "site_photo"),
         ]
         ingest_total = sum(len(g[1]) for g in ingest_groups)
+        _set_preflight_status(3, f"入库资料（{ingest_total} 个文件）")
+        _render_task_status(top_status_holder)
         _append_log(f"步骤 3/6: 入库资料 ({ingest_total} 个文件)")
         _render_logs(log_holder)
         for group_name, group_files, source_hint in ingest_groups:
@@ -2810,12 +3367,15 @@ if run_btn:
             "quality_strict": bool(mode_params["quality_strict"]),
             "auto_remediate": bool(mode_params["auto_remediate"]),
             "remediate_mode": str(mode_params["remediate_mode"]),
+            "allow_fable_escalation": bool(st.session_state.get("allow_fable_escalation", False)),
             "compare_mode": "summary",
             "compare_max_chars": int(mode_params["compare_max_chars"]),
             "compare_titles": None,
             "case_library": current_case_library_options,
             "image_library": current_image_library_options,
         }
+        _set_preflight_status(4, "保存计划配置")
+        _render_task_status(top_status_holder)
         _append_log("步骤 4/6: 保存计划配置")
         _render_logs(log_holder)
         _post_json(base_url, "/actions/plan/save", actions_key, plan_payload, params={"project_id": project_id})
@@ -2841,8 +3401,8 @@ if run_btn:
             "compare_mode": "summary",
             "compare_max_chars": int(mode_params["compare_max_chars"]),
             "generate_images": bool(mode_params["generate_images"]),
-            "image_provider": str(st.session_state.get("image_provider") or "google"),
-            "image_model": str(st.session_state.get("image_model") or "banana"),
+            "image_provider": str(st.session_state.get("image_provider") or "openai"),
+            "image_model": str(st.session_state.get("image_model") or "gpt-image-2"),
             "style": style,
             "chapter_pages": chapter_pages,
             "chapter_requirements": chapter_requirements or {},
@@ -2928,6 +3488,8 @@ if run_btn:
                 f"显式图片={len(current_image_library_options.get('selected_image_ids') or [])}"
             )
 
+        _set_preflight_status(5, "启动异步生成")
+        _render_task_status(top_status_holder)
         _append_log("步骤 5/6: 启动异步生成")
         _render_logs(log_holder)
         job = _post_json(base_url, "/actions/generate_async", actions_key, generate_payload, timeout=180)
@@ -2945,11 +3507,20 @@ if run_btn:
             "base_url": base_url,
             "started_at": time.time(),
         }
+        st.session_state["preflight_status"] = None
+        _render_task_status(top_status_holder)
         _append_log(f"步骤 6/6: 任务已排队 job_id={job_id}")
         _render_logs(log_holder)
         status_holder.success("任务已提交，正在后台生成")
 
     except Exception as e:
+        current_preflight = st.session_state.get("preflight_status") or {}
+        _set_preflight_status(
+            int(current_preflight.get("stage") or 0),
+            str(e),
+            state="failed",
+        )
+        _render_task_status(top_status_holder)
         status_holder.error(f"执行失败: {e}")
         _append_log(f"失败: {e}")
 
@@ -2960,14 +3531,16 @@ if st.session_state.get("active_job"):
     try:
         _poll_active_job(base_url, actions_key, float(poll_sec))
         st.session_state["poll_fail_count"] = 0
+        _render_task_status(top_status_holder)
     except Exception as e:
         fail_n = int(st.session_state.get("poll_fail_count") or 0) + 1
         st.session_state["poll_fail_count"] = fail_n
         _append_log(f"轮询失败: {e}")
         st.warning(f"后端暂时不可达，正在自动重连（第{fail_n}次）：{e}")
+        _render_task_status(top_status_holder)
 
 if st.session_state.get("run_result"):
-    _render_downloads()
+    _render_downloads(base_url, actions_key)
     _render_review_workspace(base_url, actions_key)
     with st.expander("JSON结果", expanded=False):
         raw = st.session_state["run_result"].get("result_json") or b"{}"

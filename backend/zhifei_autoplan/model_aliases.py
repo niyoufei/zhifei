@@ -6,13 +6,16 @@ from typing import Tuple
 
 _LATEST_RUNTIME_MODELS = {
     "google": str(os.environ.get("GEMINI_TEXT_MODEL") or os.environ.get("ZF_GOOGLE_TEXT_MODEL_ID") or "gemini-3.1-pro-preview").strip(),
-    "openai": str(os.environ.get("OPENAI_TEXT_MODEL_MAIN") or os.environ.get("ZF_OPENAI_TEXT_MODEL_ID") or "gpt-5.4").strip(),
+    "openai": str(os.environ.get("OPENAI_TEXT_MODEL_MAIN") or os.environ.get("ZF_OPENAI_TEXT_MODEL_ID") or "gpt-5.6-sol").strip(),
+    "anthropic": str(os.environ.get("ANTHROPIC_TEXT_MODEL_MAIN") or os.environ.get("ZF_ANTHROPIC_TEXT_MODEL_ID") or "claude-opus-5").strip(),
     "grok": str(os.environ.get("ZF_GROK_TEXT_MODEL_ID") or "grok-4-1-fast-reasoning").strip(),
 }
 
 _DISPLAY_MODEL_ALIASES = {
     ("google", "gemini3.1pro"): lambda: latest_runtime_model_for("google"),
     ("openai", "chatgpt-5.4"): lambda: latest_runtime_model_for("openai"),
+    ("openai", "chatgpt-5.6"): lambda: latest_runtime_model_for("openai"),
+    ("anthropic", "claude-latest"): lambda: latest_runtime_model_for("anthropic"),
 }
 
 _LEGACY_RUNTIME_ALIASES = {
@@ -20,6 +23,7 @@ _LEGACY_RUNTIME_ALIASES = {
     ("google", "gemini-2.5-flash"): lambda: latest_runtime_model_for("google"),
     ("google", "gemini-2.0-flash"): lambda: latest_runtime_model_for("google"),
     ("openai", "gpt-5.2-pro"): lambda: latest_runtime_model_for("openai"),
+    ("openai", "gpt-5.4"): lambda: latest_runtime_model_for("openai"),
 }
 
 

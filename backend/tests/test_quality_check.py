@@ -21,6 +21,7 @@ from backend.zhifei_autoplan.quality_check import (
     _check_required_topics,
     _check_required_topics_detail,
     apply_remediation,
+    ensure_local_export_mandatory_content,
     run_quality_checks,
     strip_nonconcrete_language,
 )
@@ -558,6 +559,37 @@ class TestApplyRemediation:
         assert "【自动补充】替换空话为可执行项" in sections[0]["content"]
 
 
+class TestEnsureLocalExportMandatoryContent:
+    def test_adds_both_control_tables_to_a_preferred_section(self):
+        sections = [
+            {"title": "第一章 工程概况", "content": "项目概况。"},
+            {"title": "第十二章 安全风险与控制措施", "content": "风险识别与措施闭环。"},
+        ]
+
+        added = ensure_local_export_mandatory_content(sections)
+
+        assert added == ["劳保用品配置矩阵", "关键工序控制点表"]
+        assert "劳保用品配置矩阵" not in sections[0]["content"]
+        assert "劳保用品配置矩阵" in sections[1]["content"]
+        assert "关键工序控制点表" in sections[1]["content"]
+        assert "不另造项目参数" in sections[1]["content"]
+
+    def test_is_idempotent(self):
+        sections = [{"title": "安全措施", "content": "风险与措施。"}]
+
+        assert ensure_local_export_mandatory_content(sections)
+        first = sections[0]["content"]
+        assert ensure_local_export_mandatory_content(sections) == []
+        assert sections[0]["content"] == first
+
+    def test_preserves_existing_remediation_source(self):
+        sections = [{"title": "安全措施", "content": "风险与措施。", "auto_remediated": "llm"}]
+
+        ensure_local_export_mandatory_content(sections)
+
+        assert sections[0]["auto_remediated"] == "llm"
+
+
 class TestStripNonconcreteLanguage:
     def test_strip_nonconcrete_language(self):
         text = "压实责任，形成工作合力，严格检查并确保落实。"
@@ -752,6 +784,22 @@ class TestStrictQualityGate:
         assert result["consistency"]["ok"] is False
         assert any(r["type"] == "consistency_conflict" for r in result["remediation"])
 
+    def test_strict_mode_does_not_multiply_repeated_project_totals_by_chapter(self):
+        sections = [
+            {
+                "title": f"第{i}章",
+                "content": "本项目总工期1216天，资源峰值8人，关键线路间隔3天。",
+            }
+            for i in range(1, 13)
+        ]
+
+        result = run_quality_checks(None, [], sections, strict=True)
+
+        assert result["consistency"]["ok"] is True
+        assert result["consistency"]["conflicts"] == []
+        cpm = result["consistency"].get("cpm") or {}
+        assert cpm.get("comparison_eligible", {}).get("工期") is False
+
     def test_strict_mode_boq_focus_coverage(self):
         sections = [{"title": "工程概况", "content": "本章未覆盖重点清单项。"}]
         boq_focus = {"must_cover_keywords": ["钢筋混凝土管", "防水卷材"]}
@@ -764,3 +812,69 @@ class TestStrictQualityGate:
         result = run_quality_checks(None, [], sections, strict=True)
         assert result["officialese"]["ok"] is False
         assert any(i["type"] == "bureaucratic_phrase" for i in result["issue_list"])
+
+    def test_strict_mode_flags_material_cross_chapter_repetition(self):
+        shared_a = "项目部建立统一协调机制并持续加强过程管理，确保各专业施工活动有序衔接"
+        shared_b = "施工过程中严格落实既定部署并动态优化资源配置，全面保障各项工作顺利推进"
+        sections = [
+            {
+                "title": "第一章",
+                "content": f"{shared_a}。{shared_b}。本章分析现场条件并提出组织方法。本章列出主要工作流程和实施顺序。",
+            },
+            {
+                "title": "第二章",
+                "content": f"{shared_a}。{shared_b}。本章说明技术路线并梳理关键接口。本章给出责任边界和检查安排。",
+            },
+        ]
+
+        result = run_quality_checks(None, [], sections, strict=True)
+
+        assert result["repetition_control"]["ok"] is False
+        assert any(i["type"] == "repetitive_content" for i in result["issue_list"])
+
+    def test_strict_mode_flags_long_generic_content_without_project_evidence(self):
+        generic = (
+            "本章围绕总体目标开展系统分析，结合现场条件统筹组织各项工作并做好相互配合。"
+            "通过完善管理机制和组织体系推动各项任务有序开展，并根据实际情况持续优化实施安排。"
+            "各参与方应加强沟通协调，及时研究有关事项，保障工作过程衔接顺畅并实现预期目标。"
+        ) * 4
+        result = run_quality_checks(None, [], [{"title": "通用方案", "content": generic}], strict=True)
+
+        assert result["content_specificity"]["ok"] is False
+        assert any(i["type"] == "low_specificity" for i in result["issue_list"])
+
+    def test_strict_mode_accepts_long_project_specific_content(self):
+        specific = (
+            "钢筋进场后按60t为1批复核合格证并见证取样，质量员负责登记《材料验收台账》。"
+            "风险:批次混用→控制:分区挂牌并按炉批号追溯→验证:每批核对1次复验报告，偏差当天整改。"
+            "【证据:钢筋清单.pdf#p3_ab12cd34@120】"
+        ) * 4
+        result = run_quality_checks(None, [], [{"title": "钢筋工程", "content": specific}], strict=True)
+
+        assert result["content_specificity"]["ok"] is True
+
+    def test_strict_mode_flags_sparse_chapter_instead_of_encouraging_page_fill(self):
+        result = run_quality_checks(
+            None,
+            [],
+            [{"title": "施工部署", "content": "本章说明施工部署和组织安排。"}],
+            strict=True,
+        )
+
+        assert result["content_density"]["ok"] is False
+        assert any(i["type"] == "content_density_gap" for i in result["issue_list"])
+        issue = next(i for i in result["issue_list"] if i["type"] == "content_density_gap")
+        assert "空白页" in issue["suggestion"]
+        assert "重复段落" in issue["suggestion"]
+
+    def test_strict_mode_accepts_concise_but_substantive_chapter(self):
+        content = (
+            "钢筋进场后按60t为1批复核合格证并见证取样，质量员登记材料验收台账。"
+            "风险:批次混用→控制:按炉批号分区挂牌并设置隔离标识→验证:每批核对1次复验报告。"
+            "偏差在24小时内整改并由项目总工复核关闭，形成检查记录与移交清单。"
+            "加工区、待检区和合格区分别设置责任牌，班组长每日巡检，周例会汇总偏差趋势并更新纠正措施。"
+            "【证据:钢筋清单.pdf#p3_ab12cd34@120】"
+        )
+        result = run_quality_checks(None, [], [{"title": "钢筋工程", "content": content}], strict=True)
+
+        assert result["content_density"]["ok"] is True

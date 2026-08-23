@@ -506,11 +506,13 @@ def test_docx_isolation_guard_id_is_deterministic():
     assert explicit["docx_isolation_guard_id"] == "fixed-docx-isolation-guard-id"
 
 
-def test_importing_helper_does_not_pull_main_chain_or_docx_modules():
-    leaked_modules = MAIN_CHAIN_MODULES.intersection(sys.modules)
+def test_importing_helper_does_not_pull_main_chain_or_docx_modules(assert_clean_import):
+    assert_clean_import(
+        "backend.zhifei_autoplan.docx_isolation_guard",
+        MAIN_CHAIN_MODULES,
+    )
     source = helper_source()
 
-    assert leaked_modules == set()
     assert "from docx" not in source
     assert "import docx" not in source
     assert "python_docx" not in source

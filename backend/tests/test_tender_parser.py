@@ -59,6 +59,22 @@ class TestInit:
         assert parser.llm is mock_llm
 
 
+class TestStyleRequirements:
+    """招标版式要求应覆盖默认值，并保持两种行距模式互斥。"""
+
+    def test_extract_fixed_line_spacing(self, parser):
+        style, _ = parser._extract_style_requirements("正文采用宋体四号，行距固定值24磅。")
+
+        assert style["line_spacing_pt"] == 24.0
+        assert "line_spacing" not in style
+
+    def test_extract_multiple_line_spacing(self, parser):
+        style, _ = parser._extract_style_requirements("正文采用宋体四号，行距为1.5倍。")
+
+        assert style["line_spacing"] == 1.5
+        assert "line_spacing_pt" not in style
+
+
 # ==============================================================================
 # _is_qa_file tests
 # ==============================================================================
@@ -239,6 +255,29 @@ class TestExtractProjectMeta:
         assert name == "长山路建设工程"
         assert code is None
 
+    def test_extract_project_meta_rebuilds_wrapped_road_title(self, parser):
+        text = """包河经开区延边路（繁华大道-沈阳路）、
+月谭路（饮马井路-南淝河路）、饮马井路（月谭路-长
+春路）等3条道路工程补疑2
+招标项目编号：2025BFBGZ50935
+"""
+        name, code = parser._extract_project_meta(text)
+        assert name == (
+            "包河经开区延边路（繁华大道-沈阳路）、"
+            "月谭路（饮马井路-南淝河路）、"
+            "饮马井路（月谭路-长春路）等3条道路工程"
+        )
+        assert code == "2025BFBGZ50935"
+
+    def test_extract_project_meta_ignores_unbalanced_label_tail(self, parser):
+        text = """项目名称：春路）等3条道路工程补疑2
+包河经开区延边路（繁华大道-沈阳路）、月谭路（饮马井路-南淝河路）、
+饮马井路（月谭路-长春路）等3条道路工程
+"""
+        name, _ = parser._extract_project_meta(text)
+        assert name.startswith("包河经开区延边路")
+        assert name.endswith("等3条道路工程")
+
     def test_extract_outline_from_review_standard_block(self, parser):
         text = """技术文件详细评审标准
 依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
@@ -301,6 +340,56 @@ class TestExtractProjectMeta:
         assert len(outline) == 10
         assert outline[0] == "工程概况"
         assert outline[-1] == "施工总平面布置图"
+
+    def test_extract_outline_review_standard_stops_before_scoring_and_proof_prose(self, parser):
+        text = """技术文件详细评审标准
+依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
+1）针对工程项目整体理解
+2）工程重点难点的保障体系与措施
+3）拟采用的新技术、新工艺（如有）
+4）确保工期与质量的保障体系与措施
+5）确保人、材、机的保障体系与措施
+6）确保安全文明生产的管理体系与措施
+7）本项评委打分为一般或优秀的，评委须提出充足的理由并在评标报告中陈述
+8）本项满分5分
+9）投标人提供的项目经理业绩证明材料应反映岗位信息
+"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert outline == [
+            "针对工程项目整体理解",
+            "工程重点难点的保障体系与措施",
+            "拟采用的新技术、新工艺（如有）",
+            "确保工期与质量的保障体系与措施",
+            "确保人、材、机的保障体系与措施",
+            "确保安全文明生产的管理体系与措施",
+        ]
+
+    def test_extract_outline_stops_before_compilation_note_and_bid_price_formula(self, parser):
+        text = """技术文件详细评审标准
+依据投标人提供的施工组织设计进行评审，包括但不限于以下内容：
+1）针对工程项目整体理解
+2）工程重点难点及危大工程的保障体系与措施
+3）拟采用的新技术、新工艺（如有）
+4）确保工期与质量的保障体系与措施
+5）确保人、材、机的保障体系与措施
+6）确保安全文明生产的管理体系与措施
+7）投标结合工程实际特点及需要，国家及地方现有工法规范已有的内容无需重复编制
+8）项目经理业绩提供的业绩证明资料同投标人须知前附表附录5中规定提供的业绩证明材料
+9）确定评标基准价，评标价平均值等于评标基准价
+10）报价文件，投标报价85分
+11）若T大于等于Z的60%，按照T从高到低确定规定数量
+"""
+        outline, meta = parser._extract_outline(text)
+        assert meta.get("source") == "review_standard"
+        assert outline == [
+            "针对工程项目整体理解",
+            "工程重点难点及危大工程的保障体系与措施",
+            "拟采用的新技术、新工艺（如有）",
+            "确保工期与质量的保障体系与措施",
+            "确保人、材、机的保障体系与措施",
+            "确保安全文明生产的管理体系与措施",
+        ]
 
     def test_extract_outline_review_standard_not_polluted_by_contract_list(self, parser):
         text = """技术文件详细评审标准
@@ -611,6 +700,28 @@ class TestParse:
             result = await parser.parse(["/path/tender.pdf", "/path/答疑.pdf"])
 
         assert isinstance(result, TenderIndexMatrix)
+
+    @pytest.mark.asyncio
+    async def test_parse_style_matrix_uses_clarification_over_tender(self, parser):
+        def mock_open(path):
+            mock_page = MagicMock()
+            if "答疑" in path:
+                mock_page.extract_text.return_value = "澄清：正文采用仿宋体小四，行距固定值24磅。"
+            else:
+                mock_page.extract_text.return_value = "招标要求：正文采用宋体四号，行距固定值22磅。"
+            mock_pdf = MagicMock()
+            mock_pdf.pages = [mock_page]
+            mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+            mock_pdf.__exit__ = MagicMock(return_value=None)
+            return mock_pdf
+
+        with patch("pdfplumber.open", side_effect=mock_open):
+            result = await parser.parse(["/path/tender.pdf", "/path/答疑.pdf"])
+
+        matrix = result.extraction_meta["requirement_decision_matrix"]
+        assert matrix["status"] == "resolved"
+        assert matrix["fields"]["line_spacing"]["selected"]["source_type"] == "clarification"
+        assert result.style["line_spacing_pt"] == 24.0
 
     @pytest.mark.asyncio
     async def test_parse_returns_matrix_structure(self, parser):

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
 import tempfile
+import threading
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -12,10 +16,21 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, UploadFil
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
 
-from backend.zhifei_autoplan.job_store import create_job, get_job, update_job
+from backend.zhifei_autoplan.job_store import create_job, get_job, heartbeat_job, update_job
 from backend.zhifei_autoplan import export_docx_service as export_docx_core
-from backend.zhifei_autoplan.orchestrator import run_autoplan
+from backend.zhifei_autoplan.orchestrator import (
+    _build_boq_focus,
+    _normalize_provider_chain,
+    _provider_chain_for_role,
+    _resolve_provider_api_key,
+    run_autoplan,
+)
+from backend.zhifei_autoplan.multi_agent_runtime import AGENT_ROLE_DIRECTIVES
 from backend.zhifei_autoplan.output_artifacts import save_outputs as save_output_artifacts
+from backend.zhifei_autoplan.professional_document_renderer import (
+    ProfessionalRenderError,
+    render_professional_document,
+)
 from backend.zhifei_autoplan.plan_store import load_plan, save_plan
 from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
@@ -23,8 +38,16 @@ from backend.zhifei_autoplan.tender_store import save_tender_matrix
 from backend.zhifei_autoplan.boq_store import save_boq_data
 from backend.zhifei_autoplan.tender_store import load_tender_matrix
 from backend.zhifei_autoplan.boq_store import load_boq_data
-from backend.zhifei_autoplan.quality_check import run_quality_checks, strip_nonconcrete_language
-from backend.zhifei_autoplan.orchestrator import _build_boq_focus
+from backend.zhifei_autoplan.quality_check import apply_remediation, run_quality_checks, strip_nonconcrete_language
+from backend.zhifei_autoplan.utils.llm_client import LLMClient
+from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
+from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
+from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
+from backend.zhifei_autoplan.requirement_evidence_matrix import (
+    finalize_requirement_evidence_matrix,
+    validate_requirement_evidence_matrix,
+)
+from backend.zhifei_autoplan.compliance_policy import audit_standard_citations
 from backend.zhifei_autoplan.params_runtime import load_params, save_params
 from backend.zhifei_autoplan.four_new_tech import recommend_four_new
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
@@ -49,6 +72,18 @@ from backend.zhifei_autoplan.section_drafts import (
     compute_section_draft_diff,
     reject_section_draft,
     rollback_section_draft,
+)
+from backend.zhifei_autoplan.review_revision import (
+    artifact_manifest,
+    canonical_digest,
+    create_revision_snapshot,
+    finalize_revision_snapshot,
+    issue_set_digest,
+    list_revision_snapshots,
+    load_revision_snapshot,
+    result_version,
+    stable_issue_id,
+    variant_version,
 )
 from backend.zhifei_autoplan.zbid_snapshot_mapper import map_zbid_snapshot_to_zdoc_draft_input
 from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
@@ -88,6 +123,10 @@ class ActionsGenerateRequest(BaseModel):
     # 并行控制：章节级 Agent 并行数（单份方案内），以及多份方案并行数（A/B/C/D/E 之间）。
     agent_parallelism: int | None = None
     variant_parallelism: int | None = None
+    max_model_parallelism: int | None = None
+    max_model_attempts: int | None = None
+    max_model_input_chars: int | None = None
+    max_model_output_tokens: int | None = None
     strict_tender_outline: bool | None = None
     total_pages_target: int | None = None
     chapter_pages: dict | None = None
@@ -117,6 +156,13 @@ class ActionsGenerateRequest(BaseModel):
     params_override: dict | None = None
     case_library: dict | None = None
     image_library: dict | None = None
+    # 实战生成默认先验证模型/凭据，并在整条文本模型链失效时停止，避免模板稿冒充成功结果。
+    model_preflight: bool | None = True
+    fail_on_model_exhaustion: bool | None = True
+    # Resume integrity-bound completed chapters from a prior failed/cancelled
+    # job. A changed project, outline, style, requirement plan or model route
+    # produces a different binding and therefore cannot reuse old content.
+    resume_from_job_id: str | None = None
 
 
 class ActionsPlanRequest(BaseModel):
@@ -175,6 +221,11 @@ class ActionsExportRequest(BaseModel):
     case_reference_pack: dict | None = None
 
 
+class ActionsProfessionalRenderRequest(BaseModel):
+    job_id: str
+    variant: int = 1
+
+
 class ActionsParamsSetRequest(BaseModel):
     update: dict
     merge: bool = True
@@ -200,6 +251,17 @@ class ActionsReviewApplyRequest(BaseModel):
     variant: int = 1
     apply_all: bool = False
     decisions: List[ActionsReviewDecision] = []
+    expected_result_version: str = ""
+    expected_variant_version: str = ""
+    expected_issue_digest: str = ""
+    actor: str | None = None
+
+
+class ActionsReviewRollbackRequest(BaseModel):
+    job_id: str
+    revision_id: str
+    expected_result_version: str = ""
+    actor: str | None = None
 
 
 class ActionsOllamaPreviewRequest(BaseModel):
@@ -480,6 +542,8 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
         payload["agent_parallelism"] = max(1, min(16, int(ap)))
 
     payload["generation_mode"] = mode
+    payload.setdefault("model_preflight", True)
+    payload.setdefault("fail_on_model_exhaustion", True)
     payload["_mode_policy"] = {
         "mode_effective": mode,
         "auto_switched": bool(auto_switched),
@@ -549,7 +613,214 @@ def _merge_plan_defaults(payload: dict) -> dict:
 
 
 def _save_outputs(base_name: str, results: list[dict]) -> dict:
+    postprocess_blocked = [
+        {
+            "variant": index,
+            "errors": row.get("postprocess_errors") or [],
+        }
+        for index, row in enumerate(results, start=1)
+        if isinstance(row, dict) and bool(row.get("postprocess_errors"))
+    ]
+    if postprocess_blocked:
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "code": "POSTPROCESS_REBUILD_FAILED",
+                    "message": "最终内容复核后的派生报告重建失败，禁止沿用旧质量结论生成交付文件。",
+                    "variants": postprocess_blocked,
+                },
+                ensure_ascii=False,
+            )
+        )
+    blocked = [
+        {
+            "variant": index,
+            "decision_digest": (row.get("delivery_quality_gate") or {}).get("decision_digest"),
+            "blockers": (row.get("delivery_quality_gate") or {}).get("blockers") or [],
+        }
+        for index, row in enumerate(results, start=1)
+        if isinstance(row, dict)
+        and isinstance(row.get("delivery_quality_gate"), dict)
+        and not bool((row.get("delivery_quality_gate") or {}).get("delivery_allowed"))
+    ]
+    if blocked:
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "code": "DELIVERY_QUALITY_GATE_BLOCKED",
+                    "message": "最终专业交付质量门未通过，禁止生成交付文件。",
+                    "variants": blocked,
+                },
+                ensure_ascii=False,
+            )
+        )
     return save_output_artifacts(base_name, results)
+
+
+def _clamp_execution_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    return max(int(minimum), min(int(maximum), parsed))
+
+
+def _prepare_execution_control(
+    payload: dict[str, Any],
+    *,
+    cancel_callback: Any | None = None,
+) -> tuple[ExecutionControlRuntime, dict[str, Any]]:
+    """Apply one execution policy to every generation entry point.
+
+    The returned runtime is intentionally attached only after JSON cloning so
+    secrets, callbacks and synchronization primitives never enter persisted
+    request payloads.  All chapter, variant and professional-render model calls
+    then share the same concurrency semaphore and cumulative budgets.
+    """
+
+    variants_total = _clamp_execution_int(payload.get("variants") or 1, 1, 1, 5)
+    agent_parallelism = _clamp_execution_int(
+        payload.get("agent_parallelism") or 4,
+        4,
+        1,
+        16,
+    )
+    variant_parallelism = _clamp_execution_int(
+        payload.get("variant_parallelism") or 1,
+        1,
+        1,
+        5,
+    )
+    max_model_parallelism = _clamp_execution_int(
+        payload.get("max_model_parallelism") or 8,
+        8,
+        1,
+        16,
+    )
+    variant_parallelism = min(variant_parallelism, variants_total, max_model_parallelism)
+    agent_parallelism = min(
+        agent_parallelism,
+        max(1, max_model_parallelism // max(1, variant_parallelism)),
+    )
+
+    chapter_count = max(
+        1,
+        len(payload.get("outline")) if isinstance(payload.get("outline"), list) else 1,
+    )
+    default_attempts = min(
+        1_200,
+        max(96, variants_total * (chapter_count * 10 + 24)),
+    )
+    max_model_attempts = _clamp_execution_int(
+        payload.get("max_model_attempts") or default_attempts,
+        default_attempts,
+        1,
+        10_000,
+    )
+    default_input_chars = max(12_000_000, max_model_attempts * 120_000)
+    default_output_tokens = max(1_500_000, max_model_attempts * 16_000)
+    runtime = ExecutionControlRuntime(
+        max_concurrency=max_model_parallelism,
+        max_model_attempts=max_model_attempts,
+        max_input_chars=_clamp_execution_int(
+            payload.get("max_model_input_chars") or default_input_chars,
+            default_input_chars,
+            1,
+            2_000_000_000,
+        ),
+        max_requested_output_tokens=_clamp_execution_int(
+            payload.get("max_model_output_tokens") or default_output_tokens,
+            default_output_tokens,
+            1,
+            200_000_000,
+        ),
+        cancel_callback=cancel_callback,
+    )
+    policy = {
+        "schema_version": "execution-policy-v1",
+        "max_model_parallelism": max_model_parallelism,
+        "chapter_task_parallelism": agent_parallelism,
+        "variant_parallelism": variant_parallelism,
+        **runtime.snapshot()["limits"],
+    }
+    payload["variants"] = variants_total
+    payload["agent_parallelism"] = agent_parallelism
+    payload["variant_parallelism"] = variant_parallelism
+    payload["max_model_parallelism"] = max_model_parallelism
+    payload["_execution_policy"] = policy
+    return runtime, policy
+
+
+def _set_output_variant_path(result: dict[str, Any], key: str, variant: int, value: str) -> None:
+    values = list(result.get(key)) if isinstance(result.get(key), list) else []
+    while len(values) < variant:
+        values.append(None)
+    values[variant - 1] = value
+    result[key] = values
+
+
+async def _render_professional_outputs_for_job(
+    *,
+    job_id: str,
+    outputs: dict[str, Any],
+    progress_callback: Any | None = None,
+    execution_runtime: ExecutionControlRuntime | None = None,
+) -> dict[str, Any]:
+    """Promote Sonnet-refined DOCX files to the only user-facing Word outputs.
+
+    The deterministic source export remains available under ``source_docx`` for
+    audit and controlled re-rendering.  The public ``docx`` slot is replaced
+    only after every requested variant passes the professional-render gates.
+    """
+
+    delivery = dict(outputs or {})
+    raw_sources = delivery.get("source_docx")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raw_sources = delivery.get("docx")
+    source_docx = [str(path) for path in raw_sources] if isinstance(raw_sources, list) else []
+    if not source_docx:
+        raise ProfessionalRenderError("中间 Word 不存在，无法自动生成专业交付版")
+    if not delivery.get("json"):
+        raise ProfessionalRenderError("生成结果 JSON 不存在，无法自动生成专业交付版")
+
+    render_source = dict(delivery)
+    render_source["docx"] = list(source_docx)
+    professional_docx: list[str] = []
+    professional_json: list[str] = []
+    professional_receipts: list[str] = []
+    total = len(source_docx)
+    for variant in range(1, total + 1):
+        if callable(progress_callback):
+            progress_callback(variant, total)
+        render_kwargs: dict[str, Any] = {
+            "job_id": job_id,
+            "variant": variant,
+            "result": render_source,
+        }
+        if execution_runtime is not None:
+            render_kwargs["execution_runtime"] = execution_runtime
+        rendered = await render_professional_document(**render_kwargs)
+        professional_docx.append(str(rendered["professional_docx"]))
+        professional_json.append(str(rendered["professional_json"]))
+        professional_receipts.append(str(rendered["professional_render_receipt"]))
+
+    # Do not expose the deterministic intermediate as the main Word download.
+    # This promotion occurs atomically after all variants pass rendering.
+    delivery["source_docx"] = source_docx
+    delivery["professional_docx"] = professional_docx
+    delivery["professional_json"] = professional_json
+    delivery["professional_render_receipt"] = professional_receipts
+    delivery["docx"] = list(professional_docx)
+    delivery["delivery_profile"] = "sonnet5_professional_word"
+    sealed_delivery = build_delivery_receipt(
+        job_id=job_id,
+        source_docx=source_docx,
+        professional_docx=professional_docx,
+        professional_receipts=professional_receipts,
+    )
+    delivery["delivery_receipt"] = str(sealed_delivery["receipt"])
+    delivery["delivery_decision_digest"] = str(sealed_delivery["decision_digest"])
+    return delivery
 
 
 def _rebuild_postprocessed_artifacts(
@@ -558,6 +829,7 @@ def _rebuild_postprocessed_artifacts(
     payload: dict,
     report: dict | None,
     params: dict | None,
+    fail_closed: bool = False,
 ) -> None:
     """
     When we modify section text after `run_autoplan` (e.g., diversity autofix),
@@ -597,10 +869,13 @@ def _rebuild_postprocessed_artifacts(
     except Exception:
         pass
 
+    postprocess_errors: list[dict[str, str]] = []
+
     # Normalize per-variant derived artifacts.
     for v in results:
         if not isinstance(v, dict):
             continue
+        variant_error_start = len(postprocess_errors)
         sections = v.get("sections") if isinstance(v.get("sections"), list) else []
         outline = v.get("outline") if isinstance(v.get("outline"), list) and v.get("outline") else []
         if not outline:
@@ -619,8 +894,10 @@ def _rebuild_postprocessed_artifacts(
             from backend.zhifei_autoplan.plan_consistency import normalize_metrics_in_sections
 
             v["plan_consistency"] = normalize_metrics_in_sections(sections)
-        except Exception:
-            pass
+        except Exception as exc:
+            postprocess_errors.append(
+                {"stage": "plan_consistency", "error_type": type(exc).__name__, "message": str(exc)}
+            )
 
         # Param trace receipt (in-place placeholder substitution).
         try:
@@ -629,8 +906,10 @@ def _rebuild_postprocessed_artifacts(
             receipt = build_param_receipt(sections, params)
             saved_at = save_latest_receipt(receipt, project_id=str(pid) if pid else None)
             v["param_trace"] = {"ok": True, "saved_at": saved_at, "receipt": receipt}
-        except Exception:
-            pass
+        except Exception as exc:
+            postprocess_errors.append(
+                {"stage": "param_trace", "error_type": type(exc).__name__, "message": str(exc)}
+            )
 
         # Recompute quality checks for final content (deterministic; no LLM calls).
         qc = run_quality_checks(
@@ -699,16 +978,145 @@ def _rebuild_postprocessed_artifacts(
                 quality_checks=qc,
                 project_id=pid,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            postprocess_errors.append(
+                {"stage": "cross_index", "error_type": type(exc).__name__, "message": str(exc)}
+            )
         try:
             v["evidence_tracking"] = build_evidence_tracking(
                 sections=sections,
                 tender=tender,
                 chapter_pages=v.get("chapter_pages") if isinstance(v.get("chapter_pages"), dict) else {},
             )
-        except Exception:
+        except Exception as exc:
             v["evidence_tracking"] = {"rows": [], "summary": {}}
+            postprocess_errors.append(
+                {"stage": "evidence_tracking", "error_type": type(exc).__name__, "message": str(exc)}
+            )
+
+        try:
+            requirement_plan = (
+                v.get("requirement_evidence_plan")
+                if isinstance(v.get("requirement_evidence_plan"), dict)
+                else {}
+            )
+            requirement_matrix = finalize_requirement_evidence_matrix(
+                plan=requirement_plan,
+                sections=sections,
+                evidence_tracking=(
+                    v.get("evidence_tracking")
+                    if isinstance(v.get("evidence_tracking"), dict)
+                    else {}
+                ),
+            )
+            v["requirement_evidence_matrix"] = requirement_matrix
+            v["requirement_evidence_validation"] = validate_requirement_evidence_matrix(
+                requirement_matrix
+            )
+        except Exception as exc:
+            postprocess_errors.append(
+                {
+                    "stage": "requirement_evidence_matrix",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+
+        try:
+            standards_manifest = (
+                v.get("project_applicable_standards")
+                if isinstance(v.get("project_applicable_standards"), dict)
+                else {}
+            )
+            v["standard_citation_audit"] = audit_standard_citations(
+                sections,
+                standards_manifest,
+            )
+        except Exception as exc:
+            postprocess_errors.append(
+                {
+                    "stage": "standard_citation_audit",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+
+        try:
+            routing = v.get("model_routing") if isinstance(v.get("model_routing"), dict) else {}
+            delivery_gate = build_delivery_quality_gate(
+                strict=strict,
+                content_review=(
+                    qc.get("independent_content_review")
+                    if isinstance(qc.get("independent_content_review"), dict)
+                    else {}
+                ),
+                plan_consistency=(
+                    v.get("plan_consistency")
+                    if isinstance(v.get("plan_consistency"), dict)
+                    else {}
+                ),
+                model_review_audit=(
+                    routing.get("review_audit")
+                    if isinstance(routing.get("review_audit"), dict)
+                    else {}
+                ),
+                requirement_matrix=(
+                    v.get("requirement_evidence_matrix")
+                    if isinstance(v.get("requirement_evidence_matrix"), dict)
+                    else {}
+                ),
+                standard_audit=(
+                    v.get("standard_citation_audit")
+                    if isinstance(v.get("standard_citation_audit"), dict)
+                    else {}
+                ),
+                cross_index=(
+                    v.get("cross_index") if isinstance(v.get("cross_index"), dict) else {}
+                ),
+                model_review_required=(
+                    str(routing.get("mode") or "") == "anthropic_tiered"
+                    and not bool(payload.get("dry_run"))
+                ),
+            )
+            v["delivery_quality_gate"] = delivery_gate
+            qc["delivery_quality_gate"] = delivery_gate
+            if not bool(delivery_gate.get("delivery_allowed")):
+                postprocess_errors.append(
+                    {
+                        "stage": "delivery_quality_gate",
+                        "error_type": "DeliveryQualityGateBlocked",
+                        "message": json.dumps(
+                            delivery_gate.get("blockers") or [],
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+        except Exception as exc:
+            postprocess_errors.append(
+                {
+                    "stage": "delivery_quality_gate",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+
+        variant_errors = postprocess_errors[variant_error_start:]
+        if variant_errors:
+            v["postprocess_errors"] = list(variant_errors)
+        else:
+            v.pop("postprocess_errors", None)
+
+    if fail_closed and postprocess_errors:
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "code": "POSTPROCESS_REBUILD_FAILED",
+                    "message": "复核后的派生报告重建失败，候选版本未晋升。",
+                    "errors": postprocess_errors,
+                },
+                ensure_ascii=False,
+            )
+        )
 
 
 def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
@@ -735,6 +1143,7 @@ def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> l
     sections = variant_rec.get("sections") if isinstance(variant_rec.get("sections"), list) else []
 
     title_to_excerpt: Dict[str, str] = {}
+    title_to_digest: Dict[str, str] = {}
     for s in sections:
         if not isinstance(s, dict):
             continue
@@ -743,34 +1152,32 @@ def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> l
             continue
         c = str(s.get("content") or "").strip()
         title_to_excerpt[t] = c[:max_excerpt] + ("..." if len(c) > max_excerpt else "")
+        title_to_digest[t] = canonical_digest({"title": t, "content": c})
 
     out: list[dict] = []
     severity_rank = {"high": 3, "medium": 2, "low": 1}
-    for i, it in enumerate(issues, start=1):
+    for it in issues:
         if not isinstance(it, dict):
             continue
         title = str(it.get("title") or "").strip() or "章节"
         source = "issue_list"
-        issue_id = f"I{i:04d}"
-        out.append(
-            {
-                "issue_id": issue_id,
-                "source": source,
-                "title": title,
-                "type": str(it.get("type") or "issue"),
-                "severity": str(it.get("severity") or "medium"),
-                "severity_rank": severity_rank.get(str(it.get("severity") or "").lower(), 2),
-                "problem": str(it.get("problem") or ""),
-                "suggestion": str(it.get("suggestion") or ""),
-                "section_excerpt": title_to_excerpt.get(title, ""),
-                "apply": True,
-                "replacement": "",
-            }
-        )
+        row = {
+            "source": source,
+            "title": title,
+            "type": str(it.get("type") or "issue"),
+            "severity": str(it.get("severity") or "medium"),
+            "severity_rank": severity_rank.get(str(it.get("severity") or "").lower(), 2),
+            "problem": str(it.get("problem") or ""),
+            "suggestion": str(it.get("suggestion") or ""),
+            "section_excerpt": title_to_excerpt.get(title, ""),
+            "apply": True,
+            "replacement": "",
+        }
+        row["issue_id"] = stable_issue_id(row, section_digest=title_to_digest.get(title, ""))
+        out.append(row)
 
     # Add recs not already covered by issue_list.
     seen = {(str(x.get("title")), str(x.get("type")), str(x.get("suggestion"))) for x in out}
-    rid = 0
     for rec in recs:
         if not isinstance(rec, dict):
             continue
@@ -781,24 +1188,246 @@ def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> l
         if key in seen:
             continue
         seen.add(key)
-        rid += 1
-        out.append(
-            {
-                "issue_id": f"R{rid:04d}",
-                "source": "auto_revision_suggestions",
-                "title": title,
-                "type": rtype,
-                "severity": "medium",
-                "severity_rank": 2,
-                "problem": "",
-                "suggestion": sugg,
-                "section_excerpt": title_to_excerpt.get(title, ""),
-                "apply": True,
-                "replacement": "",
-            }
-        )
+        row = {
+            "source": "auto_revision_suggestions",
+            "title": title,
+            "type": rtype,
+            "severity": "medium",
+            "severity_rank": 2,
+            "problem": "",
+            "suggestion": sugg,
+            "section_excerpt": title_to_excerpt.get(title, ""),
+            "apply": True,
+            "replacement": "",
+        }
+        row["issue_id"] = stable_issue_id(row, section_digest=title_to_digest.get(title, ""))
+        out.append(row)
     out.sort(key=lambda x: (-int(x.get("severity_rank") or 0), str(x.get("title") or ""), str(x.get("type") or "")))
     return out
+
+
+def _review_versions(variants: list[dict], idx: int) -> dict[str, str]:
+    target = variants[idx]
+    items = _review_items_for_variant(target)
+    return {
+        "result_version": result_version(variants),
+        "variant_version": variant_version(target),
+        "issue_digest": issue_set_digest(items),
+    }
+
+
+def _require_review_preconditions(
+    *,
+    variants: list[dict],
+    idx: int,
+    expected_result_version: str,
+    expected_variant_version: str | None = None,
+    expected_issue_digest: str | None = None,
+) -> dict[str, str]:
+    expected_result = str(expected_result_version or "").strip()
+    expected_variant = str(expected_variant_version or "").strip()
+    expected_issues = str(expected_issue_digest or "").strip()
+    required = {"expected_result_version": expected_result}
+    if expected_variant_version is not None:
+        required["expected_variant_version"] = expected_variant
+    if expected_issue_digest is not None:
+        required["expected_issue_digest"] = expected_issues
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise HTTPException(
+            status_code=428,
+            detail={"code": "REVIEW_PRECONDITION_REQUIRED", "missing": missing},
+        )
+
+    live = _review_versions(variants, idx)
+    mismatches = {}
+    if expected_result != live["result_version"]:
+        mismatches["result_version"] = live["result_version"]
+    if expected_variant_version is not None and expected_variant != live["variant_version"]:
+        mismatches["variant_version"] = live["variant_version"]
+    if expected_issue_digest is not None and expected_issues != live["issue_digest"]:
+        mismatches["issue_digest"] = live["issue_digest"]
+    if mismatches:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_REVIEW_STATE",
+                "message": "问题清单或文档已更新，请重新载入后再应用。",
+                "live": mismatches,
+            },
+        )
+    return live
+
+
+def _review_quality_counts(items: list[dict]) -> dict[str, int]:
+    counts = {"high": 0, "medium": 0, "low": 0, "total": len(items)}
+    for item in items:
+        severity = str(item.get("severity") or "medium").lower()
+        counts[severity if severity in counts else "medium"] += 1
+    return counts
+
+
+def _review_section_manifest(variant: dict) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    sections = variant.get("sections") if isinstance(variant.get("sections"), list) else []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or "").strip()
+        content = str(section.get("content") or "")
+        if title:
+            rows[title] = {"sha256": canonical_digest(content), "characters": len(content)}
+    return rows
+
+
+def _review_section_changes(before: dict, after: dict) -> list[dict[str, Any]]:
+    before_rows = _review_section_manifest(before)
+    after_rows = _review_section_manifest(after)
+    changes: list[dict[str, Any]] = []
+    for title in sorted(set(before_rows) | set(after_rows)):
+        old = before_rows.get(title, {"sha256": "", "characters": 0})
+        new = after_rows.get(title, {"sha256": "", "characters": 0})
+        if old["sha256"] == new["sha256"]:
+            continue
+        changes.append(
+            {
+                "title": title,
+                "before_sha256": old["sha256"],
+                "after_sha256": new["sha256"],
+                "before_characters": old["characters"],
+                "after_characters": new["characters"],
+            }
+        )
+    return changes
+
+
+def _find_review_target_section(sections: list[dict], item: dict) -> dict | None:
+    """Resolve a QC item to one existing chapter without inventing a new chapter."""
+    title = str(item.get("title") or "").strip()
+    for section in sections:
+        if isinstance(section, dict) and str(section.get("title") or "").strip() == title:
+            return section
+
+    issue_type = str(item.get("type") or "").strip().lower()
+    candidates: tuple[str, ...]
+    if issue_type == "consistency" or title == "全局一致性":
+        candidates = ("进度", "工期", "关键线路", "资源", "施工部署")
+    elif issue_type in {"boq_focus", "qse_closed_loop"} or title == "清单重点项":
+        candidates = ("施工方案", "工程重点", "质量", "安全", "文明", "环保")
+    else:
+        candidates = (title,) if title else ()
+
+    for keyword in candidates:
+        for section in sections:
+            section_title = str(section.get("title") or "").strip() if isinstance(section, dict) else ""
+            if keyword and keyword in section_title:
+                return section
+    return None
+
+
+def _clean_review_rewrite(text: str, *, title: str) -> str:
+    value = str(text or "").strip()
+    if value.startswith("```") and value.endswith("```"):
+        value = re.sub(r"^```(?:markdown|md|text)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value).strip()
+    lines = value.splitlines()
+    if lines:
+        first = re.sub(r"^\s*#{1,6}\s*", "", lines[0]).strip()
+        if first in {title, f"第{title}"}:
+            value = "\n".join(lines[1:]).strip()
+    return value
+
+
+def _safe_review_error(value: object) -> str:
+    text = str(value or "provider_error")[:500]
+    text = re.sub(r"(?:sk|sk-ant|AIza)[A-Za-z0-9_\-]{12,}", "[redacted]", text)
+    return text
+
+
+async def _rewrite_review_section(
+    *,
+    section: dict,
+    issues: list[dict],
+    payload: dict,
+    round_number: int,
+) -> tuple[str, dict]:
+    """Use the configured review chain to revise one complete chapter."""
+    title = str(section.get("title") or "章节").strip() or "章节"
+    original = str(section.get("content") or "").strip()
+    audit: dict[str, Any] = {
+        "round": int(round_number),
+        "title": title,
+        "issue_ids": [str(item.get("issue_id") or "") for item in issues],
+        "status": "failed",
+        "attempts": [],
+    }
+    if not original:
+        audit["error"] = "empty_section_content"
+        return "", audit
+
+    issue_lines = []
+    for index, item in enumerate(issues, start=1):
+        issue_lines.append(
+            f"{index}. 类型：{str(item.get('type') or 'issue')}；"
+            f"级别：{str(item.get('severity') or 'medium')}；"
+            f"问题：{str(item.get('problem') or '').strip()}；"
+            f"修订要求：{str(item.get('suggestion') or '').strip()}"
+        )
+    prompt = f"""你是施工组织设计技术标的资深复核工程师。请对下面的完整章节执行第{round_number}轮闭环精修。
+
+硬约束：
+1. 只修订现有章节《{title}》，不得新增、删除或重命名章节。
+2. 必须逐项解决所列问题，同时保留原文中已有的项目事实、工程量、参数、证据标记和可执行措施。
+3. 不得编造项目事实、工程量、工期、规范名称、规范编号、人员资质、设备型号或验收结论；没有依据的内容使用“以经审查文件/现场确认结果为准”的受控表达。
+4. 统一前后矛盾的工期、资源峰值、关键线路间隔等口径；补充内容必须形成“指标/措施—风险—控制—验证—证据”的闭环。
+5. 删除空话、套话、与本项目无关的内容，语言应专业、具体、可复核。
+6. 仅输出修订后的完整章节正文，不要输出标题、解释、前言、总结说明、Markdown代码围栏或JSON。
+
+待解决问题：
+{chr(10).join(issue_lines)}
+
+原章节正文：
+{original}
+"""
+
+    chain = _provider_chain_for_role(
+        _normalize_provider_chain(payload),
+        "review",
+        allow_fable_escalation=bool(payload.get("allow_fable_escalation", False)),
+    )
+    for entry in chain:
+        provider = str(entry.get("provider") or "").strip().lower()
+        model = str(entry.get("model") or "").strip()
+        slot = str(entry.get("slot") or "").strip()
+        if not provider or not model:
+            continue
+        api_key = _resolve_provider_api_key(
+            payload,
+            provider,
+            slot_id=slot,
+            explicit_key=str(entry.get("api_key") or ""),
+        )
+        attempt: dict[str, Any] = {"slot": slot, "provider": provider, "model": model}
+        client = LLMClient(
+            provider,
+            model,
+            api_key=api_key,
+            base_url=payload.get("base_url"),
+            secret_key=payload.get("secret_key"),
+            token_url=payload.get("token_url"),
+        )
+        response = await client.complete(prompt, timeout=240, max_tokens=12000)
+        rewritten = _clean_review_rewrite(str(response.get("text") or ""), title=title)
+        if rewritten:
+            attempt["status"] = "success"
+            audit["attempts"].append(attempt)
+            audit.update({"status": "success", "provider": provider, "model": model, "slot": slot})
+            return rewritten, audit
+        attempt.update({"status": "failed", "error": _safe_review_error(response.get("error"))})
+        audit["attempts"].append(attempt)
+
+    audit["error"] = "review_chain_exhausted"
+    return "", audit
 
 
 @router.post("/plan/save")
@@ -1185,7 +1814,7 @@ def _ollama_smoke_enabled() -> bool:
 
 
 def _ollama_smoke_model(req_model: str | None) -> str:
-    return (req_model or os.environ.get("OLLAMA_MODEL") or "qwen3:0.6b").strip() or "qwen3:0.6b"
+    return (req_model or os.environ.get("OLLAMA_MODEL") or "qwen3.5:4b").strip() or "qwen3.5:4b"
 
 
 def _ollama_smoke_base_url(req_base_url: str | None) -> str:
@@ -1423,21 +2052,106 @@ async def actions_export_docx(
     )
 
 
+@router.post("/professional_render")
+async def actions_professional_render(
+    req: ActionsProfessionalRenderRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    """Controlled re-render endpoint; normal generation already renders automatically."""
+
+    _auth_actions_key(x_actions_key)
+    job_id = str(req.job_id or "").strip()
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
+    result = dict(job.get("result") or {})
+    variant = max(1, int(req.variant or 1))
+    render_source = dict(result)
+    source_docx = result.get("source_docx")
+    if isinstance(source_docx, list) and source_docx:
+        render_source["docx"] = list(source_docx)
+    try:
+        rendered = await render_professional_document(
+            job_id=job_id,
+            variant=variant,
+            result=render_source,
+        )
+    except ProfessionalRenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"专业精修与渲染失败: {exc}") from exc
+
+    if not isinstance(result.get("source_docx"), list):
+        existing_docx = result.get("docx")
+        result["source_docx"] = list(existing_docx) if isinstance(existing_docx, list) else []
+    _set_output_variant_path(result, "professional_docx", variant, rendered["professional_docx"])
+    _set_output_variant_path(result, "professional_json", variant, rendered["professional_json"])
+    _set_output_variant_path(
+        result,
+        "professional_render_receipt",
+        variant,
+        rendered["professional_render_receipt"],
+    )
+    _set_output_variant_path(result, "docx", variant, rendered["professional_docx"])
+    result["delivery_profile"] = "sonnet5_professional_word"
+    update_job(job_id, status="done", result=result, error=None)
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "variant": variant,
+        "display_model": rendered["receipt"].get("display_model"),
+        "model_id": rendered["receipt"].get("model_id"),
+        "quality_gate": rendered["receipt"].get("quality_gate"),
+        "files": {
+            "professional_docx": rendered["professional_docx"],
+            "professional_json": rendered["professional_json"],
+            "professional_render_receipt": rendered["professional_render_receipt"],
+        },
+    }
+
+
 @router.post("/generate")
 async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
+    resume_from_job_id = str(payload.get("resume_from_job_id") or "").strip()
+    if resume_from_job_id:
+        if not re.fullmatch(r"[a-f0-9]{32}", resume_from_job_id):
+            raise HTTPException(status_code=400, detail="invalid resume_from_job_id")
+        source_job = get_job(resume_from_job_id)
+        if not source_job:
+            raise HTTPException(status_code=404, detail="resume source job not found")
+        if str(source_job.get("status") or "").strip().lower() not in {"failed", "cancelled"}:
+            raise HTTPException(
+                status_code=409,
+                detail="only failed or cancelled jobs can be resumed",
+            )
     variant_plan = _build_variant_plan(payload)
     payload["_variant_plan"] = variant_plan
     payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
-    results = []
-    for item in variant_plan:
+    payload["variants"] = len(variant_plan) if variant_plan else int(payload.get("variants") or 1)
+    execution_runtime, execution_policy = _prepare_execution_control(payload)
+
+    ordered_results: list[dict[str, Any] | None] = [None] * len(variant_plan)
+    direct_sem = asyncio.Semaphore(int(execution_policy["variant_parallelism"]))
+
+    async def _run_direct_variant(position: int, item: dict[str, Any]) -> None:
         local_payload = json.loads(json.dumps(payload))
         local_payload["variant_id"] = int(item.get("variant_id") or 1)
         tid = _normalize_logic_template_id(item.get("logic_template_id"))
         if tid:
             local_payload["logic_template_id"] = tid
-        results.append(await run_autoplan(local_payload))
+        # Runtime/callback objects are deliberately attached only after cloning.
+        local_payload["_execution_runtime"] = execution_runtime
+        async with direct_sem:
+            ordered_results[position] = await run_autoplan(local_payload)
+
+    await asyncio.gather(
+        *[_run_direct_variant(i, item) for i, item in enumerate(variant_plan)]
+    )
+    results = [item for item in ordered_results if isinstance(item, dict)]
     # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort; does not change outline.
     if len(results) >= 2:
         try:
@@ -1510,8 +2224,19 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
         except Exception:
             pass
     outputs = _save_outputs("actions_generated", results)
+    outputs = await _render_professional_outputs_for_job(
+        job_id=f"direct-{uuid.uuid4().hex}",
+        outputs=outputs,
+        execution_runtime=execution_runtime,
+    )
     quality = [v.get("quality_checks") for v in results]
-    return {"ok": True, "result": results, "quality": quality, "files": outputs}
+    return {
+        "ok": True,
+        "result": results,
+        "quality": quality,
+        "files": outputs,
+        "execution_control": execution_runtime.snapshot(),
+    }
 
 
 @router.post("/generate_async")
@@ -1529,31 +2254,147 @@ async def actions_generate_async(
     job_id = create_job(payload, user_id=None)
 
     def _run_job(_job_id: str, _payload: dict):
+        heartbeat_stop = threading.Event()
+        heartbeat_thread: threading.Thread | None = None
         try:
             local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
+            local_payload["_job_id"] = _job_id
 
-            def _clamp_int(v: Any, default: int, lo: int, hi: int) -> int:
-                try:
-                    n = int(v)
-                except Exception:
-                    n = int(default)
-                return max(lo, min(hi, n))
+            def _is_cancelled() -> bool:
+                j = get_job(_job_id) or {}
+                return str(j.get("status") or "").strip().lower() == "cancelled"
 
-            variants_total = _clamp_int(local_payload.get("variants") or 1, 1, 1, 5)
-            agent_parallelism = _clamp_int(local_payload.get("agent_parallelism") or 4, 4, 1, 16)
-            variant_parallelism = _clamp_int(local_payload.get("variant_parallelism") or 1, 1, 1, 5)
-            local_payload["agent_parallelism"] = agent_parallelism
-            local_payload["variant_parallelism"] = variant_parallelism
+            execution_runtime, execution_policy = _prepare_execution_control(
+                local_payload,
+                cancel_callback=_is_cancelled,
+            )
+            variants_total = int(local_payload["variants"])
+            agent_parallelism = int(execution_policy["chapter_task_parallelism"])
+            variant_parallelism = int(execution_policy["variant_parallelism"])
+            max_model_parallelism = int(execution_policy["max_model_parallelism"])
 
             agent_runtime = {
                 "mode": "parallel",
                 "master_agent": "主控Agent",
                 "compliance_agent": "合规Agent",
+                "specialist_role_count": len(AGENT_ROLE_DIRECTIVES),
+                "parallelism_semantics": "bounded_chapter_tasks_not_agent_count",
                 "agent_parallelism": agent_parallelism,
                 "variant_parallelism": variant_parallelism,
+                "max_model_parallelism": max_model_parallelism,
                 "variants_total": variants_total,
                 "variants_done": 0,
+                "chapters_total": 0,
+                "chapters_started": 0,
+                "chapters_done": 0,
+                "active_agents": 0,
+                "current_chapters": [],
             }
+            activity_lock = threading.RLock()
+            activity_state: Dict[str, Any] = {
+                "activity": "主控Agent正在准备章节任务",
+                "chapter_totals": {},
+                "started": set(),
+                "completed": set(),
+                "active": {},
+            }
+
+            def _activity_snapshot() -> tuple[str, Dict[str, Any]]:
+                with activity_lock:
+                    runtime = dict(agent_runtime)
+                    current = [str(x) for x in activity_state.get("active", {}).values() if str(x).strip()]
+                    runtime.update(
+                        {
+                            "chapters_total": int(sum(activity_state.get("chapter_totals", {}).values())),
+                            "chapters_started": len(activity_state.get("started", set())),
+                            "chapters_done": len(activity_state.get("completed", set())),
+                            "active_agents": len(current),
+                            "current_chapters": current[:6],
+                        }
+                    )
+                    agent_runtime.update(runtime)
+                    return str(activity_state.get("activity") or "Agent正在工作"), runtime
+
+            def _heartbeat_loop() -> None:
+                while not heartbeat_stop.is_set():
+                    activity, runtime = _activity_snapshot()
+                    heartbeat_job(
+                        _job_id,
+                        activity=activity,
+                        agent_runtime_updates=runtime,
+                    )
+                    heartbeat_stop.wait(5.0)
+
+            def _variant_progress_callback(variant_id: int):
+                def _callback(event: Dict[str, Any]) -> None:
+                    event_name = str(event.get("event") or "").strip()
+                    chapter_idx = int(event.get("chapter_index") or 0)
+                    chapter_title = str(event.get("chapter_title") or "").strip()
+                    total = max(0, int(event.get("chapters_total") or 0))
+                    variant_key = str(int(variant_id))
+                    chapter_key = f"{variant_key}:{chapter_idx}"
+                    with activity_lock:
+                        if total:
+                            activity_state["chapter_totals"][variant_key] = total
+                        if event_name == "compliance_preflight":
+                            verified_count = max(
+                                0,
+                                int(event.get("verified_standard_count") or 0),
+                            )
+                            if bool(event.get("ready")) and verified_count > 0:
+                                activity_state["activity"] = (
+                                    f"合规Agent已完成生成前预检：{verified_count}项项目适用规范通过核验"
+                                )
+                            else:
+                                activity_state["activity"] = (
+                                    "合规Agent正在核验项目适用规范，尚未进入内容生成"
+                                )
+                        elif event_name == "chapter_started":
+                            activity_state["started"].add(chapter_key)
+                            activity_state["active"][chapter_key] = chapter_title
+                        elif event_name == "chapter_resumed":
+                            activity_state["started"].add(chapter_key)
+                            activity_state["completed"].add(chapter_key)
+                            activity_state["active"].pop(chapter_key, None)
+                            activity_state["activity"] = f"已从可信断点恢复章节：{chapter_title}"
+                        elif event_name == "chapter_checkpoint_saved":
+                            activity_state["activity"] = f"章节已安全保存，可断点续编：{chapter_title}"
+                        elif event_name == "chapter_completed":
+                            activity_state["started"].add(chapter_key)
+                            activity_state["completed"].add(chapter_key)
+                            activity_state["active"].pop(chapter_key, None)
+                        elif event_name == "draft_complete":
+                            activity_state["activity"] = "章节初稿完成，合规Agent正在复核与校验"
+
+                        current = [
+                            str(x)
+                            for x in activity_state.get("active", {}).values()
+                            if str(x).strip()
+                        ]
+                        if current:
+                            preview = "、".join(current[:3])
+                            suffix = "…" if len(current) > 3 else ""
+                            activity_state["activity"] = (
+                                f"{len(current)}个章节任务正在编辑：{preview}{suffix}"
+                            )
+                        done = len(activity_state.get("completed", set()))
+                        all_total = int(sum(activity_state.get("chapter_totals", {}).values()))
+
+                    progress_updates: Dict[str, Any] = {
+                        "chapters_total": all_total,
+                        "chapters_done": done,
+                    }
+                    if all_total > 0:
+                        progress_updates["percent"] = min(75, 15 + int((done / all_total) * 60))
+                    activity, runtime = _activity_snapshot()
+                    heartbeat_job(
+                        _job_id,
+                        activity=activity,
+                        progress_updates=progress_updates,
+                        agent_runtime_updates=runtime,
+                    )
+
+                return _callback
 
             def _update_progress(percent: int, stage: str, detail: str = "") -> None:
                 p = max(0, min(100, int(percent)))
@@ -1569,14 +2410,18 @@ async def actions_generate_async(
                     agent_runtime=agent_runtime,
                 )
 
-            def _is_cancelled() -> bool:
-                j = get_job(_job_id) or {}
-                return str(j.get("status") or "").strip().lower() == "cancelled"
+            agent_runtime["execution_control"] = execution_runtime.snapshot()
 
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user")
                 return
             update_job(_job_id, status="running", agent_runtime=agent_runtime)
+            heartbeat_thread = threading.Thread(
+                target=_heartbeat_loop,
+                name=f"autoplan-heartbeat-{_job_id[:8]}",
+                daemon=True,
+            )
+            heartbeat_thread.start()
             _update_progress(5, "job_started", "任务已启动，正在分配多Agent")
             mode_policy = local_payload.get("_mode_policy") if isinstance(local_payload.get("_mode_policy"), dict) else {}
             mode_name = str(mode_policy.get("mode_effective") or local_payload.get("generation_mode") or "quality_200")
@@ -1637,7 +2482,10 @@ async def actions_generate_async(
             _update_progress(
                 10,
                 "agent_ready",
-                f"多Agent协作已启用：章节并行={agent_parallelism}，方案并行={variant_parallelism}",
+                (
+                    f"{len(AGENT_ROLE_DIRECTIVES)}个专业角色已进入任务编排："
+                    f"同时编写章节={agent_parallelism}，方案并行={variant_parallelism}"
+                ),
             )
 
             async def _run_variants_parallel() -> list[dict]:
@@ -1657,6 +2505,13 @@ async def actions_generate_async(
                     if tid:
                         lp["logic_template_id"] = tid
                     lp["agent_parallelism"] = agent_parallelism
+                    lp["_progress_callback"] = _variant_progress_callback(vid)
+                    lp["_job_id"] = _job_id
+                    lp["_checkpoint_namespace"] = str(
+                        local_payload.get("resume_from_job_id") or _job_id
+                    )
+                    lp["_cancel_callback"] = _is_cancelled
+                    lp["_execution_runtime"] = execution_runtime
                     async with sem:
                         if _is_cancelled():
                             return
@@ -1683,6 +2538,7 @@ async def actions_generate_async(
                 return [x for x in ordered if isinstance(x, dict)]
 
             results = asyncio.run(_run_variants_parallel())
+            agent_runtime["execution_control"] = execution_runtime.snapshot()
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user")
                 return
@@ -1757,20 +2613,65 @@ async def actions_generate_async(
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user")
                 return
-            _update_progress(92, "exporting", "正在导出 DOCX / 对照稿 / 问题清单")
+            _update_progress(91, "exporting_source", "正在生成可追溯中间稿与质控附件")
             outputs = _save_outputs(f"actions_{_job_id}", results)
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
                 return
-            _update_progress(100, "done", "任务完成")
+
+            def _professional_progress(variant: int, total: int) -> None:
+                percent = 93 + int(((variant - 1) / max(1, total)) * 6)
+                detail = f"Sonnet 5 正在精修并专业落版：方案 {variant}/{total}"
+                with activity_lock:
+                    activity_state["activity"] = detail
+                _update_progress(percent, "professional_rendering", detail)
+
+            _update_progress(
+                93,
+                "professional_rendering",
+                "Sonnet 5 正在逐章精修、统一视觉规范并执行 Word 质量闸门",
+            )
+            outputs = asyncio.run(
+                _render_professional_outputs_for_job(
+                    job_id=_job_id,
+                    outputs=outputs,
+                    progress_callback=_professional_progress,
+                    execution_runtime=execution_runtime,
+                )
+            )
+            agent_runtime["execution_control"] = execution_runtime.snapshot()
+            if _is_cancelled():
+                update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
+                return
+            _update_progress(100, "done", "专业 Word 已完成，可直接下载")
             update_job(_job_id, status="done", result=outputs, agent_runtime=agent_runtime)
         except Exception as e:
-            update_job(
-                _job_id,
-                status="failed",
-                error=repr(e),
-                progress={"percent": 100, "stage": "failed", "detail": repr(e)},
-            )
+            error_text = repr(e)
+            cancel_probe = locals().get("_is_cancelled")
+            was_cancelled = bool(cancel_probe()) if callable(cancel_probe) else False
+            if was_cancelled or "cancelled_by_user" in error_text:
+                prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
+                update_job(
+                    _job_id,
+                    status="cancelled",
+                    error="cancelled_by_user",
+                    progress={
+                        "percent": int(prior_progress.get("percent") or 0),
+                        "stage": "cancelled",
+                        "detail": "用户已取消；未完成章节已停止，已完成章节保留为可信断点。",
+                    },
+                )
+            else:
+                update_job(
+                    _job_id,
+                    status="failed",
+                    error=error_text,
+                    progress={"percent": 100, "stage": "failed", "detail": error_text},
+                )
+        finally:
+            heartbeat_stop.set()
+            if heartbeat_thread is not None and heartbeat_thread.is_alive():
+                heartbeat_thread.join(timeout=0.25)
 
     background_tasks.add_task(_run_job, job_id, payload)
     return {"ok": True, "job_id": job_id, "status": "queued"}
@@ -1839,13 +2740,16 @@ async def actions_review_issues(
     _, _, _, variants = _load_done_job_variants(job_id)
     v = max(1, int(variant or 1))
     rec = variants[v - 1] if v <= len(variants) else variants[0]
+    idx = (v - 1) if v <= len(variants) else 0
     items = _review_items_for_variant(rec)
+    versions = _review_versions(variants, idx)
     return {
         "ok": True,
         "job_id": job_id,
         "variant": int(v if v <= len(variants) else 1),
         "count": len(items),
         "items": items,
+        **versions,
     }
 
 
@@ -1858,15 +2762,27 @@ async def actions_review_apply(
     job_id = str(req.job_id or "").strip()
     if not job_id:
         raise HTTPException(status_code=400, detail="job_id required")
-    job, _, data, variants = _load_done_job_variants(job_id)
+    job, current_result, _, variants = _load_done_job_variants(job_id)
 
     v = max(1, int(req.variant or 1))
     idx = (v - 1) if v <= len(variants) else 0
-    target = variants[idx]
-    if not isinstance(target, dict):
+    if not isinstance(variants[idx], dict):
         raise HTTPException(status_code=400, detail="invalid variant record")
 
-    items = _review_items_for_variant(target)
+    live_versions = _require_review_preconditions(
+        variants=variants,
+        idx=idx,
+        expected_result_version=req.expected_result_version,
+        expected_variant_version=req.expected_variant_version,
+        expected_issue_digest=req.expected_issue_digest,
+    )
+    original_target = variants[idx]
+    original_items = _review_items_for_variant(original_target)
+    original_quality = _review_quality_counts(original_items)
+    candidate_variants = copy.deepcopy(variants)
+    target = candidate_variants[idx]
+
+    items = _review_items_for_variant(original_target)
     item_map = {str(it.get("issue_id") or ""): it for it in items}
 
     selected: list[dict] = []
@@ -1893,7 +2809,21 @@ async def actions_review_apply(
             "variant": idx + 1,
             "applied_count": 0,
             "message": "no selected items",
+            **live_versions,
         }
+
+    revision = create_revision_snapshot(
+        job_id=job_id,
+        variants=copy.deepcopy(variants),
+        result=current_result,
+        reason="pre_review_apply",
+        metadata={
+            "actor": str(req.actor or "webui").strip() or "webui",
+            "variant": idx + 1,
+            "selected_issue_ids": [str(item.get("issue_id") or "") for item in selected],
+            "expected_issue_digest": req.expected_issue_digest,
+        },
+    )
 
     sections = target.get("sections") if isinstance(target.get("sections"), list) else []
     if not isinstance(sections, list):
@@ -1901,23 +2831,39 @@ async def actions_review_apply(
 
     remediation = []
     replacement_count = 0
-    for it in selected:
-        title = str(it.get("title") or "").strip()
-        rtype = str(it.get("type") or "issue").strip()
-        suggestion = str(it.get("suggestion") or it.get("problem") or "").strip()
-        replacement = str(it.get("replacement") or "").strip()
-        if replacement and title:
-            for sec in sections:
-                if not isinstance(sec, dict):
-                    continue
-                if str(sec.get("title") or "").strip() == title:
-                    sec["original_content"] = sec.get("content") or ""
-                    sec["content"] = replacement
-                    sec["auto_remediated"] = "review_apply"
-                    replacement_count += 1
-                    break
+    ai_rewritten_count = 0
+    fallback_count = 0
+    review_audit: list[dict] = []
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in selected:
+        section = _find_review_target_section(sections, item)
+        replacement = str(item.get("replacement") or "").strip()
+        if replacement and section is not None:
+            section.setdefault("pre_review_apply_content", section.get("content") or "")
+            section["content"] = replacement
+            section["auto_remediated"] = "review_apply_manual_replacement"
+            replacement_count += 1
+            review_audit.append(
+                {
+                    "round": 1,
+                    "title": str(section.get("title") or ""),
+                    "issue_ids": [str(item.get("issue_id") or "")],
+                    "status": "manual_replacement",
+                }
+            )
             continue
-        remediation.append({"title": title, "type": rtype, "suggestion": suggestion})
+        if section is None:
+            remediation.append(
+                {
+                    "title": str(item.get("title") or "").strip(),
+                    "type": str(item.get("type") or "issue").strip(),
+                    "suggestion": str(item.get("suggestion") or item.get("problem") or "").strip(),
+                }
+            )
+            fallback_count += 1
+            continue
+        section_title = str(section.get("title") or "").strip()
+        grouped.setdefault(section_title, {"section": section, "items": []})["items"].append(item)
 
     pid = str(target.get("project_id") or (job.get("payload") or {}).get("project_id") or "").strip() or None
     boq_focus = target.get("boq_focus") if isinstance(target.get("boq_focus"), dict) else {}
@@ -1933,6 +2879,43 @@ async def actions_review_apply(
             else:
                 params[k] = v
 
+    modified_titles: set[str] = set()
+    for section in sections:
+        if isinstance(section, dict) and section.get("auto_remediated") == "review_apply_manual_replacement":
+            modified_titles.add(str(section.get("title") or "").strip())
+    for group in grouped.values():
+        section = group["section"]
+        group_items = group["items"]
+        rewritten, audit = await _rewrite_review_section(
+            section=section,
+            issues=group_items,
+            payload=payload_obj,
+            round_number=1,
+        )
+        review_audit.append(audit)
+        if rewritten:
+            section.setdefault("pre_review_apply_content", section.get("content") or "")
+            section["content"] = rewritten
+            section["auto_remediated"] = "review_apply_ai_round_1"
+            section["review_apply_model"] = {
+                "provider": audit.get("provider"),
+                "model": audit.get("model"),
+                "slot": audit.get("slot"),
+            }
+            section["review_apply_issue_ids"] = list(audit.get("issue_ids") or [])
+            modified_titles.add(str(section.get("title") or "").strip())
+            ai_rewritten_count += 1
+            continue
+        for item in group_items:
+            remediation.append(
+                {
+                    "title": str(item.get("title") or "").strip(),
+                    "type": str(item.get("type") or "issue").strip(),
+                    "suggestion": str(item.get("suggestion") or item.get("problem") or "").strip(),
+                }
+            )
+            fallback_count += 1
+
     if remediation:
         apply_remediation(
             sections,
@@ -1941,21 +2924,123 @@ async def actions_review_apply(
             boq_focus=boq_focus,
             params=params,
         )
+        for item in selected:
+            section = _find_review_target_section(sections, item)
+            if isinstance(section, dict):
+                modified_titles.add(str(section.get("title") or "").strip())
     for sec in sections:
         if isinstance(sec, dict):
             sec["content"] = strip_nonconcrete_language(str(sec.get("content") or ""))
 
-    # Rebuild receipts/QC/cross-index for this variant after manual confirmation.
-    _rebuild_postprocessed_artifacts([target], payload=payload_obj, report=None, params=params)
+    # Rebuild receipts/QC/cross-index after round 1. This is the first full-document recheck.
+    _rebuild_postprocessed_artifacts(
+        [target], payload=payload_obj, report=None, params=params, fail_closed=True
+    )
 
-    # Persist all variants back to output files and refresh job result paths.
-    out = _save_outputs(f"actions_{job_id}", variants)
+    round_2_recheck_count = 0
+    round_2_rewritten_count = 0
+    if modified_titles:
+        remaining_items = _review_items_for_variant(target)
+        round_2_groups: dict[str, dict[str, Any]] = {}
+        for item in remaining_items:
+            if int(item.get("severity_rank") or 0) < 2:
+                continue
+            section = _find_review_target_section(sections, item)
+            section_title = str(section.get("title") or "").strip() if isinstance(section, dict) else ""
+            if not section_title or section_title not in modified_titles:
+                continue
+            round_2_groups.setdefault(section_title, {"section": section, "items": []})["items"].append(item)
+        round_2_recheck_count = sum(len(group["items"]) for group in round_2_groups.values())
+        for group in round_2_groups.values():
+            section = group["section"]
+            rewritten, audit = await _rewrite_review_section(
+                section=section,
+                issues=group["items"],
+                payload=payload_obj,
+                round_number=2,
+            )
+            review_audit.append(audit)
+            if not rewritten:
+                continue
+            section["content"] = rewritten
+            section["auto_remediated"] = "review_apply_ai_round_2"
+            section["review_apply_model"] = {
+                "provider": audit.get("provider"),
+                "model": audit.get("model"),
+                "slot": audit.get("slot"),
+            }
+            section["review_apply_issue_ids"] = list(audit.get("issue_ids") or [])
+            round_2_rewritten_count += 1
+        if round_2_rewritten_count:
+            for sec in sections:
+                if isinstance(sec, dict):
+                    sec["content"] = strip_nonconcrete_language(str(sec.get("content") or ""))
+            # A second rebuild is mandatory after AI round 2 so all derivative
+            # reports, evidence tables and exported files describe final text.
+            _rebuild_postprocessed_artifacts(
+                [target], payload=payload_obj, report=None, params=params, fail_closed=True
+            )
+
+    final_review_items = _review_items_for_variant(target)
+    final_quality = _review_quality_counts(final_review_items)
+    remaining_high = [item for item in final_review_items if str(item.get("severity") or "").lower() == "high"]
+    target["review_apply_audit"] = {
+        "revision_id": revision["revision_id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "actor": str(req.actor or "webui").strip() or "webui",
+        "before_result_version": live_versions["result_version"],
+        "before_variant_version": live_versions["variant_version"],
+        "before_issue_digest": live_versions["issue_digest"],
+        "selected_count": len(selected),
+        "ai_rewritten_chapter_count": ai_rewritten_count,
+        "manual_replacement_count": replacement_count,
+        "template_fallback_item_count": fallback_count,
+        "round_2_recheck_item_count": round_2_recheck_count,
+        "round_2_rewritten_chapter_count": round_2_rewritten_count,
+        "remaining_issue_count": len(final_review_items),
+        "before_quality_counts": original_quality,
+        "after_quality_counts": final_quality,
+        "section_changes": _review_section_changes(original_target, target),
+        "candidate_section_digest": canonical_digest(_review_section_manifest(target)),
+        "promotion": "validated_for_commit",
+        "rounds": review_audit,
+    }
+
+    if remaining_high:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "REVIEW_HIGH_RISK_REMAINS",
+                "message": "复核后仍存在高风险问题，候选版本未晋升，当前 Word 保持不变。",
+                "revision_id": revision["revision_id"],
+                "remaining_high_count": len(remaining_high),
+                "remaining_issue_count": len(final_review_items),
+            },
+        )
+
+    # Candidate outputs use unique paths.  The live job is promoted only after
+    # persistence, professional rendering and every gate above has succeeded.
+    candidate_version = result_version(candidate_variants)
+    candidate_suffix = revision["revision_id"].lower()
+    out = _save_outputs(f"actions_{job_id}_{candidate_suffix}", candidate_variants)
+    out = await _render_professional_outputs_for_job(
+        job_id=f"{job_id}-{candidate_suffix}",
+        outputs=out,
+    )
+    candidate_artifacts = artifact_manifest(out)
+    finalize_revision_snapshot(
+        job_id=job_id,
+        revision_id=revision["revision_id"],
+        promotion={
+            "actor": str(req.actor or "webui").strip() or "webui",
+            "candidate_result_version": candidate_version,
+            "candidate_variant_version": variant_version(target),
+            "candidate_issue_digest": issue_set_digest(final_review_items),
+            "candidate_artifact_digest": canonical_digest(candidate_artifacts),
+            "artifacts": candidate_artifacts,
+        },
+    )
     update_job(job_id, status="done", result=out, error=None)
-    data["variants"] = variants
-    try:
-        Path(out["json"]).write_text(json.dumps({"variants": variants}, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
 
     return {
         "ok": True,
@@ -1964,6 +3049,92 @@ async def actions_review_apply(
         "applied_count": len(selected),
         "template_applied_count": len(remediation),
         "replacement_count": replacement_count,
+        "ai_rewritten_chapter_count": ai_rewritten_count,
+        "template_fallback_item_count": fallback_count,
+        "round_2_recheck_item_count": round_2_recheck_count,
+        "round_2_rewritten_chapter_count": round_2_rewritten_count,
+        "remaining_issue_count": len(final_review_items),
+        "revision_id": revision["revision_id"],
+        "result_version": candidate_version,
+        "variant_version": variant_version(target),
+        "issue_digest": issue_set_digest(final_review_items),
+        "candidate_artifact_digest": canonical_digest(candidate_artifacts),
+        "files": out,
+    }
+
+
+@router.get("/review/revisions")
+async def actions_review_revisions(
+    job_id: str,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    _load_done_job_variants(job_id)
+    return {"ok": True, "job_id": job_id, "revisions": list_revision_snapshots(job_id=job_id)}
+
+
+@router.post("/review/rollback")
+async def actions_review_rollback(
+    req: ActionsReviewRollbackRequest,
+    x_actions_key: str | None = Header(default=None),
+):
+    _auth_actions_key(x_actions_key)
+    job_id = str(req.job_id or "").strip()
+    revision_id = str(req.revision_id or "").strip()
+    if not job_id or not revision_id:
+        raise HTTPException(status_code=400, detail="job_id and revision_id required")
+    _, current_result, _, current_variants = _load_done_job_variants(job_id)
+    _require_review_preconditions(
+        variants=current_variants,
+        idx=0,
+        expected_result_version=req.expected_result_version,
+    )
+    try:
+        revision = load_revision_snapshot(job_id=job_id, revision_id=revision_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="revision not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"invalid revision: {exc}")
+
+    safety = create_revision_snapshot(
+        job_id=job_id,
+        variants=copy.deepcopy(current_variants),
+        result=current_result,
+        reason="pre_review_rollback",
+        metadata={
+            "actor": str(req.actor or "webui").strip() or "webui",
+            "restore_revision_id": revision_id,
+        },
+    )
+    restored_variants = copy.deepcopy(revision["variants"])
+    restored_version = result_version(restored_variants)
+    candidate_suffix = f"rollback-{revision_id.lower()}-{safety['revision_id'].lower()}"
+    out = _save_outputs(f"actions_{job_id}_{candidate_suffix}", restored_variants)
+    out = await _render_professional_outputs_for_job(
+        job_id=f"{job_id}-{candidate_suffix}",
+        outputs=out,
+    )
+    rollback_artifacts = artifact_manifest(out)
+    finalize_revision_snapshot(
+        job_id=job_id,
+        revision_id=safety["revision_id"],
+        promotion={
+            "actor": str(req.actor or "webui").strip() or "webui",
+            "operation": "rollback",
+            "restored_revision_id": revision_id,
+            "candidate_result_version": restored_version,
+            "candidate_artifact_digest": canonical_digest(rollback_artifacts),
+            "artifacts": rollback_artifacts,
+        },
+    )
+    update_job(job_id, status="done", result=out, error=None)
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "restored_revision_id": revision_id,
+        "safety_revision_id": safety["revision_id"],
+        "result_version": restored_version,
+        "candidate_artifact_digest": canonical_digest(rollback_artifacts),
         "files": out,
     }
 
@@ -2014,6 +3185,13 @@ async def actions_result(
             "expert_review_docx": (result.get("expert_review_docx") or [None])[v - 1]
             if isinstance(result.get("expert_review_docx"), list)
             else result.get("expert_review_docx"),
+            "professional_docx": (result.get("professional_docx") or [None])[v - 1]
+            if isinstance(result.get("professional_docx"), list)
+            else result.get("professional_docx"),
+            "professional_render_receipt": (result.get("professional_render_receipt") or [None])[v - 1]
+            if isinstance(result.get("professional_render_receipt"), list)
+            else result.get("professional_render_receipt"),
+            "delivery_receipt": result.get("delivery_receipt"),
         },
     }
     if include_sections:
@@ -2031,7 +3209,7 @@ async def actions_result(
 @router.get("/download")
 async def actions_download(
     job_id: str,
-    kind: str = "docx",  # docx|compare_docx|json|focus_xlsx|score_overview_xlsx|expert_review_docx
+    kind: str = "docx",  # docx|professional_docx|compare_docx|json|delivery_receipt|focus_xlsx|score_overview_xlsx|expert_review_docx
     variant: int = 1,
     x_actions_key: str | None = Header(default=None),
 ):
@@ -2043,14 +3221,29 @@ async def actions_download(
         raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
     result = job.get("result") or {}
     path = result.get(kind)
-    if kind in ("docx", "compare_docx", "focus_xlsx", "score_overview_xlsx", "expert_review_docx") and isinstance(path, list):
+    if kind in (
+        "docx",
+        "professional_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "compare_docx",
+        "focus_xlsx",
+        "score_overview_xlsx",
+        "expert_review_docx",
+    ) and isinstance(path, list):
         v = max(1, int(variant or 1))
         path = path[v - 1] if v <= len(path) else None
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail="file not found")
-    if kind == "json":
+    if kind in {"json", "professional_json", "professional_render_receipt", "delivery_receipt"}:
         media_type = "application/json"
-        filename = f"autoplan_{job_id}.json"
+        if kind == "json":
+            filename = f"autoplan_{job_id}.json"
+        elif kind == "delivery_receipt":
+            filename = f"autoplan_{job_id}_delivery_receipt.json"
+        else:
+            suffix = "_professional" if kind == "professional_json" else "_professional_receipt"
+            filename = f"autoplan_{job_id}{suffix}_v{max(1, int(variant or 1))}.json"
     elif kind == "focus_xlsx":
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         filename = f"autoplan_{job_id}_focus_v{max(1, int(variant or 1))}.xlsx"
@@ -2060,6 +3253,9 @@ async def actions_download(
     elif kind == "expert_review_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         filename = f"autoplan_{job_id}_专家复核提要版_v{max(1, int(variant or 1))}.docx"
+    elif kind == "professional_docx":
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename = f"autoplan_{job_id}_Sonnet5专业精修版_v{max(1, int(variant or 1))}.docx"
     elif kind == "compare_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         filename = f"autoplan_{job_id}_compare_v{max(1, int(variant or 1))}.docx"
