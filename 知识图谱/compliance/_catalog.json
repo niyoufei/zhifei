@@ -3,12 +3,12 @@
   "root": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance",
   "count": 4,
   "verified_count": 4,
-  "generated_at": "2026-08-24T05:46:30",
+  "generated_at": "2026-08-24T06:12:55",
   "source_fingerprint": [
     {
       "name": "_official_registry.json",
       "size": 3335,
-      "mtime_ns": 1787441258750830235
+      "sha256": "f788dbf15fb6a54884dced9a64af2401d50da6070b612341333b2fac116c0f73"
     }
   ],
   "entries": [

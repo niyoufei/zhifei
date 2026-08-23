@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -128,6 +129,14 @@ def _source_files(root: Path) -> List[Path]:
     return sorted(files, key=lambda p: p.name)
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _source_fingerprint(root: Path) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for path in _source_files(root):
@@ -137,7 +146,7 @@ def _source_fingerprint(root: Path) -> List[Dict[str, Any]]:
                 {
                     "name": path.name,
                     "size": int(stat.st_size),
-                    "mtime_ns": int(stat.st_mtime_ns),
+                    "sha256": _file_sha256(path),
                 }
             )
         except OSError:
@@ -145,14 +154,18 @@ def _source_fingerprint(root: Path) -> List[Dict[str, Any]]:
     return out
 
 
-@lru_cache(maxsize=16)
-def _load_json_file(path: str, mtime_ns: int) -> Dict[str, Any]:
+def _load_json_file(path: str, content_sha256: str) -> Dict[str, Any]:
+    """Load JSON bytes without trusting a separately patched existence check.
+
+    ``content_sha256`` is intentionally retained in the call contract so
+    callers prove which bytes they meant to read.  The payload itself is not
+    cached: test isolation and live file replacement must never turn a
+    transient ``Path.exists`` result into a process-lifetime empty registry.
+    """
     p = Path(path)
-    if not p.exists() or not p.is_file():
-        return {}
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
 
 
@@ -217,10 +230,10 @@ def _load_official_registry(root: Path) -> List[Dict[str, Any]]:
     if not path.is_file():
         return []
     try:
-        mtime_ns = int(path.stat().st_mtime_ns)
+        content_sha256 = _file_sha256(path)
     except OSError:
-        mtime_ns = 0
-    payload = _load_json_file(str(path), mtime_ns)
+        content_sha256 = ""
+    payload = _load_json_file(str(path), content_sha256)
     rows = payload.get("standards") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         return []
@@ -307,12 +320,13 @@ def build_compliance_catalog(root: str | Path | None = None) -> Dict[str, Any]:
         if _canonical_standard_code(row.get("standard_code"))
     }
     entries: List[Dict[str, Any]] = []
+    clause_source_codes: set[str] = set()
     for p in files:
         try:
-            mtime_ns = int(p.stat().st_mtime_ns)
+            content_sha256 = _file_sha256(p)
         except Exception:
-            mtime_ns = 0
-        payload = _load_json_file(str(p), mtime_ns)
+            content_sha256 = ""
+        payload = _load_json_file(str(p), content_sha256)
         if not isinstance(payload, dict):
             continue
         entry = _extract_entry_from_payload(p, payload)
@@ -335,10 +349,14 @@ def build_compliance_catalog(root: str | Path | None = None) -> Dict[str, Any]:
                 value = registry_meta.get(key)
                 if value not in (None, "", []):
                     entry[key] = value
-            registry_meta["_has_clause_source"] = True
+            clause_source_codes.add(_canonical_standard_code(entry.get("standard_code")))
         entries.append(entry)
 
-    entries.extend([row for row in registry_entries if not row.get("_has_clause_source")])
+    entries.extend(
+        row
+        for row in registry_entries
+        if _canonical_standard_code(row.get("standard_code")) not in clause_source_codes
+    )
 
     latest_by_key: Dict[str, Tuple[int, str]] = {}
     for e in entries:
@@ -371,7 +389,29 @@ def build_compliance_catalog(root: str | Path | None = None) -> Dict[str, Any]:
         "source_fingerprint": _source_fingerprint(rt),
         "entries": entries,
     }
-    _catalog_path(rt).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    catalog_path = _catalog_path(rt)
+    # Explicit rebuild requests are intentionally idempotent.  A catalog is a
+    # versioned projection of its source bytes, not a heartbeat: rewriting it
+    # only to refresh ``generated_at`` would dirty the repository after tests
+    # or health checks and incorrectly turn static readiness into NO-GO.
+    try:
+        existing = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        existing = {}
+    stable_keys = (
+        "version",
+        "root",
+        "count",
+        "verified_count",
+        "source_fingerprint",
+        "entries",
+    )
+    if isinstance(existing, dict) and all(existing.get(key) == out.get(key) for key in stable_keys):
+        return existing
+
+    temporary_path = catalog_path.with_name(f".{catalog_path.name}.tmp-{os.getpid()}")
+    temporary_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_path.replace(catalog_path)
     return out
 
 

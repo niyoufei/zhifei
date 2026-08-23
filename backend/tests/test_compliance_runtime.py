@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from backend.zhifei_autoplan.compliance_runtime import (
@@ -252,3 +253,74 @@ def test_catalog_rebuilds_when_registry_changes(tmp_path: Path):
     status = get_compliance_registry_status(root)
     assert status["ready"] is True
     assert status["verified_count"] == 1
+
+
+def test_catalog_does_not_rebuild_for_source_mtime_only_change(tmp_path: Path):
+    root = tmp_path / "compliance"
+    root.mkdir(parents=True, exist_ok=True)
+    registry = root / "_official_registry.json"
+    registry.write_text('{"standards": []}', encoding="utf-8")
+
+    catalog = build_compliance_catalog(root)
+    catalog_path = root / "_catalog.json"
+    original_bytes = catalog_path.read_bytes()
+    original_fingerprint = catalog["source_fingerprint"]
+
+    stat = registry.stat()
+    os.utime(registry, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    status = get_compliance_registry_status(root)
+
+    assert status["ready"] is False
+    assert catalog_path.read_bytes() == original_bytes
+    reloaded = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert reloaded["source_fingerprint"] == original_fingerprint
+    assert set(original_fingerprint[0]) == {"name", "size", "sha256"}
+
+
+def test_explicit_catalog_rebuild_is_byte_stable_when_sources_are_unchanged(tmp_path: Path):
+    root = tmp_path / "compliance"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "_official_registry.json").write_text('{"standards": []}', encoding="utf-8")
+
+    build_compliance_catalog(root)
+    catalog_path = root / "_catalog.json"
+    original_bytes = catalog_path.read_bytes()
+
+    rebuilt = build_compliance_catalog(root)
+
+    assert catalog_path.read_bytes() == original_bytes
+    assert rebuilt == json.loads(original_bytes.decode("utf-8"))
+
+
+def test_transient_path_exists_patch_cannot_poison_registry_load(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "compliance"
+    root.mkdir(parents=True, exist_ok=True)
+    registry = root / "_official_registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "standards": [
+                    {
+                        "standard_code": "GB/T 50326-2017",
+                        "standard_name": "建设工程项目管理规范",
+                        "official_source": "https://official.example/GB-T-50326-2017",
+                        "effective_status": "active",
+                        "current_version": "GB/T 50326-2017",
+                        "domain_tags": ["通用工程"],
+                        "latest": True,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(Path, "exists", lambda _path: False)
+    catalog = build_compliance_catalog(root)
+
+    assert catalog["verified_count"] == 1
+    assert catalog["entries"][0]["standard_code"] == "GB/T 50326-2017"

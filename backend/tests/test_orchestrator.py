@@ -26,6 +26,34 @@ def _mock_mindmap_generation():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_verified_compliance_registry():
+    """Keep orchestration unit tests independent from repository catalog state.
+
+    The compliance registry has its own focused test module.  Tests in this
+    module exercise orchestration, provider routing, roles, and failure
+    handling, so they receive one traceable current standard by default.
+    """
+    verified_standard = {
+        "standard_code": "GB/T 50326-2017",
+        "standard_name": "建设工程项目管理规范",
+        "source_name": "建设工程项目管理规范",
+        "current_version": "GB/T 50326-2017",
+        "effective_status": "现行有效",
+        "official_source": "https://official.example/GB-T-50326-2017",
+        "domain_tags": ["通用工程"],
+        "latest": True,
+    }
+    with patch(
+        "backend.zhifei_autoplan.orchestrator.get_compliance_registry_status",
+        return_value={"ready": True, "verified_count": 1, "warnings": []},
+    ), patch(
+        "backend.zhifei_autoplan.orchestrator.list_verified_standard_metadata",
+        return_value=[verified_standard],
+    ):
+        yield
+
+
 def _find_ctx_by_title(mock_writer, title: str) -> dict:
     for call_args in mock_writer.write.call_args_list:
         if call_args and len(call_args[0]) >= 2 and str(call_args[0][0]) == title:
@@ -287,7 +315,9 @@ class TestRunAutoplan:
              patch("backend.zhifei_autoplan.orchestrator.generate_boq_chart") as mock_chart, \
              patch("backend.zhifei_autoplan.orchestrator.generate_ingested_previews") as mock_previews, \
              patch("backend.zhifei_autoplan.orchestrator.run_quality_checks") as mock_quality, \
-             patch("backend.zhifei_autoplan.orchestrator.apply_remediation") as mock_remediate:
+             patch("backend.zhifei_autoplan.orchestrator.apply_remediation") as mock_remediate, \
+             patch("backend.zhifei_autoplan.orchestrator.get_compliance_registry_status") as mock_compliance_status, \
+             patch("backend.zhifei_autoplan.orchestrator.list_verified_standard_metadata") as mock_verified_standards:
 
             mock_tender.return_value = {}
             mock_boq.return_value = {}
@@ -300,6 +330,27 @@ class TestRunAutoplan:
 
             mock_quality.return_value = _passing_quality_result()
             mock_previews.return_value = []
+            # These orchestration unit tests exercise routing and context
+            # wiring, not the repository-backed compliance registry.  Keep a
+            # minimal verified record in the fixture so an unrelated local
+            # catalog refresh cannot make the suite fail closed.
+            mock_compliance_status.return_value = {
+                "ready": True,
+                "verified_count": 1,
+                "warnings": [],
+            }
+            mock_verified_standards.return_value = [
+                {
+                    "standard_code": "GB/T 50326-2017",
+                    "standard_name": "建设工程项目管理规范",
+                    "source_name": "建设工程项目管理规范",
+                    "current_version": "GB/T 50326-2017",
+                    "effective_status": "现行有效",
+                    "official_source": "https://official.example/GB-T-50326-2017",
+                    "domain_tags": ["通用工程"],
+                    "latest": True,
+                }
+            ]
 
             yield {
                 "tender": mock_tender,
@@ -313,6 +364,8 @@ class TestRunAutoplan:
                 "previews": mock_previews,
                 "quality": mock_quality,
                 "remediate": mock_remediate,
+                "compliance_status": mock_compliance_status,
+                "verified_standards": mock_verified_standards,
             }
 
     @pytest.mark.asyncio
