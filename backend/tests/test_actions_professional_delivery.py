@@ -140,3 +140,35 @@ def test_web_ui_has_no_manual_professional_render_button() -> None:
     assert '"professional_render_receipt"' in source
     assert '"delivery_receipt"' in source
     assert "任务级交付凭证已通过" in source
+
+
+def test_professional_render_failure_preserves_sources_without_exposing_final(
+    tmp_path: Path,
+) -> None:
+    from backend.app.routers import actions_bridge
+
+    source = tmp_path / "source.docx"
+    source.write_bytes(b"source")
+    compare = tmp_path / "compare.docx"
+    compare.write_bytes(b"compare")
+    outputs = {
+        "json": ["x.json"],
+        "docx": [str(source)],
+        "compare_docx": [str(compare)],
+    }
+    secret = "sk-secret12345678"
+
+    recovery, info = actions_bridge._professional_render_failure_result(
+        outputs,
+        ConnectionError(f"connection reset {secret}"),
+    )
+
+    assert recovery["source_docx"] == [str(source)]
+    assert "docx" not in recovery
+    assert recovery["compare_docx"] == [str(compare)]
+    assert recovery["delivery_profile"] == "professional_render_incomplete"
+    assert recovery["professional_render_status"]["status"] == "failed"
+    assert recovery["professional_render_status"]["source_preserved"] is True
+    assert secret not in json.dumps(recovery, ensure_ascii=False)
+    assert info["retryable"] is True
+    assert outputs["docx"] == [str(source)]

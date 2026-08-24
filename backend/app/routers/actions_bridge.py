@@ -41,6 +41,7 @@ from backend.zhifei_autoplan.boq_store import load_boq_data
 from backend.zhifei_autoplan.quality_check import apply_remediation, run_quality_checks, strip_nonconcrete_language
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
 from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
+from backend.zhifei_autoplan.model_reliability import classify_provider_error
 from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
 from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
 from backend.zhifei_autoplan.requirement_evidence_matrix import (
@@ -821,6 +822,60 @@ async def _render_professional_outputs_for_job(
     delivery["delivery_receipt"] = str(sealed_delivery["receipt"])
     delivery["delivery_decision_digest"] = str(sealed_delivery["decision_digest"])
     return delivery
+
+
+def _professional_render_failure_result(
+    outputs: dict[str, Any], error: Exception
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Preserve source artifacts without presenting them as final delivery."""
+
+    delivery = copy.deepcopy(outputs or {})
+    raw_sources = delivery.get("source_docx") or delivery.get("docx") or []
+    if isinstance(raw_sources, (str, Path)):
+        raw_sources = [raw_sources]
+    if not isinstance(raw_sources, list):
+        raw_sources = []
+    source_docx = [str(path) for path in raw_sources if str(path)]
+    delivery["source_docx"] = source_docx
+
+    for key in (
+        "docx",
+        "professional_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "delivery_receipt",
+        "delivery_decision_digest",
+    ):
+        delivery.pop(key, None)
+
+    if isinstance(error, ProfessionalRenderError):
+        error_info: dict[str, Any] = {
+            "code": "professional_quality_gate_failed",
+            "message": "professional render quality gate failed",
+            "retryable": False,
+            "provider": "anthropic",
+            "model": "claude-sonnet-5",
+            "user_message": "专业终稿未通过质量门槛。",
+            "action": "请检查专业渲染报告后修正，禁止交付中间稿。",
+            "severity": "error",
+        }
+    else:
+        error_info = classify_provider_error(
+            error,
+            provider="anthropic",
+            model="claude-sonnet-5",
+        )
+
+    delivery["delivery_profile"] = "professional_render_incomplete"
+    delivery["professional_render_status"] = {
+        "status": "failed",
+        "retryable": bool(error_info.get("retryable")),
+        "code": str(error_info.get("code") or "provider_error"),
+        "message": str(error_info.get("user_message") or "专业终稿渲染未完成。"),
+        "action": str(error_info.get("action") or ""),
+        "source_preserved": bool(source_docx),
+    }
+    return delivery, error_info
 
 
 def _rebuild_postprocessed_artifacts(
@@ -2631,14 +2686,39 @@ async def actions_generate_async(
                 "professional_rendering",
                 "Sonnet 5 正在逐章精修、统一视觉规范并执行 Word 质量闸门",
             )
-            outputs = asyncio.run(
-                _render_professional_outputs_for_job(
-                    job_id=_job_id,
-                    outputs=outputs,
-                    progress_callback=_professional_progress,
-                    execution_runtime=execution_runtime,
+            try:
+                outputs = asyncio.run(
+                    _render_professional_outputs_for_job(
+                        job_id=_job_id,
+                        outputs=outputs,
+                        progress_callback=_professional_progress,
+                        execution_runtime=execution_runtime,
+                    )
                 )
-            )
+            except Exception as render_error:
+                agent_runtime["execution_control"] = execution_runtime.snapshot()
+                recovery, error_info = _professional_render_failure_result(
+                    outputs,
+                    render_error,
+                )
+                detail = (
+                    "专业终稿渲染未完成："
+                    f"{error_info.get('user_message') or '外部模型连接失败。'} "
+                    "已保全中间稿与质控附件；未将中间稿冒充专业终稿。"
+                )
+                update_job(
+                    _job_id,
+                    status="failed",
+                    error=detail,
+                    result=recovery,
+                    agent_runtime=agent_runtime,
+                    progress={
+                        "percent": 99,
+                        "stage": "professional_render_failed",
+                        "detail": detail,
+                    },
+                )
+                return
             agent_runtime["execution_control"] = execution_runtime.snapshot()
             if _is_cancelled():
                 update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)

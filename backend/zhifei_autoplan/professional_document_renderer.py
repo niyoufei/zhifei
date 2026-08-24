@@ -21,6 +21,10 @@ from backend.zhifei_autoplan.docx_visual_quality import (
 )
 from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
 from backend.zhifei_autoplan.exporter import export_autoplan_docx
+from backend.zhifei_autoplan.model_reliability import (
+    bounded_retry_delay,
+    classify_provider_error,
+)
 from backend.zhifei_autoplan.provider_runtime import ProviderSlot, resolve_document_render_slot
 from backend.zhifei_autoplan.providers.anthropic_provider import AnthropicProvider
 
@@ -185,6 +189,22 @@ def _compact_quality_summary(raw: Any) -> dict[str, Any]:
     return summary
 
 
+def _professional_retry_attempts() -> int:
+    try:
+        value = int(os.getenv("ZHIFEI_PROFESSIONAL_RENDER_RETRY_ATTEMPTS", "3"))
+    except (TypeError, ValueError):
+        value = 3
+    return max(1, min(5, value))
+
+
+def _professional_retry_base_delay() -> float:
+    try:
+        value = float(os.getenv("ZHIFEI_PROFESSIONAL_RENDER_RETRY_BASE_DELAY", "0.25"))
+    except (TypeError, ValueError):
+        value = 0.25
+    return max(0.0, min(2.0, value))
+
+
 async def _controlled_complete(
     provider: Any,
     prompt: str,
@@ -196,18 +216,41 @@ async def _controlled_complete(
 ) -> dict[str, Any]:
     """Run a renderer call through the job-wide execution controller."""
 
-    if execution_runtime is None:
-        return await provider.complete(prompt, **kwargs)
     requested_tokens = kwargs.get("max_tokens") or kwargs.get("max_output_tokens") or 0
-    async with execution_runtime.model_attempt(
-        provider=provider_name,
-        model=model_name,
-        prompt_chars=len(prompt),
-        requested_output_tokens=int(requested_tokens or 0),
-    ):
-        result = await provider.complete(prompt, **kwargs)
-        execution_runtime.record_result(result)
-        return result
+
+    async def _invoke() -> dict[str, Any]:
+        if execution_runtime is None:
+            return await provider.complete(prompt, **kwargs)
+        async with execution_runtime.model_attempt(
+            provider=provider_name,
+            model=model_name,
+            prompt_chars=len(prompt),
+            requested_output_tokens=int(requested_tokens or 0),
+        ):
+            result = await provider.complete(prompt, **kwargs)
+            execution_runtime.record_result(result)
+            return result
+
+    attempts = _professional_retry_attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _invoke()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error_info = classify_provider_error(
+                exc,
+                provider=provider_name,
+                model=model_name,
+            )
+            if not error_info.get("retryable") or attempt >= attempts:
+                raise
+            await bounded_retry_delay(
+                attempt,
+                retry_after=error_info.get("retry_after"),
+                base_delay=_professional_retry_base_delay(),
+            )
+    raise RuntimeError("professional renderer retry loop exhausted")
 
 
 async def _design_brief(

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.zhifei_autoplan import professional_document_renderer as renderer
 from backend.zhifei_autoplan.professional_document_renderer import (
     ProfessionalRenderError,
     _merge_professional_style,
@@ -230,3 +231,72 @@ async def test_refine_chunk_blocks_evidence_loss() -> None:
             chunk_total=1,
             editorial_priorities=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_controlled_complete_retries_transient_provider_error(monkeypatch) -> None:
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, prompt, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise ConnectionError("temporary reset")
+            return {"text": "ok"}
+
+    delays: list[int] = []
+
+    async def no_delay(attempt, **kwargs):
+        delays.append(attempt)
+
+    monkeypatch.setenv("ZHIFEI_PROFESSIONAL_RENDER_RETRY_ATTEMPTS", "3")
+    monkeypatch.setattr(renderer, "bounded_retry_delay", no_delay)
+    provider = Provider()
+
+    out = await renderer._controlled_complete(
+        provider,
+        "test",
+        execution_runtime=None,
+        provider_name="anthropic",
+        model_name="claude-sonnet-5",
+    )
+
+    assert out["text"] == "ok"
+    assert provider.calls == 3
+    assert delays == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_controlled_complete_does_not_retry_auth_error(monkeypatch) -> None:
+    class AuthError(RuntimeError):
+        status_code = 401
+
+    class Provider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, prompt, **kwargs):
+            self.calls += 1
+            raise AuthError("bad key")
+
+    delays: list[int] = []
+
+    async def no_delay(attempt, **kwargs):
+        delays.append(attempt)
+
+    monkeypatch.setenv("ZHIFEI_PROFESSIONAL_RENDER_RETRY_ATTEMPTS", "3")
+    monkeypatch.setattr(renderer, "bounded_retry_delay", no_delay)
+    provider = Provider()
+
+    with pytest.raises(AuthError):
+        await renderer._controlled_complete(
+            provider,
+            "test",
+            execution_runtime=None,
+            provider_name="anthropic",
+            model_name="claude-sonnet-5",
+        )
+
+    assert provider.calls == 1
+    assert delays == []

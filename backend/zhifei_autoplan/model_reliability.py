@@ -91,6 +91,8 @@ def classify_provider_error(
 ) -> Dict[str, Any]:
     """Normalize SDK/provider failures into a stable, non-secret record."""
 
+    is_connection_error = isinstance(error, ConnectionError)
+
     if isinstance(error, dict) and error.get("code"):
         info = dict(error)
         info.setdefault("provider", provider)
@@ -136,7 +138,15 @@ def classify_provider_error(
         code, retryable = "timeout", True
     elif status is not None and status >= 500:
         code, retryable = "provider_unavailable", True
-    elif any(x in lower for x in ("connection", "network", "temporarily unavailable", "service unavailable")):
+    elif is_connection_error or any(
+        x in lower
+        for x in (
+            "connection",
+            "network",
+            "temporarily unavailable",
+            "service unavailable",
+        )
+    ):
         code, retryable = "network_error", True
     elif any(x in lower for x in ("content filter", "safety", "blocked")):
         code, retryable = "content_filtered", False
