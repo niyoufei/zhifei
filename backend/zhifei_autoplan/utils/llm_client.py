@@ -220,8 +220,6 @@ class LLMClient:
                 last_error = repr(exc)
                 last_info = classify_provider_error(exc, provider=self.provider, model=self.model)
 
-            if runtime is not None and last_info is not None:
-                runtime.record_failure(self.provider, self.model, last_info)
             if not last_info or not bool(last_info.get("retryable")) or attempt >= attempts:
                 break
             await bounded_retry_delay(
@@ -230,13 +228,22 @@ class LLMClient:
                 base_delay=self.retry_base_delay,
             )
 
+        final_info = last_info or classify_provider_error(
+            last_error,
+            provider=self.provider,
+            model=self.model,
+        )
+        if runtime is not None:
+            # Internal retries belong to one logical provider request. Counting
+            # every attempt as a separate failure opens the shared circuit from
+            # a single transient outage and starves parallel chapter agents.
+            runtime.record_failure(self.provider, self.model, final_info)
         return {
             "provider": self.provider,
             "model": self.model,
             "text": "",
             "error": last_error,
-            "error_info": last_info
-            or classify_provider_error(last_error, provider=self.provider, model=self.model),
+            "error_info": final_info,
             "attempts": attempt,
         }
 

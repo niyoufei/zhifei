@@ -146,3 +146,31 @@ async def test_quota_exhaustion_does_not_retry():
     assert result["error_info"]["code"] == "quota_exhausted"
     assert result["attempts"] == 1
     assert impl.complete.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_exhausted_internal_retries_count_as_one_circuit_failure():
+    impl = MagicMock()
+    impl.complete = AsyncMock(
+        return_value={"text": "", "error": "503 service unavailable"}
+    )
+    runtime = ModelReliabilityRuntime(failure_threshold=2)
+
+    with patch.object(LLMClient, "_init_provider", return_value=impl):
+        client = LLMClient(
+            provider="openai",
+            model="m",
+            api_key="test-key",
+            reliability_runtime=runtime,
+            retry_attempts=3,
+            retry_base_delay=0,
+        )
+        first = await client.complete("prompt")
+        assert first["attempts"] == 3
+        assert runtime.is_open("openai", "m") is False
+
+        second = await client.complete("prompt")
+
+    assert second["attempts"] == 3
+    assert impl.complete.await_count == 6
+    assert runtime.is_open("openai", "m") is True

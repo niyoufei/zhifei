@@ -520,18 +520,40 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     providers = payload.get("providers") or []
     model_map = payload.get("model_map") or {}
     provider_chain = _normalize_provider_chain(payload)
-    model_reliability = ModelReliabilityRuntime(failure_threshold=2)
+    try:
+        agent_parallelism = int(payload.get("agent_parallelism") or 4)
+    except Exception:
+        agent_parallelism = 4
+    agent_parallelism = max(1, min(16, agent_parallelism))
+    try:
+        requested_model_parallelism = int(
+            payload.get("max_model_parallelism") or min(agent_parallelism, 2)
+        )
+    except Exception:
+        requested_model_parallelism = min(agent_parallelism, 2)
+    max_model_parallelism = max(
+        1, min(8, agent_parallelism, requested_model_parallelism)
+    )
+    try:
+        requested_failure_threshold = int(
+            payload.get("model_circuit_failure_threshold")
+            or max(3, max_model_parallelism + 1)
+        )
+    except Exception:
+        requested_failure_threshold = max(3, max_model_parallelism + 1)
+    model_circuit_failure_threshold = max(
+        2, min(16, requested_failure_threshold)
+    )
+    model_reliability = ModelReliabilityRuntime(
+        failure_threshold=model_circuit_failure_threshold
+    )
     model_preflight_receipts: List[Dict[str, Any]] = []
     progress_callback = payload.get("_progress_callback")
     cancel_callback = payload.get("_cancel_callback")
     execution_runtime = payload.get("_execution_runtime")
     if not isinstance(execution_runtime, ExecutionControlRuntime):
         execution_runtime = ExecutionControlRuntime(
-            max_concurrency=int(
-                payload.get("max_model_parallelism")
-                or payload.get("agent_parallelism")
-                or 4
-            ),
+            max_concurrency=max_model_parallelism,
             max_model_attempts=int(payload.get("max_model_attempts") or 256),
             max_input_chars=int(payload.get("max_model_input_chars") or 24_000_000),
             max_requested_output_tokens=int(
@@ -1086,11 +1108,6 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             return "资源统筹负责人"
         return "技术负责人"
 
-    try:
-        agent_parallelism = int(payload.get("agent_parallelism") or 4)
-    except Exception:
-        agent_parallelism = 4
-    agent_parallelism = max(1, min(16, agent_parallelism))
     section_sem = asyncio.Semaphore(agent_parallelism)
 
     def _build_case_pack_for_section(title: str) -> dict[str, Any]:
