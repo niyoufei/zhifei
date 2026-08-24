@@ -120,6 +120,9 @@ async def test_complete_empty_content_returns_fallback() -> None:
     assert result["error"] == "ollama_empty_response"
 
 
-def test_adapter_import_does_not_pull_main_chain_modules() -> None:
+def test_adapter_import_does_not_pull_main_chain_modules(assert_clean_import) -> None:
     assert not hasattr(ollama_provider, "LLMClient")
-    assert "backend.zhifei_autoplan.orchestrator" not in sys.modules
+    assert_clean_import(
+        "backend.zhifei_autoplan.providers.ollama_provider",
+        {"backend.zhifei_autoplan.orchestrator"},
+    )

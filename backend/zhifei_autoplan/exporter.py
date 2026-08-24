@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 from docx import Document
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.shared import Cm
@@ -16,6 +16,15 @@ from docx.shared import Pt
 from docx.shared import RGBColor
 from docx.oxml.ns import qn
 from backend.zhifei_autoplan.media import generate_section_visuals
+from backend.zhifei_autoplan.media_quality import (
+    build_media_delivery_manifest,
+    media_matches_chapter,
+    validate_media_collection,
+    validate_media_item,
+    verify_docx_media_hashes,
+)
+from backend.zhifei_autoplan.docx_structural_quality import audit_docx_structural_quality
+from backend.zhifei_autoplan.style_policy import resolve_line_spacing
 from backend.zhifei_autoplan.terminology_guard import load_global_terminology, normalize_text_terminology
 
 try:
@@ -44,6 +53,153 @@ _GENERIC_COVER_IMAGE_STEMS = {
     "现场图",
     "现状",
 }
+
+_FONT_ALIASES = {
+    # The application runs on macOS.  SimSun/SimHei are Windows family names;
+    # LibreOffice on macOS silently substitutes them with a Latin face, which
+    # turns Chinese submission text into tofu/blank glyphs.  STSong and Heiti
+    # SC are installed system Chinese faces and remain recognisable to Word's
+    # font substitution engine when the DOCX is opened on Windows.
+    "宋体": "STSong",
+    "simsun": "STSong",
+    "stsong": "STSong",
+    "songti sc": "STSong",
+    "仿宋": "STFangsong",
+    "仿宋体": "STFangsong",
+    "fangsong": "STFangsong",
+    "黑体": "Heiti SC",
+    "simhei": "Heiti SC",
+    "heiti sc": "Heiti SC",
+    "stheiti": "Heiti SC",
+}
+_SUBMISSION_EVIDENCE_RE = re.compile(r"【证据\s*[:：][^】]{0,600}】")
+_SUBMISSION_GRAPH_RE = re.compile(r"【(?:图谱节点|图谱经验值)\s*[:：][^】]{0,600}】")
+_SUBMISSION_EXPERIENCE_RE = re.compile(
+    r"[【（(]经验值(?:\s*[:：，,][^】）)]{0,200})?[】）)]"
+)
+_SUBMISSION_LOCATOR_RE = re.compile(
+    r"[^\s，。；;：:【】]{1,180}#(?:p\d+_)?[0-9a-fA-F]{6,}@[0-9]+"
+)
+_SUBMISSION_INTERNAL_TOKENS = (
+    "entity_master_key",
+    "authority_rank",
+    "formula_expression",
+    "gemini_usefulness_score",
+    "incremental_fingerprint",
+    "is_auto_generated",
+    "kg_dimension",
+    "node_id",
+    "professional_domain",
+    "reference_standard_count",
+    "reference_standard_primary",
+    "safety_level",
+    "source_hierarchy",
+    "source_hierarchy_weight",
+    "quality_checks",
+    "auto_revision_suggestions",
+    "span_start",
+    "span_end",
+)
+_SUBMISSION_INTERNAL_PREFIXES = (
+    "【多Agent",
+    "【图谱节点绑定",
+    "【证据与追溯",
+    "【系统全局指令",
+    "【篇幅约束",
+    "【章节结构蓝图",
+    "评分点命中关键词（用于本章覆盖校核）",
+    "【消除空泛词】",
+    "【核心结论证据补齐】",
+    "【评分点覆盖建议】",
+    "【证据可追溯定位】",
+    "【数据一致性校核】",
+    "【本地导出控制表】",
+    "【排版及格式合规声明】",
+    "【格式合规声明】",
+    "【排版声明",
+    "排版及格式合规声明",
+    "格式合规声明",
+    "评分点覆盖建议",
+    "核心结论证据补齐",
+    "证据可追溯定位",
+    "证据标注",
+    "评分维度回填",
+    "消除空泛词",
+    "本地导出控制表",
+)
+_SUBMISSION_INSTRUCTION_PREFIXES = (
+    "将空泛词替换为",
+    "对含“频次/阈值/时限/人数/型号/工期”等结论句逐条补",
+    "示例：",
+    "补充评分点覆盖：",
+    "量化指标示例：",
+    "本章至少保留 1 条带定位符的证据",
+    "每条写清：动作+参数+频次+责任岗位+验收方法/阈值+记录表",
+    "在每条关键结论句末追加",
+    "至少 1 条/章",
+    "至少1条/章",
+)
+_GENERIC_METRIC_TEMPLATE_PREFIX = (
+    "量化指标：频次=2次/日（班前+收工）；阈值=偏差≤5mm；间距=1000mm；"
+    "厚度=50mm；时长=4h/作业段；人数=8人/班；设备型号=20t挖机1台"
+)
+_SUBMISSION_IDENTIFIER_LABELS = {
+    "inspection_batches": "已验收批次",
+    "pass_rate_percent": "批次合格率",
+    "total_batches": "总批次",
+    "total_work_batches": "总施工批次",
+    "emergency_response_minutes": "实际应急响应时长",
+    "target_response_minutes": "目标应急响应时长",
+    "defect_count": "缺陷数",
+    "sample_count": "抽检样本数",
+    "rework_volume": "返工工程量",
+    "total_work_volume": "总工程量",
+}
+_RISK_TRIPLET_RE = re.compile(
+    r"^(?:风险\s*[→-]\s*控制\s*[→-]\s*验证\s*[：:]\s*)?"
+    r"(?:风险|风险点)\s*[：:]\s*(?P<risk>.*?)\s*[；;]\s*"
+    r"(?:控制|控制措施)\s*[：:]\s*(?P<control>.*?)\s*[；;]\s*"
+    r"(?:验证|验证方式)\s*[：:]\s*(?P<verification>.+)$"
+)
+_INLINE_MARKDOWN_RE = re.compile(r"(\*\*|__)(.+?)\1")
+_MAX_SUBMISSION_IMAGES = 24
+_INVALID_XML_10_RE = re.compile(
+    "[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]"
+)
+
+_SUBMISSION_HEADING_REPLACEMENTS = {
+    "A. 组织与策划层 (Architecture & Planning)": "组织与策划",
+    "B. 边界与防护层 (Boundary & Protection)": "作业边界与防护",
+    "C. 核心执行层 (Core Implementation)": "施工执行与过程控制",
+    "D. 监测与诊断层 (Detection & Diagnostics)": "监测、诊断与纠偏",
+    "E. 应急与闭环层 (Emergency & Evaluation)": "应急处置与闭环",
+    "A. 本章交付物与记录表": "交付成果与记录",
+    "A. 交付物/记录表/验收点": "交付成果、记录与验收点",
+    "B. 核心约束条件与重难点分析": "核心约束与重难点",
+    "B. 约束条件": "施工约束与前置条件",
+    "C. 执行步骤": "实施步骤",
+    "D. 风险→控制→验证（闭环）": "风险控制与验证",
+    "D. 风险→控制→验证（闭环管控）": "风险控制与验证",
+    "E. 扣分项规避说明": "质量风险防控",
+}
+
+
+def _sanitize_xml_text(value: Any) -> str:
+    """Remove characters that OOXML/XML 1.0 cannot represent."""
+    return _INVALID_XML_10_RE.sub("", str(value or ""))
+
+
+def _sanitize_docx_payload(value: Any) -> Any:
+    """Return a structure-safe copy with every text value XML-compatible."""
+    if isinstance(value, str):
+        return _sanitize_xml_text(value)
+    if isinstance(value, dict):
+        return {key: _sanitize_docx_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_docx_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_docx_payload(item) for item in value)
+    return value
 
 
 def _local_adapter_export_error(export_kind: str, issues: Any) -> RuntimeError:
@@ -77,6 +233,1188 @@ def _strip_internal_autofix_markers(text: str) -> str:
     s = _AUTOFIX_MARK_RE.sub(lambda m: f"【{m.group('name').strip()}】", s)
     s = s.replace("【自动补充】", "")
     return s
+
+
+def _resolve_docx_font_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    return _FONT_ALIASES.get(raw, _FONT_ALIASES.get(raw.lower(), raw))
+
+
+def _rewrite_submission_notation(value: str) -> str:
+    """Translate machine-oriented formulas into bidder-facing engineering prose."""
+    text = str(value or "")
+    formula_replacements = (
+        (
+            r"inspection_batches\s*\*\s*pass_rate_percent\s*/\s*max\s*\(\s*(?:total_batches|total_work_batches)\s*,\s*1\s*\)",
+            "已验收批次乘以批次合格率，再除以总批次",
+        ),
+        (
+            r"emergency_response_minutes\s*/\s*max\s*\(\s*target_response_minutes\s*,\s*1\s*\)",
+            "实际应急响应时长与目标应急响应时长的比值",
+        ),
+        (
+            r"100\s*-\s*defect_count\s*\*\s*100\s*/\s*max\s*\(\s*sample_count\s*,\s*1\s*\)",
+            "抽检合格率〔（抽检样本数－缺陷数）÷抽检样本数×100%〕",
+        ),
+        (
+            r"rework_volume\s*\*\s*100\s*/\s*max\s*\(\s*total_work_volume\s*,\s*1\s*\)",
+            "返工率〔返工工程量÷总工程量×100%〕",
+        ),
+        (
+            r"high_risk_tasks\s*\*\s*100\s*/\s*(?:max\s*\(\s*)?total_tasks(?:\s*,\s*1\s*\))?",
+            "高风险任务数÷任务总数×100%",
+        ),
+        (
+            r"delay_hours\s*\*\s*100\s*/\s*(?:max\s*\(\s*)?planned_hours(?:\s*,\s*1\s*\))?",
+            "累计延误时长÷计划时长×100%",
+        ),
+    )
+    for pattern, replacement in formula_replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    for identifier, label in _SUBMISSION_IDENTIFIER_LABELS.items():
+        text = re.sub(rf"\b{re.escape(identifier)}\b", label, text, flags=re.IGNORECASE)
+    text = re.sub(r"\bmax\s*\(([^,()]+),\s*1\s*\)", r"\1（最小按1计）", text, flags=re.IGNORECASE)
+    text = text.replace("`", "").replace("->", "→")
+    return text
+
+
+def _missing_parameter_keys(value: Any) -> set[str]:
+    if not isinstance(value, dict):
+        return set()
+    missing = value.get("missing")
+    if not isinstance(missing, list):
+        return set()
+    return {
+        str(item.get("key") or "").strip()
+        for item in missing
+        if isinstance(item, dict) and str(item.get("key") or "").strip()
+    }
+
+
+def _rewrite_unverified_submission_parameters(text: str, missing_parameters: Any) -> str:
+    """Replace guessed planning values when the source packet says they are missing.
+
+    The prose remains usable, but the submission no longer states model/default
+    values as if they had been confirmed by the tender documents.
+    """
+    keys = _missing_parameter_keys(missing_parameters)
+    value = str(text or "")
+    value = value.replace(_GENERIC_METRIC_TEMPLATE_PREFIX + "。", "")
+    value = value.replace(_GENERIC_METRIC_TEMPLATE_PREFIX, "")
+    if "总工期" in keys:
+        unverified_durations: set[str] = set()
+        duration_patterns = (
+            r"总工期[^\n，。；;]{0,24}?(\d+(?:\.\d+)?)\s*天",
+            r"(\d+(?:\.\d+)?)\s*天[^\n，。；;]{0,24}?总工期",
+            r"总进度计划网络图（(\d+(?:\.\d+)?)\s*天控制口径）",
+        )
+        for pattern in duration_patterns:
+            unverified_durations.update(re.findall(pattern, value))
+        value = re.sub(
+            r"(?:本工程)?(?:计划)?总工期\s*(?:[=：:]|为)?\s*\d+(?:\.\d+)?\s*天",
+            "本工程总工期以招标文件及经批准的总进度计划为准",
+            value,
+        )
+        for duration in sorted(unverified_durations, key=len, reverse=True):
+            value = re.sub(
+                rf"(?<![0-9.]){re.escape(duration)}\s*天(?![0-9])",
+                "经批准计划确定的工期",
+                value,
+            )
+    if "资源峰值" in keys:
+        value = re.sub(
+            r"(?:锁定)?资源峰值\s*(?:[=：:]|为)?\s*\d+(?:\.\d+)?\s*人(?:（当量）)?",
+            "各阶段资源按经批准的进度计划和实际工作面动态配置",
+            value,
+        )
+    if "关键线路间隔" in keys:
+        value = re.sub(
+            r"关键线路间隔\s*(?:[=：:]|为)?\s*\d+(?:\.\d+)?\s*天",
+            "关键线路节拍以经批准的进度计划为准",
+            value,
+        )
+    if "风险检查频次" in keys:
+        value = value.replace("频次=2次/日（班前+收工）", "按班前检查、过程巡检和收工复核执行")
+        value = value.replace("2次/日（班前+收工）", "班前检查、过程巡检和收工复核")
+        value = re.sub(
+            r"(?:风险检查)?频次\s*[=：:]\s*2\s*次\s*/\s*日",
+            "检查频次按班前、过程巡检和收工复核执行",
+            value,
+        )
+        value = re.sub(
+            r"(?<![0-9])2\s*次\s*/\s*日(?![0-9])",
+            "按班前、过程巡检和收工复核",
+            value,
+        )
+    if "质量阈值" in keys:
+        value = value.replace("偏差≤5mm", "允许偏差按设计文件和适用验收标准执行")
+        value = re.sub(
+            r"(?:一次验收)?(?:质量)?合格率(?:阈值)?(?:要求)?\s*(?:设定为|控制为)?\s*[=：:]?\s*≥?\s*98%",
+            "验收合格标准按招标文件、设计文件及适用规范执行",
+            value,
+        )
+        value = re.sub(
+            r"一次验收通过率(?:阈值)?(?:设置|要求|控制在)?\s*[=：:]?\s*≥?\s*95%",
+            "一次验收通过率按经批准的项目质量目标考核",
+            value,
+        )
+        value = re.sub(
+            r"扫码准确率\s*≥?\s*98%",
+            "扫码信息与实物及台账逐项核对",
+            value,
+        )
+    if "偏差处置时限" in keys:
+        value = value.replace("偏差处置时限≤4h", "偏差应立即隔离并在复验合格后销项")
+        value = re.sub(
+            r"(?:处置)?时限\s*[=：:]?\s*≤?\s*\d+(?:\.\d+)?\s*h\s*内?",
+            "发现偏差后立即隔离整改，复验合格后销项",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(
+            r"偏差应立即隔离并在复验合格后销项内到场",
+            "立即启动备用人员调配，并依据经批准的进度计划调整作业安排",
+            value,
+        )
+    if "资源峰值" in keys:
+        value = re.sub(
+            r"作业人数\s*[（(]\s*\d+\s*人\s*/\s*班\s*[）)]",
+            "作业人数按工作面和经批准的劳动力计划配置",
+            value,
+        )
+        value = re.sub(
+            r"人数\s*[=：:]\s*\d+\s*人\s*/\s*班",
+            "人数按工作面和经批准的劳动力计划配置",
+            value,
+        )
+    value = re.sub(
+        r"防锈漆厚度\s*[=：:]\s*50\s*mm(?:（[^）]*）)?",
+        "防锈漆干膜厚度按设计文件、产品体系和适用验收标准检查",
+        value,
+    )
+    # Remove generation-template language and generic equipment defaults that
+    # are not suitable for a hospital partial-renovation submission.
+    value = value.replace("A/B/C/D/E标准控制工序", "准备、复核、材料、施工、验收五步控制工序")
+    value = value.replace("A/B/C/D/E结构", "五步闭环")
+    value = value.replace("A/B/C/D/E", "五步闭环")
+    value = value.replace(
+        "A（准备）/B（施工）/C（检查）/D（验收）/E（成品保护/后期处理）五步工序法",
+        "准备、施工、检查、验收、成品保护五步闭环工序法",
+    )
+    value = re.sub(r"[（(](?:模版|模板)A[）)]", "", value)
+    value = value.replace("五层级（五步闭环）", "准备、复核、材料、施工、验收五步闭环")
+    value = re.sub(
+        r"防尘网覆盖厚度控制在50mm",
+        "采用阻燃密目网连续覆盖并压边固定",
+        value,
+    )
+    value = re.sub(
+        r"裸土及渣土使用密目网覆盖，厚度控制50mm以保持水土",
+        "裸土及渣土采用阻燃密目网连续覆盖并压边固定",
+        value,
+    )
+    value = re.sub(
+        r"(?:铺设砂浆|干硬性水泥砂浆打底|底层铺设)厚度[=：:]?50mm(?:（含找平层）)?",
+        "找平层及结合层厚度按设计构造、样板确认和标高复核结果控制",
+        value,
+    )
+    value = value.replace(
+        "干硬性水泥砂浆打底（厚度=50mm）",
+        "干硬性水泥砂浆找平及结合层厚度按设计构造、样板确认和标高复核结果控制",
+    )
+    value = re.sub(
+        r"细石混凝土保护层厚度[=：:]?50mm",
+        "细石混凝土保护层厚度按设计构造和适用验收标准控制",
+        value,
+    )
+    value = re.sub(
+        r"蓄水深度不低于厚度[=：:]?50mm",
+        "蓄水深度和持续时间按设计文件及适用验收标准执行",
+        value,
+    )
+    value = re.sub(
+        r"设备型号[=：:]?20t挖机1台(?:（量化默认值）|（按工序替换）)?",
+        "与作业面及院区交通条件相匹配的小型开挖设备",
+        value,
+    )
+    value = value.replace("20t挖机1台", "与作业面及院区交通条件相匹配的小型开挖设备")
+    value = value.replace("20t挖机", "与作业面及院区交通条件相匹配的小型开挖设备")
+    value = value.replace("50m车载泵", "按专项方案选配的混凝土输送设备")
+    value = re.sub(
+        r"(?:连续作业)?时长[=：:]?4h/作业段",
+        "作业时长按班次计划与职业健康要求执行",
+        value,
+    )
+    value = re.sub(
+        r"时长[（(]?4h/作业段[）)]?",
+        "作业时长按班次计划与职业健康要求执行",
+        value,
+    )
+    value = value.replace("单次搅拌量满足4h/作业段施工", "单次搅拌量与当班可使用量匹配")
+    value = value.replace("照片上传系统延迟：时长≤4h/作业段", "照片须随检验批及时上传并完成关联")
+    value = re.sub(
+        r"总人数配置满足8人/班的作业分组",
+        "班组人数按工作面和经批准的劳动力计划配置",
+        value,
+    )
+    value = re.sub(
+        r"扫码领料覆盖率≥95%",
+        "纳入范围的材料领用全部扫码留痕",
+        value,
+    )
+    value = value.replace(
+        "整改偏差应立即隔离并在复验合格后销项/作业段",
+        "发现不合格时立即隔离整改，复验合格后销项",
+    )
+    value = re.sub(
+        r"进度纠偏行动需在偏差应立即隔离并在复验合格后销项内下达指令",
+        "发现进度偏差后立即下达纠偏指令",
+        value,
+    )
+    value = value.replace(
+        "时限：偏差应立即隔离并在复验合格后销项",
+        "处置：立即隔离整改，复验合格后销项",
+    )
+    value = value.replace(
+        "限定偏差应立即隔离并在复验合格后销项",
+        "执行立即隔离整改、复验合格后销项的闭环要求",
+    )
+    value = value.replace(
+        "执行偏差应立即隔离并在复验合格后销项的刚性闭环",
+        "立即隔离整改并在复验合格后销项",
+    )
+    value = value.replace(
+        "要求备用人员在立即启动备用人员调配，并依据经批准的进度计划调整作业安排",
+        "立即启动备用人员调配，并依据经批准的进度计划调整作业安排",
+    )
+    value = value.replace(
+        "在规定偏差应立即隔离并在复验合格后销项内进行局部复涂",
+        "立即进行局部复涂",
+    )
+    value = value.replace(
+        "系统于偏差应立即隔离并在复验合格后销项内自动报警",
+        "系统在出现异常时自动报警",
+    )
+    value = value.replace(
+        "间距=1000mm；厚度=50mm",
+        "间距和厚度按设计图纸、材料体系及适用规范确定",
+    )
+    value = value.replace(
+        "在找平层上铺设电导率传感网格（间距=1000mm布置）",
+        "在找平层上按经批准的专项方案铺设电导率传感网格",
+    )
+    value = value.replace(
+        "电工施放线缆，间距=1000mm绑扎固定",
+        "电工施放线缆，并按设计及适用规范要求分段绑扎固定",
+    )
+    value = value.replace(
+        "预设间距=1000mm、吊杆直径8mm等核心检验参数",
+        "预设吊杆间距不大于1000mm、吊杆直径8mm等核心检验参数",
+    )
+    value = value.replace(
+        "综合布线强弱电缆保持间距=1000mm以上",
+        "综合布线强弱电缆保持设计及适用规范要求的隔离距离",
+    )
+    value = value.replace(
+        "以间距=1000mm为节点进行布线",
+        "按经批准专项方案确定的网格间距布线",
+    )
+    value = value.replace(
+        "；与作业面及院区交通条件相匹配的小型开挖设备。",
+        "；设备按具体工序和现场条件配置。",
+    )
+    value = value.replace(
+        "设备/工具=与作业面及院区交通条件相匹配的小型开挖设备（按工序替换）",
+        "设备/工具=按具体工序和现场条件配置",
+    )
+    value = value.replace(
+        "数据超标即时停止土方作业，加派与作业面及院区交通条件相匹配的小型开挖设备协同覆盖防尘网，增设雾炮车（时限：30min内）",
+        "数据超标时立即停止土方作业，组织人员覆盖裸土并启动雾炮喷淋，复核达标后恢复作业",
+    )
+    value = value.replace(
+        "针对高风险任务触发安全响应控制补强节点",
+        "针对高风险任务增配安全监督人员并提高过程巡检频次",
+    )
+    value = value.replace(
+        "安全响应控制补强节点",
+        "安全风险预警与处置机制",
+    )
+    value = value.replace(
+        "进度响应控制补强节点",
+        "进度偏差预警与纠偏机制",
+    )
+    value = value.replace(
+        "质量响应控制补强节点",
+        "质量偏差复核与闭环机制",
+    )
+    value = value.replace(
+        "环保响应控制补强节点",
+        "环境指标预警与处置机制",
+    )
+    value = value.replace(
+        "清单-工序-资源映射补强节点",
+        "清单、工序与资源匹配复核机制",
+    )
+    value = value.replace(
+        "清单-工序-资源映射",
+        "清单与工序资源匹配",
+    )
+    value = value.replace(
+        "触发“清单、工序与资源匹配复核机制”评估实体返工率。",
+        "施工过程中按检验批记录实体质量，并对不合格项复验销项。",
+    )
+    value = value.replace(
+        "证据未给出红线边界及夜间禁行具体要求 → 编制口径：按合肥市中心城区管控标准，"
+        "暂定晚22:00-早6:00禁止重型渣土车及材料运输车通行，场区内部划定4m宽单向循环通道1处 "
+        "→ 需澄清项：具体交通开口坐标及夜间施工许可办理权限归属。",
+        "施工前联合建设单位复核改造区域红线、材料运输时段、院区通行路线和交通开口；"
+        "未取得书面确认前，不采用临时假定作为施工依据。",
+    )
+    return value
+
+
+def _rewrite_hospital_renovation_scope(text: str, project_topic: Any) -> str:
+    """Keep a hospital partial-renovation submission inside its evidenced scope.
+
+    Model drafts sometimes import generic new-build crews, heavy equipment,
+    experimental sensors, or bare BoQ numbers into a renovation narrative.  For
+    this project type those claims are either unsupported or actively distract
+    from the operational hospital constraints.  Replace them with conventional,
+    verifiable renovation controls instead of silently presenting them as facts.
+    """
+    topic = str(project_topic or "")
+    if "医院" not in topic or "改造" not in topic:
+        return str(text or "")
+
+    value = str(text or "")
+    replacements = (
+        (
+            "防水层渗漏电导率阵列监测（新工艺）",
+            "防水隐蔽验收与蓄水/淋水检验",
+        ),
+        (
+            "防水层渗漏电导率阵列监测系统",
+            "防水隐蔽验收与蓄水/淋水检验制度",
+        ),
+        (
+            "防水层渗漏电导率阵列监测",
+            "防水隐蔽验收与蓄水/淋水检验",
+        ),
+        (
+            "基于BIM的管线综合防碰撞与绿色施工技术",
+            "既有机电管线复核与专业接口协调",
+        ),
+        (
+            "基础底板及二次结构工程质量控制",
+            "局部修复、开槽回补及安装基层质量控制",
+        ),
+        (
+            "防爆工业级手持扫码终端机（PDA）4台，热转印工业条码打印机2台，二维码耗材50卷",
+            "经项目批准的移动扫码终端和标签打印设备，数量按材料收发工作量配置",
+        ),
+        (
+            "防爆防摔三防平板电脑6台（配置微距防抖摄像头），携带RTK精准定位模块的劳保安全帽8顶，红外测距仪6台",
+            "项目受控移动终端、激光测量工具和影像采集设备，数量按作业面配置",
+        ),
+        (
+            "测量工1人/班，模板工（吊顶安装）4人/班，防腐工2人/班，质检员1人",
+            "测量放线、吊顶安装、防腐和质量检查人员按作业面及经批准的劳动力计划配置",
+        ),
+        (
+            "测量工、钢筋工、模板工、混凝土工、架子工、防水工、电工、焊工、管道工、起重信号司索工、机械设备操作工等11类技术工种",
+            "装饰装修工、防水工、电工、弱电安装工、管道工、通风空调工、焊工及测量放线人员等与本项目范围相匹配的专业工种",
+        ),
+        (
+            "测量工、钢筋工、模板工、混凝土工、架子工、防水工、电工、焊工、管道工、起重信号司索工、机械设备操作工",
+            "装饰装修工、防水工、电工、弱电安装工、管道工、通风空调工、焊工及测量放线人员",
+        ),
+        (
+            "地下结构、主体框架、二次结构、机电智能化安装、装饰装修等五个控制节点",
+            "区域移交、拆改与基层处理、机电管线安装、隐蔽验收、装饰收口和系统联调等控制节点",
+        ),
+        (
+            "配置人数按工作面和经批准的劳动力计划配置的专业攻坚组（含模板工、钢筋工、混凝土工等），实行双班轮替作业（16小时工作制），保证工序连续",
+            "按区域开放条件和经批准的劳动力计划配置专业班组，并依据院方确认的时段组织错峰施工",
+        ),
+        (
+            "钢筋下料单复核，模板排版图绘制",
+            "复核拆改边界、基层条件、既有管线位置和修复做法，完成样板确认",
+        ),
+        (
+            "钢筋工按照间距绑扎墙柱纵筋与箍筋，模板工使用新型支撑体系加固，混凝土工分层浇筑（厚度≤500mm），振捣棒快插慢拔",
+            "清理松散基层，按设计材料分层修补找平；机电开槽封堵和安装基层按隐蔽验收结果施工",
+        ),
+        (
+            "混凝土初凝后覆盖薄膜保湿养护，时长不少于14天",
+            "修复区域按材料体系要求养护并设置成品保护，达到后续工序条件后办理移交",
+        ),
+        (
+            "配置起重信号司索工及特种设备操作工，持证上岗率100%",
+            "涉及登高、动火和临时用电的人员按作业类别持有效证件上岗",
+        ),
+        (
+            "针对基础、主体、二次结构、屋面与防渗、装饰及智能化等核心工序",
+            "针对拆改、基层修复、防水、装饰装修、机电安装及智能化等核心工序",
+        ),
+        (
+            "完全覆盖基础、主体、二次结构、屋面与防渗及装饰、智能化",
+            "覆盖拆改与基层修复、防水、装饰装修、机电安装及智能化",
+        ),
+        (
+            "土方、吊装、机电安装阶段",
+            "室外局部开挖、拆改、材料转运和机电安装阶段",
+        ),
+        (
+            "如提升机、与作业面及院区交通条件相匹配的小型开挖设备等",
+            "如小型运输、切割、钻孔、登高及测试设备等",
+        ),
+        (
+            "带GPS/BIM坐标的三维影像资料",
+            "带施工部位、房间/轴线、标高和时间信息的影像资料",
+        ),
+        (
+            "配置BIM坐标插件的移动终端",
+            "配置部位标识和时间水印的项目受控移动终端",
+        ),
+        (
+            "扫码出库指令与BIM模型用量强制比对",
+            "扫码出库指令与经批准的材料计划用量逐项核对",
+        ),
+        (
+            "BIM导出的无碰撞排布图及精准下料清单",
+            "经会审确认的综合管线排布图及材料计划",
+        ),
+        (
+            "利用BIM平台建立地下一层及地上建筑高精度三维模型",
+            "汇总各专业图纸和现场复测成果，形成综合管线叠图及接口问题清单",
+        ),
+        (
+            "BIM图形工作站1台",
+            "综合管线复核所需的受控办公终端和制图软件",
+        ),
+        (
+            "BIM工程师1人",
+            "机电专业工程师按接口复核工作量配置",
+        ),
+        (
+            "现场实测标高输入系统，系统自动计算并标注",
+            "现场实测标高与经会审确认的综合管线排布图逐项核对，标注",
+        ),
+        (
+            "指导模板工调整主龙骨吊放位置",
+            "指导吊顶安装人员调整主龙骨和吊点位置",
+        ),
+        (
+            "模板工安装拉爆螺丝",
+            "吊顶安装人员按批准做法安装后置锚固件",
+        ),
+        (
+            "模板工（吊顶安装）",
+            "吊顶安装工",
+        ),
+        (
+            "测量工佩戴RTK定位安全帽，手持平板",
+            "施工员使用项目受控移动终端",
+        ),
+        (
+            "质量员手持防爆平板电脑至点位",
+            "质量员使用项目受控移动终端到点检查",
+        ),
+        (
+            "一键上传云端服务器",
+            "上传至项目受控资料库",
+        ),
+        (
+            "同步至云端归档",
+            "同步至项目受控资料库归档",
+        ),
+        (
+            "20t挖机1台",
+            "与作业面、地下管线和院区通行条件相匹配的小型开挖设备",
+        ),
+        (
+            "50m车载泵",
+            "按具体修复工序和现场条件选配的施工设备",
+        ),
+        (
+            "雾炮机",
+            "局部吸尘与移动雾化降尘设备",
+        ),
+        (
+            "雾炮车",
+            "移动雾化降尘设备",
+        ),
+        (
+            "雾炮设备",
+            "移动雾化降尘设备",
+        ),
+        (
+            "BIM模型",
+            "经会审确认的综合管线排布图",
+        ),
+        (
+            "BIM碰撞检测",
+            "专业接口复核",
+        ),
+        (
+            "BIM出图",
+            "经会审确认的综合管线排布图",
+        ),
+        (
+            "BIM图纸",
+            "综合管线排布图",
+        ),
+        (
+            "BIM坐标",
+            "施工部位标识",
+        ),
+        (
+            "BIM",
+            "综合管线复核",
+        ),
+        (
+            "PDA",
+            "移动扫码终端",
+        ),
+        (
+            "GPS定位与标高时间戳",
+            "施工部位、标高和时间标识",
+        ),
+        (
+            "GPS/综合管线复核",
+            "施工部位",
+        ),
+    )
+    for source, target in replacements:
+        value = value.replace(source, target)
+
+    # Replace unsupported sensor claims with conventional, auditable waterproof
+    # acceptance steps.  These sentences are intentionally conservative.
+    value = re.sub(
+        r"在找平层上(?:按经批准的专项方案)?铺设电导率传感网格[^。]*。?",
+        "防水施工前复核基层、附加层、搭接和收头条件，形成隐蔽验收记录。",
+        value,
+    )
+    value = re.sub(
+        r"(?:敷设|铺设|网格化铺设)[^。；\n]*电导率(?:传感器)?阵列[^。；\n]*[。；]?",
+        "对基层、附加层、搭接、收头及穿墙管根逐项旁站检查并留痕。",
+        value,
+    )
+    value = re.sub(
+        r"防水隐蔽验收与蓄水/淋水检验(?:数据反馈单|数据报告|日志)",
+        "防水隐蔽验收记录和蓄水/淋水检验记录",
+        value,
+    )
+    value = value.replace("电导率异常报警复核 (渗漏电流≤30mA，实时监测)", "渗漏点复核（检查节点、搭接、收头和穿墙管根）")
+    value = value.replace("智慧监测日志 / 渗漏坐标、电流值、处理状态", "防水检查台账 / 检查部位、渗漏点、处理状态")
+    value = value.replace("启动局部揭开修补，复测电导率", "局部揭开修补，并重新执行蓄水/淋水检验")
+    value = re.sub(
+        r"(?:系统|后台)[^。；\n]*(?:电导率|介电常数)[^。；\n]*[。；]?",
+        "蓄水/淋水期间分区巡查，发现渗漏立即标记部位并启动修补复验。",
+        value,
+    )
+    value = re.sub(
+        r"(?:电导率|渗漏电流)[^。；\n]*(?:阈值|报警|基线)[^。；\n]*[。；]?",
+        "防水检验按设计文件、适用验收标准和批准方案判定，渗漏点修补后重新检验。",
+        value,
+    )
+    value = re.sub(
+        r"(?:执行)?(?:24|48)小时蓄水/淋水试验",
+        "执行蓄水/淋水试验，持续时间按适用验收标准和批准方案确定",
+        value,
+    )
+    value = re.sub(
+        r"(?:注入|蓄水深度为?)\s*20mm[^。；\n]*",
+        "蓄水深度和持续时间按适用验收标准及批准方案执行",
+        value,
+    )
+    value = re.sub(
+        r"PM10(?:浓度)?\s*(?:≤|≥|=)?\s*\d+(?:\.\d+)?\s*(?:ug/m3|μg/m³)",
+        "现场扬尘指标",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = value.replace("PM2.5及PM10报警联动控制", "粉尘监测、局部吸尘和雾化降尘联动控制")
+    value = value.replace("PM10数值", "粉尘监测数据")
+    value = value.replace("PM10监测仪读数", "粉尘监测数据")
+    value = value.replace("PM10浓度", "粉尘监测数据")
+    value = value.replace("PM10", "粉尘")
+    value = value.replace("雾炮", "移动雾化降尘设备")
+    value = value.replace("GPS定位", "施工部位标识")
+    value = value.replace("工程云端管理平台", "项目受控资料库")
+    value = value.replace("项目云盘", "项目受控资料库")
+    value = value.replace("云端", "项目受控资料库")
+    value = value.replace(
+        "交付清单驱动物：防水基层隐蔽验收单、执行蓄水/淋水试验，持续时间按适用验收标准和批准方案确定记录、电导率阵列监测数据反馈单",
+        "交付清单：防水基层隐蔽验收单、蓄水/淋水检验记录、渗漏修补复验记录",
+    )
+    value = value.replace(
+        "作业：分层涂刷防水层，敷设渗漏电导率传感阵列，施工细石混凝土保护层厚度按设计构造和适用验收标准控制",
+        "作业：按批准的材料体系分层施工防水层，管根、阴阳角、收头和搭接部位逐项旁站；保护层按设计构造和适用验收标准施工",
+    )
+    value = value.replace(
+        "检查验收：封堵下水口，蓄水深度和持续时间按适用验收标准及批准方案执行；作业时长按班次计划与职业健康要求执行电导率监测",
+        "检查验收：封堵排水口，蓄水深度和持续时间按适用验收标准及批准方案执行；发现渗漏后标记部位、修补并重新检验",
+    )
+    value = value.replace(
+        "《防水施工与电导率监测日志》（记录厚度、电阻率变化峰值）",
+        "《防水施工与蓄水/淋水检验记录》（记录施工部位、节点做法、检验时段和处理结果）",
+    )
+    value = value.replace(
+        "执行48小时闭水试验，结合电导率数据双重判定",
+        "执行蓄水/淋水试验，持续时间和判定标准按适用验收标准及批准方案确定",
+    )
+    value = value.replace(
+        "依托电导率阵列监测技术，实时监控水分子穿透防水层后的介电常数变化",
+        "依托隐蔽验收、蓄水/淋水检验和分区巡查，对管根、收头、搭接和节点部位重点复核",
+    )
+    value = value.replace(
+        "在防水层下方网格化铺设电导率传感阵列，按经批准专项方案确定的网格间距布线，接入智慧工地监控后台",
+        "防水施工前复核基层、附加层、搭接、收头及穿墙管根，过程影像和验收结果录入项目受控资料库",
+    )
+    value = value.replace(
+        "防水层下方网格化铺设渗漏电导率传感器阵列",
+        "基层、附加层、搭接、收头及穿墙管根逐项检查并留痕",
+    )
+    value = value.replace("电导率阵列监测数据报告", "防水隐蔽验收和蓄水/淋水检验记录")
+    value = value.replace("电导率监测数据反馈单", "蓄水/淋水检验记录")
+    value = value.replace("电导率监测", "蓄水/淋水检验")
+    value = value.replace("渗漏电导率传感器阵列", "防水节点检查清单")
+    value = value.replace("渗漏电导率传感阵列", "防水节点检查清单")
+    value = value.replace("电导率阵列监测技术", "防水隐蔽验收与蓄水/淋水检验制度")
+    value = value.replace("电导率数据", "蓄水/淋水检验记录")
+    value = value.replace(
+        "起重信号司索工及各专业工种按资源映射节点流水施工",
+        "各专业班组按经批准的穿插计划和区域移交条件流水施工",
+    )
+    value = value.replace(
+        "起重信号司索工及机械设备操作工凭证上岗，执行“定人、定机、定岗”制度",
+        "涉及设备操作的人员按设备类别持有效证件上岗，执行定人、定机、定岗管理",
+    )
+    value = re.sub(
+        r"技术工种配置：测量工1人/班；钢筋工2人/班；模板工2人/班；混凝土工2人/班；"
+        r"架子工2人/班；电工1人/班；焊工1人/班；起重信号司索工1人/班（起重作业时）[。.]?",
+        "技术工种配置：装饰装修、防水、电气、弱电、管道、通风空调、焊接及测量放线人员按作业面和经批准的劳动力计划配置。",
+        value,
+    )
+    value = value.replace(
+        "防水工、钢筋工、电工作业过程中的隐蔽工程节点",
+        "防水、电气、管道和装饰安装作业过程中的隐蔽工程节点",
+    )
+    value = value.replace(
+        "数据超标时立即停止土方作业，组织人员覆盖裸土并启动移动雾化降尘设备喷淋，复核达标后恢复作业",
+        "粉尘指标异常时立即停止室外开挖或拆除作业，组织局部吸尘、覆盖和雾化降尘，复核达标后恢复作业",
+    )
+    value = value.replace(
+        "结合工程量及造价清单重点（如：9.1工程量=6.0、030411004005合价=17197.0等）",
+        "结合正式工程量清单和图纸确定的重点材料、设备与施工部位",
+    )
+    value = re.sub(
+        r"本项目涉及门诊综合楼[^。\n]*?重点管控造价高、单价高的设备与材料，包含清单项：[^。\n]*。",
+        "本项目涉及门诊综合楼和运动训练楼的弱电智能化系统，重点管控综合布线、网络、机房、广播、呼叫等系统的设备材料、接口条件和联调记录。",
+        value,
+    )
+    value = re.sub(
+        r"检查验收与资料归档：技术人员登录系统后台[^。\n]*图纸工程量[^。\n]*。[^。\n]*。",
+        "检查验收与资料归档：材料员、施工员和质量员核对领料数量、安装部位、剩余退库和检验批记录，形成可追溯的材料流向台账。",
+        value,
+    )
+    value = re.sub(
+        r"涉及高单价材料清单：[^。\n]*。",
+        "需重点管控的材料和设备按正式工程量清单、设计文件及采购计划确定。",
+        value,
+    )
+    value = re.sub(
+        r"高价材料管控项：[^。\n]*。",
+        "需重点管控的材料和设备建立批次、进场报验、领用部位和退库记录。",
+        value,
+    )
+    value = re.sub(
+        r"依据图纸清单及高价材料项（[^）]*），编制物资采购计划。采购比价=≥3家/批次",
+        "依据图纸、正式工程量清单和经批准的材料计划编制采购计划，询比价和审批按招标要求及公司制度执行",
+        value,
+    )
+    value = re.sub(
+        r"高价值智能化线缆（如清单[^）]*）",
+        "需重点管控的智能化设备和线缆",
+        value,
+    )
+    value = re.sub(
+        r"由技术负责人组织测量工、机电工程师核对智能化16个系统与原建筑结构图纸，标定全部碰撞点；"
+        r"建立高价值清单项（[^）]*）采购台账",
+        "由技术负责人组织测量放线和机电专业人员核对智能化系统与既有建筑图纸、现场条件及装饰标高，形成接口问题清单；建立重点材料和设备采购台账",
+        value,
+    )
+    value = re.sub(
+        r"按照领料单提取[^。；\n]*，利用施工电梯运至各楼层指定作业区，堆载高度受控",
+        "按照领料单配发经报验合格的管材、线缆、装饰材料和设备，沿院方确认的运输路线运至指定作业区，并控制临时堆载",
+        value,
+    )
+    value = re.sub(
+        r"适用条件：针对清单中合价超1万的[^。\n]*。",
+        "适用条件：需重点管控的智能化设备、线缆、管材和装饰材料。",
+        value,
+    )
+    # The final submission must read as a construction plan, not as an AI
+    # scoring memo.  Replace review-language, invented formulas and generic
+    # new-build logistics with hospital-renovation controls that can actually
+    # be implemented and accepted on site.
+    polished_replacements = (
+        (
+            "《项目特征分析及清单量价评估报告》",
+            "《项目特征与施工界面复核记录》《场地与运输路线查勘记录》《重点材料设备采购与报验台账》",
+        ),
+        ("引发重大偏差扣分", "形成重大质量安全风险"),
+        ("规避否决扣分项", "控制关键质量、安全和进度风险"),
+        (
+            "依托工程项目响应控制补强机制，对质量、安全、进度目标设定数字化红线管控，控制关键质量、安全和进度风险：",
+            "建立质量、安全和进度预警与纠偏机制，对关键工序、接口和院区运行风险实施闭环控制：",
+        ),
+        (
+            "控制：计算高风险任务占比指标（公式：高风险任务数÷任务总数×100%），当指标过高时增加安全监督岗。执行应急响应时间考核（公式：实际应急响应时长与目标应急响应时长的比值）。现场布置防尘喷雾，裸土及渣土采用阻燃密目网连续覆盖并压边固定。",
+            "控制：高处、动火、临时用电、拆除和吊装等高风险作业严格执行作业许可、班前交底、过程监护和完工销项；出现异常立即停工、隔离并按批准的应急预案处置。室外局部开挖和拆除作业采用局部吸尘、覆盖与雾化降尘。",
+        ),
+        (
+            "验证：专职安全员每班开展隐患排查（检查频次按班前、过程巡检和收工复核执行），应急演练频次=1次/季度，维持零安全生产事故记录。",
+            "验证：专职安全员开展班前检查、过程巡检和收工复核；应急演练按施工阶段和批准的应急预案组织，问题整改后复验销项。",
+        ),
+        (
+            "控制：应用进度延误率模型（公式：累计延误时长÷计划时长×100%）逐日核算偏差。当延误超前置预警线，立即触发资源动态调配，增加夜班作业时段或投入备用设备。",
+            "控制：计划人员每日比对实际完成量与经批准的计划，发现偏差立即分析接口、材料、人员和工作面原因；仅在院方批准的作业时段内调整穿插顺序和资源配置。",
+        ),
+        (
+            "控制：严密监测返工体量比率（公式：返工率〔返工工程量÷总工程量×100%〕）。石材缝隙、天棚标高控制及系统电缆绝缘测试由专人盯控，工序资源按清单映射匹配（例如 重点清单项 对应专项熟练技术工种）。",
+            "控制：按检验批统计返工原因；石材铺贴、吊顶标高和系统电缆绝缘测试由专人复核，正式清单项、施工部位、工序、资源和验收资料逐项对应。",
+        ),
+        (
+            "若系统功能测试不达标，构成质量验收重大偏差。执行设备材料进场100%报验，不合格品即刻退场，杜绝使用劣质材料导致否决项触发。",
+            "系统功能测试或材料报验未通过时不得进入下一工序；不合格材料隔离标识，并按审批流程退换处理。",
+        ),
+        (
+            "吊顶拉爆螺丝松动及石材空鼓视为安全与质量双重否决项。执行100%全覆盖敲击排查，消除维修改造工程常见的坠落与返工风险。",
+            "吊顶后置锚固件松动和石材空鼓属于重点质量安全风险；按检验批和施工区域逐项检查，问题整改复验后方可移交。",
+        ),
+        (
+            "防止材料溯源不清引发的进度与质量纠纷，信息化台账将作为工程结算和验收的铁证，杜绝审计核减风险。",
+            "材料批次、报验、领用部位和退库记录形成可追溯台账，作为工程验收和结算的核验依据。",
+        ),
+        (
+            "控制：启用进度响应控制补强算法（累计延误时长÷计划时长×100%），动态调整关键线路缓冲期。",
+            "控制：每日核对关键线路和区域移交条件，按批准的预警标准分析偏差并调整穿插顺序、材料到货和人员配置。",
+        ),
+        (
+            "超期交付为合同重大违约扣分项。将各阶段资源按经批准的进度计划和实际工作面动态配置按网格化分解至各作业段，保障日均产值底线，规避延期罚款。",
+            "将各阶段资源按经批准的进度计划、院区开放条件和实际工作面配置到各作业段，持续控制合同履约风险。",
+        ),
+        (
+            "安全事故是项目管理的绝对红线与否决项。本措施彻底消除重大安全与环保违规隐患，实现零事故目标，打造绿色文明标准工地。",
+            "安全、院感、消防和环保要求是项目管理底线；各类风险按作业许可、过程检查、整改复验和资料归档闭环控制。",
+        ),
+        (
+            "本章详细阐述本项目（含门诊综合楼改造、运动训练楼智能化及装饰改造）中拟采用的四新技术与信息化管理技术。各项工艺和技术均围绕项目清单重点项与图纸规范编制，所有参数设定与操作规程均经过校验，无重大偏差，规避废标与扣分项。施工本工程总工期以招标文件及经批准的总进度计划为准，各阶段资源按经批准的进度计划和实际工作面动态配置，关键线路节拍以经批准的进度计划为准。",
+            "本章围绕门诊综合楼和运动训练楼的智能化、装饰及相关改造工作，选择可实施、可验证、可移交的新技术。工期、资源和关键线路均以招标文件及经批准的计划为准。",
+        ),
+        (
+            "控制：在验收APP中配置“强制全景+微距必拍点”算法。对于门诊大厅、发热门诊等核心改造区域，必须完整上传“吊点焊接局部图”“防锈漆涂装细节图”“防火涂料三遍对比图”，集齐后方可激活下方“提交隐蔽验收”按钮，执行防呆锁死控制。",
+            "控制：验收程序将全景、局部和尺量影像设置为隐蔽验收必备资料；资料齐全并经复核后方可提交验收。",
+        ),
+        (
+            "测量复核与碰撞检测：将墙上1m高水平控制线作为标高基准，载入模型进行软硬碰撞检测，系统自动生成干涉点清单。综合管线复核工程师通过调整管线路由，消除所有碰撞点。",
+            "测量与接口复核：以现场水平控制线和复测标高为基准，将各专业图纸叠合并与现场条件核对，形成干涉点清单；经专业会审确认后调整管线路由和末端位置。",
+        ),
+        ("视为安全与质量双重否决项", "属于重点质量安全风险"),
+        ("补强机制", "预警与纠偏机制"),
+        ("补强算法", "预警与纠偏机制"),
+        ("清单映射", "清单对应关系"),
+        ("三维映射数据库", "材料安装部位台账"),
+        ("进度模型", "进度计划"),
+        ("扣分项", "合同与技术风险"),
+        ("否决项", "关键风险"),
+        ("铁证", "核验依据"),
+        ("评审要求", "合同与技术要求"),
+        (
+            "本章节内容对标招标文件合同与技术要求，控制关键质量、安全和进度风险。",
+            "本节明确合同、图纸、规范和审批流程的执行要求。",
+        ),
+        ("智能电导率阵列监测预警", "防水隐蔽验收、蓄水/淋水检验和渗漏巡查"),
+        ("发热门诊或运动训练楼", "门诊综合楼或运动训练楼"),
+        ("门诊大厅、发热门诊等核心改造区域", "门诊综合楼和运动训练楼的重点改造区域"),
+        ("施工电梯、塔吊的起重量及运行行程", "院方批准的垂直运输路线及升降平台等设备的额定载荷和作业范围"),
+        ("超过一定规模的吊顶标高定位、外脚手架", "高处、动火、临时用电、拆除和吊装（如涉及）"),
+        ("防水工+瓦工", "石材铺装工+质量员"),
+        ("系统台账数据与实物相符率100%，台账抽查频次=1次/周。防范高价材料流失或用错批次。", "系统台账与实物逐项核对，按周抽查并留痕，防范重点材料错领、错用或去向不清。"),
+        ("所有隐蔽工程数字影像留存率100%，支撑项目终验追溯。", "隐蔽工程按检验批留存部位清晰、时间可追溯的影像资料，支撑过程验收和竣工移交。"),
+        ("超期交付为合同重大违约合同与技术风险。", "进度偏差可能形成合同履约风险。"),
+    )
+    for source, target in polished_replacements:
+        value = value.replace(source, target)
+
+    value = re.sub(
+        r"机械设备配置：[^。\n]*。",
+        "机械设备按具体工序和作业面配置，重点采用带集尘切割或钻孔设备、移动吸尘器、液压升降平台、激光测量工具、光纤熔接与测试设备及石材切割设备；室外局部开挖确需机械时，选用与地下管线和院区通行条件相匹配的小型设备。",
+        value,
+    )
+    value = re.sub(
+        r"本章节内容对标招标文件[^。\n]*：",
+        "本节明确合同、图纸、规范和审批流程的执行要求：",
+        value,
+    )
+    value = re.sub(
+        r"全面规避废标与重大偏差：[^\n]*",
+        "开工前核对招标目录、技术条款和施工范围；涉及设计或范围变化时先履行书面确认，不降低质量与安全标准。",
+        value,
+    )
+    value = re.sub(
+        r"技术规避项声明：[^\n]*",
+        "技术响应说明：施工前核对图纸、现场和材料设备接口，按批准流程解决差异；质量、安全、进度和环保要求均纳入检查与整改闭环。",
+        value,
+    )
+    value = re.sub(
+        r"基于本项目本工程总工期[^\n]*",
+        "本项目在运营医院环境内实施，安全、院感、医疗秩序、进度和环保要求相互制约；项目部按准备、复核、材料、施工、验收五步闭环组织各作业区。",
+        value,
+    )
+    value = re.sub(
+        r"应用进度延误率模型[^。\n]*逐日核算偏差。[^。\n]*。",
+        "计划人员每日比对实际完成量与经批准的计划，发现偏差立即分析接口、材料、人员和工作面原因；仅在院方批准的作业时段内调整穿插顺序和资源配置。",
+        value,
+    )
+    value = re.sub(
+        r"计算高风险任务占比指标[^\n]*",
+        "高处、动火、临时用电、拆除和吊装等高风险作业严格执行作业许可、班前交底、过程监护和完工销项；出现异常立即停工、隔离并按批准的应急预案处置。",
+        value,
+    )
+    value = re.sub(
+        r"严密监测返工体量比率[^\n]*",
+        "按检验批统计返工原因；石材铺贴、吊顶标高和系统电缆绝缘测试由专人复核，正式清单项、施工部位、工序、资源和验收资料逐项对应。",
+        value,
+    )
+    value = re.sub(
+        r"启用进度响应控制[^\n]*",
+        "每日核对关键线路和区域移交条件，按批准的预警标准分析偏差并调整穿插顺序、材料到货和人员配置。",
+        value,
+    )
+    value = re.sub(
+        r"在验收APP中配置[^。\n]*算法。[^\n]*防呆锁死控制。",
+        "验收程序将全景、局部和尺量影像设置为隐蔽验收必备资料；资料齐全并经复核后方可提交验收。",
+        value,
+    )
+    value = re.sub(
+        r"测量复核与碰撞检测[^：:\n]*[：:][^\n]*",
+        "测量与接口复核：以现场水平控制线和复测标高为基准，将各专业图纸叠合并与现场条件核对，形成干涉点清单；经专业会审确认后调整管线路由和末端位置。",
+        value,
+    )
+    value = re.sub(
+        r"技术规避项声明[^：:\n]*[：:][^\n]*",
+        "技术响应说明：施工前核对图纸、现场和材料设备接口，按批准流程解决差异；质量、安全、进度和环保要求均纳入检查与整改闭环。",
+        value,
+    )
+    value = re.sub(
+        r"基于本项目[^\n]*规模特点[^\n]*",
+        "本项目在运营医院环境内实施，安全、院感、医疗秩序、进度和环保要求相互制约；项目部按准备、复核、材料、施工、验收五步闭环组织各作业区。",
+        value,
+    )
+    value = re.sub(
+        r"粉尘阈值\s*(?:[=：]\s*)?(?:≤\s*)?\d+(?:\.\d+)?\s*(?:ug/m3|μg/m³)?",
+        "粉尘控制指标执行属地环保要求和院方管理规定",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"昼间噪声阈值\s*(?:[=：]\s*)?≤?\s*\d+\s*dB[^。；\n]*夜间(?:噪声阈值)?\s*(?:[=：]\s*)?≤?\s*\d+\s*dB",
+        "施工噪声执行属地标准和院方批准的作业时段",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(r"(?:检查|抽检|台账抽查|应急演练|上传)频次\s*=\s*1次/季度", "实施安排按施工阶段和批准的专项计划", value)
+    value = re.sub(r"(?:检查|抽检|台账抽查|上传)频次\s*=\s*1次/周", "按周抽查并留痕", value)
+    value = re.sub(r"洒水车每日按频次\s*=\s*4次/日", "道路降尘频次根据作业强度和粉尘监测结果调整", value)
+    value = re.sub(r"(?:质量)?阈值\s*=\s*", "", value)
+    value = re.sub(r"抽检频次\s*=\s*", "抽检频次按", value)
+    value = re.sub(r"频次\s*=\s*", "频次按", value)
+    value = re.sub(r"(?:材料)?采购比价\s*=\s*≥?3家/批次", "材料询比价和审批按招标要求及公司制度执行", value)
+    value = value.replace("材料采购比价≥3家/批次", "材料询比价和审批按招标要求及公司制度执行")
+    value = value.replace("采购比价≥3家/批次", "材料询比价和审批按招标要求及公司制度执行")
+    value = value.replace("效率映射关联", "人员投入与完成量对应关系")
+    value = value.replace("施工班组通过移动端“扫码领料”，数据自动关联WBS进度计划，扣减工程量清单库存额度。", "施工班组通过移动端扫码领料，领料数量、材料批次、安装部位和退库记录与材料台账关联。")
+    value = value.replace("合规管理与合同与技术风险显式规避说明", "合同与技术标准响应管理")
+    value = value.replace("合规管理与扣分项显式规避说明", "合同与技术标准响应管理")
+    value = value.replace("材料进场抽检频次按每100m2 1次", "材料进场按批次报验和抽检")
+    value = value.replace("系统联调时测量信噪比及衰减度，抽检频次按每100m2 1次", "系统联调按子系统、回路和点位测量信噪比及衰减度")
+    value = value.replace("当周计划滞后超过20%时，触发进度响应控制预警与纠偏机制", "达到经批准的进度预警条件时，立即启动偏差分析和纠偏")
+    value = value.replace("水土保持沉淀池清理记录", "建筑垃圾分类清运和施工废水处置记录")
+    value = value.replace("本章证据及验收要求", "本章控制要求和适用验收标准")
+    value = value.replace("节点映射监测100%覆盖", "节点检查记录按检验批完整留存")
+    value = value.replace("保证最终项目整体质量等级达到合格标准要求，杜绝重大偏差出现", "确保实体质量和资料满足合同、设计及适用验收标准，问题整改复验后闭环")
+    value = value.replace("各类特种作业（架子工、焊工等）必须100%持证", "高处、焊接、临时用电等特种作业人员必须持有效证件")
+    value = value.replace("土方开挖与裸露区域100%覆盖防尘网", "室外局部开挖和裸露区域连续覆盖防尘网并压边固定")
+    value = value.replace("应急响应时间（实际应急响应时长）达标率100%", "异常情况按批准的应急预案及时响应并形成处置记录")
+    value = value.replace("管线空间坐标标高与经会审确认的综合管线排布图一致率：100%", "管线标高、路由和末端位置经复核后应与会审确认的综合管线排布图一致")
+    value = value.replace("按到货批次100%实施", "按到货批次和施工区域实施")
+    value = value.replace("涂布率达100%", "石材六面防护液涂布完整")
+    value = value.replace("每作业面隐蔽前100%全数检查", "每个作业面隐蔽前逐段检查")
+    value = value.replace("防水隐蔽验收与蓄水/淋水检验制度实时在线", "防水隐蔽验收及蓄水/淋水检验记录完整")
+    value = value.replace("杜绝逾期风险", "控制工期履约风险")
+    value = value.replace("杜绝水泥砂浆泛碱及变色", "降低水泥砂浆泛碱和石材变色风险")
+    value = value.replace("照片上传率100%", "每个检验批的规定影像资料完整")
+    value = value.replace("物流数据与领料数据相符率100%", "物流、领料和安装部位记录一致")
+    value = value.replace("扫码识别率100%，实物库存与系统台账误差率0", "扫码信息可识别，实物库存、领用和退库记录与系统台账一致")
+    value = value.replace("扫码出库准确率100%", "扫码出库记录与领料单、实物和安装部位一致")
+    value = value.replace("隐蔽部位影像覆盖率100%", "隐蔽部位按检验批留存规定影像")
+    value = value.replace("批次字段齐全率=100%", "规定批次字段齐全")
+    value = value.replace("影像覆盖率=100%", "规定影像资料齐全")
+    value = value.replace("执行项目安全等级要求，杜绝重大安全事故，实现文明施工", "执行项目安全管理要求，控制重大安全风险并落实文明施工")
+    value = value.replace("关键标准定位：杜绝水泥砂浆泛碱", "关键标准：降低水泥砂浆泛碱风险")
+    value = value.replace("杜绝水泥砂浆泛碱", "降低水泥砂浆泛碱风险")
+    value = value.replace("执行“六个百分百”要求，裸土及易扬尘物料100%覆盖", "涉及室外土方或易扬尘物料时，按属地扬尘治理要求连续覆盖并压边固定")
+    value = value.replace("不合格批次=100%隔离并在24h内退换", "不合格批次立即隔离，并按审批流程退换")
+    value = value.replace("台账字段齐全率=100%+上传频次按1次/日", "规定台账字段齐全并及时上传")
+    value = value.replace("抽查覆盖率=100%，记录=《资料台账》；偏差处置：缺项≤24h补齐并复核关闭", "按计划抽查并记录于《资料台账》；缺项及时补齐，复核后关闭")
+    value = value.replace("巡检记录齐全率=100%，违章=0次/日", "巡检记录齐全，违章行为立即纠正")
+    value = value.replace("试跳记录齐全率=100%，带病运行=0次", "漏电保护试跳记录齐全，不合格设备不得运行")
+    value = value.replace("围挡闭合率=100%+道路硬化=100%+喷淋=按班前、过程巡检和收工复核+车辆冲洗=1次/车+覆盖=100%", "围挡或隔离完整，产尘作业同步吸尘或喷雾，车辆按规定冲洗，裸露物料连续覆盖")
+    value = value.replace("现场扬尘指标（监测=1次/日），投诉=0次/周", "产尘作业期间监测粉尘并记录投诉处置")
+    value = value.replace("粉尘超限≤15min启动加密喷淋，2h内复测达标", "粉尘指标异常时立即停止产尘作业、加强吸尘或喷雾，复测合格后恢复")
+    value = re.sub(
+        r"材料进场时启动采购比价机制[^。\n]*。质检员按每100m²\s*1次的抽检频次对外护套、线径及防火涂料理化指标进行检验，[^。\n]*。",
+        "材料进场按批次报验，重点核对外护套、线径、防火涂料合格证和复验资料；抽检方法与频次按设计、适用标准和经批准的检验计划执行。",
+        value,
+    )
+    value = re.sub(
+        r"技术负责人每工作段验证综合管线排布图与实体的一致性[^\n]*",
+        "技术负责人按作业区复核综合管线排布图与实体的一致性；粉尘监测、吸尘和雾化降尘措施在产尘作业期间同步检查，应急演练按施工阶段和批准的专项计划组织。",
+        value,
+    )
+    value = value.replace("环境监测系统24小时实时传输", "产尘作业期间监测并记录")
+    # Last-resort vocabulary guard for bidder-facing hospital submissions.
+    value = value.replace("否决", "关键风险")
+    value = value.replace("扣分", "履约风险")
+    # Normalize split or unsplit bare BoQ identifiers only after the surrounding
+    # prose has been rewritten. A code without an item name is not useful to a
+    # reviewer and must not masquerade as project-specific detail.
+    value = re.sub(r"\b(0\d{8})\s*\n\s*(\d{3,5})\b", r"\1\2", value)
+    value = re.sub(r"\b(WB\d{7})\s*\n\s*(\d{3,6})\b", r"\1\2", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:0\d{8,}|WB\d{8,})\b", "重点清单项", value, flags=re.IGNORECASE)
+
+    # Bare BoQ codes and price/quantity fragments without item names are not
+    # intelligible tender content. Replace the first occurrence in each chapter
+    # with a usable control statement and remove duplicates.
+    cleaned: List[str] = []
+    boq_notice_added = False
+    for raw_line in value.splitlines():
+        line = raw_line
+        if re.match(r"^\s*(?:[-*+]\s*)?清单项：\s*(?:重点清单项|[A-Z0-9]+)\s*$", line):
+            continue
+        if re.search(r"清单重点（|(?:工程量|合价|单价)\s*[=：]", line):
+            if not boq_notice_added:
+                cleaned.append(
+                    "清单重点项按正式工程量清单建立项目名称、施工部位、工序、资源和验收资料的对应关系；"
+                    "清单与图纸不一致时先履行书面核验程序。"
+                )
+                boq_notice_added = True
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
+def _normalize_submission_heading(value: str) -> str:
+    heading = re.sub(r"\s+", " ", str(value or "").strip())
+    heading = re.sub(r"\s*[\(（]方案版本\s*[:：]\s*v?\d+[\)）]\s*$", "", heading, flags=re.IGNORECASE)
+    if heading in _SUBMISSION_HEADING_REPLACEMENTS:
+        return _SUBMISSION_HEADING_REPLACEMENTS[heading]
+    heading = re.sub(r"^([A-E])\.\s*", "", heading)
+    heading = re.sub(r"\s*\([A-Za-z][A-Za-z &/\-]+\)\s*$", "", heading)
+    return heading.strip()
+
+
+def _submission_heading_key(value: str) -> str:
+    normalized = _normalize_submission_heading(value)
+    normalized = re.sub(r"（如有）$", "", normalized)
+    normalized = re.sub(r"^\s*第[\u4e00-\u9fa50-9]+章\s*", "", normalized)
+    normalized = re.sub(r"[\s（）()\-_:：、。]", "", normalized)
+    return normalized.lower()
+
+
+def _sanitize_submission_text(
+    value: Any,
+    *,
+    field_name: str,
+    missing_parameters: Any = None,
+    project_topic: Any = None,
+) -> str:
+    """Return bidder-facing prose and fail closed on non-text section payloads.
+
+    The generation pipeline intentionally keeps machine locators and graph/agent
+    metadata for quality analysis.  Those values belong in the JSON/XLSX review
+    artifacts, never in the submission DOCX.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise _local_adapter_export_error(
+            "docx",
+            [
+                {
+                    "code": "SUBMISSION_TEXT_TYPE_INVALID",
+                    "field": field_name,
+                    "message": "submission DOCX accepts text section content only",
+                }
+            ],
+        )
+
+    text = _rewrite_submission_notation(_strip_internal_autofix_markers(value).replace("\x00", ""))
+    text = _rewrite_unverified_submission_parameters(text, missing_parameters)
+    text = _rewrite_hospital_renovation_scope(text, project_topic)
+    text = _SUBMISSION_EVIDENCE_RE.sub("", text)
+    text = _SUBMISSION_GRAPH_RE.sub("", text)
+    text = _SUBMISSION_EXPERIENCE_RE.sub("", text)
+    text = _SUBMISSION_LOCATOR_RE.sub("资料依据", text)
+
+    clean_lines: List[str] = []
+    seen_lines: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        # A scoped phrase replacement may consume the closing Markdown marker
+        # of a bold lead while leaving its opening marker. Do not leak that
+        # authoring syntax into the submitted Word document.
+        if line.count("**") == 1:
+            line = line.replace("**", "", 1).lstrip()
+        if not line:
+            clean_lines.append("")
+            continue
+        if line.startswith("【证据摘要】"):
+            # Legacy provider-failure payloads appended the raw evidence dump at
+            # the end of a chapter. The remainder is review-only material.
+            break
+        lowered = line.lower()
+        semantic_line = re.sub(
+            r"^(?:#{1,6}\s+|[-*+]\s+|\d+[.)、]\s*)",
+            "",
+            line,
+        ).strip()
+        semantic_line = re.sub(r"^\*\*(.*?)\*\*$", r"\1", semantic_line).strip()
+        semantic_key = semantic_line.strip("【】").strip()
+        if any(semantic_line.startswith(prefix) or semantic_key.startswith(prefix) for prefix in _SUBMISSION_INTERNAL_PREFIXES):
+            continue
+        if any(semantic_line.startswith(prefix) for prefix in _SUBMISSION_INSTRUCTION_PREFIXES):
+            continue
+        if semantic_line.startswith(_GENERIC_METRIC_TEMPLATE_PREFIX):
+            continue
+        if semantic_line.startswith("量化指标：") and sum(
+            marker in semantic_line
+            for marker in ("频次=", "阈值=", "间距=", "厚度=", "时长=", "人数=", "设备型号=")
+        ) >= 4:
+            continue
+        if semantic_line in {"---", "***", "___", "风险→控制→验证"}:
+            continue
+        if re.search(r"纸张\s*A4|正文字体|页边距|排版导致的", semantic_line) and (
+            "排版" in semantic_line
+            or "字号" in semantic_line
+            or "行距" in semantic_line
+            or "正文字体" in semantic_line
+            or "页边距" in semantic_line
+        ):
+            continue
+        if any(token.lower() in lowered for token in _SUBMISSION_INTERNAL_TOKENS):
+            continue
+        if "zf-kg-" in lowered or "knowledge_graph" in lowered or "graph_nodes" in lowered:
+            continue
+        if ("负责人：" in line or "负责人=" in line) and ("逻辑模" in line or line.startswith("【范围】")):
+            continue
+        if "冲突值" in line and "{" in line and "}" in line:
+            line = "资料之间如有差异，以招标文件、答疑文件及经批准的设计文件为准，并履行书面核验程序。"
+        # Raw mapping dumps are never bidder-facing prose.
+        if line.startswith(("{", "[")) and line.endswith(("}", "]")) and ":" in line:
+            continue
+        # Retain the relevant construction step while removing model/template
+        # outline letters that have no place in the submitted document.
+        # The outline letter may sit inside Markdown emphasis, for example
+        # ``- **A. 施工准备**``. Remove only that internal letter marker while
+        # preserving the bidder-facing title and its emphasis.
+        if semantic_line not in _SUBMISSION_HEADING_REPLACEMENTS:
+            line = re.sub(
+                r"^((?:(?:#{1,6}|[-*+])\s+)?(?:\*\*|__)?)"
+                r"[A-E](?:[.．、]\s*|\s*)(?=[\u4e00-\u9fff])",
+                r"\1",
+                line,
+            )
+        line = re.sub(r"^((?:[-*+]\s+)?)[A-E](?=[\u4e00-\u9fff]{2,12}[：:])", r"\1", line)
+        line = re.sub(r"\s+([，。；：])", r"\1", line).strip()
+        if line and line not in {"-", "•"}:
+            duplicate_key = re.sub(r"\s+", "", line)
+            if len(duplicate_key) >= 12 and duplicate_key in seen_lines:
+                continue
+            if len(duplicate_key) >= 12:
+                seen_lines.add(duplicate_key)
+            clean_lines.append(line)
+
+    # Collapse excessive blank lines while preserving intentional paragraph breaks.
+    collapsed: List[str] = []
+    for line in clean_lines:
+        if not line and (not collapsed or not collapsed[-1]):
+            continue
+        collapsed.append(line)
+    result = "\n".join(collapsed).strip()
+    remaining = [
+        token
+        for token in ("entity_master_key", "incremental_fingerprint", "【多Agent", "【图谱节点", "$.章节")
+        if token.lower() in result.lower()
+    ]
+    if remaining:
+        raise _local_adapter_export_error(
+            "docx",
+            [
+                {
+                    "code": "SUBMISSION_INTERNAL_METADATA_REMAINS",
+                    "field": field_name,
+                    "tokens": remaining,
+                    "message": "internal metadata remains after submission sanitization",
+                }
+            ],
+        )
+    return result
+
+
+def _prepare_submission_sections(
+    raw_sections: Any,
+    *,
+    internal_review: bool,
+    missing_parameters: Any = None,
+    project_topic: Any = None,
+) -> List[Dict[str, Any]]:
+    if raw_sections is None:
+        return []
+    if not isinstance(raw_sections, list):
+        raise _local_adapter_export_error(
+            "docx",
+            [{"code": "SUBMISSION_SECTIONS_TYPE_INVALID", "message": "sections must be a list"}],
+        )
+    prepared: List[Dict[str, Any]] = []
+    for idx, raw in enumerate(raw_sections):
+        if not isinstance(raw, dict):
+            raise _local_adapter_export_error(
+                "docx",
+                [{"code": "SUBMISSION_SECTION_TYPE_INVALID", "index": idx, "message": "section must be an object"}],
+            )
+        section = dict(raw)
+        title = section.get("title") or f"章节{idx + 1}"
+        if not isinstance(title, str):
+            raise _local_adapter_export_error(
+                "docx",
+                [{"code": "SUBMISSION_TITLE_TYPE_INVALID", "index": idx, "message": "section title must be text"}],
+            )
+        section["title"] = title.strip() or f"章节{idx + 1}"
+        if not internal_review:
+            section["content"] = _sanitize_submission_text(
+                section.get("content"),
+                field_name=f"sections[{idx}].content",
+                missing_parameters=missing_parameters,
+                project_topic=project_topic,
+            )
+        prepared.append(section)
+    return prepared
 
 
 def _to_float(v: Any, default: float) -> float:
@@ -149,14 +1487,9 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
         style.get("body_size") or style.get("font_size") or font_cfg.get("size_pt") or 14,
         14.0,
     )
-    line_spacing = _to_float(style.get("line_spacing") or font_cfg.get("line_spacing") or 1.5, 1.5)
-    line_spacing_pt = style.get("line_spacing_pt") or font_cfg.get("line_spacing_pt") or 22.0
-    try:
-        line_spacing_pt = float(line_spacing_pt) if line_spacing_pt is not None else None
-    except Exception:
-        line_spacing_pt = None
-    if line_spacing_pt is not None and line_spacing_pt <= 0:
-        line_spacing_pt = 22.0
+    # A tender-specified multiple spacing must not inherit the 22 pt fallback.
+    # Use 22 pt only when neither spacing mode is explicitly configured.
+    line_spacing, line_spacing_pt = resolve_line_spacing(style, default_pt=22.0)
 
     title_font = style.get("title_font") or headings_cfg.get("eastAsia") or body_font
     title_latin_font = style.get("title_latin_font") or headings_cfg.get("latin") or body_latin_font
@@ -172,6 +1505,26 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
     bottom = _to_float(margins_cfg.get("bottom"), _to_float(margins_list[2] if len(margins_list) > 2 else 2.0, 2.0))
     left = _to_float(margins_cfg.get("left"), _to_float(margins_list[3] if len(margins_list) > 3 else 2.0, 2.0))
 
+    def _hex_color(value: Any, default: str) -> str:
+        cleaned = re.sub(r"[^0-9A-Fa-f]", "", str(value or ""))
+        return cleaned.upper() if len(cleaned) == 6 else default
+
+    palette_raw = style.get("palette") if isinstance(style.get("palette"), dict) else {}
+    palette = {
+        # Deep blue/teal and cool gray are deliberately restrained: they match
+        # the visual language shared by the four reviewed benchmark tenders
+        # without copying any one bidder's brand identity.
+        "accent": _hex_color(palette_raw.get("accent") or style.get("accent_color"), "0F5966"),
+        "accent_dark": _hex_color(palette_raw.get("accent_dark"), "103B52"),
+        "accent_light": _hex_color(palette_raw.get("accent_light"), "EAF2F5"),
+        "signal": _hex_color(palette_raw.get("signal"), "D9792B"),
+        "signal_light": _hex_color(palette_raw.get("signal_light"), "FFF2E8"),
+        "border": _hex_color(palette_raw.get("border"), "AFC4CE"),
+        "table_header": _hex_color(palette_raw.get("table_header"), "103B52"),
+        "table_band": _hex_color(palette_raw.get("table_band"), "F5F8FA"),
+        "muted": _hex_color(palette_raw.get("muted"), "53656E"),
+    }
+
     return {
         "paper": str(style.get("paper") or style.get("paper_size") or "A4"),
         "body_font": body_font,
@@ -183,8 +1536,8 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
         "doc_title_size": max(12.0, min(36.0, doc_title_size)),
         "line_spacing": max(1.0, min(2.5, line_spacing)),
         "line_spacing_pt": line_spacing_pt,
-        "first_line_indent_cm": max(0.0, _to_float(style.get("first_line_indent_cm"), 0.0)),
-        "body_align": _resolve_alignment(style.get("body_align")),
+        "first_line_indent_cm": max(0.0, _to_float(style.get("first_line_indent_cm"), 0.74)),
+        "body_align": _resolve_alignment(style.get("body_align")) or WD_ALIGN_PARAGRAPH.JUSTIFY,
         "title_align": _resolve_alignment(style.get("title_align")),
         "margins_cm": {
             "top": max(0.5, top),
@@ -192,7 +1545,10 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
             "bottom": max(0.5, bottom),
             "left": max(0.5, left),
         },
-        "chapter_start_new_page": _to_bool(style.get("chapter_start_new_page"), False),
+        "header_distance_cm": max(0.3, _to_float(style.get("header_distance_cm"), 0.65)),
+        "footer_distance_cm": max(0.3, _to_float(style.get("footer_distance_cm"), 0.65)),
+        "palette": palette,
+        "chapter_start_new_page": _to_bool(style.get("chapter_start_new_page"), True),
         "enforce_chapter_pages": _to_bool(style.get("enforce_chapter_pages"), False),
     }
 
@@ -208,18 +1564,149 @@ def _apply_page_setup(doc: Document, style_cfg: Dict[str, Any]):
         section.right_margin = Cm(_to_float(margins.get("right"), 2.0))
         section.bottom_margin = Cm(_to_float(margins.get("bottom"), 2.0))
         section.left_margin = Cm(_to_float(margins.get("left"), 2.0))
+        section.header_distance = Cm(_to_float(style_cfg.get("header_distance_cm"), 0.65))
+        section.footer_distance = Cm(_to_float(style_cfg.get("footer_distance_cm"), 0.65))
 
 
 def _set_run_font(run, east_font: str, latin_font: str, size_pt: float):
+    east_font = _resolve_docx_font_name(east_font)
+    latin_font = _resolve_docx_font_name(latin_font)
     run.font.name = latin_font or east_font
     run.font.size = Pt(size_pt)
     rpr = run._element.get_or_add_rPr()
     rfonts = rpr.get_or_add_rFonts()
     if east_font:
         rfonts.set(qn("w:eastAsia"), east_font)
+        rfonts.set(qn("w:hint"), "eastAsia")
     if latin_font:
         rfonts.set(qn("w:ascii"), latin_font)
         rfonts.set(qn("w:hAnsi"), latin_font)
+
+
+def _set_style_font(style, *, east_font: str, latin_font: str, size_pt: float | None = None) -> None:
+    east_font = _resolve_docx_font_name(east_font)
+    latin_font = _resolve_docx_font_name(latin_font)
+    style.font.name = latin_font or east_font
+    if size_pt is not None:
+        style.font.size = Pt(size_pt)
+    try:
+        rpr = style._element.get_or_add_rPr()
+        rfonts = rpr.get_or_add_rFonts()
+        if east_font:
+            rfonts.set(qn("w:eastAsia"), east_font)
+            rfonts.set(qn("w:hint"), "eastAsia")
+        if latin_font:
+            rfonts.set(qn("w:ascii"), latin_font)
+            rfonts.set(qn("w:hAnsi"), latin_font)
+    except Exception:
+        pass
+
+
+def _configure_professional_named_styles(doc: Document, style_cfg: Dict[str, Any]) -> None:
+    """Normalize built-in Word styles used by captions, lists and the TOC.
+
+    Keeping these as named styles (rather than one-off paragraph formatting)
+    makes the export easier to revise in Word while preserving a consistent
+    technical-bid visual system.
+    """
+    cfg = _normalize_style(style_cfg or {})
+    palette = cfg["palette"]
+    try:
+        caption = doc.styles["Caption"]
+        _set_style_font(
+            caption,
+            east_font=cfg["body_font"],
+            latin_font=cfg["body_latin_font"],
+            size_pt=10.5,
+        )
+        caption.font.italic = False
+        caption.font.color.rgb = RGBColor.from_string(palette["muted"])
+        caption.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        caption.paragraph_format.first_line_indent = Cm(0)
+        caption.paragraph_format.line_spacing = 1.0
+        caption.paragraph_format.space_before = Pt(2)
+        caption.paragraph_format.space_after = Pt(8)
+        caption.paragraph_format.keep_together = True
+        caption.paragraph_format.keep_with_next = False
+        caption.paragraph_format.widow_control = True
+    except Exception:
+        pass
+    try:
+        bullet = doc.styles["List Bullet"]
+        _set_style_font(
+            bullet,
+            east_font=cfg["body_font"],
+            latin_font=cfg["body_latin_font"],
+            size_pt=cfg["body_size"],
+        )
+        bullet.paragraph_format.left_indent = Cm(0.74)
+        bullet.paragraph_format.first_line_indent = Cm(-0.37)
+        bullet.paragraph_format.space_after = Pt(3)
+        bullet.paragraph_format.widow_control = True
+    except Exception:
+        pass
+    for style_name, left_cm, size_pt in (("TOC 1", 0.0, 11.5), ("TOC 2", 0.55, 11.0), ("TOC 3", 1.1, 10.5)):
+        try:
+            toc_style = doc.styles[style_name]
+            _set_style_font(
+                toc_style,
+                east_font=cfg["body_font"],
+                latin_font=cfg["body_latin_font"],
+                size_pt=size_pt,
+            )
+            toc_style.paragraph_format.left_indent = Cm(left_cm)
+            toc_style.paragraph_format.first_line_indent = Cm(0)
+            toc_style.paragraph_format.space_after = Pt(2)
+            toc_style.paragraph_format.widow_control = True
+        except Exception:
+            pass
+
+
+def _set_inline_shape_alt_text(shape: Any, *, title: str, description: str) -> None:
+    try:
+        doc_pr = shape._inline.docPr
+        doc_pr.set("title", str(title or "插图"))
+        doc_pr.set("descr", str(description or title or "插图"))
+    except Exception:
+        pass
+
+
+def _configure_inline_image_paragraph(
+    paragraph: Any,
+    *,
+    space_before_pt: float = 6.0,
+    space_after_pt: float = 4.0,
+    keep_with_next: bool = True,
+) -> None:
+    """Keep inline images independent from the tender body's fixed line grid.
+
+    Word and LibreOffice can clip a drawing to a thin horizontal strip when its
+    host paragraph inherits an exact 22 pt line height.  Every formal image,
+    including cover/header/footer assets, therefore gets a single-line host
+    paragraph with explicit spacing and zero indentation.
+    """
+    try:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.left_indent = Cm(0)
+        paragraph.paragraph_format.right_indent = Cm(0)
+        paragraph.paragraph_format.line_spacing = 1.0
+        paragraph.paragraph_format.space_before = Pt(float(space_before_pt or 0))
+        paragraph.paragraph_format.space_after = Pt(float(space_after_pt or 0))
+        paragraph.paragraph_format.keep_together = True
+        paragraph.paragraph_format.keep_with_next = bool(keep_with_next)
+    except Exception:
+        pass
+
+
+def _mark_table_header_row(table: Any) -> None:
+    try:
+        tr_pr = table.rows[0]._tr.get_or_add_trPr()
+        tbl_header = OxmlElement("w:tblHeader")
+        tbl_header.set(qn("w:val"), "true")
+        tr_pr.append(tbl_header)
+    except Exception:
+        pass
 
 
 def _topic_to_cover_project_name(topic: Any) -> str:
@@ -228,7 +1715,15 @@ def _topic_to_cover_project_name(topic: Any) -> str:
         return ""
     for suffix in ("施工组织设计方案", "施工组织设计", "施组方案"):
         if raw.endswith(suffix):
-            return raw[: -len(suffix)].strip()
+            raw = raw[: -len(suffix)].strip()
+            break
+    # A parser can occasionally retain only the tail of a long tender title
+    # (for example, a closing parenthesis with no opening parenthesis).  A
+    # professional cover must never print that fragment as if it were the full
+    # project name.  Explicit project_name metadata still takes precedence in
+    # _resolve_cover_meta.
+    if raw.count("）") > raw.count("（") or raw.count(")") > raw.count("("):
+        return ""
     return raw
 
 
@@ -369,6 +1864,7 @@ def _build_static_toc_entries(
                 "title": title,
                 "start_page": current_page,
                 "planned_pages": planned_pages,
+                "page_number_exact": False,
             }
         )
         current_page += planned_pages
@@ -417,7 +1913,7 @@ def _format_toc_display_title(title: str) -> str:
     return cleaned
 
 
-def _append_field_run(paragraph, instruction: str) -> None:
+def _append_field_run(paragraph, instruction: str, result_text: str | None = None):
     run = paragraph.add_run()
     r = run._r
     fld_begin = OxmlElement("w:fldChar")
@@ -432,7 +1928,24 @@ def _append_field_run(paragraph, instruction: str) -> None:
     r.append(fld_begin)
     r.append(instr)
     r.append(fld_separate)
+    if result_text is not None:
+        result = OxmlElement("w:t")
+        result.text = str(result_text)
+        r.append(result)
     r.append(fld_end)
+    return run
+
+
+def _add_paragraph_bookmark(paragraph, name: str, bookmark_id: int) -> None:
+    """Bind a stable Word bookmark to a chapter heading for live TOC page refs."""
+    safe_name = re.sub(r"[^A-Za-z0-9_]", "_", str(name or "")) or "ZF_CHAPTER"
+    start = OxmlElement("w:bookmarkStart")
+    start.set(qn("w:id"), str(int(bookmark_id)))
+    start.set(qn("w:name"), safe_name)
+    end = OxmlElement("w:bookmarkEnd")
+    end.set(qn("w:id"), str(int(bookmark_id)))
+    paragraph._p.insert(0, start)
+    paragraph._p.append(end)
 
 
 def _hide_paragraph(paragraph) -> None:
@@ -455,6 +1968,8 @@ def _toc_entry_style(style_cfg: Dict[str, Any], level: int) -> Dict[str, Any]:
     title_latin = str(style.get("title_latin_font") or body_latin)
     body_size = _to_float(style.get("body_size"), 14.0)
     title_size = _to_float(style.get("title_size"), body_size + 2.0)
+    palette = _normalize_style(style).get("palette") or {}
+    accent_rgb = tuple(int(str(palette.get("accent") or "0F5966")[i : i + 2], 16) for i in (0, 2, 4))
     if level <= 1:
         return {
             "font_east": title_font,
@@ -462,7 +1977,7 @@ def _toc_entry_style(style_cfg: Dict[str, Any], level: int) -> Dict[str, Any]:
             "size_pt": max(title_size, body_size + 2.0),
             "bold": True,
             "left_indent_cm": 0.0,
-            "color_rgb": (0, 0, 0),
+            "color_rgb": tuple(int(str(palette.get("accent_dark") or "103B52")[i : i + 2], 16) for i in (0, 2, 4)),
         }
     if level == 2:
         return {
@@ -471,7 +1986,7 @@ def _toc_entry_style(style_cfg: Dict[str, Any], level: int) -> Dict[str, Any]:
             "size_pt": max(body_size + 1.0, 14.5),
             "bold": False,
             "left_indent_cm": 1.0,
-            "color_rgb": (16, 158, 170),
+            "color_rgb": accent_rgb,
         }
     return {
         "font_east": body_font,
@@ -493,7 +2008,6 @@ def _render_toc_line(
     line_cfg = _toc_entry_style(style_cfg, level)
     title = _format_toc_display_title(str((entry or {}).get("title") or "章节"))
     page_number = int(_to_int((entry or {}).get("start_page"), 1) or 1)
-    dot_count = max(10, 52 - len(title) - max(0, level - 1) * 4)
     paragraph = doc.add_paragraph()
     try:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -502,16 +2016,36 @@ def _render_toc_line(
         paragraph.paragraph_format.space_before = Pt(0)
         paragraph.paragraph_format.space_after = Pt(4 if level == 1 else 2)
         paragraph.paragraph_format.line_spacing = Pt(22)
+        p_pr = paragraph._p.get_or_add_pPr()
+        tabs = p_pr.find(qn("w:tabs"))
+        if tabs is None:
+            tabs = OxmlElement("w:tabs")
+            p_pr.append(tabs)
+        tab = OxmlElement("w:tab")
+        tab.set(qn("w:val"), "right")
+        tab.set(qn("w:leader"), "dot")
+        tab.set(qn("w:pos"), "8850")
+        tabs.append(tab)
     except Exception:
         pass
-    run = paragraph.add_run(f"{title}{'·' * dot_count}{page_number}")
-    _set_run_font(run, str(line_cfg["font_east"]), str(line_cfg["font_latin"]), float(line_cfg["size_pt"]))
-    try:
-        run.bold = bool(line_cfg["bold"])
-        color = tuple(line_cfg.get("color_rgb") or (0, 0, 0))
-        run.font.color.rgb = RGBColor(int(color[0]), int(color[1]), int(color[2]))
-    except Exception:
-        pass
+    suffix = str(page_number)
+    title_run = paragraph.add_run(title)
+    tab_run = paragraph.add_run("\t")
+    order = max(1, _to_int((entry or {}).get("order"), 1))
+    bookmark_name = f"ZF_CHAPTER_{order}"
+    suffix_run = _append_field_run(
+        paragraph,
+        f"PAGEREF {bookmark_name} \\h",
+        result_text=suffix,
+    )
+    for run in (title_run, tab_run, suffix_run):
+        _set_run_font(run, str(line_cfg["font_east"]), str(line_cfg["font_latin"]), float(line_cfg["size_pt"]))
+        try:
+            run.bold = bool(line_cfg["bold"])
+            color = tuple(line_cfg.get("color_rgb") or (0, 0, 0))
+            run.font.color.rgb = RGBColor(int(color[0]), int(color[1]), int(color[2]))
+        except Exception:
+            pass
     return paragraph
 
 
@@ -542,7 +2076,7 @@ def _insert_auto_toc(
         _set_run_font(title_run, title_font, title_latin, title_size)
         try:
             title_run.bold = True
-            title_run.font.color.rgb = RGBColor(16, 158, 170)
+            title_run.font.color.rgb = RGBColor(15, 89, 102)
         except Exception:
             pass
 
@@ -629,6 +2163,310 @@ def _set_cell_shading(cell, fill: str) -> None:
         pass
 
 
+def _set_paragraph_shading(paragraph: Any, fill: str) -> None:
+    try:
+        p_pr = paragraph._p.get_or_add_pPr()
+        for child in list(p_pr):
+            if child.tag == qn("w:shd"):
+                p_pr.remove(child)
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), str(fill or "").strip() or "FFFFFF")
+        p_pr.append(shd)
+    except Exception:
+        pass
+
+
+def _set_paragraph_border(paragraph: Any, *, edge: str, color: str, sz: int = 8, space: int = 3) -> None:
+    """Add one deterministic paragraph rule without relying on a Word theme."""
+    try:
+        p_pr = paragraph._p.get_or_add_pPr()
+        p_bdr = p_pr.find(qn("w:pBdr"))
+        if p_bdr is None:
+            p_bdr = OxmlElement("w:pBdr")
+            p_pr.append(p_bdr)
+        current = p_bdr.find(qn(f"w:{edge}"))
+        if current is None:
+            current = OxmlElement(f"w:{edge}")
+            p_bdr.append(current)
+        current.set(qn("w:val"), "single")
+        current.set(qn("w:sz"), str(int(sz)))
+        current.set(qn("w:space"), str(int(space)))
+        current.set(qn("w:color"), str(color or "AFC4CE"))
+    except Exception:
+        pass
+
+
+def _set_cell_margins(cell: Any, *, top: int = 90, start: int = 110, bottom: int = 90, end: int = 110) -> None:
+    try:
+        tc_pr = cell._tc.get_or_add_tcPr()
+        tc_mar = tc_pr.first_child_found_in("w:tcMar")
+        if tc_mar is None:
+            tc_mar = OxmlElement("w:tcMar")
+            tc_pr.append(tc_mar)
+        for name, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+            node = tc_mar.find(qn(f"w:{name}"))
+            if node is None:
+                node = OxmlElement(f"w:{name}")
+                tc_mar.append(node)
+            node.set(qn("w:w"), str(int(value)))
+            node.set(qn("w:type"), "dxa")
+    except Exception:
+        pass
+
+
+def _prevent_table_row_split(row: Any) -> None:
+    try:
+        tr_pr = row._tr.get_or_add_trPr()
+        if tr_pr.find(qn("w:cantSplit")) is None:
+            tr_pr.append(OxmlElement("w:cantSplit"))
+    except Exception:
+        pass
+
+
+def _style_professional_table(table: Any, style_cfg: Dict[str, Any] | None = None) -> None:
+    """Apply the restrained blue-gray tender table treatment used by exports."""
+    cfg = _normalize_style(style_cfg or {})
+    palette = cfg["palette"]
+    try:
+        table.style = "Table Grid"
+        table.autofit = False
+    except Exception:
+        pass
+    _mark_table_header_row(table)
+    for row_index, row in enumerate(table.rows):
+        _prevent_table_row_split(row)
+        for cell in row.cells:
+            _set_cell_margins(cell)
+            if row_index == 0:
+                _set_cell_shading(cell, palette["table_header"])
+            elif row_index % 2 == 0:
+                _set_cell_shading(cell, palette["table_band"])
+            _set_cell_border(
+                cell,
+                top={"color": palette["border"], "sz": 5},
+                bottom={"color": palette["border"], "sz": 5},
+                start={"color": palette["border"], "sz": 5},
+                end={"color": palette["border"], "sz": 5},
+                insideH={"color": palette["border"], "sz": 4},
+                insideV={"color": palette["border"], "sz": 4},
+            )
+            for paragraph in cell.paragraphs:
+                try:
+                    paragraph.paragraph_format.keep_together = True
+                    paragraph.paragraph_format.widow_control = True
+                except Exception:
+                    pass
+
+
+def _table_text_weight(value: Any) -> float:
+    """Approximate printed width, counting CJK glyphs as full-width."""
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return 0.0
+    weight = 0.0
+    for char in text:
+        weight += 1.0 if "\u2e80" <= char <= "\uffff" else 0.56
+    return weight
+
+
+def _suggest_table_column_widths(
+    headers: List[str],
+    rows: List[List[str]],
+    *,
+    total_width_cm: float = 16.2,
+) -> tuple[float, ...]:
+    """Allocate A4 table width by semantic content instead of equal columns."""
+    if not headers:
+        return (float(total_width_cm),)
+    narrative_tokens = ("措施", "内容", "说明", "分析", "要求", "控制", "验证", "处置", "记录", "描述", "建议", "章节")
+    compact_tokens = ("序号", "编号", "单位", "数量", "页码", "状态", "等级", "日期", "时间", "单价", "合价")
+    raw_weights: List[float] = []
+    for col, header in enumerate(headers):
+        samples = [str(header or "")]
+        for row in rows[:24]:
+            if col < len(row):
+                samples.append(str(row[col] or ""))
+        measured = sorted(min(54.0, _table_text_weight(value)) for value in samples if str(value).strip())
+        representative = measured[min(len(measured) - 1, max(0, int(len(measured) * 0.78)))] if measured else 2.0
+        weight = max(2.0, _table_text_weight(header) * 1.15, representative)
+        header_text = str(header or "")
+        if any(token in header_text for token in narrative_tokens):
+            weight *= 1.35
+        if any(token in header_text for token in compact_tokens):
+            weight = min(weight, 5.2)
+        raw_weights.append(max(2.0, min(weight, 34.0)))
+
+    min_width = 1.55 if len(headers) >= 4 else 2.0
+    widths = [max(min_width, total_width_cm * weight / max(1.0, sum(raw_weights))) for weight in raw_weights]
+    # Re-normalize after minimum-width clamping.
+    scale = float(total_width_cm) / max(0.1, sum(widths))
+    widths = [round(width * scale, 2) for width in widths]
+    widths[-1] = round(widths[-1] + (float(total_width_cm) - sum(widths)), 2)
+    return tuple(widths)
+
+
+def _table_column_prefers_center(header: str, values: List[str]) -> bool:
+    header_text = str(header or "").strip()
+    if any(token in header_text for token in ("序号", "编号", "单位", "数量", "页码", "状态", "等级", "日期", "时间", "单价", "合价", "比例")):
+        return True
+    nonempty = [str(value or "").strip() for value in values if str(value or "").strip()]
+    if not nonempty:
+        return False
+    numeric_like = re.compile(r"^[\d\s.,%‰+\-—/年月日时分秒万元m²㎡m³³]+$", re.IGNORECASE)
+    return all(_table_text_weight(value) <= 12 and numeric_like.fullmatch(value) for value in nonempty)
+
+
+def _apply_semantic_table_layout(
+    table: Any,
+    headers: List[str],
+    rows: List[List[str]],
+    style_cfg: Dict[str, Any] | None = None,
+) -> None:
+    """Apply print-oriented alignment, type size and first-column emphasis."""
+    cfg = _normalize_style(style_cfg or {})
+    palette = cfg["palette"]
+    if not headers:
+        return
+    columns = len(headers)
+    centered = [
+        _table_column_prefers_center(
+            headers[col],
+            [row[col] if col < len(row) else "" for row in rows],
+        )
+        for col in range(columns)
+    ]
+    first_values = [row[0] for row in rows if row]
+    emphasize_first = bool(first_values) and max((_table_text_weight(value) for value in first_values), default=0) <= 18
+    for row_index, row in enumerate(table.rows):
+        for col, cell in enumerate(row.cells):
+            try:
+                cell.vertical_alignment = (
+                    WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                    if row_index == 0 or (col < len(centered) and centered[col])
+                    else WD_CELL_VERTICAL_ALIGNMENT.TOP
+                )
+            except Exception:
+                pass
+            if row_index > 0 and col == 0 and emphasize_first:
+                _set_cell_shading(cell, palette["accent_light"])
+            for paragraph in cell.paragraphs:
+                try:
+                    paragraph.alignment = (
+                        WD_ALIGN_PARAGRAPH.CENTER
+                        if row_index == 0 or (col < len(centered) and centered[col]) or (col == 0 and emphasize_first)
+                        else WD_ALIGN_PARAGRAPH.LEFT
+                    )
+                    paragraph.paragraph_format.first_line_indent = Cm(0)
+                    paragraph.paragraph_format.line_spacing = 1.0
+                    paragraph.paragraph_format.space_before = Pt(0)
+                    paragraph.paragraph_format.space_after = Pt(0)
+                    paragraph.paragraph_format.keep_together = True
+                    paragraph.paragraph_format.widow_control = True
+                except Exception:
+                    pass
+                for run in paragraph.runs:
+                    _set_run_font(run, cfg["body_font"], cfg["body_latin_font"], 10.5 if row_index else 11.0)
+                    if row_index == 0 or (row_index > 0 and col == 0 and emphasize_first):
+                        run.bold = True
+                    if row_index == 0:
+                        try:
+                            run.font.color.rgb = RGBColor.from_string("FFFFFF")
+                        except Exception:
+                            pass
+
+
+def _set_inline_shape_border(shape: Any, *, color: str = "AFC4CE", width: int = 12700) -> None:
+    """Give an inserted picture a thin neutral keyline for clean print output."""
+    try:
+        graphic_data = shape._inline.graphic.graphicData
+        pic = next((child for child in graphic_data.iter() if child.tag == qn("pic:pic")), None)
+        if pic is None:
+            return
+        sp_pr = pic.find(qn("pic:spPr"))
+        if sp_pr is None:
+            return
+        old = sp_pr.find(qn("a:ln"))
+        if old is not None:
+            sp_pr.remove(old)
+        line = OxmlElement("a:ln")
+        line.set("w", str(int(width)))
+        solid = OxmlElement("a:solidFill")
+        rgb = OxmlElement("a:srgbClr")
+        rgb.set("val", str(color or "AFC4CE"))
+        solid.append(rgb)
+        line.append(solid)
+        sp_pr.append(line)
+    except Exception:
+        pass
+
+
+def _image_width_for_docx(path: Any, *, source_kind: str = "") -> float:
+    """Choose a print-safe width from the actual aspect ratio."""
+    try:
+        from PIL import Image
+
+        with Image.open(str(path)) as image:
+            width, height = image.size
+        ratio = float(width) / max(1.0, float(height))
+        if ratio < 0.82:
+            return 9.6
+        if ratio < 1.15:
+            return 11.2
+        if ratio > 2.15:
+            return 15.6
+        if ratio > 1.55:
+            return 15.0
+        return 13.8
+    except Exception:
+        return 14.5 if str(source_kind or "").lower() in {"site_photo", "drawing", "deterministic_project_diagram"} else 13.8
+
+
+def _image_aspect_ratio(path: Any) -> float | None:
+    try:
+        from PIL import Image
+
+        with Image.open(str(path)) as image:
+            width, height = image.size
+        return float(width) / max(1.0, float(height))
+    except Exception:
+        return None
+
+
+def _media_pair_eligible(items: List[Any]) -> bool:
+    """Return true for two compatible landscape project photos/drawings."""
+    if len(items) != 2:
+        return False
+    kinds: List[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        path = str(item.get("path") or "").strip()
+        kind = str(item.get("source_kind") or "").strip().lower()
+        if kind not in {"site_photo", "drawing"} or not path or not Path(path).is_file():
+            return False
+        ratio = _image_aspect_ratio(path)
+        if ratio is None or ratio < 1.12 or ratio > 2.25:
+            return False
+        kinds.append(kind)
+    # A photo pair or drawing pair reads as one coherent evidence panel.
+    return kinds[0] == kinds[1]
+
+
+def _enable_field_updates(doc: Document) -> None:
+    """Ask Word-compatible editors to refresh TOC/PAGE fields on open."""
+    try:
+        settings = doc.settings._element
+        current = settings.find(qn("w:updateFields"))
+        if current is None:
+            current = OxmlElement("w:updateFields")
+            settings.append(current)
+        current.set(qn("w:val"), "true")
+    except Exception:
+        pass
+
+
 def _set_cell_border(cell, **kwargs) -> None:
     try:
         tc_pr = cell._tc.get_or_add_tcPr()
@@ -667,9 +2505,11 @@ def _apply_footer_page_numbers(
     *,
     bidder_company: str,
     logo_path: str | None,
+    document_label: str = "",
 ) -> None:
     font_east = str((style_cfg or {}).get("body_font") or "宋体")
     font_latin = str((style_cfg or {}).get("body_latin_font") or font_east)
+    palette = (_normalize_style(style_cfg or {}).get("palette") or {})
     company = str(bidder_company or "").strip()
     logo = str(logo_path or "").strip()
     if logo and not Path(logo).exists():
@@ -687,11 +2527,12 @@ def _apply_footer_page_numbers(
             continue
         _clear_block_container(footer)
         table = footer.add_table(rows=1, cols=2, width=Cm(usable_width))
+        _mark_table_header_row(table)
         try:
             table.autofit = False
         except Exception:
             pass
-        _set_table_all_borders(table, color="14A6AE", sz=10, top=True)
+        _set_table_all_borders(table, color=str(palette.get("border") or "AFC4CE"), sz=6, top=True)
         left_cell = table.cell(0, 0)
         right_cell = table.cell(0, 1)
         _set_cell_width(left_cell, usable_width * 0.72)
@@ -714,7 +2555,15 @@ def _apply_footer_page_numbers(
             pass
         if logo:
             try:
-                p_left.add_run().add_picture(logo, width=Cm(1.0))
+                shape = p_left.add_run().add_picture(logo, width=Cm(1.0))
+                _set_inline_shape_alt_text(shape, title="投标人标识", description="投标人企业标识")
+                _configure_inline_image_paragraph(
+                    p_left,
+                    space_before_pt=4,
+                    space_after_pt=0,
+                    keep_with_next=False,
+                )
+                p_left.alignment = WD_ALIGN_PARAGRAPH.LEFT
             except Exception:
                 pass
         if company:
@@ -724,9 +2573,27 @@ def _apply_footer_page_numbers(
                 run_company.bold = True
             except Exception:
                 pass
+        elif str(document_label or "").strip():
+            run_label = p_left.add_run(str(document_label).strip())
+            _set_run_font(run_label, font_east, font_latin, 10.5)
+            try:
+                run_label.font.color.rgb = RGBColor(15, 89, 102)
+            except Exception:
+                pass
+        prefix = p_right.add_run("第 ")
+        _set_run_font(prefix, font_east, font_latin, 9.5)
         _append_field_run(p_right, "PAGE")
+        middle = p_right.add_run(" 页 / 共 ")
+        _set_run_font(middle, font_east, font_latin, 9.5)
+        _append_field_run(p_right, "NUMPAGES")
+        suffix = p_right.add_run(" 页")
+        _set_run_font(suffix, font_east, font_latin, 9.5)
         for run in p_right.runs:
-            _set_run_font(run, font_east, font_latin, 14.0)
+            _set_run_font(run, font_east, font_latin, 9.5)
+            try:
+                run.font.color.rgb = RGBColor(83, 101, 110)
+            except Exception:
+                pass
 
 
 def _style_cover_paragraph(
@@ -780,12 +2647,69 @@ def _cover_image_caption(project_name: Any, filename: Any, source_hint: Any = ""
     return f"{name} · {label}" if name else label
 
 
+def _submission_media_eligible(item: Any) -> bool:
+    """Reject unverified text-bearing figures from bidder-facing exports.
+
+    AI image generators are not reliable at rendering Chinese labels, and the
+    legacy BoQ overview mixed incomparable units on one axis.  Both are useful
+    as internal previews but must not be inserted into a formal submission
+    unless a caller explicitly marks the figure as text-verified.
+    """
+    if isinstance(item, dict):
+        caption = str(item.get("caption") or "").strip().lower()
+        path = str(item.get("path") or "").strip().lower()
+        source_kind = str(item.get("source_kind") or "").strip().lower()
+        text_verified = item.get("text_verified") is True
+    else:
+        caption = ""
+        path = str(item or "").strip().lower()
+        source_kind = ""
+        text_verified = False
+    if source_kind == "logo" or "投标单位logo" in caption.replace(" ", ""):
+        return False
+    if "gemini" in caption or "ai生成" in caption or "ai 生成" in caption:
+        return text_verified
+    if source_kind in {"external_ai", "ai", "generated_ai", "outline_mindmap"}:
+        return text_verified
+    if "boq统计概览" in caption.replace(" ", "") or "boq_stats_" in path:
+        return False
+    return True
+
+
+def _rank_submission_media(items: Any) -> List[Any]:
+    """Deduplicate and rank real project evidence ahead of generated figures."""
+    ranked: List[tuple[int, int, Any]] = []
+    seen: set[str] = set()
+    priorities = {
+        "site_photo": 0,
+        "drawing": 1,
+        "deterministic_project_diagram": 2,
+    }
+    for index, item in enumerate(items or []):
+        if not _submission_media_eligible(item):
+            continue
+        if isinstance(item, dict):
+            path = str(item.get("path") or "").strip()
+            source_kind = str(item.get("source_kind") or "").strip().lower()
+            identity = str(item.get("source_sha256") or "").strip() or path
+        else:
+            path = str(item or "").strip()
+            source_kind = ""
+            identity = path
+        if not path or not Path(path).exists() or not identity or identity in seen:
+            continue
+        seen.add(identity)
+        ranked.append((priorities.get(source_kind, 3), index, item))
+    ranked.sort(key=lambda entry: (entry[0], entry[1]))
+    return [entry[2] for entry in ranked]
+
+
 def _resolve_cover_meta(data: Dict[str, Any] | None) -> Dict[str, Any]:
     raw = data if isinstance(data, dict) else {}
     branding = raw.get("branding") if isinstance(raw.get("branding"), dict) else {}
     topic = str(raw.get("topic") or "施工组织设计").strip() or "施工组织设计"
     project_name = str(raw.get("project_name") or "").strip() or _topic_to_cover_project_name(topic)
-    project_code = str(raw.get("project_code") or "").strip()
+    project_code = str(raw.get("project_code") or raw.get("project_id") or "").strip()
     bidder_company = str(branding.get("bidder_company") or raw.get("bidder_company") or "").strip()
 
     logo_path = str(branding.get("logo_path") or raw.get("logo_path") or "").strip()
@@ -795,9 +2719,28 @@ def _resolve_cover_meta(data: Dict[str, Any] | None) -> Dict[str, Any]:
     if cover_image_path and not Path(cover_image_path).exists():
         cover_image_path = ""
 
+    cover_source_hint = "site_photo"
+    cover_source_caption = ""
+    if not cover_image_path:
+        for media_item in _rank_submission_media(raw.get("media") or []):
+            if not isinstance(media_item, dict):
+                continue
+            if str(media_item.get("source_kind") or "").strip().lower() != "site_photo":
+                continue
+            candidate = str(media_item.get("path") or "").strip()
+            if candidate and Path(candidate).exists():
+                cover_image_path = candidate
+                cover_source_hint = "site_photo"
+                cover_source_caption = str(media_item.get("caption") or "").strip()
+                break
+
     cover_image_caption = str(raw.get("cover_image_caption") or branding.get("cover_image_caption") or "").strip()
     if cover_image_path and not cover_image_caption:
-        cover_image_caption = _cover_image_caption(project_name, Path(cover_image_path).name, "site_photo")
+        cover_image_caption = cover_source_caption or _cover_image_caption(
+            project_name,
+            Path(cover_image_path).name,
+            cover_source_hint,
+        )
 
     return {
         "project_id": str(raw.get("project_id") or branding.get("project_id") or "").strip(),
@@ -821,13 +2764,34 @@ def _insert_cover_page(doc: Document, style_cfg: Dict[str, Any], cover_meta: Dic
     title_latin = str(cfg.get("title_latin_font") or cfg.get("body_latin_font") or title_font)
     body_font = str(cfg.get("body_font") or "宋体")
     body_latin = str(cfg.get("body_latin_font") or body_font)
-    accent = (16, 158, 170)
+    accent = (15, 89, 102)
 
     project_name = str(meta.get("project_name") or "").strip()
     project_code = str(meta.get("project_code") or "").strip()
     cover_title = str(meta.get("cover_title") or "施工组织设计").strip() or "施工组织设计"
     bidder_company = str(meta.get("bidder_company") or "").strip()
     issue_year_month = str(meta.get("issue_year_month") or "").strip()
+
+    kicker = doc.add_paragraph()
+    _style_cover_paragraph(
+        kicker,
+        east_font=title_font,
+        latin_font=title_latin,
+        size_pt=12,
+        text="技术文件",
+        bold=True,
+        color_rgb=accent,
+        space_before_pt=18,
+        space_after_pt=12,
+        line_spacing_pt=18,
+    )
+    _set_paragraph_border(
+        kicker,
+        edge="bottom",
+        color=str(cfg["palette"]["border"]),
+        sz=8,
+        space=6,
+    )
 
     if project_name:
         _style_cover_paragraph(
@@ -838,7 +2802,7 @@ def _insert_cover_page(doc: Document, style_cfg: Dict[str, Any], cover_meta: Dic
             text=project_name,
             bold=True,
             color_rgb=accent,
-            space_before_pt=42,
+            space_before_pt=18,
             space_after_pt=10,
             line_spacing_pt=30,
         )
@@ -864,13 +2828,24 @@ def _insert_cover_page(doc: Document, style_cfg: Dict[str, Any], cover_meta: Dic
     )
 
     cover_image_path = str(meta.get("cover_image_path") or "").strip()
+    cover_image_caption = str(meta.get("cover_image_caption") or "").strip()
     if cover_image_path and Path(cover_image_path).exists():
         try:
-            doc.add_picture(cover_image_path, width=Cm(12))
-            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            shape = doc.add_picture(cover_image_path, width=Cm(14.2))
+            _set_inline_shape_alt_text(
+                shape,
+                title="封面项目图片",
+                description=cover_image_caption or "项目现场或效果图",
+            )
+            _set_inline_shape_border(shape, color=str(cfg["palette"]["border"]), width=12700)
+            _configure_inline_image_paragraph(
+                doc.paragraphs[-1],
+                space_before_pt=8,
+                space_after_pt=4,
+                keep_with_next=bool(cover_image_caption),
+            )
         except Exception:
             pass
-    cover_image_caption = str(meta.get("cover_image_caption") or "").strip()
     if cover_image_caption:
         _style_cover_paragraph(
             doc.add_paragraph(),
@@ -886,8 +2861,14 @@ def _insert_cover_page(doc: Document, style_cfg: Dict[str, Any], cover_meta: Dic
     logo_path = str(meta.get("logo_path") or "").strip()
     if logo_path and Path(logo_path).exists():
         try:
-            doc.add_picture(logo_path, width=Cm(2.4))
-            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            shape = doc.add_picture(logo_path, width=Cm(2.4))
+            _set_inline_shape_alt_text(shape, title="投标人标识", description="投标人企业标识")
+            _configure_inline_image_paragraph(
+                doc.paragraphs[-1],
+                space_before_pt=12,
+                space_after_pt=4,
+                keep_with_next=True,
+            )
         except Exception:
             pass
     if bidder_company:
@@ -915,16 +2896,57 @@ def _insert_cover_page(doc: Document, style_cfg: Dict[str, Any], cover_meta: Dic
 
 def _apply_style(doc: Document, style: Dict[str, Any]):
     cfg = _normalize_style(style)
+    _configure_professional_named_styles(doc, cfg)
     try:
         st = doc.styles["Normal"]
-        st.font.name = cfg["body_latin_font"] or cfg["body_font"]
-        st.font.size = Pt(cfg["body_size"])
+        _set_style_font(
+            st,
+            east_font=cfg["body_font"],
+            latin_font=cfg["body_latin_font"],
+            size_pt=cfg["body_size"],
+        )
         if cfg.get("line_spacing_pt") is not None:
             st.paragraph_format.line_spacing = Pt(cfg["line_spacing_pt"])
         else:
             st.paragraph_format.line_spacing = cfg["line_spacing"]
+        st.paragraph_format.space_before = Pt(0)
+        st.paragraph_format.space_after = Pt(4)
+        st.paragraph_format.alignment = cfg["body_align"]
+        st.paragraph_format.first_line_indent = Cm(cfg["first_line_indent_cm"])
+        st.paragraph_format.widow_control = True
     except Exception:
         pass
+    heading_sizes = {
+        "Heading 1": cfg["doc_title_size"],
+        "Heading 2": cfg["title_size"],
+        "Heading 3": max(cfg["body_size"] + 1.0, 12.0),
+    }
+    palette = cfg["palette"]
+    heading_colors = {
+        "Heading 1": RGBColor.from_string(palette["accent_dark"]),
+        "Heading 2": RGBColor.from_string(palette["accent"]),
+        "Heading 3": RGBColor.from_string(palette["accent_dark"]),
+    }
+    for style_name in ("Heading 1", "Heading 2", "Heading 3"):
+        try:
+            heading_style = doc.styles[style_name]
+            _set_style_font(
+                heading_style,
+                east_font=cfg["title_font"],
+                latin_font=cfg["title_latin_font"],
+                size_pt=heading_sizes[style_name],
+            )
+            heading_style.font.bold = True
+            heading_style.font.color.rgb = heading_colors[style_name]
+            heading_style.paragraph_format.keep_with_next = True
+            heading_style.paragraph_format.keep_together = True
+            heading_style.paragraph_format.page_break_before = False
+            heading_style.paragraph_format.widow_control = True
+            heading_style.paragraph_format.first_line_indent = Cm(0)
+            heading_style.paragraph_format.space_before = Pt(12 if style_name == "Heading 1" else 8)
+            heading_style.paragraph_format.space_after = Pt(6)
+        except Exception:
+            pass
 
     def apply_paragraph(p, is_title: bool = False):
         font_east = cfg["title_font"] if is_title else cfg["body_font"]
@@ -935,6 +2957,8 @@ def _apply_style(doc: Document, style: Dict[str, Any]):
                 p.paragraph_format.line_spacing = Pt(cfg["line_spacing_pt"])
             else:
                 p.paragraph_format.line_spacing = cfg["line_spacing"]
+            p.paragraph_format.widow_control = True
+            p.paragraph_format.space_after = Pt(4 if not is_title else 6)
             if not is_title and cfg["first_line_indent_cm"] > 0:
                 p.paragraph_format.first_line_indent = Cm(cfg["first_line_indent_cm"])
             align = cfg["title_align"] if is_title else cfg["body_align"]
@@ -944,6 +2968,30 @@ def _apply_style(doc: Document, style: Dict[str, Any]):
             pass
         for r in p.runs:
             _set_run_font(r, font_east, font_latin, size)
+        if is_title:
+            try:
+                style_name = str(getattr(getattr(p, "style", None), "name", "") or "")
+                if style_name == "Heading 1":
+                    # Benchmark technical bids consistently use a centered
+                    # chapter opener with a restrained rule, while lower-level
+                    # headings remain left aligned for fast scanning.
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    _set_paragraph_border(p, edge="bottom", color=palette["accent"], sz=10, space=6)
+                    p.paragraph_format.left_indent = Cm(0)
+                    p.paragraph_format.right_indent = Cm(0)
+                    p.paragraph_format.space_before = Pt(14)
+                    p.paragraph_format.space_after = Pt(10)
+                elif style_name == "Heading 2":
+                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    _set_paragraph_border(p, edge="bottom", color=palette["border"], sz=6, space=4)
+                    p.paragraph_format.space_before = Pt(8)
+                    p.paragraph_format.space_after = Pt(6)
+                elif style_name == "Heading 3":
+                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    p.paragraph_format.space_before = Pt(6)
+                    p.paragraph_format.space_after = Pt(4)
+            except Exception:
+                pass
 
     return apply_paragraph
 
@@ -958,12 +3006,10 @@ def _apply_branding_header(doc: Document, style_cfg: Dict[str, Any], *, topic: s
     logo = str(logo_path or "").strip()
     if logo and not Path(logo).exists():
         logo = ""
-    if not company and not logo:
-        return
-
     font_east = str(style_cfg.get("body_font") or "宋体")
     font_latin = str(style_cfg.get("body_latin_font") or font_east)
     size_pt = 9.0
+    palette = (_normalize_style(style_cfg or {}).get("palette") or {})
 
     for sec in doc.sections:
         try:
@@ -979,13 +3025,19 @@ def _apply_branding_header(doc: Document, style_cfg: Dict[str, Any], *, topic: s
             pass
 
         try:
-            table = header.add_table(rows=1, cols=2)
+            _clear_block_container(header)
+            usable_width = _usable_page_width_cm(doc)
+            table = header.add_table(rows=1, cols=2, width=Cm(usable_width))
+            _mark_table_header_row(table)
             try:
                 table.autofit = True
             except Exception:
                 pass
             cell_logo = table.cell(0, 0)
             cell_text = table.cell(0, 1)
+            _set_cell_width(cell_logo, usable_width * 0.62)
+            _set_cell_width(cell_text, usable_width * 0.38)
+            _set_table_all_borders(table, color=str(palette.get("border") or "AFC4CE"), sz=6, bottom=True)
 
             # Logo (left)
             if logo:
@@ -996,25 +3048,47 @@ def _apply_branding_header(doc: Document, style_cfg: Dict[str, Any], *, topic: s
                     pass
                 try:
                     r0 = p0.add_run()
-                    r0.add_picture(logo, width=Cm(2.0))
+                    shape = r0.add_picture(logo, width=Cm(2.0))
+                    _set_inline_shape_alt_text(shape, title="投标人标识", description="投标人企业标识")
+                    _configure_inline_image_paragraph(
+                        p0,
+                        space_before_pt=0,
+                        space_after_pt=3,
+                        keep_with_next=False,
+                    )
+                    p0.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 except Exception:
                     pass
 
-            # Text (right)
+            p0 = cell_logo.paragraphs[0] if cell_logo.paragraphs else cell_logo.add_paragraph()
+            try:
+                p0.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                p0.paragraph_format.space_before = Pt(0)
+                p0.paragraph_format.space_after = Pt(3)
+            except Exception:
+                pass
+            left_text = company or (_topic_to_cover_project_name(topic) or str(topic or "施工组织设计"))
+            if left_text:
+                r0_text = p0.add_run(f" {left_text}" if logo else left_text)
+                _set_run_font(r0_text, font_east, font_latin, size_pt)
+                try:
+                    r0_text.font.color.rgb = RGBColor(15, 89, 102)
+                    r0_text.bold = True
+                except Exception:
+                    pass
+
+            # Document label (right)
             p1 = cell_text.paragraphs[0] if cell_text.paragraphs else cell_text.add_paragraph()
             try:
                 p1.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             except Exception:
                 pass
-            header_text = company or ""
-            if header_text and topic:
-                header_text = f"{header_text} | {topic}"
-            elif topic:
-                header_text = str(topic)
+            header_text = "施工组织设计"
             if header_text:
                 r1 = p1.add_run(header_text)
                 try:
                     _set_run_font(r1, font_east, font_latin, size_pt)
+                    r1.font.color.rgb = RGBColor(83, 101, 110)
                 except Exception:
                     pass
         except Exception:
@@ -1073,17 +3147,382 @@ def _is_overview_section(title: str) -> bool:
 
 def _auto_density_images_for_pages(chapter_pages: int, total_pages: int) -> int:
     """
-    Auto image density policy:
-    - total <= 200: 2 images per page
-    - total > 200: 2 images per 2 pages (i.e. 1 image per page)
+    Submission-safe image density policy.
+
+    Figures are supporting evidence, not page filler.  Keep at most two distinct
+    figures per chapter and reduce density further for very long documents.
     """
     cp = max(0, int(chapter_pages or 0))
     tp = max(0, int(total_pages or 0))
     if cp <= 0:
         return 0
-    if tp <= 200:
-        return cp * 2
-    return cp
+    divisor = 4 if tp <= 200 else 6
+    return min(2, max(1, math.ceil(cp / divisor)))
+
+
+def _append_inline_markdown_runs(paragraph: Any, text: str) -> None:
+    """Render the small Markdown subset produced by generation without leaking markers."""
+    value = str(text or "")
+    cursor = 0
+    for match in _INLINE_MARKDOWN_RE.finditer(value):
+        if match.start() > cursor:
+            paragraph.add_run(value[cursor: match.start()])
+        run = paragraph.add_run(match.group(2))
+        run.bold = True
+        cursor = match.end()
+    if cursor < len(value):
+        paragraph.add_run(value[cursor:])
+
+
+def _normalize_risk_triplet_line(value: str) -> Dict[str, str] | None:
+    line = re.sub(r"^(?:[-*•·]|\d+[.)、])\s*", "", str(value or "").strip())
+    line = re.sub(r"\*\*|__", "", line).strip()
+    match = _RISK_TRIPLET_RE.match(line)
+    if not match:
+        return None
+    result = {key: str(val or "").strip() for key, val in match.groupdict().items()}
+    return result if all(result.values()) else None
+
+
+def _risk_triplet_signature(triplet: Dict[str, str]) -> tuple[str, str, str]:
+    """Build a stable signature for suppressing repeated generic control cards."""
+    values = []
+    for key in ("risk", "control", "verification"):
+        value = str(triplet.get(key) or "").strip()
+        value = re.sub(r"(?:资料依据】)+$", "", value).strip()
+        value = re.sub(r"\s+", "", value)
+        values.append(value)
+    return tuple(values)
+
+
+def _append_risk_triplet_table(
+    doc: Document,
+    apply_paragraph: Any,
+    triplet: Dict[str, str],
+    style_cfg: Dict[str, Any] | None = None,
+) -> None:
+    table = doc.add_table(rows=2, cols=3)
+    try:
+        table.style = "Table Grid"
+        table.autofit = False
+    except Exception:
+        pass
+    _mark_table_header_row(table)
+    headers = ("风险", "控制措施", "验证与留痕")
+    values = (triplet["risk"], triplet["control"], triplet["verification"])
+    widths = (4.7, 6.2, 5.1)
+    for index, header in enumerate(headers):
+        header_cell = table.rows[0].cells[index]
+        value_cell = table.rows[1].cells[index]
+        _set_cell_width(header_cell, widths[index])
+        _set_cell_width(value_cell, widths[index])
+        _set_cell_shading(header_cell, "D9F2FA")
+        header_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        value_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+        hp = header_cell.paragraphs[0]
+        hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        hr = hp.add_run(header)
+        hr.bold = True
+        apply_paragraph(hp)
+        hp.paragraph_format.first_line_indent = Cm(0)
+        vp = value_cell.paragraphs[0]
+        _append_inline_markdown_runs(vp, values[index])
+        apply_paragraph(vp)
+        vp.paragraph_format.first_line_indent = Cm(0)
+        vp.paragraph_format.space_after = Pt(0)
+    _style_professional_table(table, style_cfg)
+    _apply_semantic_table_layout(table, list(headers), [list(values)], style_cfg)
+
+
+def _project_chapter_lead(topic: str, chapter_title: str) -> str:
+    """Return a concise bidder-facing lead for the known project context."""
+    if "医院" not in str(topic or "") or "改造" not in str(topic or ""):
+        return ""
+    title = str(chapter_title or "")
+    project_name = _topic_to_cover_project_name(topic) or "本工程"
+    if "整体理解" in title or "工程概况" in title:
+        return (
+            f"{project_name}按医院局部改造场景组织实施。施工部署以改造区域边界、专业接口协同、"
+            "既有设施保护、院感边界、医疗秩序和交付验证为主线；具体作业时段、通行边界及临时切换方案在开工前由建设单位确认。"
+        )
+    if "重点难点" in title:
+        return (
+            "本章将装饰装修、弱电智能化、防水防渗及既有设施保护纳入同一个接口台账，"
+            "按“前置复核—样板确认—过程旁站—隐蔽验收—成品保护”形成闭环，减少拆改返工和医疗环境扰动。"
+        )
+    if "新技术" in title or "新工艺" in title:
+        return (
+            "拟采用的新技术以可实施、可验证和可移交为原则。每项技术均须经专项交底、小范围试用和建设单位确认，"
+            "不改变设计功能，不以技术展示代替工序质量验收。"
+        )
+    if "工期与质量" in title:
+        return (
+            "进度管理以招标文件和经批准的总进度计划为基准，将区域移交、材料到场、专业穿插、隐蔽验收与系统联调作为关键控制点。"
+            "质量管理坚持先样板、后展开，上道工序未验收不转入下道工序。"
+        )
+    if "人、材、机" in title:
+        return (
+            "人、材、机配置随区域开放条件和工序节拍动态调整，重点保障装饰、防水、电气与智能化专业的接口配合。"
+            "所有材料和设备实行进场报验、批次追溯和领用去向记录，未验收或不合格品不得投入使用。"
+        )
+    if "安全文明" in title:
+        return (
+            "安全文明施工除完成常规高处、临电、动火和机械作业控制外，重点管控医院改造期间的院感边界、洁污分流、粉尘噪声、人员通行和成品保护。"
+            "异常情况先停止作业、隔离现场，经复核确认后再恢复施工。"
+        )
+    return ""
+
+
+def _append_hospital_renovation_response_table(
+    doc: Document,
+    apply_paragraph: Any,
+    style_cfg: Dict[str, Any] | None = None,
+) -> None:
+    rows = (
+        (
+            "改造区域与医疗环境边界",
+            "开工前确认封闭范围、人员及材料通行路径，对粉尘、噪声和成品保护实施分区控制。",
+            "区域移交单、边界巡检记录、恢复确认记录",
+        ),
+        (
+            "装饰、防水与智能化接口",
+            "通过图纸会审、样板先行和隐蔽验收统一标高、点位、收口及系统切换条件。",
+            "图纸会审记录、样板验收记录、隐蔽工程验收记录",
+        ),
+        (
+            "既有设施保护与临时切换",
+            "实行先调查、后作业；涉及停用或切换时编制专项操作顺序和回退措施，未经确认不擅自操作。",
+            "切换审批记录、功能测试记录、恢复确认单",
+        ),
+        (
+            "清单、图纸与方案一致性",
+            "建立清单项、设计位置、施工工序和验收资料的对应关系，发现差异先履行书面核验程序。",
+            "清单对照表、设计变更/洽商记录、检验批资料",
+        ),
+        (
+            "院感与洁污流线",
+            "如邻近在用诊疗区域，采用连续封闭隔离、局部吸尘、门口粘尘和密闭转运；保洁消杀及垃圾转运路线由院方确认。",
+            "隔离验收记录、保洁消杀记录、建筑垃圾转运记录",
+        ),
+        (
+            "医疗秩序与系统切换",
+            "噪声、停水停电、消防及弱电系统切换实行预约审批和书面告知；先验证回退条件，再按批准窗口实施。",
+            "作业窗口确认单、切换审批单、功能测试及恢复记录",
+        ),
+    )
+    table = doc.add_table(rows=1 + len(rows), cols=3)
+    table.style = "Table Grid"
+    table.autofit = False
+    _mark_table_header_row(table)
+    headers = ("项目约束", "施工组织响应", "验证与留痕")
+    widths = (4.0, 7.6, 4.6)
+    for col, header in enumerate(headers):
+        cell = table.rows[0].cells[col]
+        _set_cell_width(cell, widths[col])
+        _set_cell_shading(cell, "D9F2FA")
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        paragraph = cell.paragraphs[0]
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = paragraph.add_run(header)
+        run.bold = True
+        apply_paragraph(paragraph)
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+    for row_index, row in enumerate(rows, 1):
+        for col, value in enumerate(row):
+            cell = table.rows[row_index].cells[col]
+            _set_cell_width(cell, widths[col])
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            if row_index % 2 == 0:
+                _set_cell_shading(cell, "F4FAFC")
+            paragraph = cell.paragraphs[0]
+            _append_inline_markdown_runs(paragraph, value)
+            apply_paragraph(paragraph)
+            paragraph.paragraph_format.first_line_indent = Cm(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+    _style_professional_table(table, style_cfg)
+    _apply_semantic_table_layout(table, list(headers), [list(row) for row in rows], style_cfg)
+
+
+def _split_markdown_table_row(value: str) -> List[str]:
+    line = str(value or "").strip().strip("|")
+    return [re.sub(r"\\\|", "|", cell).strip() for cell in line.split("|")]
+
+
+def _is_markdown_table_separator(value: str) -> bool:
+    cells = _split_markdown_table_row(value)
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells)
+
+
+def _append_submission_markdown_table(
+    doc: Document,
+    apply_paragraph: Any,
+    headers: List[str],
+    rows: List[List[str]],
+    style_cfg: Dict[str, Any] | None = None,
+) -> None:
+    """Render generated Markdown matrices as readable Word tables.
+
+    Five-column safety matrices are condensed into three wider columns so the
+    result remains legible on A4 portrait pages.
+    """
+    normalized_headers = [re.sub(r"\*\*", "", str(item or "")).strip() for item in headers]
+    normalized_rows = [
+        [re.sub(r"\*\*", "", str(item or "")).strip() for item in row]
+        for row in rows
+    ]
+    if len(normalized_headers) == 5:
+        table_headers = ["风险事项", "控制与验证", "记录与处置"]
+        table_rows: List[List[str]] = []
+        for row in normalized_rows:
+            padded = (row + [""] * 5)[:5]
+            table_rows.append(
+                [
+                    padded[0],
+                    f"控制：{padded[1]}\n验证：{padded[2]}",
+                    f"记录：{padded[3]}\n处置：{padded[4]}",
+                ]
+            )
+        widths = (3.8, 7.0, 5.4)
+    else:
+        column_count = max(1, min(6, len(normalized_headers)))
+        table_headers = (normalized_headers + [f"字段{idx + 1}" for idx in range(column_count)])[:column_count]
+        table_rows = [(row + [""] * column_count)[:column_count] for row in normalized_rows]
+        widths = _suggest_table_column_widths(table_headers, table_rows, total_width_cm=16.2)
+
+    table = doc.add_table(rows=1 + len(table_rows), cols=len(table_headers))
+    table.style = "Table Grid"
+    table.autofit = False
+    _mark_table_header_row(table)
+    for col, header in enumerate(table_headers):
+        cell = table.rows[0].cells[col]
+        _set_cell_width(cell, widths[col])
+        _set_cell_shading(cell, "D9F2FA")
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        paragraph = cell.paragraphs[0]
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = paragraph.add_run(header)
+        run.bold = True
+        apply_paragraph(paragraph)
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        for run in paragraph.runs:
+            run.font.size = Pt(11.5)
+    for row_index, row in enumerate(table_rows, 1):
+        for col, value in enumerate(row):
+            cell = table.rows[row_index].cells[col]
+            _set_cell_width(cell, widths[col])
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            if row_index % 2 == 0:
+                _set_cell_shading(cell, "F4FAFC")
+            paragraph = cell.paragraphs[0]
+            for part_index, part in enumerate(str(value or "").splitlines()):
+                if part_index:
+                    paragraph.add_run().add_break()
+                _append_inline_markdown_runs(paragraph, part)
+            apply_paragraph(paragraph)
+            paragraph.paragraph_format.first_line_indent = Cm(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            for run in paragraph.runs:
+                run.font.size = Pt(11.0)
+    _style_professional_table(table, style_cfg)
+    _apply_semantic_table_layout(table, table_headers, table_rows, style_cfg)
+
+
+def _append_submission_content(
+    doc: Document,
+    apply_paragraph: Any,
+    content: str,
+    *,
+    seen_risk_triplets: set[tuple[str, str, str]] | None = None,
+    chapter_title: str = "",
+    style_cfg: Dict[str, Any] | None = None,
+) -> None:
+    """Render plain generated text as semantic DOCX paragraphs.
+
+    The old exporter put an entire chapter into one paragraph with soft line
+    breaks, which produced unstable pagination and inaccessible structure.
+    """
+    lines = str(content or "").splitlines() or [""]
+    line_index = 0
+    while line_index < len(lines):
+        raw = lines[line_index]
+        line = raw.strip()
+        if (
+            line.startswith("|")
+            and line_index + 1 < len(lines)
+            and _is_markdown_table_separator(lines[line_index + 1])
+        ):
+            headers = _split_markdown_table_row(line)
+            table_rows: List[List[str]] = []
+            line_index += 2
+            while line_index < len(lines) and lines[line_index].strip().startswith("|"):
+                table_rows.append(_split_markdown_table_row(lines[line_index]))
+                line_index += 1
+            if headers and table_rows:
+                _append_submission_markdown_table(doc, apply_paragraph, headers, table_rows, style_cfg)
+            continue
+        line_index += 1
+        if not line:
+            continue
+        triplet = _normalize_risk_triplet_line(line)
+        if triplet:
+            signature = _risk_triplet_signature(triplet)
+            if seen_risk_triplets is not None:
+                if signature in seen_risk_triplets:
+                    continue
+                seen_risk_triplets.add(signature)
+            _append_risk_triplet_table(doc, apply_paragraph, triplet, style_cfg)
+            continue
+        markdown_heading = re.match(r"^(#{1,4})\s+(.+)$", line)
+        bracket_heading = re.match(r"^【([^】]{2,48})】\s*$", line)
+        if markdown_heading or bracket_heading:
+            if markdown_heading:
+                heading_text = _normalize_submission_heading(markdown_heading.group(2))
+                level = 2 if len(markdown_heading.group(1)) <= 2 else 3
+            else:
+                heading_text = _normalize_submission_heading(bracket_heading.group(1))
+                level = 2
+            if not heading_text or (
+                chapter_title and _submission_heading_key(heading_text) == _submission_heading_key(chapter_title)
+            ):
+                continue
+            p = doc.add_heading(heading_text, level=level)
+            apply_paragraph(p, is_title=True)
+            continue
+        bold_heading = re.match(r"^\*\*(.{2,100})\*\*$", line)
+        if bold_heading:
+            heading_text = _normalize_submission_heading(bold_heading.group(1))
+            if chapter_title and _submission_heading_key(heading_text) == _submission_heading_key(chapter_title):
+                continue
+            level = 3 if re.match(r"^(?:\d+\.\d+|[A-E]\.)", bold_heading.group(1).strip()) else 2
+            p = doc.add_heading(heading_text, level=level)
+            apply_paragraph(p, is_title=True)
+            continue
+        bracket_lead = re.match(r"^【([^】]{2,48})】\s*(.+)$", line)
+        if bracket_lead:
+            p = doc.add_paragraph()
+            p.add_run(f"{bracket_lead.group(1).strip()}：").bold = True
+            _append_inline_markdown_runs(p, bracket_lead.group(2).strip())
+            apply_paragraph(p)
+            continue
+        if re.match(r"^(?:[-•·]|\*(?!\*)|\d+[.)、])\s*", line):
+            cleaned = re.sub(r"^(?:[-•·]|\*(?!\*)|\d+[.)、])\s*", "", line).strip()
+            try:
+                p = doc.add_paragraph(style="List Bullet")
+                _append_inline_markdown_runs(p, cleaned)
+            except Exception:
+                p = doc.add_paragraph()
+                _append_inline_markdown_runs(p, f"• {cleaned}")
+            apply_paragraph(p)
+            try:
+                p.paragraph_format.first_line_indent = Cm(0)
+                p.paragraph_format.left_indent = Cm(0.74)
+                p.paragraph_format.space_after = Pt(2)
+            except Exception:
+                pass
+            continue
+        p = doc.add_paragraph()
+        _append_inline_markdown_runs(p, line)
+        apply_paragraph(p)
 
 
 def _build_report_paths(output_path: str) -> tuple[Path, Path]:
@@ -1123,6 +3562,8 @@ def _write_docx_build_report(
     layout_receipts: List[Dict[str, Any]],
     media_count: int,
     quality_checks: Any = None,
+    figure_quality: Any = None,
+    structural_quality: Any = None,
 ) -> None:
     _require_local_adapter_export_allowed({"sections": sections, "quality_checks": quality_checks}, "docx_build_report")
     report_json_path, report_log_path = _build_report_paths(output_path)
@@ -1144,6 +3585,10 @@ def _write_docx_build_report(
     quality_evidence = _build_quality_evidence_report(quality_checks)
     if quality_evidence:
         report["quality_evidence"] = quality_evidence
+    if figure_quality:
+        report["figure_quality"] = _json_safe_report_value(figure_quality)
+    if structural_quality:
+        report["structural_quality"] = _json_safe_report_value(structural_quality)
     report_json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     report_log_path.write_text(
         "\n".join(
@@ -1187,6 +3632,9 @@ def _append_quality_evidence_appendix(
         "quantitative",
         "vague_terms",
         "officialese",
+        "repetition_control",
+        "content_specificity",
+        "content_density",
         "consistency",
         "boq_focus_coverage",
         "boq_focus_item_closure",
@@ -1381,6 +3829,7 @@ def _append_quality_evidence_appendix(
 
 
 def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
+    data = _sanitize_docx_payload(data)
     _require_local_adapter_export_allowed(data, "docx")
     style_raw = data.get("style") or {}
     style_cfg = _normalize_style(style_raw)
@@ -1438,9 +3887,70 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             return src_path
 
     layout_receipts = []
-    sections = data.get("sections") or []
+    internal_review = str(data.get("document_audience") or "").strip().lower() == "internal_review"
+    sections = _prepare_submission_sections(
+        data.get("sections"),
+        internal_review=internal_review,
+        missing_parameters=data.get("missing_parameters"),
+        project_topic=data.get("topic"),
+    )
+    # The submission sanitizer can remove internal-only evidence tails that made
+    # the raw payload appear complete.  Re-run the build-report gate against the
+    # exact bidder-facing sections before any DOCX bytes are saved.  This keeps a
+    # blocked export from leaving behind a plausible-looking partial document.
+    _require_local_adapter_export_allowed(
+        {"sections": sections, "quality_checks": data.get("quality_checks")},
+        "docx_build_report",
+    )
     terminology_entries = load_global_terminology()
-    media_all = data.get("media") or []
+    raw_media = list(data.get("media") or [])
+    required_prefilter_failures = []
+    for raw_item in raw_media:
+        if not isinstance(raw_item, dict) or not raw_item.get("required"):
+            continue
+        if not _submission_media_eligible(raw_item):
+            required_prefilter_failures.append(
+                {"item": dict(raw_item), "reason": ["required_image_not_eligible_for_submission"]}
+            )
+            continue
+        required_path = Path(str(raw_item.get("path") or raw_item.get("source_path") or "")).expanduser()
+        if not required_path.exists() or not required_path.is_file():
+            required_prefilter_failures.append(
+                {"item": dict(raw_item), "reason": ["image_file_missing"]}
+            )
+    ranked_media = _rank_submission_media(raw_media)
+    media_quality = validate_media_collection(ranked_media)
+    if required_prefilter_failures:
+        media_quality["required_failures"] = [
+            *(media_quality.get("required_failures") or []),
+            *required_prefilter_failures,
+        ]
+        media_quality["rejected"] = [
+            *(media_quality.get("rejected") or []),
+            *required_prefilter_failures,
+        ]
+        media_quality["rejected_count"] = len(media_quality["rejected"])
+        media_quality["status"] = "blocked"
+    if media_quality.get("status") == "blocked":
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "export_allowed": False,
+                    "export_kind": "docx_figure_quality",
+                    "issues": [
+                        {
+                            "code": "REQUIRED_FIGURE_REJECTED",
+                            "reason": list(entry.get("reason") or []),
+                            "caption": str((entry.get("item") or {}).get("caption") or ""),
+                        }
+                        for entry in media_quality.get("required_failures") or []
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+    media_all = list(media_quality.get("accepted") or [])
     chart_policy = style_raw.get("chart_policy") if isinstance(style_raw, dict) and isinstance(style_raw.get("chart_policy"), dict) else {}
     chart_enabled = _to_bool(chart_policy.get("enabled"), True)
     chart_mode = str(chart_policy.get("mode") or "").strip().lower()
@@ -1479,6 +3989,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         style_cfg,
         bidder_company=bidder_company,
         logo_path=str(logo_path or ""),
+        document_label=str(cover_meta.get("project_name") or topic or "施工组织设计"),
     )
     _insert_cover_page(doc, style_cfg, cover_meta)
     if int(front_matter_plan.get("full_index_pages") or 0) > 0:
@@ -1502,41 +4013,291 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         ),
     )
 
-    media_cursor = 0
     media_index = 0
     chapter_media_started = False
+    seen_risk_triplets: set[tuple[str, str, str]] = set()
+    consumed_media: set[str] = set()
+    inserted_media_hashes: list[str] = []
+    figure_insertions: list[Dict[str, Any]] = []
+    figure_failures: list[Dict[str, Any]] = []
 
-    def _append_media_item(item: Any):
-        nonlocal media_index
+    def _media_identity(item: Any) -> str:
+        if isinstance(item, dict):
+            return str(
+                item.get("asset_sha256")
+                or item.get("source_sha256")
+                or item.get("path")
+                or ""
+            ).strip()
+        return str(item or "").strip()
+
+    def _available_media_for_chapter(chapter_title: str, *, is_context: bool) -> List[Any]:
+        return [
+            item
+            for item in media_all
+            if _media_identity(item) not in consumed_media
+            and media_matches_chapter(
+                item,
+                chapter_title,
+                allow_unbound_project_source=bool(is_context),
+            )
+        ]
+
+    def _media_parts(item: Any) -> tuple[str, str, str]:
         path = item.get("path") if isinstance(item, dict) else item
         caption = item.get("caption") if isinstance(item, dict) else None
-        try:
-            branded_path = _brand_image_with_logo(str(path))
-            path_to_add = branded_path or str(path)
-            doc.add_picture(str(path_to_add), width=Cm(14))
+        source_kind = (
+            str(item.get("source_kind") or "local_asset").strip().lower()
+            if isinstance(item, dict)
+            else "local_asset"
+        )
+        if not caption:
             try:
-                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                name = Path(str(path)).name
+            except Exception:
+                name = str(path)
+            caption = "BoQ 统计概览" if "boq_stats_" in str(name) else name
+        return str(path or ""), str(caption or "施工图表"), source_kind
+
+    def _media_source_ref(item: Any, path: str) -> str:
+        if isinstance(item, dict):
+            explicit = str(
+                item.get("source_ref")
+                or item.get("source_filename")
+                or item.get("original_filename")
+                or ""
+            ).strip()
+            if explicit:
+                return explicit
+        return Path(str(path or "")).name
+
+    def _append_media_item(item: Any, *, chapter_title: str = "") -> bool:
+        nonlocal media_index
+        if media_index >= _MAX_SUBMISSION_IMAGES:
+            failure = {
+                "caption": str((item or {}).get("caption") or "") if isinstance(item, dict) else "",
+                "chapter_title": chapter_title,
+                "reason": ["formal_figure_limit_reached"],
+                "required": bool(isinstance(item, dict) and item.get("required")),
+            }
+            figure_failures.append(failure)
+            if failure["required"]:
+                raise RuntimeError(json.dumps({"status": "blocked", "issue": failure}, ensure_ascii=False))
+            return False
+        path, caption, source_kind = _media_parts(item)
+        source_ref = _media_source_ref(item, path)
+        source_receipt = validate_media_item(item, chapter_title=chapter_title)
+        if not source_receipt.get("ok"):
+            failure = {
+                "caption": caption,
+                "chapter_title": chapter_title,
+                "reason": list(source_receipt.get("errors") or []),
+                "required": bool(isinstance(item, dict) and item.get("required")),
+            }
+            figure_failures.append(failure)
+            if failure["required"]:
+                raise RuntimeError(json.dumps({"status": "blocked", "issue": failure}, ensure_ascii=False))
+            return False
+        try:
+            branded_path = None if source_kind in {"site_photo", "drawing"} else _brand_image_with_logo(str(path))
+            path_to_add = branded_path or str(path)
+            insert_receipt = validate_media_item(
+                {
+                    "path": path_to_add,
+                    "caption": caption,
+                    "required": bool(isinstance(item, dict) and item.get("required")),
+                },
+                chapter_title=chapter_title,
+            )
+            if not insert_receipt.get("ok"):
+                failure = {
+                    "caption": caption,
+                    "chapter_title": chapter_title,
+                    "reason": list(insert_receipt.get("errors") or []),
+                    "required": bool(isinstance(item, dict) and item.get("required")),
+                }
+                figure_failures.append(failure)
+                if failure["required"]:
+                    raise RuntimeError(json.dumps({"status": "blocked", "issue": failure}, ensure_ascii=False))
+                return False
+            image_width = _image_width_for_docx(path_to_add, source_kind=source_kind)
+            shape = doc.add_picture(str(path_to_add), width=Cm(image_width))
+            _set_inline_shape_alt_text(
+                shape,
+                title=str(caption or "施工图表"),
+                description=f"与施工组织设计正文配套的图表：{str(caption or '施工图表')}",
+            )
+            _set_inline_shape_border(shape, color=str(style_cfg["palette"]["border"]), width=12700)
+            try:
+                image_paragraph = doc.paragraphs[-1]
+                _configure_inline_image_paragraph(image_paragraph)
             except Exception:
                 pass
             media_index += 1
-            if not caption:
-                try:
-                    name = Path(str(path)).name
-                except Exception:
-                    name = str(path)
-                if "boq_stats_" in str(name):
-                    caption = "BoQ 统计概览"
-                else:
-                    caption = name
-            pc = doc.add_paragraph(f"图{media_index}：{caption}")
+            pc = doc.add_paragraph(f"图{media_index}：{caption}", style="Caption")
             apply_paragraph(pc)
             try:
                 pc.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                pc.paragraph_format.first_line_indent = Cm(0)
+                pc.paragraph_format.line_spacing = 1.0
+                pc.paragraph_format.space_before = Pt(0)
+                pc.paragraph_format.space_after = Pt(8)
+                pc.paragraph_format.keep_together = True
+                for run in pc.runs:
+                    _set_run_font(run, style_cfg["body_font"], style_cfg["body_latin_font"], 10.5)
+                    run.font.color.rgb = RGBColor(24, 82, 112)
             except Exception:
                 pass
+            asset_hash = str(insert_receipt.get("sha256") or "")
+            if asset_hash:
+                inserted_media_hashes.append(asset_hash)
+            figure_insertions.append(
+                {
+                    "figure_number": media_index,
+                    "caption": caption,
+                    "chapter_title": chapter_title,
+                    "source_kind": source_kind,
+                    "source_ref": source_ref,
+                    "required": bool(isinstance(item, dict) and item.get("required")),
+                    "asset_sha256": asset_hash,
+                    "width_px": int(insert_receipt.get("width_px") or 0),
+                    "height_px": int(insert_receipt.get("height_px") or 0),
+                    "effective_dpi": insert_receipt.get("effective_dpi"),
+                }
+            )
+            return True
+        except Exception as exc:
+            failure = {
+                "caption": caption,
+                "chapter_title": chapter_title,
+                "reason": ["docx_image_insert_failed"],
+                "error_type": type(exc).__name__,
+                "required": bool(isinstance(item, dict) and item.get("required")),
+            }
+            figure_failures.append(failure)
+            if failure["required"]:
+                raise
+            return False
+
+    def _append_media_pair(items: List[Any], *, chapter_title: str = "") -> bool:
+        """Render two landscape project photos as one professional evidence panel."""
+        nonlocal media_index
+        if media_index + 2 > _MAX_SUBMISSION_IMAGES:
+            required_items = [item for item in items if isinstance(item, dict) and item.get("required")]
+            if required_items:
+                failure = {
+                    "caption": "、".join(str(item.get("caption") or "") for item in required_items),
+                    "chapter_title": chapter_title,
+                    "reason": ["formal_figure_limit_reached"],
+                    "required": True,
+                }
+                figure_failures.append(failure)
+                raise RuntimeError(json.dumps({"status": "blocked", "issue": failure}, ensure_ascii=False))
+            return False
+        if not _media_pair_eligible(items):
+            return False
+        table = None
+        pair_receipts: list[tuple[str, str, str, str, bool, Dict[str, Any]]] = []
+        start_media_index = media_index
+        staged_hashes: list[str] = []
+        staged_insertions: list[Dict[str, Any]] = []
+        try:
+            for item in items:
+                path, caption, source_kind = _media_parts(item)
+                source_ref = _media_source_ref(item, path)
+                required = bool(isinstance(item, dict) and item.get("required"))
+                receipt = validate_media_item(item, chapter_title=chapter_title, insert_width_cm=7.45)
+                if not receipt.get("ok"):
+                    failure = {
+                        "caption": caption,
+                        "chapter_title": chapter_title,
+                        "reason": list(receipt.get("errors") or []),
+                        "required": bool(isinstance(item, dict) and item.get("required")),
+                    }
+                    figure_failures.append(failure)
+                    if failure["required"]:
+                        raise RuntimeError(json.dumps({"status": "blocked", "issue": failure}, ensure_ascii=False))
+                    return False
+                pair_receipts.append((path, caption, source_kind, source_ref, required, receipt))
+            table = doc.add_table(rows=1, cols=2)
+            table.autofit = False
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            _prevent_table_row_split(table.rows[0])
+            cell_width = 8.0
+            first_figure_number = media_index + 1
+            for col, (path, caption, source_kind, source_ref, required, receipt) in enumerate(pair_receipts):
+                cell = table.rows[0].cells[col]
+                _set_cell_width(cell, cell_width)
+                _set_cell_margins(cell, top=80, start=85, bottom=75, end=85)
+                _set_cell_border(
+                    cell,
+                    top={"color": style_cfg["palette"]["border"], "sz": 5},
+                    bottom={"color": style_cfg["palette"]["border"], "sz": 5},
+                    start={"color": style_cfg["palette"]["border"], "sz": 5},
+                    end={"color": style_cfg["palette"]["border"], "sz": 5},
+                )
+                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+                image_paragraph = cell.paragraphs[0]
+                _configure_inline_image_paragraph(
+                    image_paragraph,
+                    space_before_pt=0,
+                    space_after_pt=3,
+                    keep_with_next=True,
+                )
+                shape = image_paragraph.add_run().add_picture(path, width=Cm(7.45))
+                _set_inline_shape_alt_text(
+                    shape,
+                    title=caption,
+                    description=f"与施工组织设计正文配套的项目证据图片：{caption}",
+                )
+                _set_inline_shape_border(shape, color=str(style_cfg["palette"]["border"]), width=12700)
+                media_index += 1
+                caption_paragraph = cell.add_paragraph(f"图{media_index}：{caption}", style="Caption")
+                caption_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                caption_paragraph.paragraph_format.first_line_indent = Cm(0)
+                caption_paragraph.paragraph_format.line_spacing = 1.0
+                caption_paragraph.paragraph_format.space_before = Pt(0)
+                caption_paragraph.paragraph_format.space_after = Pt(2)
+                caption_paragraph.paragraph_format.keep_together = True
+                for run in caption_paragraph.runs:
+                    _set_run_font(run, style_cfg["body_font"], style_cfg["body_latin_font"], 10.5)
+                    run.font.color.rgb = RGBColor.from_string(style_cfg["palette"]["muted"])
+                asset_hash = str(receipt.get("sha256") or "")
+                if asset_hash:
+                    staged_hashes.append(asset_hash)
+                staged_insertions.append(
+                    {
+                        "figure_number": first_figure_number + col,
+                        "caption": caption,
+                        "chapter_title": chapter_title,
+                        "source_kind": source_kind,
+                        "source_ref": source_ref,
+                        "required": required,
+                        "asset_sha256": asset_hash,
+                        "width_px": int(receipt.get("width_px") or 0),
+                        "height_px": int(receipt.get("height_px") or 0),
+                        "effective_dpi": receipt.get("effective_dpi"),
+                    }
+                )
+            spacer = doc.add_paragraph()
+            spacer.paragraph_format.space_before = Pt(0)
+            spacer.paragraph_format.space_after = Pt(2)
+            spacer.paragraph_format.line_spacing = 1.0
+            inserted_media_hashes.extend(staged_hashes)
+            figure_insertions.extend(staged_insertions)
+            return True
         except Exception:
-            pe = doc.add_paragraph(f"图片加载失败：{path}")
-            apply_paragraph(pe)
+            media_index = start_media_index
+            if table is not None:
+                try:
+                    parent = table._element.getparent()
+                    if parent is not None:
+                        parent.remove(table._element)
+                except Exception:
+                    pass
+            if any(bool(isinstance(item, dict) and item.get("required")) for item in items):
+                raise
+            return False
 
     # 目录/章节内容
     for idx, sec in enumerate(sections):
@@ -1547,8 +4308,6 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             content_doc, _ = normalize_text_terminology(content_doc, terminology_entries)
         except Exception:
             pass
-        role = sec.get("agent_role")
-
         apply_this = apply_paragraph
         section_style_cfg = style_cfg
         if isinstance(chapter_styles, dict) and isinstance(chapter_styles.get(title), dict):
@@ -1556,16 +4315,45 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             apply_this = _apply_style(doc, merged_style)
             section_style_cfg = _normalize_style(merged_style)
 
+        chapter_heading = doc.add_heading(title, level=1)
+        apply_this(chapter_heading, is_title=True)
+        _add_paragraph_bookmark(chapter_heading, f"ZF_CHAPTER_{idx + 1}", 1000 + idx)
         if idx > 0 and style_cfg.get("chapter_start_new_page"):
-            doc.add_page_break()
-
-        h2 = doc.add_heading(title, level=2)
-        apply_this(h2, is_title=True)
-        if role:
-            p = doc.add_paragraph(f"负责人：{role}")
+            # Put the page-start requirement on the heading itself.  An empty
+            # page-break paragraph can combine with a template's heading rule
+            # and yield a nearly blank sheet in Word/LibreOffice.
+            chapter_heading.paragraph_format.page_break_before = True
+        if internal_review and sec.get("agent_role"):
+            p = doc.add_paragraph(f"内部责任角色：{sec.get('agent_role')}")
             apply_this(p)
-        p = doc.add_paragraph(content_doc)
-        apply_this(p)
+        if not internal_review:
+            chapter_lead = _project_chapter_lead(str(topic), str(title))
+            if chapter_lead:
+                lead = doc.add_paragraph()
+                lead.add_run("本章实施主线：").bold = True
+                lead.add_run(chapter_lead)
+                apply_this(lead)
+                try:
+                    _set_paragraph_shading(lead, "EEF3F8")
+                    lead.paragraph_format.left_indent = Cm(0.3)
+                    lead.paragraph_format.right_indent = Cm(0.3)
+                    lead.paragraph_format.first_line_indent = Cm(0)
+                    lead.paragraph_format.space_before = Pt(4)
+                    lead.paragraph_format.space_after = Pt(8)
+                except Exception:
+                    pass
+            if idx == 0 and "医院" in str(topic) and "改造" in str(topic):
+                response_heading = doc.add_heading("医院局部改造施工组织响应", level=2)
+                apply_this(response_heading, is_title=True)
+                _append_hospital_renovation_response_table(doc, apply_this, section_style_cfg)
+        _append_submission_content(
+            doc,
+            apply_this,
+            content_doc,
+            seen_risk_triplets=seen_risk_triplets,
+            chapter_title=str(title),
+            style_cfg=section_style_cfg,
+        )
 
         target_pages = _extract_chapter_page_target(chapter_pages, title)
         if target_pages:
@@ -1578,53 +4366,80 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
                     "target_pages": target_pages,
                     "estimated_pages": estimated_pages,
                     "delta": delta,
+                    "shortfall_pages": max(0, target_pages - estimated_pages),
+                    "mechanical_padding_applied": False,
                 }
             )
-            if style_cfg.get("enforce_chapter_pages") and estimated_pages < target_pages:
-                for _ in range(target_pages - estimated_pages):
-                    doc.add_page_break()
         else:
             chars_per_page = _estimate_chars_per_page(section_style_cfg)
             estimated_pages = _estimate_content_pages(content_doc, chars_per_page)
 
-        # Auto density policy: image count follows planned pages and excludes overview chapters.
+        # Auto density policy: the first chapter receives real project context;
+        # later chapters receive at most one project-specific generated figure.
         if chart_mode_auto_density and chart_position in {"chapter", "per_chapter", "by_chapter"}:
-            if not _is_overview_section(title):
+            is_context_chapter = idx == 0 or _is_overview_section(title)
+            chapter_candidates = _available_media_for_chapter(str(title), is_context=is_context_chapter)
+            if is_context_chapter:
+                remaining_sources = sum(
+                    1
+                    for pending in chapter_candidates
+                    if isinstance(pending, dict)
+                    and str(pending.get("source_kind") or "").strip().lower() in {"site_photo", "drawing"}
+                )
+                need_images = min(2, remaining_sources, max(0, _MAX_SUBMISSION_IMAGES - media_index))
+            else:
                 effective_pages = target_pages if target_pages else estimated_pages
-                need_images = _auto_density_images_for_pages(effective_pages, total_planned_pages)
-                if need_images > 0:
-                    if not chapter_media_started:
-                        hmc = doc.add_heading("图表与插图（按页密度自动分布）", level=2)
-                        apply_paragraph(hmc, is_title=True)
-                        chapter_media_started = True
-                    # Generate a small section-specific image pool, then reuse cyclically to meet page density.
-                    pool_size = max(2, min(8, need_images))
-                    section_pool = generate_section_visuals(
+                need_images = min(
+                    _auto_density_images_for_pages(effective_pages, total_planned_pages),
+                    max(0, _MAX_SUBMISSION_IMAGES - media_index),
+                )
+            if need_images > 0:
+                if not chapter_media_started:
+                    heading_text = "项目现场与图纸依据" if is_context_chapter else "施工组织图示"
+                    hmc = doc.add_heading(heading_text, level=2)
+                    apply_paragraph(hmc, is_title=True)
+                    chapter_media_started = True
+                chapter_items: List[Any] = []
+                chapter_items.extend(chapter_candidates[:need_images])
+                shortfall = need_images - len(chapter_items)
+                if shortfall > 0 and not is_context_chapter:
+                    generated = generate_section_visuals(
                         title=title,
                         content=content_doc,
-                        image_count=pool_size,
-                        include_mindmap=True,
+                        image_count=min(shortfall, 1),
+                        include_mindmap=False,
                     )
-                    if section_pool:
-                        for k in range(need_images):
-                            _append_media_item(section_pool[k % len(section_pool)])
-                    elif media_all:
-                        for _ in range(need_images):
-                            _append_media_item(media_all[media_cursor % len(media_all)])
-                            media_cursor += 1
+                    for generated_item in (generated or [])[:1]:
+                        item = dict(generated_item) if isinstance(generated_item, dict) else {"path": str(generated_item or "")}
+                        item["chapter_scope"] = [str(title)]
+                        item.setdefault("semantic_terms", [str(title)])
+                        item.setdefault("source_kind", "deterministic_project_diagram")
+                        chapter_items.append(item)
+                selected_items = chapter_items[:need_images]
+                if _append_media_pair(selected_items, chapter_title=str(title)):
+                    consumed_media.update(_media_identity(item) for item in selected_items)
+                else:
+                    for item in selected_items:
+                        if _append_media_item(item, chapter_title=str(title)):
+                            consumed_media.add(_media_identity(item))
         # Legacy chapter frequency policy (backward compatibility).
         elif media_all and chart_enabled and chart_position in {"chapter", "per_chapter", "by_chapter"}:
-            if ((idx + 1) % chart_every_n == 0) and media_cursor < len(media_all):
+            chapter_candidates = _available_media_for_chapter(
+                str(title),
+                is_context=bool(idx == 0 or _is_overview_section(title)),
+            )
+            if ((idx + 1) % chart_every_n == 0) and chapter_candidates:
                 if not chapter_media_started:
                     hmc = doc.add_heading("图表与插图（按章节分布）", level=2)
                     apply_paragraph(hmc, is_title=True)
                     chapter_media_started = True
-                _append_media_item(media_all[media_cursor])
-                media_cursor += 1
+                item = chapter_candidates[0]
+                if _append_media_item(item, chapter_title=str(title)):
+                    consumed_media.add(_media_identity(item))
 
     # 图纸证据索引（可追溯）
     drawing_index = data.get("drawing_index") or {}
-    if isinstance(drawing_index, dict) and (drawing_index.get("drawings") or drawing_index.get("chapter_bindings")):
+    if internal_review and isinstance(drawing_index, dict) and (drawing_index.get("drawings") or drawing_index.get("chapter_bindings")):
         doc.add_page_break()
         hd = doc.add_heading("图纸证据索引（自动生成）", level=1)
         apply_paragraph(hd, is_title=True)
@@ -1657,7 +4472,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
 
     # 企业标准证据索引（可追溯）
     standard_index = data.get("standard_index") or {}
-    if isinstance(standard_index, dict) and (standard_index.get("standards") or standard_index.get("chapter_bindings")):
+    if internal_review and isinstance(standard_index, dict) and (standard_index.get("standards") or standard_index.get("chapter_bindings")):
         doc.add_page_break()
         hd = doc.add_heading("企业标准证据索引（自动生成）", level=1)
         apply_paragraph(hd, is_title=True)
@@ -1690,7 +4505,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
 
     # 重点项证据闭环索引（BoQ focus cross-index）
     cross_index = data.get("cross_index") or {}
-    if isinstance(cross_index, dict) and isinstance(cross_index.get("focus_items"), list) and cross_index.get("focus_items"):
+    if internal_review and isinstance(cross_index, dict) and isinstance(cross_index.get("focus_items"), list) and cross_index.get("focus_items"):
         doc.add_page_break()
         hd = doc.add_heading("重点项证据闭环索引（自动生成）", level=1)
         apply_paragraph(hd, is_title=True)
@@ -1708,6 +4523,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         items = cross_index.get("focus_items") or []
         # Keep table compact to avoid layout explosion on A4.
         table = doc.add_table(rows=1, cols=9)
+        _mark_table_header_row(table)
         hdr = table.rows[0].cells
         headers = ["清单项", "类别/工序", "工程量", "单价", "合价", "落位章节", "图纸定位", "标准定位", "闭环"]
         for i, h in enumerate(headers):
@@ -1765,11 +4581,12 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
                     row[i].text = str(v or "")
                 except Exception:
                     pass
+        _style_professional_table(table, style_cfg)
 
     # 可编辑参数影响回执（参数键 -> 出现位置/影响章节）
     param_trace = data.get("param_trace") or {}
     receipt = param_trace.get("receipt") if isinstance(param_trace, dict) else None
-    if isinstance(receipt, dict) and isinstance(receipt.get("keys"), dict) and receipt.get("keys"):
+    if internal_review and isinstance(receipt, dict) and isinstance(receipt.get("keys"), dict) and receipt.get("keys"):
         doc.add_page_break()
         hd = doc.add_heading("可编辑参数影响回执（自动生成）", level=1)
         apply_paragraph(hd, is_title=True)
@@ -1790,6 +4607,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         apply_paragraph(p0)
 
         table = doc.add_table(rows=1, cols=3)
+        _mark_table_header_row(table)
         hdr = table.rows[0].cells
         hdr[0].text = "参数键"
         hdr[1].text = "当前值"
@@ -1808,18 +4626,24 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             row[0].text = str(k)
             row[1].text = val
             row[2].text = chs
+        _style_professional_table(table, style_cfg)
 
     # Remaining chart/images (default: append at end, or chapter mode leftover).
-    remaining_media = [] if chart_mode_auto_density else (media_all[media_cursor:] if isinstance(media_all, list) else [])
+    remaining_media = (
+        []
+        if chart_mode_auto_density
+        else [item for item in media_all if _media_identity(item) not in consumed_media]
+    )
     if remaining_media:
         doc.add_page_break()
         hm = doc.add_heading("图表与插图", level=1)
         apply_paragraph(hm, is_title=True)
         for item in remaining_media:
-            _append_media_item(item)
+            if _append_media_item(item, chapter_title="图表与插图"):
+                consumed_media.add(_media_identity(item))
 
     # 章节版式回执
-    if layout_receipts:
+    if internal_review and layout_receipts:
         doc.add_page_break()
         hl = doc.add_heading("章节版式约束回执", level=1)
         apply_paragraph(hl, is_title=True)
@@ -1837,16 +4661,62 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
             p = doc.add_paragraph(f"- {title}: 目标{target}页，估算{estimated}页（{status}）")
             apply_paragraph(p)
 
-    _append_quality_evidence_appendix(
-        doc,
-        apply_paragraph,
-        data.get("quality_checks"),
-        sections=sections,
-        compare_cfg=data.get("compare") or {},
-    )
+    if internal_review:
+        _append_quality_evidence_appendix(
+            doc,
+            apply_paragraph,
+            data.get("quality_checks"),
+            sections=sections,
+            compare_cfg=data.get("compare") or {},
+        )
 
+    _enable_field_updates(doc)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
+    embedded_media_verification = verify_docx_media_hashes(output_path, inserted_media_hashes)
+    source_media_summary = {
+            "accepted_count": int(media_quality.get("accepted_count") or 0),
+            "rejected_count": int(media_quality.get("rejected_count") or 0),
+            "rejected": [
+                {
+                    "caption": str((entry.get("item") or {}).get("caption") or ""),
+                    "reason": list(entry.get("reason") or []),
+                    "required": bool((entry.get("item") or {}).get("required")),
+                }
+                for entry in media_quality.get("rejected") or []
+            ],
+    }
+    figure_quality_report = build_media_delivery_manifest(
+        source_media=source_media_summary,
+        insertions=figure_insertions,
+        insertion_failures=figure_failures,
+        embedded_media_verification=embedded_media_verification,
+    )
+    figure_manifest_path = Path(output_path).with_suffix(".figure_manifest.json")
+    figure_manifest_path.write_text(
+        json.dumps(figure_quality_report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    if not figure_quality_report.get("delivery_allowed"):
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "export_allowed": False,
+                    "export_kind": "docx_figure_delivery_manifest",
+                    "decision_digest": figure_quality_report.get("decision_digest"),
+                    "issues": figure_quality_report.get("issues") or [],
+                },
+                ensure_ascii=False,
+            )
+        )
+    structural_quality_report = audit_docx_structural_quality(
+        output_path,
+        expected_style=style_cfg,
+        figure_manifest=figure_quality_report,
+        require_heading_structure=bool(sections),
+        strict=True,
+    )
     _write_docx_build_report(
         output_path,
         topic=str(topic),
@@ -1855,11 +4725,14 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         layout_receipts=layout_receipts,
         media_count=media_index,
         quality_checks=data.get("quality_checks"),
+        figure_quality=figure_quality_report,
+        structural_quality=structural_quality_report,
     )
     return output_path
 
 
 def export_autoplan_compare_docx(data: Dict[str, Any], output_path: str) -> str:
+    data = _sanitize_docx_payload(data)
     _require_local_adapter_export_allowed(data, "compare_docx")
     style_raw = data.get("style") or {}
     style_cfg = _normalize_style(style_raw)
@@ -3092,6 +5965,7 @@ def export_scoring_evidence_overview_xlsx(data: Dict[str, Any], output_path: str
 
 
 def export_expert_review_brief_docx(data: Dict[str, Any], output_path: str) -> str:
+    data = _sanitize_docx_payload(data)
     _require_local_adapter_export_allowed(data, "expert_review_brief_docx")
     """
     10%专家复核提要版

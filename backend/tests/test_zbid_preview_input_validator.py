@@ -376,11 +376,13 @@ def test_validator_does_not_call_zbid_start_services_or_write_files():
     assert "random" not in source
 
 
-def test_importing_validator_does_not_pull_main_chain_or_zbid_modules():
-    leaked_modules = MAIN_CHAIN_OR_ZBID_MODULES.intersection(sys.modules)
+def test_importing_validator_does_not_pull_main_chain_or_zbid_modules(assert_clean_import):
+    assert_clean_import(
+        "backend.zhifei_autoplan.zbid_preview_input_validator",
+        MAIN_CHAIN_OR_ZBID_MODULES,
+    )
     source = validator_source()
 
-    assert leaked_modules == set()
     assert "from docx" not in source
     assert "import docx" not in source
     assert "python_docx" not in source

@@ -17,6 +17,7 @@ def test_build_bidding_format_config_keeps_null_for_missing_fields():
     assert cfg["body_size_pt"] is None
     assert cfg["title_size_pt"] is None
     assert cfg["line_spacing_pt"] is None
+    assert cfg["line_spacing"] is None
     assert cfg["margins_cm"]["top"] is None
     assert cfg["margins_cm"]["right"] is None
     assert cfg["margins_cm"]["bottom"] is None
@@ -57,6 +58,7 @@ def test_merge_style_with_bidding_fallback_uses_default_when_all_missing():
     assert merged["body_size"] == DEFAULT_FORMAT_CONFIG["body_size_pt"]
     assert merged["title_size"] == DEFAULT_FORMAT_CONFIG["title_size_pt"]
     assert merged["line_spacing_pt"] == DEFAULT_FORMAT_CONFIG["line_spacing_pt"]
+    assert "line_spacing" not in merged
     assert merged["margins_cm"] == DEFAULT_FORMAT_CONFIG["margins_cm"]
 
 
@@ -67,6 +69,24 @@ def test_merge_style_with_bidding_fallback_normalizes_cn_font_aliases():
     )
     assert merged["body_font"] == "宋体"
     assert merged["title_font"] == "仿宋体"
+
+
+def test_merge_style_with_bidding_fallback_prefers_bidding_multiple_spacing():
+    merged = merge_style_with_bidding_fallback(
+        user_style={"line_spacing_pt": 22},
+        bidding_format_config={"line_spacing": 1.5},
+    )
+    assert merged["line_spacing"] == 1.5
+    assert "line_spacing_pt" not in merged
+
+
+def test_merge_style_with_bidding_fallback_defaults_to_22pt_without_requirement():
+    merged = merge_style_with_bidding_fallback(
+        user_style={},
+        bidding_format_config={"line_spacing": None, "line_spacing_pt": None},
+    )
+    assert merged["line_spacing_pt"] == 22.0
+    assert "line_spacing" not in merged
 
 
 def test_naturalize_machine_text_rewrites_kv_pairs():

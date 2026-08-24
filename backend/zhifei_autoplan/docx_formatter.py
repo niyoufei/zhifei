@@ -103,6 +103,7 @@ def build_bidding_format_config_from_style(style: Dict[str, Any] | None) -> Dict
         "body_size_pt": raw.get("body_size") or raw.get("font_size") or font_cfg.get("size_pt"),
         "title_size_pt": raw.get("title_size") or headings_cfg.get("h2_size") or headings_cfg.get("h1_size"),
         "line_spacing_pt": raw.get("line_spacing_pt") or font_cfg.get("line_spacing_pt"),
+        "line_spacing": raw.get("line_spacing") or font_cfg.get("line_spacing"),
         "margins_cm": {
             "top": _margin_value("top", 0),
             "right": _margin_value("right", 1),
@@ -138,9 +139,21 @@ def merge_style_with_bidding_fallback(
         or DEFAULT_FORMAT_CONFIG["body_size_pt"]
     )
     merged["title_size"] = bidding.get("title_size_pt") or user.get("title_size") or DEFAULT_FORMAT_CONFIG["title_size_pt"]
-    merged["line_spacing_pt"] = (
-        bidding.get("line_spacing_pt") or user.get("line_spacing_pt") or DEFAULT_FORMAT_CONFIG["line_spacing_pt"]
-    )
+    if bidding.get("line_spacing_pt") is not None:
+        merged["line_spacing_pt"] = bidding["line_spacing_pt"]
+        merged.pop("line_spacing", None)
+    elif bidding.get("line_spacing") is not None:
+        merged["line_spacing"] = bidding["line_spacing"]
+        merged.pop("line_spacing_pt", None)
+    elif user.get("line_spacing_pt") is not None:
+        merged["line_spacing_pt"] = user["line_spacing_pt"]
+        merged.pop("line_spacing", None)
+    elif user.get("line_spacing") is not None:
+        merged["line_spacing"] = user["line_spacing"]
+        merged.pop("line_spacing_pt", None)
+    else:
+        merged["line_spacing_pt"] = DEFAULT_FORMAT_CONFIG["line_spacing_pt"]
+        merged.pop("line_spacing", None)
 
     merged_margins = dict(DEFAULT_FORMAT_CONFIG["margins_cm"])
     if isinstance(user.get("margins_cm"), dict):

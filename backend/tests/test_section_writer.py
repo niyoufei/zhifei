@@ -40,6 +40,17 @@ class TestBuildPrompt:
         assert "质量要求" in prompt
         assert "安全要求" in prompt
 
+    def test_global_instruction_is_a_compliance_floor_not_a_tender_override(self):
+        writer = SectionWriter()
+        context = {"global_instruction": "仅引用现行有效且可追溯的规范。"}
+
+        prompt = writer._build_prompt("工程概况", context)
+
+        assert "【系统级合规底线】" in prompt
+        assert "仅引用现行有效且可追溯的规范。" in prompt
+        assert "不得覆盖招标文件、澄清答疑" in prompt
+        assert "发生冲突时必须标记并停止自行裁决" in prompt
+
     def test_build_prompt_with_kg_evidence(self):
         """Test prompt includes KG evidence."""
         writer = SectionWriter()
@@ -106,6 +117,24 @@ class TestBuildPrompt:
         assert "【招标/清单/图纸证据】" in prompt
         assert "【合规检查要点】" in prompt
         assert "输出要求" in prompt
+        assert "不得输出字典/JSON" in prompt
+
+    def test_build_prompt_includes_actionable_auxiliary_agent_roles(self):
+        writer = SectionWriter()
+        prompt = writer._build_prompt(
+            "道路施工方案",
+            {
+                "master_agent": "主控Agent",
+                "compliance_agent": "合规Agent",
+                "auxiliary_agents": [
+                    {"name": "证据溯源Agent", "directive": "关键结论绑定证据。"},
+                    {"name": "图纸接口Agent", "directive": "核对预留预埋和交叉作业。"},
+                ],
+            },
+        )
+        assert "专项复核职责" in prompt
+        assert "证据溯源Agent：关键结论绑定证据" in prompt
+        assert "图纸接口Agent：核对预留预埋和交叉作业" in prompt
 
 
 class TestFallback:
@@ -153,6 +182,7 @@ class TestWrite:
         assert "【量化指标】" in result["content"]
         assert "【风险→控制→验证】" in result["content"]
         assert "【证据:" in result["content"]
+        assert result["generation_mode"] == "fallback"
 
     @pytest.mark.asyncio
     async def test_write_without_llm_includes_prompt(self):
@@ -178,6 +208,7 @@ class TestWrite:
         assert result["content"] == "生成的章节内容..."
         assert result["provider"] == "openai"
         assert result["model"] == "gpt-4"
+        assert result["generation_mode"] == "llm"
         mock_llm.complete.assert_called_once()
 
     @pytest.mark.asyncio
@@ -192,11 +223,12 @@ class TestWrite:
         writer = SectionWriter(llm=mock_llm)
         context = {"kg_evidence": ["证据A", "证据B"], "doc_evidence": ["文档C"]}
         result = await writer.write("施工方案", context)
-        # Should use fallback + evidence
+        # Fallback keeps deterministic prose but never dumps raw evidence arrays.
         assert "【量化指标】" in result["content"]
-        assert "【证据摘要】" in result["content"]
-        assert "证据A" in result["content"]
-        assert "文档C" in result["content"]
+        assert "【证据摘要】" not in result["content"]
+        assert "证据A" not in result["content"]
+        assert "【证据:文档C】" in result["content"]
+        assert result["generation_mode"] == "fallback"
 
     @pytest.mark.asyncio
     async def test_write_with_whitespace_only_uses_fallback(self):
@@ -206,7 +238,7 @@ class TestWrite:
         writer = SectionWriter(llm=mock_llm)
         result = await writer.write("质量管理", {})
         assert "【量化指标】" in result["content"]
-        assert "【证据摘要】" in result["content"]
+        assert "【证据摘要】" not in result["content"]
 
     @pytest.mark.asyncio
     async def test_write_with_llm_error_uses_fallback(self):
@@ -219,12 +251,12 @@ class TestWrite:
         writer = SectionWriter(llm=mock_llm)
         result = await writer.write("安全管理", {})
         assert "【量化指标】" in result["content"]
-        assert "【证据摘要】" in result["content"]
+        assert "【证据摘要】" not in result["content"]
         assert result["error"] == "API rate limit exceeded"
 
     @pytest.mark.asyncio
-    async def test_write_evidence_limit_in_fallback(self):
-        """Test fallback limits evidence to 3 items each."""
+    async def test_write_failure_does_not_dump_raw_evidence_context(self):
+        """Provider failure must not copy raw evidence arrays into prose."""
         mock_llm = AsyncMock()
         mock_llm.complete.return_value = {"text": ""}
         writer = SectionWriter(llm=mock_llm)
@@ -234,15 +266,9 @@ class TestWrite:
         }
         result = await writer.write("进度计划", context)
         content = result["content"]
-        # Should have first 3 from each
-        assert "kg1" in content
-        assert "kg2" in content
-        assert "kg3" in content
-        assert "kg4" not in content
-        assert "doc1" in content
-        assert "doc2" in content
-        assert "doc3" in content
-        assert "doc4" not in content
+        assert "【证据摘要】" not in content
+        assert not any(token in content for token in ("kg1", "kg2", "kg3", "kg4", "doc2", "doc3", "doc4"))
+        assert "【证据:doc1】" in content
 
     @pytest.mark.asyncio
     async def test_write_result_structure(self):
@@ -262,6 +288,7 @@ class TestWrite:
         assert "provider" in result
         assert "model" in result
         assert "error" in result
+        assert result["generation_mode"] == "llm"
 
 
 class TestEdgeCases:
@@ -275,7 +302,8 @@ class TestEdgeCases:
         writer = SectionWriter(llm=mock_llm)
         result = await writer.write("章节", {})
         # None should be treated as empty, triggering fallback
-        assert "【证据摘要】" in result["content"]
+        assert "【证据摘要】" not in result["content"]
+        assert result["generation_mode"] == "fallback"
 
     @pytest.mark.asyncio
     async def test_write_with_unicode_title(self):

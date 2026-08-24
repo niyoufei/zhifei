@@ -16,6 +16,12 @@ DEFAULT_AUDIT_PATH = Path("backend/data/audit/ingest.jsonl")
 NON_FACT_REFERENCE_NOTICE = (
     "案例库仅用于格式、结构、表达方式参考，不得覆盖招标文件、BoQ、图纸、答疑和企业参数等高优先级事实源。"
 )
+CASE_REFERENCE_APPLICATION_BOUNDARY = (
+    "案例提示不是本项目事实源：只可借鉴章节结构、逻辑顺序、表达风格和施工方法组织；"
+    "严禁复制案例中的项目名称、地点、日期、工期、数量、金额、工程参数、企业信息、"
+    "法规或规范编号及结论。凡与招标文件、澄清答疑、审查合格设计文件、工程量清单、"
+    "已核验现行规范或企业参数冲突的内容，必须弃用案例提示。"
+)
 
 
 def normalize_reference_id_list(raw: Any) -> list[str]:
@@ -116,6 +122,8 @@ def list_case_library_items(
         if normalized_type and rec_type != normalized_type:
             continue
         item = _record_public_item(rec)
+        if not item["enabled"] or not item["usable"]:
+            continue
         if wanted_tags and not wanted_tags.intersection(set(item["tags"])):
             continue
         if wanted_chapter and wanted_chapter not in set(item["chapter_scope"]):
@@ -215,3 +223,28 @@ def build_case_reference_pack(
     pack["reference_lines"] = pack["reference_lines"][:5]
     return pack
 
+
+def case_reference_prompt_requirements(pack: Any) -> list[str]:
+    """Build bounded, non-factual drafting hints only for a real case hit."""
+
+    data = pack if isinstance(pack, dict) else {}
+    hits = data.get("hits") if isinstance(data.get("hits"), list) else []
+    if not bool(data.get("enabled")) or not hits:
+        return []
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw in data.get("reference_lines") or []:
+        line = str(raw or "").strip()
+        if not line or line == NON_FACT_REFERENCE_NOTICE or line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+        if len(lines) >= 4:
+            break
+
+    return [
+        "【案例库安全增强（非事实源）】",
+        *lines,
+        CASE_REFERENCE_APPLICATION_BOUNDARY,
+    ]

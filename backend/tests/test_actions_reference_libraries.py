@@ -42,7 +42,7 @@ async def test_actions_case_library_upload_and_items_roundtrip(tmp_path: Path) -
 
     assert uploaded["ok"] is True
     assert uploaded["items"][0]["case_id"]
-    assert uploaded["items"][0]["project_type"] == "房建"
+    assert uploaded["items"][0]["project_type"] == "房屋建筑"
     assert uploaded["items"][0]["tags"] == ["医院", "结构"]
     assert uploaded["items"][0]["chapter_scope"] == ["工程概况", "施工部署"]
     assert listed["ok"] is True
@@ -125,6 +125,53 @@ def test_build_case_reference_pack_with_selected_case_ids(tmp_path: Path) -> Non
     assert pack["style_hints"]
 
 
+def test_case_reference_prompt_requirements_requires_hit_and_enforces_boundary() -> None:
+    from backend.zhifei_autoplan.case_library_service import case_reference_prompt_requirements
+
+    assert case_reference_prompt_requirements({"enabled": True, "hits": [], "reference_lines": ["结构清晰"]}) == []
+
+    requirements = case_reference_prompt_requirements(
+        {
+            "enabled": True,
+            "hits": [{"case_id": "case:1"}],
+            "reference_lines": ["案例库仅供参考", "案例提示：结构清晰"],
+        }
+    )
+    text = "\n".join(requirements)
+    assert "案例库安全增强（非事实源）" in text
+    assert "案例提示：结构清晰" in text
+    assert "严禁复制案例中的项目名称" in text
+
+
+def test_reference_library_lists_hide_disabled_or_unusable_records(tmp_path: Path) -> None:
+    from backend.zhifei_autoplan.case_library_service import list_case_library_items
+    from backend.zhifei_autoplan.image_library import list_image_library_items
+
+    audit_path = tmp_path / "ingest.jsonl"
+    records = [
+        {
+            "ts": "2026-04-12T10:00:00Z",
+            "filename": "不可用案例.txt",
+            "project_type": "房建",
+            "library_scope": "case_library",
+            "sha256": "a" * 64,
+            "usable": False,
+        },
+        {
+            "ts": "2026-04-12T11:00:00Z",
+            "filename": "停用图片.png",
+            "project_type": "房建",
+            "library_scope": "image_library",
+            "sha256": "b" * 64,
+            "enabled": False,
+        },
+    ]
+    _write_audit(audit_path, records)
+
+    assert list_case_library_items(project_type="房建", audit_path=audit_path) == []
+    assert list_image_library_items(project_type="房建", audit_path=audit_path) == []
+
+
 @pytest.mark.asyncio
 async def test_actions_image_library_upload_and_items_roundtrip(tmp_path: Path) -> None:
     from backend.app.routers.actions_bridge import actions_image_library_items, actions_image_library_upload
@@ -152,7 +199,7 @@ async def test_actions_image_library_upload_and_items_roundtrip(tmp_path: Path) 
 
     assert uploaded["ok"] is True
     assert uploaded["items"][0]["image_id"]
-    assert uploaded["items"][0]["project_type"] == "房建"
+    assert uploaded["items"][0]["project_type"] == "房屋建筑"
     assert uploaded["items"][0]["tags"] == ["平面", "临建"]
     assert listed["items"][0]["caption"] == "现场平面示意"
 
@@ -218,7 +265,20 @@ def test_build_image_selection_pack_roundtrip(tmp_path: Path) -> None:
     assert pack["match_reason"] == "selected_image_ids"
     assert pack["images"][0]["caption"] == "现场平面示意"
     assert image_selection_pack_media_entries(pack) == [
-        {"path": str(image_path), "caption": "现场平面示意"}
+        {
+            "path": str(image_path),
+            "caption": "现场平面示意",
+            "image_id": image_library_record_id(record),
+            "chapter_scope": ["施工总平面"],
+            "semantic_terms": ["平面", "临建"],
+            "source_kind": "library_image",
+            "source_sha256": None,
+            "source_filename": "现场平面.png",
+            "source_page": None,
+            "is_project_source": False,
+            "required": False,
+            "explicit_selection": True,
+        }
     ]
 
 
@@ -236,8 +296,34 @@ def test_image_selection_pack_media_entries_skips_missing_paths_and_deduplicates
             ],
         }
     ) == [
-        {"path": "/tmp/a.png", "caption": "现场平面示意"},
-        {"path": "/tmp/b.png", "caption": "材料堆场"},
+        {
+            "path": "/tmp/a.png",
+            "caption": "现场平面示意",
+            "image_id": None,
+            "chapter_scope": [],
+            "semantic_terms": [],
+            "source_kind": "library_image",
+            "source_sha256": None,
+            "source_filename": None,
+            "source_page": None,
+            "is_project_source": False,
+            "required": False,
+            "explicit_selection": True,
+        },
+        {
+            "path": "/tmp/b.png",
+            "caption": "材料堆场",
+            "image_id": None,
+            "chapter_scope": [],
+            "semantic_terms": [],
+            "source_kind": "library_image",
+            "source_sha256": None,
+            "source_filename": None,
+            "source_page": None,
+            "is_project_source": False,
+            "required": False,
+            "explicit_selection": True,
+        },
     ]
 
 

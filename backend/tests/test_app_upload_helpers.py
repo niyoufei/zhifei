@@ -6,10 +6,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-import pytest
 from requests_toolbelt.multipart.encoder import MultipartEncoder
-
-pytestmark = pytest.mark.skip(reason="app.py upload helper is outside this ingest-only PR scope")
 
 
 class _FakeResponse:

@@ -79,7 +79,11 @@ class TestOpenAIProvider:
             assert result["provider"] == "openai"
             assert result["model"] == "gpt-4"
             assert result["text"] == "Hello, world!"
-            mock_client.responses.create.assert_called_once_with(model="gpt-4", input="test prompt")
+            mock_client.responses.create.assert_called_once_with(
+                model="gpt-4",
+                input="test prompt",
+                timeout=180.0,
+            )
 
     @pytest.mark.asyncio
     async def test_complete_without_output_text(self):
@@ -437,11 +441,11 @@ class TestBaiduProvider:
             # 模拟获取 token
             mock_token_resp = MagicMock()
             mock_token_resp.json.return_value = {"access_token": "test-token"}
-            
+
             # 模拟调用 API
             mock_api_resp = MagicMock()
             mock_api_resp.json.return_value = {"result": "文心回复"}
-            
+
             mock_post.side_effect = [mock_token_resp, mock_api_resp]
 
             provider = BaiduProvider(

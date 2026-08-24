@@ -163,6 +163,11 @@ def build_evidence_tracking(
             ev = _extract_evidence(para, section_graph_nodes)
             score_hits = _detect_score_hits(para, score_points)
             page_est = page_cursor + min(sec_pages - 1, math.floor((p_idx - 1) * sec_pages / sec_para_count))
+            explicit_sources = [
+                source
+                for source in ev["sources"]
+                if source and not str(source).startswith("AUTO://")
+            ]
             rows.append(
                 {
                     "section_index": s_idx,
@@ -173,17 +178,19 @@ def build_evidence_tracking(
                     "tender_score_points": score_hits,
                     "system_response": para,
                     "evidence_sources": ev["sources"],
+                    "explicit_evidence_sources": explicit_sources,
+                    "has_explicit_evidence": bool(explicit_sources),
                     "evidence_typed": ev["typed"],
                 }
             )
         page_cursor += max(1, sec_pages)
 
     matched_rows = sum(1 for r in rows if (r.get("tender_score_points") or []))
-    evidence_rows = sum(1 for r in rows if (r.get("evidence_sources") or []))
+    evidence_rows = sum(1 for r in rows if (r.get("explicit_evidence_sources") or []))
     trace_rows = sum(
         1
         for r in rows
-        if any(("#" in str(x) and "@" in str(x)) for x in (r.get("evidence_sources") or []))
+        if any(("#" in str(x) and "@" in str(x)) for x in (r.get("explicit_evidence_sources") or []))
     )
     return {
         "rows": rows,
@@ -194,4 +201,3 @@ def build_evidence_tracking(
             "traceable_locator_rows": trace_rows,
         },
     }
-

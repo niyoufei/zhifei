@@ -446,10 +446,13 @@ def test_outbound_adapter_does_not_write_output_job_export():
     assert _write_surface_counts() == before_counts
 
 
-def test_outbound_adapter_imports_do_not_pull_main_chain_or_writeback_modules():
-    loaded_modules = set(sys.modules)
-
-    assert not (MAIN_CHAIN_OR_WRITEBACK_MODULES & loaded_modules)
+def test_outbound_adapter_imports_do_not_pull_main_chain_or_writeback_modules(
+    assert_clean_import,
+):
+    assert_clean_import(
+        "backend.zhifei_autoplan.zdoc_zbid_preview_outbound",
+        MAIN_CHAIN_OR_WRITEBACK_MODULES,
+    )
 
 
 def test_outbound_adapter_source_does_not_import_network_clients_or_formal_modules():

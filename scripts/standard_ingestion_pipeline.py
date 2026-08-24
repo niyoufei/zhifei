@@ -30,6 +30,7 @@ if str(ROOT_DIR) not in sys.path:
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
+from backend.zhifei_autoplan.compliance_policy import canonical_standard_code
 from modules.parser.parser_unify import UnifiedParser
 
 STANDARD_CODE_RE_LIST = [
@@ -60,6 +61,19 @@ WATERMARK_NOISE_WORDS = [
     "住 房 城 乡 建 设 部 信 息 公 开",
 ]
 ALLOWED_SUFFIXES = {".pdf", ".doc", ".docx", ".txt", ".md"}
+OFFICIAL_METADATA_FIELDS = {
+    "standard_name",
+    "official_source",
+    "effective_status",
+    "current_version",
+    "latest",
+    "priority",
+    "conflicts",
+    "domain_tags",
+    "verification_note",
+    "verified_at",
+    "superseded_clauses",
+}
 
 
 @dataclass
@@ -142,6 +156,8 @@ def _source_key(path: Path) -> str:
 
 def _canonical_prefix(prefix: str) -> str:
     token = re.sub(r"[^A-Za-z/]", "", (prefix or "").upper())
+    if token in {"GB/T", "GBT"}:
+        return "GB/T"
     if token.startswith("GB"):
         return "GB"
     if token.startswith("JTG"):
@@ -182,6 +198,60 @@ def _sniff_domain_tag(file_name: str, text: str) -> str:
             best_score = score
             best_domain = domain
     return best_domain
+
+
+def _official_metadata_sidecar_candidates(path: Path) -> List[Path]:
+    """Return deterministic metadata sidecar locations without creating any file."""
+    candidates = [
+        path.with_name(path.name + ".metadata.json"),
+        path.with_suffix(".metadata.json"),
+    ]
+    out: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+
+def _load_official_metadata_sidecar(path: Path, *, standard_code: str) -> Dict[str, Any]:
+    """Load explicit official metadata; never infer verification from document text.
+
+    A sidecar must bind itself to the same standard code as the parsed source.
+    Mismatched sidecars stop ingestion instead of granting the wrong document a
+    verified identity.  Missing or incomplete sidecars remain unverified.
+    """
+    sidecar = next(
+        (candidate for candidate in _official_metadata_sidecar_candidates(path) if candidate.is_file()),
+        None,
+    )
+    if sidecar is None:
+        return {}
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"invalid_official_metadata_sidecar:{sidecar.name}:{exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid_official_metadata_sidecar:{sidecar.name}:object_required")
+    raw = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else payload
+    declared_code = str(raw.get("standard_code") or "").strip()
+    if not declared_code:
+        raise ValueError(f"invalid_official_metadata_sidecar:{sidecar.name}:standard_code_required")
+    if canonical_standard_code(declared_code) != canonical_standard_code(standard_code):
+        raise ValueError(
+            "official_metadata_standard_code_mismatch:"
+            f"{sidecar.name}:{declared_code}!={standard_code}"
+        )
+    out = {
+        key: raw.get(key)
+        for key in OFFICIAL_METADATA_FIELDS
+        if key in raw and raw.get(key) not in (None, "", [])
+    }
+    out["official_metadata_sidecar"] = str(sidecar)
+    return out
 
 
 def _clean_watermark_noise(text: str) -> str:
@@ -635,6 +705,10 @@ async def _process_one_file(
 
             standard_code, prefix_tag = _sniff_standard_code(path.name, text)
             domain_tag = _sniff_domain_tag(path.name, text)
+            official_metadata = _load_official_metadata_sidecar(
+                path,
+                standard_code=standard_code,
+            )
             chunks_all = _chunk_text(text, target_chars=3600, overlap_chars=360)
             chunks = _select_chunks(chunks_all, max_chunks=max_chunks_per_file)
             if not chunks:
@@ -687,20 +761,24 @@ async def _process_one_file(
                     }
                 )
 
+            source_metadata = {
+                "source_file": str(path),
+                "source_name": path.name,
+                "standard_code": standard_code,
+                "prefix_tag": prefix_tag,
+                "domain_tag": domain_tag,
+                "parser_meta": parse_meta,
+                "watermark_cleaning_enabled": True,
+                "llm_enhanced": True,
+                "llm_errors": llm_errors,
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+            }
+            # Only explicit sidecar fields may elevate a parsed document to
+            # verified status.  Text extraction/model output never does.
+            source_metadata.update(official_metadata)
             payload = {
                 "graph_track": "compliance",
-                "metadata": {
-                    "source_file": str(path),
-                    "source_name": path.name,
-                    "standard_code": standard_code,
-                    "prefix_tag": prefix_tag,
-                    "domain_tag": domain_tag,
-                    "parser_meta": parse_meta,
-                    "watermark_cleaning_enabled": True,
-                    "llm_enhanced": True,
-                    "llm_errors": llm_errors,
-                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
-                },
+                "metadata": source_metadata,
                 "stats": {
                     "mandatory_count": len(nodes),
                     "parameter_count": len(all_params),

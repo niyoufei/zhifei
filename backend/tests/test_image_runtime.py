@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import base64
+import io
+
+
+def _valid_png_bytes() -> bytes:
+    from PIL import Image
+
+    image = Image.effect_noise((960, 640), 36).convert("RGB")
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 class _FakeAsyncApiClient:
@@ -71,7 +82,7 @@ def test_close_gemini_client_safely_installs_noop_async_closer():
 def test_generate_image_gemini_closes_sync_client_without_async_cleanup_error(monkeypatch, tmp_path):
     from backend.zhifei_autoplan import image_runtime
 
-    fake_client = _FakeClient(_FakeResponse(b"fake-png-data"))
+    fake_client = _FakeClient(_FakeResponse(_valid_png_bytes()))
     monkeypatch.setattr(image_runtime.genai, "Client", lambda api_key: fake_client)
 
     result = image_runtime.generate_image_gemini(
@@ -87,3 +98,41 @@ def test_generate_image_gemini_closes_sync_client_without_async_cleanup_error(mo
     import asyncio
 
     asyncio.run(_exercise_async_close(fake_client))
+
+
+def test_generate_image_openai_uses_dedicated_image_model(monkeypatch, tmp_path):
+    from backend.zhifei_autoplan import image_runtime
+
+    calls = []
+
+    class _Images:
+        def generate(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                data=[SimpleNamespace(b64_json=base64.b64encode(_valid_png_bytes()).decode("ascii"))]
+            )
+
+    class _OpenAIClient:
+        def __init__(self) -> None:
+            self.images = _Images()
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = _OpenAIClient()
+    monkeypatch.setattr(image_runtime, "OpenAI", lambda api_key: client)
+
+    result = image_runtime.generate_image_openai(
+        prompt="施工总平面布置图",
+        api_key="test-key",
+        model="gpt-5.6-sol",
+        aspect_ratio="16:9",
+        out_dir=str(tmp_path),
+    )
+
+    assert result["ok"] is True
+    assert result["model"] == "gpt-image-2"
+    assert calls[0]["model"] == "gpt-image-2"
+    assert calls[0]["size"] == "1536x1024"
+    assert client.closed is True

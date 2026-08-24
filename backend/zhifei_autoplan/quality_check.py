@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Dict, Any, List
 
+from backend.zhifei_autoplan.content_quality import build_independent_content_review
+
 
 def _normalize_text(s: str) -> str:
     return (s or "").replace(" ", "").replace("\n", "")
@@ -387,6 +389,133 @@ def _check_officialese_by_section(sections: List[Dict[str, Any]]):
     return results
 
 
+def _sentence_units(text: str) -> List[str]:
+    """Return stable sentence units for conservative cross-chapter reuse checks."""
+
+    source = EVIDENCE_SRC_RE.sub("", str(text or ""))
+    source = re.sub(r"[`*_#>|]", "", source)
+    units: List[str] = []
+    for fragment in re.split(r"[。！？!?；;\n]+", source):
+        normalized = re.sub(r"^[\s\-—–•·（()\d一二三四五六七八九十、.]+", "", fragment)
+        normalized = re.sub(r"\s+", "", normalized).strip("，,：:")
+        if len(normalized) >= 20:
+            units.append(normalized)
+    return units
+
+
+def _check_repetition_by_section(sections: List[Dict[str, Any]]):
+    """Flag material sentence reuse without penalising short standard clauses."""
+
+    units_by_section = [_sentence_units(s.get("content") or "") for s in sections]
+    frequency: Dict[str, int] = {}
+    for units in units_by_section:
+        for unit in units:
+            frequency[unit] = frequency.get(unit, 0) + 1
+
+    results = []
+    for section, units in zip(sections, units_by_section):
+        repeated = [unit for unit in units if frequency.get(unit, 0) > 1]
+        ratio = len(repeated) / max(1, len(units))
+        ok = not (len(units) >= 2 and len(repeated) >= 2 and ratio >= 0.35)
+        results.append(
+            {
+                "title": section.get("title") or "",
+                "ok": ok,
+                "candidate_count": len(units),
+                "repeated_count": len(repeated),
+                "repeat_ratio": round(ratio, 3),
+                "samples": list(dict.fromkeys(repeated))[:3],
+            }
+        )
+    return results
+
+
+def _check_content_specificity_by_section(sections: List[Dict[str, Any]]):
+    """Detect long generic prose that contains neither evidence nor executable detail."""
+
+    action_terms = (
+        "检查", "复核", "验收", "记录", "台账", "责任", "频次", "阈值", "工序",
+        "设备", "材料", "风险", "控制", "验证", "偏差", "整改", "抽检", "交底",
+    )
+    quantified_re = re.compile(
+        r"\d+(?:\.\d+)?\s*(?:%|mm|cm|m|km|m2|m3|㎡|m³|MPa|kN|h|小时|分钟|天|次|人|台|套|组|项|批|班)\b",
+        re.IGNORECASE,
+    )
+    results = []
+    for section in sections:
+        text = str(section.get("content") or "")
+        compact = re.sub(r"\s+", "", text)
+        quantified = len(quantified_re.findall(text))
+        evidence = _count_good_evidence(text)
+        action_count = sum(text.count(term) for term in action_terms)
+        assessed = len(compact) >= 400
+        ok = (not assessed) or quantified >= 2 or evidence > 0 or action_count >= 4
+        results.append(
+            {
+                "title": section.get("title") or "",
+                "ok": ok,
+                "assessed": assessed,
+                "text_length": len(compact),
+                "quantified_count": quantified,
+                "evidence_count": evidence,
+                "action_term_count": action_count,
+            }
+        )
+    return results
+
+
+def _check_content_density_by_section(sections: List[Dict[str, Any]]):
+    """Reject sparse technical chapters without rewarding mechanical page fill.
+
+    A shorter chapter can still pass when it carries enough project-specific
+    signals (quantities, traceable evidence, executable actions and a
+    control/verification loop).  Cover, contents and index front matter are
+    intentionally excluded because they are valid low-density page types.
+    """
+
+    front_matter_terms = ("封面", "目录", "索引")
+    action_terms = (
+        "检查", "复核", "验收", "记录", "台账", "责任", "频次", "阈值", "工序",
+        "设备", "材料", "控制", "验证", "整改", "抽检", "交底", "移交", "试验",
+    )
+    closure_terms = ("风险", "控制", "验证", "验收", "记录", "偏差", "责任", "频次")
+    quantified_re = re.compile(
+        r"\d+(?:\.\d+)?\s*(?:%|mm|cm|m|km|m2|m3|㎡|m³|MPa|kN|h|小时|分钟|天|次|人|台|套|组|项|批|班)\b",
+        re.IGNORECASE,
+    )
+    results = []
+    for section in sections:
+        title = str(section.get("title") or "").strip()
+        text = str(section.get("content") or "")
+        compact = re.sub(r"\s+", "", EVIDENCE_SRC_RE.sub("", text))
+        excluded = any(term in title for term in front_matter_terms)
+        quantities = len(quantified_re.findall(text))
+        evidence = _count_good_evidence(text)
+        action_hits = sum(text.count(term) for term in action_terms)
+        closure_hits = sum(1 for term in closure_terms if term in text)
+        sentence_count = len(_sentence_units(text))
+        substantive_score = min(3, quantities) + min(2, evidence) + min(4, action_hits) + min(3, closure_hits)
+        effective_chars = len(compact)
+        ok = excluded or effective_chars >= 220 or (effective_chars >= 140 and substantive_score >= 6)
+        results.append(
+            {
+                "title": title,
+                "ok": ok,
+                "excluded": excluded,
+                "effective_chars": effective_chars,
+                "sentence_count": sentence_count,
+                "substantive_score": substantive_score,
+                "quantity_count": quantities,
+                "evidence_count": evidence,
+                "action_term_count": action_hits,
+                "closure_term_count": closure_hits,
+                "minimum_effective_chars": 220,
+                "compact_pass_rule": "effective_chars>=140 and substantive_score>=6",
+            }
+        )
+    return results
+
+
 def _check_evidence_quality_by_section(sections: List[Dict[str, Any]]):
     results = []
     for s in sections:
@@ -639,7 +768,7 @@ def _check_standard_evidence_by_section(sections: List[Dict[str, Any]], standard
         target = 1
         covered = any_hits
     ok = covered >= target
-    return {
+    result = {
         "ok": ok,
         "standard_count": len(standard_names),
         "standards": standard_names[:12],
@@ -1909,6 +2038,66 @@ def apply_remediation(
         sec["auto_remediated"] = True
 
 
+def ensure_local_export_mandatory_content(sections: List[Dict[str, Any]]) -> List[str]:
+    """Add missing local-export control tables once, without inventing project facts.
+
+    The local export adapter intentionally requires two named, auditable
+    controls.  Model wording is not guaranteed to use those exact canonical
+    names, so the deterministic remediation layer supplies conservative table
+    schemas.  Project-specific parameters remain bound to the generated
+    chapter and its tender/BoQ/drawing evidence instead of being fabricated
+    here.
+    """
+
+    valid_sections = [section for section in sections or [] if isinstance(section, dict)]
+    if not valid_sections:
+        return []
+
+    combined = "\n".join(
+        f"{section.get('title') or ''}\n{section.get('content') or ''}"
+        for section in valid_sections
+    )
+    additions: List[tuple[str, str]] = []
+    if "劳保用品配置矩阵" not in combined:
+        additions.append(
+            (
+                "劳保用品配置矩阵",
+                "【劳保用品配置矩阵】\n"
+                "- 作业类别｜劳保用品｜配置标准｜发放频次｜检查频次｜责任岗位｜验收记录\n"
+                "- 现场通用作业｜安全帽、反光背心、防护手套｜1套/人｜进场发放｜1次/日｜安全员｜《劳保用品发放与检查台账》\n"
+                "- 专项作业｜按本章风险和作业条件配置专用防护用品｜1套/人｜作业前发放｜1次/班｜安全员、班组长｜《专项作业防护用品检查表》",
+            )
+        )
+    if "关键工序控制点表" not in combined:
+        additions.append(
+            (
+                "关键工序控制点表",
+                "【关键工序控制点表】\n"
+                "- 工序｜风险｜控制参数｜检查频次｜责任岗位｜验收标准｜记录\n"
+                "- 本章关键工序｜施工参数偏离招标、清单或图纸要求｜引用本章已绑定参数，不另造项目参数｜首件1次/工序、过程巡检2次/日｜工长、质量员｜符合本章证据及验收要求｜《关键工序控制点检查表》",
+            )
+        )
+    if not additions:
+        return []
+
+    preferred = ("安全", "质量", "风险", "措施", "施工方案", "施工方法", "技术")
+    target = next(
+        (
+            section
+            for keyword in preferred
+            for section in valid_sections
+            if keyword in str(section.get("title") or "")
+        ),
+        valid_sections[-1],
+    )
+    content = str(target.get("content") or "").rstrip()
+    supplement = "\n\n【自动补充】本地导出控制表：\n" + "\n\n".join(block for _, block in additions)
+    target["content"] = (content + supplement).strip() + "\n"
+    target.setdefault("auto_remediated", True)
+    target.setdefault("deterministic_supplements", []).extend(label for label, _ in additions)
+    return [label for label, _ in additions]
+
+
 def run_quality_checks(
     tender: Dict[str, Any],
     outline: List[str],
@@ -2037,6 +2226,9 @@ def run_quality_checks(
     quantitative_by_section = _check_quantitative_by_section(sections)
     vague_by_section = _check_vague_terms_by_section(sections)
     officialese_by_section = _check_officialese_by_section(sections)
+    repetition_by_section = _check_repetition_by_section(sections)
+    content_specificity_by_section = _check_content_specificity_by_section(sections)
+    content_density_by_section = _check_content_density_by_section(sections)
     consistency = _check_consistency(sections)
     boq_focus_coverage = _check_boq_focus_coverage(boq_focus or {}, all_text)
     boq_focus_item_closure = _check_boq_focus_item_closure(boq_focus or {}, sections)
@@ -2128,6 +2320,57 @@ def run_quality_checks(
                         "type": "bureaucratic_phrase",
                         "severity": "high",
                         "problem": f"出现官话/套话/空话表达 {s.get('count')} 处。",
+                        "suggestion": rec["suggestion"],
+                    }
+                )
+        for s in repetition_by_section:
+            if not s.get("ok"):
+                rec = {
+                    "title": s.get("title"),
+                    "type": "repetitive_content",
+                    "suggestion": "删除跨章节重复套话；保留本章独有的工序、参数、风险、控制动作、验证口径和证据定位。",
+                }
+                remediation.append(rec)
+                issue_list.append(
+                    {
+                        "title": s.get("title"),
+                        "type": "repetitive_content",
+                        "severity": "medium",
+                        "problem": f"长句重复占比过高（{s.get('repeated_count')}/{s.get('candidate_count')}）。",
+                        "suggestion": rec["suggestion"],
+                    }
+                )
+        for s in content_specificity_by_section:
+            if not s.get("ok"):
+                rec = {
+                    "title": s.get("title"),
+                    "type": "low_specificity",
+                    "suggestion": "用项目证据、清单/图纸/工序参数、责任/频次/验收闭环替代通用描述；无法核实时标注待确认，不得编造。",
+                }
+                remediation.append(rec)
+                issue_list.append(
+                    {
+                        "title": s.get("title"),
+                        "type": "low_specificity",
+                        "severity": "high",
+                        "problem": "篇幅较长但缺少项目证据、量化参数和可执行动作。",
+                        "suggestion": rec["suggestion"],
+                    }
+                )
+        for s in content_density_by_section:
+            if not s.get("ok"):
+                rec = {
+                    "title": s.get("title"),
+                    "type": "content_density_gap",
+                    "suggestion": "不得用空白页、分页符或重复段落补页；补充本项目工序、参数、接口、资源、风险→控制→验证闭环和证据定位，资料不足时明确标注待确认。",
+                }
+                remediation.append(rec)
+                issue_list.append(
+                    {
+                        "title": s.get("title"),
+                        "type": "content_density_gap",
+                        "severity": "high",
+                        "problem": f"章节有效技术内容偏少（{s.get('effective_chars')} 字），可能形成稀疏页或空洞页。",
                         "suggestion": rec["suggestion"],
                     }
                 )
@@ -2498,6 +2741,18 @@ def run_quality_checks(
             "ok": all(s.get("ok") for s in officialese_by_section),
             "by_section": officialese_by_section,
         },
+        "repetition_control": {
+            "ok": all(s.get("ok") for s in repetition_by_section),
+            "by_section": repetition_by_section,
+        },
+        "content_specificity": {
+            "ok": all(s.get("ok") for s in content_specificity_by_section),
+            "by_section": content_specificity_by_section,
+        },
+        "content_density": {
+            "ok": all(s.get("ok") for s in content_density_by_section),
+            "by_section": content_density_by_section,
+        },
         "consistency": consistency,
         "boq_focus_coverage": boq_focus_coverage,
         "boq_focus_item_closure": boq_focus_item_closure,
@@ -2545,3 +2800,12 @@ def run_quality_checks(
         "auto_revision_suggestions": remediation,
         "remediation": remediation,
     }
+    independent_review = build_independent_content_review(
+        result,
+        sections=sections,
+        strict=bool(strict),
+    )
+    result["score"] = independent_review["score"]
+    result["quality_gate"] = independent_review["quality_gate"]
+    result["independent_content_review"] = independent_review
+    return result

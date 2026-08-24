@@ -127,14 +127,16 @@ def build_export_media(
     media: list[dict[str, Any]] = []
     if stats:
         media.extend(generate_boq_chart_fn(stats))
-    media.extend(
+    project_source_media = list(
         _call_with_optional_workspace(
             generate_ingested_previews_fn,
             limit=6,
             project_id=project_id,
             workspace_dir=workspace_dir,
         )
+        or []
     )
+    media.extend(project_source_media)
     try:
         img_defaults = get_image_defaults_fn(params)
         aspect_ratio = (
@@ -149,19 +151,22 @@ def build_export_media(
             update_branding_fn=update_branding_fn,
         )
         logo_embed = logo["logo_embed"]
-        if logo_embed:
-            media.append({"path": logo_embed, "caption": "投标单位LOGO"})
-        mindmap = build_export_mindmap_media(
-            raw_request=raw_request,
-            outline=outline,
-            workspace_dir=workspace_dir,
-            aspect_ratio=aspect_ratio,
-            logo_embed=logo_embed,
-            iterate_image_failover_slots_fn=iterate_image_failover_slots_fn,
-            generate_outline_mindmap_fn=generate_outline_mindmap_fn,
-        )
-        if mindmap:
-            media.append(mindmap)
+        # Logos belong to cover/header branding, not the body image gallery.
+        # When real project photos/drawings are available they outrank an AI
+        # outline poster; callers can still opt in explicitly for diagnostics.
+        include_outline_mindmap = bool(raw_request.get("include_outline_mindmap")) or not project_source_media
+        if include_outline_mindmap:
+            mindmap = build_export_mindmap_media(
+                raw_request=raw_request,
+                outline=outline,
+                workspace_dir=workspace_dir,
+                aspect_ratio=aspect_ratio,
+                logo_embed=logo_embed,
+                iterate_image_failover_slots_fn=iterate_image_failover_slots_fn,
+                generate_outline_mindmap_fn=generate_outline_mindmap_fn,
+            )
+            if mindmap:
+                media.append(mindmap)
     except Exception:
         pass
     return media
@@ -244,13 +249,20 @@ def build_export_mindmap_media(
     iterate_image_failover_slots_fn: Callable[[], Any] = iterate_image_failover_slots,
     generate_outline_mindmap_fn: Callable[..., dict[str, Any] | None] = generate_outline_mindmap,
 ) -> dict[str, Any] | None:
+    saw_supported_slot = False
     for image_slot in iterate_image_failover_slots_fn():
-        if getattr(image_slot, "provider", None) != "google":
+        provider = str(getattr(image_slot, "provider", None) or "").strip().lower()
+        if provider not in {"openai", "google"}:
             continue
+        saw_supported_slot = True
+        extra_kwargs: dict[str, Any] = {}
+        if _accepts_keyword(generate_outline_mindmap_fn, "fallback_to_deterministic"):
+            extra_kwargs["fallback_to_deterministic"] = False
         mindmap = _call_with_optional_workspace(
             generate_outline_mindmap_fn,
             raw_request.get("topic"),
             outline,
+            provider=provider,
             api_key=getattr(image_slot, "api_key", None),
             model=getattr(image_slot, "model", None),
             aspect_ratio=aspect_ratio,
@@ -259,9 +271,22 @@ def build_export_mindmap_media(
             logo_url=raw_request.get("logo_url"),
             bidder_domain=raw_request.get("bidder_domain"),
             workspace_dir=workspace_dir,
+            **extra_kwargs,
         )
         if mindmap:
             return mindmap
+    if saw_supported_slot:
+        return _call_with_optional_workspace(
+            generate_outline_mindmap_fn,
+            raw_request.get("topic"),
+            outline,
+            aspect_ratio=aspect_ratio,
+            logo_path=logo_embed,
+            bidder_company=raw_request.get("bidder_company"),
+            logo_url=raw_request.get("logo_url"),
+            bidder_domain=raw_request.get("bidder_domain"),
+            workspace_dir=workspace_dir,
+        )
     return None
 
 

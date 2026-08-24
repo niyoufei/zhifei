@@ -140,6 +140,31 @@ def test_ingestion_stamps_domain_tag_from_first_level_directory(tmp_path: Path) 
     assert "市政道路工程" in (top.get("tags") or [])
 
 
+def test_ingestion_uses_catalog_project_type_below_ai_namespace(tmp_path: Path) -> None:
+    root = tmp_path / "知识图谱"
+    type_dir = root / "AI知识图谱大全" / "学校房建"
+    type_dir.mkdir(parents=True)
+    (type_dir / "school.md").write_text(
+        "# 主体结构\n\n学校房建主体结构设置质量控制点、安全检查频次和验收闭环。\n",
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "kg.sqlite3"
+    report = ingest_knowledge_graph(root, db_path=db_path, force_reindex=True)
+    assert report["ok"] is True
+
+    result = search_graph_index(
+        query="学校房建 主体结构 质量 安全",
+        db_path=db_path,
+        resolve_authority=False,
+        top_k=5,
+    )
+    assert result["total"] >= 1
+    top = result["results"][0]
+    assert top.get("domain_tag") == "学校房建"
+    assert "学校房建" in (top.get("tags") or [])
+
+
 def test_real_desktop_kg_path_can_be_scanned_if_exists(tmp_path: Path) -> None:
     desktop_path = Path("/Users/youfeini/Desktop/文档生成系统/知识图谱")
     if not desktop_path.exists():

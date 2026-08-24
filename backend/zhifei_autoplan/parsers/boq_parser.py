@@ -19,10 +19,17 @@ class BoQParser:
     """
 
     async def parse(self, path: str) -> Tuple[List[BoQItem], Dict[str, Any]]:
+        # PDF/Excel extraction and the subsequent row-to-model normalization are
+        # both CPU-bound.  Keep the complete pipeline off FastAPI's event-loop
+        # thread so lightweight endpoints (notably /health and job polling)
+        # remain responsive while a large BoQ is being parsed.
+        return await asyncio.to_thread(self._parse_sync, path)
+
+    def _parse_sync(self, path: str) -> Tuple[List[BoQItem], Dict[str, Any]]:
         if path.lower().endswith((".xlsx", ".xls")):
-            rows = await asyncio.to_thread(self._read_excel, path)
+            rows = self._read_excel(path)
         elif path.lower().endswith(".pdf"):
-            rows = await asyncio.to_thread(self._read_pdf_tables, path)
+            rows = self._read_pdf_tables(path)
         else:
             rows = []
 

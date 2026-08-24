@@ -11,7 +11,7 @@ from backend.zhifei_autoplan.preview_advisory_quality_gate import attach_preview
 
 
 DEFAULT_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "qwen3:0.6b"
+DEFAULT_MODEL = "qwen3.5:4b"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 LOCAL_LLM_PREVIEW_FLAG = "ZDOC_LOCAL_LLM_PREVIEW_ENABLED"
 LOCAL_LLM_OLLAMA_PREVIEW_FLAG = "ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED"

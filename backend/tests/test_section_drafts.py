@@ -167,12 +167,17 @@ def test_rollback_section_draft_restores_original_content() -> None:
     assert draft["draft_content"] == "草稿验收"
 
 
-def test_section_drafts_module_does_not_pull_main_chain_or_write_modules() -> None:
+def test_section_drafts_module_does_not_pull_main_chain_or_write_modules(assert_clean_import) -> None:
     assert not hasattr(section_drafts, "LLMClient")
     assert not hasattr(section_drafts, "run_autoplan")
     assert not hasattr(section_drafts, "OllamaProvider")
-    assert "backend.zhifei_autoplan.orchestrator" not in sys.modules
-    assert "backend.zhifei_autoplan.job_store" not in sys.modules
-    assert "backend.zhifei_autoplan.output_artifacts" not in sys.modules
-    assert "backend.zhifei_autoplan.export_docx_service" not in sys.modules
-    assert "backend.app.routers.actions_bridge" not in sys.modules
+    assert_clean_import(
+        "backend.zhifei_autoplan.section_drafts",
+        {
+            "backend.zhifei_autoplan.orchestrator",
+            "backend.zhifei_autoplan.job_store",
+            "backend.zhifei_autoplan.output_artifacts",
+            "backend.zhifei_autoplan.export_docx_service",
+            "backend.app.routers.actions_bridge",
+        },
+    )

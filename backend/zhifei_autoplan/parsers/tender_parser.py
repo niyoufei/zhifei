@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pdfplumber
 
+from backend.zhifei_autoplan.requirement_decisions import (
+    build_requirement_decision_matrix,
+    style_from_requirement_matrix,
+)
+
 from backend.zhifei_autoplan.models import (
     TenderIndexMatrix,
     TenderIndexItem,
@@ -51,6 +56,31 @@ class TenderParser:
         items = await self._extract_index_matrix(sections, texts)
         outline, outline_meta = self._extract_outline(merged_text)
         style, style_meta = self._extract_style_requirements(merged_text)
+        style_sources: List[Dict[str, Any]] = []
+        for source_index, (source_path, source_text) in enumerate(texts):
+            extracted_style, _ = self._extract_style_requirements(source_text)
+            if not extracted_style:
+                continue
+            is_clarification = self._is_qa_file(source_path, source_text)
+            style_sources.append(
+                {
+                    "source_id": f"source_{source_index + 1}",
+                    "source_type": "clarification" if is_clarification else "tender",
+                    "priority": 400 if is_clarification else 300,
+                    "confidence": 0.95,
+                    "values": extracted_style,
+                    "evidence": {
+                        "file_name": Path(source_path).name,
+                        "extractor": "tender_style_rules",
+                    },
+                }
+            )
+        style_decision_matrix = build_requirement_decision_matrix(style_sources)
+        if style_sources:
+            # The aggregate parser is retained only for human-readable summaries;
+            # executable style values come from the source-aware decision matrix.
+            style = style_from_requirement_matrix(style_decision_matrix)
+            style_meta["source"] = "source_decision_matrix"
         chapter_pages = self._extract_chapter_page_targets(merged_text, outline)
         chapter_requirements = self._extract_chapter_requirements(merged_text, outline)
         project_name, project_code = self._extract_project_meta(merged_text)
@@ -60,6 +90,7 @@ class TenderParser:
         extraction_meta: Dict[str, Any] = {
             "outline": outline_meta,
             "style": style_meta,
+            "requirement_decision_matrix": style_decision_matrix,
         }
         return TenderIndexMatrix(
             project_name=project_name,
@@ -96,17 +127,87 @@ class TenderParser:
             "采购编号",
         )
 
-        name: str | None = None
+        name_candidates: list[tuple[int, str]] = []
         code: str | None = None
 
         def _clean_name(raw: str) -> str:
             s = (raw or "").strip()
+            s = re.sub(r"^\d+\s*/\s*\d+\s*", "", s)
+            s = re.sub(
+                r"^(?:项目名称|工程名称|招标项目名称|标段名称|项目名称及标段)\s*[：:]\s*",
+                "",
+                s,
+            )
             s = re.sub(r"[（(]?(?:项目编号|招标编号|招标项目编号|工程编号|项目代码|采购编号)\s*[：:].*$", "", s)
+            # PDF text extraction frequently appends the document kind to a
+            # wrapped project title.  It is not part of the project name.
+            for _ in range(2):
+                s = re.sub(
+                    r"(?:补疑|答疑|澄清|补遗)(?:文件)?\s*(?:第?\s*\d+\s*(?:次|号)?)?\s*$",
+                    "",
+                    s,
+                )
+                s = re.sub(
+                    r"(?:招标文件|招标公告|资格预审文件|施工组织设计(?:方案)?)\s*$",
+                    "",
+                    s,
+                )
             s = s.strip("：:;；,.，。 ")
             s = re.sub(r"\s{2,}", " ", s)
-            if len(s) > 120:
-                s = s[:120].strip()
+            s = re.sub(r"(?<=[\u4e00-\u9fff0-9])\s+(?=[\u4e00-\u9fff0-9])", "", s)
+            if len(s) > 180:
+                s = s[:180].strip()
             return s
+
+        def _paren_counts(value: str) -> tuple[int, int]:
+            return value.count("（") + value.count("("), value.count("）") + value.count(")")
+
+        def _rebuild_wrapped_name(index: int, seed: str | None = None) -> str:
+            """Reassemble a project title split across adjacent PDF text lines."""
+            parts = [str(seed if seed is not None else lines[index]).strip()]
+            left = index - 1
+            right = index + 1
+            for _ in range(4):
+                joined = "".join(parts)
+                opens, closes = _paren_counts(joined)
+                if closes > opens and left >= 0:
+                    previous = lines[left].strip()
+                    if not any(key in previous for key in code_keys):
+                        parts.insert(0, previous)
+                    left -= 1
+                    continue
+                if opens > closes and right < len(lines):
+                    following = lines[right].strip()
+                    if not any(key in following for key in code_keys):
+                        parts.append(following)
+                    right += 1
+                    continue
+                break
+            return _clean_name("".join(parts))
+
+        def _name_score(candidate: str, *, explicit: bool) -> int:
+            s = _clean_name(candidate)
+            opens, closes = _paren_counts(s)
+            if opens != closes or not 4 <= len(s) <= 180:
+                return -1
+            if not any(token in s for token in ("工程", "项目", "建设")):
+                return -1
+            if s in {"工程概况", "项目概况", "建设规模", "工程名称", "项目名称"}:
+                return -1
+            if re.match(r"^(?:第?[\d一-十]+章|编制说明|技术文件)", s):
+                return -1
+            score = min(len(s), 140)
+            score += 90 if opens else 0
+            score += 18 * min(s.count("、"), 6)
+            score += 120 if re.search(r"(?:工程|项目)$", s) else 0
+            score += 260 if explicit else 0
+            return score
+
+        def _remember_name(candidate: str, *, explicit: bool) -> None:
+            cleaned = _clean_name(candidate)
+            score = _name_score(cleaned, explicit=explicit)
+            if score >= 0:
+                name_candidates.append((score, cleaned))
 
         def _clean_code(raw: str) -> str:
             s = (raw or "").strip()
@@ -116,25 +217,16 @@ class TenderParser:
                 s = s[:80]
             return s
 
-        for ln in lines[:800]:
+        for index, ln in enumerate(lines[:800]):
             normalized = ln.replace("\u3000", " ").strip()
 
-            if not name:
-                for k in name_keys:
-                    m = re.search(rf"{re.escape(k)}\s*[：:]\s*(.+)$", normalized)
-                    if m:
-                        candidate = _clean_name(m.group(1))
-                        if len(candidate) >= 2:
-                            name = candidate
-                            break
-                if not name:
-                    for k in name_keys:
-                        m = re.search(rf"{re.escape(k)}\s+(.+)$", normalized)
-                        if m:
-                            candidate = _clean_name(m.group(1))
-                            if len(candidate) >= 2:
-                                name = candidate
-                                break
+            for k in name_keys:
+                m = re.search(rf"{re.escape(k)}\s*[：:]\s*(.+)$", normalized)
+                if not m:
+                    m = re.search(rf"{re.escape(k)}\s+(.+)$", normalized)
+                if m:
+                    _remember_name(_rebuild_wrapped_name(index, m.group(1)), explicit=True)
+                    break
 
             if not code:
                 for k in code_keys:
@@ -153,19 +245,27 @@ class TenderParser:
                                 code = candidate
                                 break
 
-            if name and code:
-                break
+        # Unlabelled cover titles and wrapped Q&A headings are common.  A line
+        # containing the tail of a name (for example, a closing parenthesis)
+        # is expanded backwards until the parentheses balance, then compared
+        # with every labelled candidate instead of accepting the first hit.
+        for index, ln in enumerate(lines[:220]):
+            if any(token in ln for token in ("工程", "项目", "建设")):
+                _remember_name(_rebuild_wrapped_name(index), explicit=False)
 
-        if not name:
-            for ln in lines[:160]:
-                if "招标文件" not in ln:
-                    continue
-                maybe = ln.replace("招标文件", "").strip("：:-_ ")
-                maybe = _clean_name(maybe)
-                if 4 <= len(maybe) <= 80 and any(k in maybe for k in ("工程", "项目", "建设")):
-                    name = maybe
-                    break
+        # A visually continuous cover title can be split at arbitrary glyph
+        # positions even when each later fragment has balanced parentheses.
+        # Compare bounded contiguous windows so the complete, longer title
+        # wins over a syntactically valid tail fragment.
+        cover_lines = lines[:220]
+        for start in range(len(cover_lines)):
+            joined = ""
+            for end in range(start, min(start + 4, len(cover_lines))):
+                joined += cover_lines[end]
+                if any(token in joined for token in ("工程", "项目", "建设")):
+                    _remember_name(joined, explicit=False)
 
+        name = max(name_candidates, default=(-1, None), key=lambda item: item[0])[1]
         return name or None, code or None
 
     def _read_pdf(self, path: str) -> Tuple[str, str]:
@@ -414,6 +514,28 @@ class TenderParser:
                 title = re.sub(r"^[：:、\-\s]+", "", title)
                 title = re.sub(r"[;；。]+$", "", title)
                 title = re.sub(r"注\s*[：:].*$", "", title).strip()
+                # Evaluation prose starts after the numbered technical criteria.
+                # Treat it as a hard boundary instead of manufacturing chapters
+                # such as "本项满分..." or "评委须提出理由...".
+                if any(
+                    marker in title
+                    for marker in (
+                        "本项评委",
+                        "本项满分",
+                        "评委须",
+                        "评标报告",
+                        "一般或优秀",
+                        "无需重复编制",
+                        "国家及地方现有工法规范",
+                        "项目经理业绩",
+                        "投标人须知前附表",
+                        "确定评标基准价",
+                        "评标价平均值",
+                        "报价文件",
+                        "投标报价",
+                    )
+                ):
+                    break
                 # 清理评审表格串行污染（如“技术文件施工组织设1002”混入条目尾部）
                 for mk in (
                     "技术文件详细评审标准",

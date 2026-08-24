@@ -94,7 +94,7 @@ def test_ollama_preview_request_payload_defaults_to_manual_preview_boundary():
     payload = helpers._build_ollama_preview_request_payload()
 
     assert payload["section_title"] == "施工组织设计方案"
-    assert payload["model"] == "qwen3:0.6b"
+    assert payload["model"] == "qwen3.5:4b"
     assert payload["base_url"] == "http://localhost:11434"
     assert payload["timeout"] == 60
     assert "不要改写正文" in payload["instruction"]

@@ -3,8 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from openpyxl import load_workbook
+import pytest
 
 from backend.zhifei_autoplan.exporter import export_autoplan_focus_xlsx
+
+
+pytestmark = pytest.mark.usefixtures("allow_legacy_export_contract")
 
 
 def test_export_autoplan_focus_xlsx_includes_focus_card_columns(tmp_path: Path):

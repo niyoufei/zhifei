@@ -53,39 +53,66 @@ def _infer_project_type(payload: Dict[str, Any], rules: Dict[str, Any]) -> Dict[
     if not text:
         return {"value": None, "confidence": 0.0, "source": "none", "evidence": []}
 
-    # 规则文件可能给了 base_confidence，但对“关键词推断”要做上限约束，防止误判高置信
+    # 规则文件中的项目类型规则优先；内置规则仅补充规则文件未覆盖的类型。
     pti = rules.get("project_type_inference") if isinstance(rules.get("project_type_inference"), dict) else {}
-    base_conf = float(pti.get("base_confidence", 0.75)) if isinstance(pti, dict) else 0.75
-    # 对 keyword 推断，强制不超过 0.80
-    base_conf = min(base_conf, 0.80)
+    configured_rules = pti.get("rules", []) if isinstance(pti, dict) else []
+    candidates: List[Tuple[str, List[str], float, str]] = []
+    configured_types = set()
+    for rule in configured_rules if isinstance(configured_rules, list) else []:
+        if not isinstance(rule, dict):
+            continue
+        project_type = str(rule.get("then_project_type") or "").strip()
+        keywords = [str(item).strip() for item in rule.get("if_keywords", []) if str(item).strip()]
+        if not project_type or not keywords:
+            continue
+        try:
+            confidence = float(rule.get("base_confidence", 0.75))
+        except (TypeError, ValueError):
+            confidence = 0.75
+        candidates.append((project_type, keywords, confidence, "rule_keyword"))
+        configured_types.add(project_type)
 
-    mapping: List[Tuple[str, List[str]]] = [
-        ("幕墙工程", ["幕墙", "玻璃幕墙", "石材幕墙", "铝板幕墙", "单元式幕墙"]),
-        ("装饰装修", ["装修", "装饰", "精装", "室内装饰", "吊顶", "墙面", "地面", "涂料", "石材", "木饰面"]),
-        ("市政排水", ["排水", "雨水", "污水", "雨污", "管网", "管道", "顶管", "检查井", "泵站", "污水处理"]),
-        ("市政道路", ["市政道路", "道路", "路面", "沥青", "水稳", "路基", "人行道", "交通导改", "标线", "标志"]),
-        ("房建", ["房建", "住宅", "楼", "主体结构", "钢筋", "混凝土", "基础", "桩基", "结构施工"]),
-        ("机电安装", ["机电", "暖通", "空调", "电气", "消防", "给排水", "弱电", "桥架", "风管", "管线"]),
-        ("园林景观", ["园林", "绿化", "景观", "铺装", "广场", "乔木", "灌木", "草坪", "园建"]),
+    built_in_rules: List[Tuple[str, List[str], float, str]] = [
+        ("幕墙工程", ["幕墙", "玻璃幕墙", "石材幕墙", "铝板幕墙", "单元式幕墙"], 0.75, "keyword"),
+        ("装饰装修", ["装修", "装饰", "精装", "室内装饰", "吊顶", "墙面", "地面", "涂料", "石材", "木饰面"], 0.75, "keyword"),
+        ("市政排水", ["排水", "雨水", "污水", "雨污", "管网", "管道", "顶管", "检查井", "泵站", "污水处理"], 0.75, "keyword"),
+        ("市政道路", ["市政道路", "道路", "路面", "沥青", "水稳", "路基", "人行道", "交通导改", "标线", "标志"], 0.75, "keyword"),
+        ("房建", ["房建", "住宅", "楼", "主体结构", "钢筋", "混凝土", "基础", "桩基", "结构施工"], 0.75, "keyword"),
+        ("机电安装", ["机电", "暖通", "空调", "电气", "消防", "给排水", "弱电", "桥架", "风管", "管线"], 0.75, "keyword"),
+        ("园林景观", ["园林", "绿化", "景观", "铺装", "广场", "乔木", "灌木", "草坪", "园建"], 0.75, "keyword"),
     ]
+    candidates.extend(rule for rule in built_in_rules if rule[0] not in configured_types)
 
-    hits: List[Tuple[str, int, List[str]]] = []
-    for ptype, kws in mapping:
+    hits: List[Tuple[str, int, List[str], float, str]] = []
+    for ptype, kws, base_confidence, source in candidates:
         found = [kw for kw in kws if kw in text]
         if found:
-            hits.append((ptype, len(found), found))
+            hits.append((ptype, len(found), found, base_confidence, source))
 
     if not hits:
+        fallback = pti.get("fallback", {}) if isinstance(pti, dict) else {}
+        if isinstance(fallback, dict) and str(fallback.get("project_type") or "").strip():
+            try:
+                confidence = float(fallback.get("base_confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            return {
+                "value": str(fallback["project_type"]).strip(),
+                "confidence": round(max(0.0, min(confidence, 1.0)), 2),
+                "source": "rule_fallback",
+                "evidence": [],
+            }
         return {"value": None, "confidence": 0.0, "source": "keyword:none", "evidence": []}
 
     hits.sort(key=lambda x: x[1], reverse=True)
-    ptype, n, found = hits[0]
+    ptype, n, found, base_confidence, source = hits[0]
 
-    conf = min(0.85, base_conf + 0.03 * max(0, n - 1))
+    # 单纯关键词命中不得凭规则声明直接跃升到自动接受。
+    conf = min(0.85, min(max(base_confidence, 0.0), 0.80) + 0.03 * max(0, n - 1))
     # 仍然保守：最多 0.85，不直接超过 auto_accept
     conf = round(conf, 2)
 
-    return {"value": ptype, "confidence": conf, "source": "keyword", "evidence": found}
+    return {"value": ptype, "confidence": conf, "source": source, "evidence": found}
 
 
 def _infer_mandatory_dimensions(project_type: Optional[str], rules: Dict[str, Any]) -> List[str]:
@@ -109,7 +136,8 @@ def _infer_mandatory_dimensions(project_type: Optional[str], rules: Dict[str, An
 def generate_project_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     cfg = kg_loader.load_kg_config()
     rule_path: Path = kg_loader.get_project_profile_rule_path(cfg)
-    rules = json.loads(rule_path.read_text(encoding="utf-8", errors="replace"))
+    rule_bytes = rule_path.read_bytes()
+    rules = json.loads(rule_bytes.decode("utf-8", errors="replace"))
 
     thresholds = rules.get("confidence_thresholds", {}) if isinstance(rules.get("confidence_thresholds"), dict) else {}
     auto_accept = float(thresholds.get("auto_accept", 0.85))
@@ -131,6 +159,7 @@ def generate_project_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
     profile = {
         "profile_rule_version": rules.get("profile_rule_version"),
         "rule_path": str(rule_path),
+        "rule_sha256": hashlib.sha256(rule_bytes).hexdigest(),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "input_sha256": _stable_sha256(payload),
 
@@ -153,35 +182,3 @@ def generate_project_profile(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 __all__ = ["generate_project_profile"]
-# ==============================
-# [PATCH] project_profile_rule_meta
-# Add rule file path + sha256 into ProjectProfile for traceability
-# ==============================
-from pathlib import Path as _PP_Path
-import hashlib as _PP_hashlib
-
-def _pp_sha256_file(_p: _PP_Path) -> str:
-    _h = _PP_hashlib.sha256()
-    with open(_p, "rb") as _f:
-        for _chunk in iter(lambda: _f.read(1024 * 1024), b""):
-            _h.update(_chunk)
-    return _h.hexdigest()
-
-try:
-    _pp_old_generate_project_profile = generate_project_profile  # noqa: F821
-except Exception:
-    _pp_old_generate_project_profile = None
-
-def generate_project_profile(payload: dict):
-    if _pp_old_generate_project_profile is None:
-        raise RuntimeError("generate_project_profile not defined before patch block")
-    profile = _pp_old_generate_project_profile(payload)
-    try:
-        from backend import kg_loader as _pp_kg_loader
-        _rp = _pp_kg_loader.get_project_profile_rule_path()
-        profile["rule_path"] = str(_rp)
-        profile["rule_sha256"] = _pp_sha256_file(_rp)
-    except Exception as _e:
-        profile.setdefault("errors", [])
-        profile["errors"].append({"stage": "project_profile_rule_meta", "error": repr(_e)})
-    return profile

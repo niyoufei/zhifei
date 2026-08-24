@@ -493,11 +493,13 @@ def test_source_hash_guard_id_is_deterministic():
     assert explicit["source_hash_guard_id"] == "fixed-source-hash-guard-id"
 
 
-def test_importing_helper_does_not_pull_main_chain_modules():
-    loaded_forbidden = sorted(module for module in MAIN_CHAIN_MODULES if module in sys.modules)
+def test_importing_helper_does_not_pull_main_chain_modules(assert_clean_import):
+    assert_clean_import(
+        "backend.zhifei_autoplan.source_hash_revalidation_guard",
+        MAIN_CHAIN_MODULES,
+    )
     source = helper_source()
 
-    assert loaded_forbidden == []
     assert "orchestrator" not in source
     assert "llm_client" not in source
     assert "actions_bridge" not in source

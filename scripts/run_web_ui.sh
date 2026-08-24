@@ -59,12 +59,77 @@ RUNTIME_DIR="${ZF_RUNTIME_DIR:-$ROOT/.runtime/docgen}"
 PID_BACKEND="$RUNTIME_DIR/webui_backend.pid"
 PID_STREAMLIT="$RUNTIME_DIR/streamlit.pid"
 PID_WATCHDOG="$RUNTIME_DIR/webui_watchdog.pid"
+PID_OLLAMA="$RUNTIME_DIR/ollama.pid"
 
 mkdir -p logs "$RUNTIME_DIR"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export ZF_SYSTEM_ID="$SYSTEM_ID"
 export ZF_ACTIONS_KEY="${ZF_ACTIONS_KEY:-zf-webui-key}"
 export ZF_BACKEND_BASE_URL="${ZF_BACKEND_BASE_URL:-http://127.0.0.1:${BACKEND_PORT}}"
+# Resolve the project compliance registry from the repository, regardless of
+# whether the app is launched from Terminal, Finder, LaunchAgent, or an app
+# bundle.  This prevents GUI launches from silently looking in a different cwd.
+export ZF_COMPLIANCE_ROOT="${ZF_COMPLIANCE_ROOT:-$ROOT/知识图谱/compliance}"
+
+# Local-model preview defaults for Apple Silicon machines.  This is an
+# optional, read-only reviewer and never blocks the main generation service.
+export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
+export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.5:4b}"
+export ZDOC_OLLAMA_PREVIEW_ENABLED="${ZDOC_OLLAMA_PREVIEW_ENABLED:-1}"
+export ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED="${ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED:-true}"
+export ZDOC_OLLAMA_PREVIEW_BASE_URL="${ZDOC_OLLAMA_PREVIEW_BASE_URL:-$OLLAMA_BASE_URL}"
+export ZDOC_OLLAMA_PREVIEW_MODEL="${ZDOC_OLLAMA_PREVIEW_MODEL:-$OLLAMA_MODEL}"
+
+OLLAMA_BIN="${ZF_OLLAMA_BIN:-}"
+if [ -z "$OLLAMA_BIN" ]; then
+  if command -v ollama >/dev/null 2>&1; then
+    OLLAMA_BIN="$(command -v ollama)"
+  elif [ -x "/Applications/Ollama.app/Contents/Resources/ollama" ]; then
+    OLLAMA_BIN="/Applications/Ollama.app/Contents/Resources/ollama"
+  fi
+fi
+
+ensure_ollama_service() {
+  local health_url="${OLLAMA_BASE_URL%/}/api/version"
+  if curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  case "$OLLAMA_BASE_URL" in
+    http://127.0.0.1:11434|http://localhost:11434)
+      ;;
+    *)
+      echo "[WARN] 自定义 Ollama 地址当前不可用：$OLLAMA_BASE_URL；本地预览暂不可用。"
+      return 0
+      ;;
+  esac
+
+  if [ -z "$OLLAMA_BIN" ] || [ ! -x "$OLLAMA_BIN" ]; then
+    echo "[WARN] 未发现 Ollama 可执行文件；本地模型预览暂不可用。"
+    return 0
+  fi
+
+  nohup env \
+    OLLAMA_HOST="127.0.0.1:11434" \
+    OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-4096}" \
+    OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}" \
+    OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}" \
+    OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-3m}" \
+    "$OLLAMA_BIN" serve \
+    > logs/ollama.out.log 2> logs/ollama.err.log < /dev/null &
+  echo $! > "$PID_OLLAMA"
+
+  for _ in $(seq 1 20); do
+    if curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "[WARN] Ollama 未能启动；本地预览暂不可用，请检查 logs/ollama.err.log。"
+  return 0
+}
+
+ensure_ollama_service
 
 PYTHON="python3"
 if [ -x "${ROOT}/venv/bin/python3" ]; then

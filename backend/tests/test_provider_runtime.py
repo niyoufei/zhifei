@@ -1,10 +1,41 @@
 from __future__ import annotations
 
+import pytest
+
 from backend.zhifei_autoplan.provider_runtime import (
     apply_server_provider_routing,
     resolve_automation_credentials,
+    resolve_document_render_slot,
+    resolve_image_slots,
     resolve_text_slots,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_environment(monkeypatch) -> None:
+    for name in (
+        "ZF_LLM_MAIN_PROVIDER",
+        "ZF_LLM_MAIN_MODEL",
+        "ZF_LLM_MAIN_API_KEY",
+        "ZF_LLM_FALLBACK1_PROVIDER",
+        "ZF_LLM_FALLBACK1_MODEL",
+        "ZF_LLM_FALLBACK1_API_KEY",
+        "ANTHROPIC_TEXT_MODEL_MAIN",
+        "ANTHROPIC_TEXT_MODEL_DRAFT",
+        "ANTHROPIC_TEXT_MODEL_REVIEW",
+        "ANTHROPIC_TEXT_MODEL_ESCALATION",
+        "ANTHROPIC_DOCUMENT_RENDER_MODEL",
+        "ZF_ANTHROPIC_DOCUMENT_RENDER_MODEL",
+        "ANTHROPIC_DOCUMENT_RENDER_API_KEY",
+        "ZF_ANTHROPIC_DOCUMENT_RENDER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ZF_ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "ZF_OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_apply_server_provider_routing_uses_env_text_chain(monkeypatch) -> None:
@@ -112,6 +143,115 @@ def test_resolve_text_slots_optional_google_text_fallback(monkeypatch) -> None:
 
     assert providers == ["openai", "google"]
     assert aliases == ["OPENAI_API_KEY_TEXT_MAIN", "GEMINI_API_KEY_A"]
+
+
+def test_resolve_text_slots_supports_google_main_without_enabling_exhausted_openai(monkeypatch) -> None:
+    monkeypatch.setenv("ZF_LLM_MAIN_PROVIDER", "google")
+    monkeypatch.setenv("ZF_LLM_MAIN_MODEL", "gemini-2.5-pro")
+    monkeypatch.setenv("GOOGLE_API_KEY", "gemini-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.delenv("ZF_LLM_FALLBACK1_PROVIDER", raising=False)
+
+    slots = resolve_text_slots()
+
+    assert [(slot.slot, slot.provider, slot.model) for slot in slots] == [
+        ("text_main", "google", "gemini-2.5-pro")
+    ]
+
+
+def test_resolve_text_slots_uses_anthropic_main_and_openai_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("ZF_LLM_MAIN_PROVIDER", "anthropic")
+    monkeypatch.setenv("ZF_LLM_MAIN_MODEL", "claude-opus-5")
+    monkeypatch.setenv("ANTHROPIC_TEXT_MODEL_DRAFT", "claude-sonnet-5")
+    monkeypatch.setenv("ANTHROPIC_TEXT_MODEL_REVIEW", "claude-opus-5")
+    monkeypatch.setenv("ANTHROPIC_TEXT_MODEL_ESCALATION", "claude-fable-5")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setenv("ZF_LLM_FALLBACK1_PROVIDER", "openai")
+    monkeypatch.setenv("ZF_LLM_FALLBACK1_MODEL", "gpt-5.6-sol")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+
+    slots = resolve_text_slots()
+
+    assert [(slot.slot, slot.provider, slot.model, slot.key_alias) for slot in slots] == [
+        ("text_draft", "anthropic", "claude-sonnet-5", "ANTHROPIC_API_KEY"),
+        ("text_review", "anthropic", "claude-opus-5", "ANTHROPIC_API_KEY"),
+        ("text_escalation", "anthropic", "claude-fable-5", "ANTHROPIC_API_KEY"),
+        ("text_backup", "openai", "gpt-5.6-sol", "OPENAI_API_KEY"),
+    ]
+
+
+def test_resolve_text_slots_keeps_openai_fallback_when_anthropic_key_missing(monkeypatch) -> None:
+    monkeypatch.setenv("ZF_LLM_MAIN_PROVIDER", "anthropic")
+    monkeypatch.setenv("ZF_LLM_MAIN_MODEL", "claude-opus-5")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ZF_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ZF_LLM_MAIN_API_KEY", raising=False)
+    monkeypatch.setenv("ZF_LLM_FALLBACK1_PROVIDER", "openai")
+    monkeypatch.setenv("ZF_LLM_FALLBACK1_MODEL", "gpt-5.6-sol")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+
+    slots = resolve_text_slots()
+
+    assert [(slot.slot, slot.provider) for slot in slots] == [("text_backup", "openai")]
+
+
+def test_resolve_document_render_slot_isolated_sonnet_model(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setenv("ANTHROPIC_DOCUMENT_RENDER_MODEL", "claude-sonnet-5")
+    monkeypatch.setenv("ANTHROPIC_TEXT_MODEL_MAIN", "claude-opus-5")
+
+    slot = resolve_document_render_slot()
+
+    assert slot is not None
+    assert (slot.slot, slot.role, slot.provider, slot.model) == (
+        "document_render",
+        "document_render",
+        "anthropic",
+        "claude-sonnet-5",
+    )
+    assert slot.api_key == "anthropic-secret"
+
+
+def test_resolve_document_render_slot_has_no_cross_provider_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+
+    assert resolve_document_render_slot() is None
+
+
+def test_apply_server_provider_routing_orders_anthropic_tiered_chain(monkeypatch) -> None:
+    monkeypatch.setenv("ZF_LLM_MAIN_PROVIDER", "anthropic")
+    monkeypatch.setenv("ZF_LLM_MAIN_MODEL", "claude-opus-5")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setenv("ZF_LLM_FALLBACK1_PROVIDER", "openai")
+    monkeypatch.setenv("ZF_LLM_FALLBACK1_MODEL", "gpt-5.6-sol")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+
+    prepared = apply_server_provider_routing({"topic": "分级模型路由"})
+
+    assert prepared["provider"] == "anthropic"
+    assert prepared["model"] == "claude-sonnet-5"
+    assert [item["slot"] for item in prepared["provider_chain"]] == [
+        "text_draft",
+        "text_review",
+        "text_backup",
+        "text_escalation",
+    ]
+
+
+def test_resolve_image_slots_uses_openai_then_google(monkeypatch) -> None:
+    monkeypatch.setenv("ZF_IMAGE_MAIN_PROVIDER", "openai")
+    monkeypatch.setenv("ZF_IMAGE_MAIN_MODEL", "gpt-image-2")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("ZF_IMAGE_FALLBACK1_PROVIDER", "google")
+    monkeypatch.setenv("ZF_IMAGE_FALLBACK1_MODEL", "gemini-3-pro-image")
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-secret")
+
+    slots = resolve_image_slots()
+
+    assert [(slot.slot, slot.provider, slot.model) for slot in slots] == [
+        ("image_main", "openai", "gpt-image-2"),
+        ("image_backup", "google", "gemini-3-pro-image"),
+    ]
 
 
 def test_resolve_automation_credentials(monkeypatch) -> None:

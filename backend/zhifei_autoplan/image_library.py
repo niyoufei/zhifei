@@ -137,6 +137,8 @@ def list_image_library_items(
         if normalized_type and rec_type != normalized_type:
             continue
         item = _record_public_item(rec)
+        if not item["enabled"] or not item["usable"]:
+            continue
         if wanted_tags and not wanted_tags.intersection(set(item["tags"])):
             continue
         if wanted_chapter and wanted_chapter not in set(item["chapter_scope"]):
@@ -252,6 +254,7 @@ def image_selection_pack_media_entries(raw: Any) -> list[dict[str, Any]]:
     pack = raw if isinstance(raw, dict) else {}
     out: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
+    matched_chapter = str(pack.get("matched_chapter") or pack.get("chapter_title") or "").strip()
     for item in pack.get("images") or []:
         if not isinstance(item, dict):
             continue
@@ -260,5 +263,24 @@ def image_selection_pack_media_entries(raw: Any) -> list[dict[str, Any]]:
             continue
         seen_paths.add(path)
         caption = str(item.get("caption") or item.get("title") or pack.get("caption_hint") or "").strip()
-        out.append({"path": path, "caption": caption})
+        chapter_scope = item.get("chapter_scope") or ([matched_chapter] if matched_chapter else [])
+        if isinstance(chapter_scope, str):
+            chapter_scope = [chapter_scope]
+        tags = [str(value).strip() for value in (item.get("tags") or item.get("library_tags") or []) if str(value).strip()]
+        out.append(
+            {
+                "path": path,
+                "caption": caption,
+                "image_id": str(item.get("image_id") or "").strip() or None,
+                "chapter_scope": [str(value).strip() for value in chapter_scope if str(value).strip()],
+                "semantic_terms": tags,
+                "source_kind": str(item.get("source_kind") or item.get("source_mode") or "library_image").strip(),
+                "source_sha256": str(item.get("sha256") or item.get("source_sha256") or "").strip() or None,
+                "source_filename": str(item.get("source_filename") or item.get("filename") or "").strip() or None,
+                "source_page": item.get("source_page"),
+                "is_project_source": bool(item.get("is_project_source")),
+                "required": bool(item.get("required")),
+                "explicit_selection": True,
+            }
+        )
     return out

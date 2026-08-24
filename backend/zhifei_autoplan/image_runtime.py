@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import time
 from pathlib import Path
@@ -7,10 +8,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai import types
+from openai import OpenAI
 
 
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+def _validated_image_payload(data: bytes) -> tuple[bool, dict[str, Any]]:
+    try:
+        from backend.zhifei_autoplan.media_quality import validate_image_bytes
+
+        receipt = validate_image_bytes(data)
+        return bool(receipt.get("ok")), receipt
+    except Exception as exc:
+        return False, {"ok": False, "errors": ["image_validation_unavailable"], "error": type(exc).__name__}
 
 
 def normalize_gemini_image_model(model: str | None) -> str:
@@ -19,15 +31,131 @@ def normalize_gemini_image_model(model: str | None) -> str:
     """
     m = (model or "").strip()
     if not m:
-        return "gemini-2.5-flash-image"
+        return "gemini-3-pro-image"
     low = m.lower()
     if low in {"banana", "nano-banana", "nanobanana", "nano_banana"}:
-        return "gemini-2.5-flash-image"
+        return "gemini-3-pro-image"
     if "pro" in low and "image" in low:
         return m
     if low in {"banana-pro", "banana_pro"}:
-        return "gemini-3-pro-image-preview"
+        return "gemini-3-pro-image"
     return m
+
+
+def normalize_openai_image_model(model: str | None) -> str:
+    value = str(model or "").strip()
+    if not value or value.lower() in {"latest", "gpt-5.6", "gpt-5.6-sol", "chatgpt-5.6"}:
+        return "gpt-image-2"
+    return value
+
+
+def _openai_image_size(aspect_ratio: str | None) -> str:
+    ratio = str(aspect_ratio or "16:9").strip().lower()
+    if ratio in {"9:16", "3:4", "2:3", "portrait"}:
+        return "1024x1536"
+    if ratio in {"1:1", "square"}:
+        return "1024x1024"
+    return "1536x1024"
+
+
+def _extract_openai_image_bytes(response: Any) -> List[bytes]:
+    images: List[bytes] = []
+    for item in getattr(response, "data", None) or []:
+        encoded = getattr(item, "b64_json", None)
+        if not encoded:
+            continue
+        try:
+            images.append(base64.b64decode(encoded))
+        except Exception:
+            continue
+    return images
+
+
+def generate_image_openai(
+    prompt: str,
+    api_key: str,
+    model: str | None = None,
+    aspect_ratio: str = "16:9",
+    input_image_paths: Optional[List[str]] = None,
+    out_dir: str | None = None,
+) -> Dict[str, Any]:
+    """Generate or edit an image with OpenAI's dedicated image model."""
+    if not api_key:
+        return {"ok": False, "paths": [], "text": "", "error": "missing_api_key"}
+
+    model_id = normalize_openai_image_model(model)
+    out_base = Path(out_dir or "backend/data/autoplan/media")
+    out_base.mkdir(parents=True, exist_ok=True)
+    client = OpenAI(api_key=api_key)
+    handles: List[Any] = []
+    try:
+        for raw_path in input_image_paths or []:
+            path = Path(str(raw_path or ""))
+            if path.exists() and path.is_file():
+                handles.append(path.open("rb"))
+        common = {
+            "model": model_id,
+            "prompt": str(prompt or "").strip(),
+            "size": _openai_image_size(aspect_ratio),
+            "quality": "high",
+            "output_format": "png",
+            "response_format": "b64_json",
+        }
+        if handles:
+            response = client.images.edit(image=handles, input_fidelity="high", **common)
+        else:
+            response = client.images.generate(n=1, **common)
+    except Exception as exc:
+        return {"ok": False, "paths": [], "text": "", "error": repr(exc), "model": model_id, "provider": "openai"}
+    finally:
+        for handle in handles:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    paths: List[str] = []
+    rejected_payloads: List[Dict[str, Any]] = []
+    for data in _extract_openai_image_bytes(response)[:3]:
+        valid, receipt = _validated_image_payload(data)
+        if not valid:
+            rejected_payloads.append(receipt)
+            continue
+        digest = _sha256(data)[:10]
+        out = out_base / f"gen_{int(time.time())}_{digest}.png"
+        try:
+            out.write_bytes(data)
+            paths.append(str(out))
+        except Exception:
+            continue
+    result = {"ok": bool(paths), "paths": paths, "text": "", "model": model_id, "provider": "openai"}
+    if rejected_payloads:
+        result["rejected_payloads"] = rejected_payloads
+    if not paths:
+        result["error"] = "invalid_image_payload" if rejected_payloads else "no_image_payload"
+    return result
+
+
+def generate_image(
+    *,
+    provider: str,
+    prompt: str,
+    api_key: str,
+    model: str | None = None,
+    aspect_ratio: str = "16:9",
+    input_image_paths: Optional[List[str]] = None,
+    out_dir: str | None = None,
+) -> Dict[str, Any]:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "openai":
+        return generate_image_openai(prompt, api_key, model, aspect_ratio, input_image_paths, out_dir)
+    if normalized == "google":
+        return generate_image_gemini(prompt, api_key, model, aspect_ratio, input_image_paths, out_dir)
+    return {"ok": False, "paths": [], "text": "", "error": f"unsupported_image_provider:{normalized}"}
 
 
 def _guess_mime(path: Path) -> str:
@@ -142,7 +270,12 @@ def generate_image_gemini(
 
     images, text = _extract_image_parts(resp)
     paths: List[str] = []
+    rejected_payloads: List[Dict[str, Any]] = []
     for data, mime in images[:3]:
+        valid, receipt = _validated_image_payload(data)
+        if not valid:
+            rejected_payloads.append(receipt)
+            continue
         ext = "png"
         if "jpeg" in mime:
             ext = "jpg"
@@ -159,4 +292,9 @@ def generate_image_gemini(
         except Exception:
             continue
 
-    return {"ok": bool(paths), "paths": paths, "text": text, "model": model_id, "provider": "google"}
+    result = {"ok": bool(paths), "paths": paths, "text": text, "model": model_id, "provider": "google"}
+    if rejected_payloads:
+        result["rejected_payloads"] = rejected_payloads
+    if not paths:
+        result["error"] = "invalid_image_payload" if rejected_payloads else "no_image_payload"
+    return result

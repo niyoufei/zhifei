@@ -38,6 +38,7 @@ __pycache__/
 .coverage
 .runtime/**
 .streamlit/**
+.env.local
 
 # ===== Local sample/test packs (single-user local assets) =====
 /01_真实项目测试/**
@@ -105,6 +106,7 @@ __pycache__/
 /backend/data/autoplan/jobs/**
 /backend/data/autoplan/media/**
 /backend/data/autoplan/projects/**
+/backend/data/autoplan/v2/
 /backend/data/workspaces/
 /backend/data/autoplan/tender_matrix.json
 /backend/data/autoplan/boq_data.json
