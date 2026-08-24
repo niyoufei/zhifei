@@ -24,6 +24,7 @@ def test_prepare_execution_control_clamps_nested_parallelism_and_budgets() -> No
     assert payload["variant_parallelism"] == 3
     assert payload["agent_parallelism"] == 2
     assert policy["max_model_parallelism"] == 6
+    assert policy["model_parallelism_source"] == "request"
     assert policy["max_model_attempts"] == 123
     assert policy["max_input_chars"] == 456_000
     assert policy["max_requested_output_tokens"] == 7_890
@@ -33,6 +34,44 @@ def test_prepare_execution_control_clamps_nested_parallelism_and_budgets() -> No
         "max_input_chars": 456_000,
         "max_requested_output_tokens": 7_890,
     }
+
+
+@pytest.mark.parametrize(("agent_parallelism", "expected"), [(4, 2), (1, 1)])
+def test_prepare_execution_control_uses_safe_default_when_model_parallelism_omitted(
+    agent_parallelism: int,
+    expected: int,
+) -> None:
+    payload = {
+        "variants": 1,
+        "outline": ["一"],
+        "agent_parallelism": agent_parallelism,
+        "variant_parallelism": 1,
+    }
+
+    runtime, policy = actions_bridge._prepare_execution_control(payload)
+
+    assert payload["max_model_parallelism"] == expected
+    assert payload["agent_parallelism"] == expected
+    assert policy["max_model_parallelism"] == expected
+    assert policy["model_parallelism_source"] == "safe_default"
+    assert runtime.snapshot()["limits"]["max_concurrency"] == expected
+
+
+def test_prepare_execution_control_clamps_explicit_zero_without_treating_it_as_omitted() -> None:
+    payload = {
+        "variants": 1,
+        "outline": ["一"],
+        "agent_parallelism": 4,
+        "variant_parallelism": 1,
+        "max_model_parallelism": 0,
+    }
+
+    runtime, policy = actions_bridge._prepare_execution_control(payload)
+
+    assert payload["max_model_parallelism"] == 1
+    assert payload["agent_parallelism"] == 1
+    assert policy["model_parallelism_source"] == "request"
+    assert runtime.snapshot()["limits"]["max_concurrency"] == 1
 
 
 @pytest.mark.asyncio

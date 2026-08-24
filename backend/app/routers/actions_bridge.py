@@ -692,9 +692,15 @@ def _prepare_execution_control(
         1,
         5,
     )
+    raw_max_model_parallelism = payload.get("max_model_parallelism")
+    default_model_parallelism = min(agent_parallelism, 2)
+    model_parallelism_source = "request"
+    if raw_max_model_parallelism is None or raw_max_model_parallelism == "":
+        raw_max_model_parallelism = default_model_parallelism
+        model_parallelism_source = "safe_default"
     max_model_parallelism = _clamp_execution_int(
-        payload.get("max_model_parallelism") or 8,
-        8,
+        raw_max_model_parallelism,
+        default_model_parallelism,
         1,
         16,
     )
@@ -740,6 +746,7 @@ def _prepare_execution_control(
     policy = {
         "schema_version": "execution-policy-v1",
         "max_model_parallelism": max_model_parallelism,
+        "model_parallelism_source": model_parallelism_source,
         "chapter_task_parallelism": agent_parallelism,
         "variant_parallelism": variant_parallelism,
         **runtime.snapshot()["limits"],
