@@ -63,6 +63,23 @@ def test_model_review_accepts_machine_readable_pass_decision():
     assert gate["delivery_allowed"] is True
 
 
+def test_machine_pass_is_not_overridden_by_warning_level_inconsistency_text():
+    kwargs = _base_kwargs()
+    kwargs["model_review_audit"]["consistency_review"]["summary"] = (
+        "DECISION: PASS\n环境监测频次前后不一致，列为警告级整改项。"
+    )
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    assert gate["delivery_allowed"] is True
+    model_check = next(
+        row
+        for row in gate["checks"]
+        if row["name"] == "independent_model_review"
+    )
+    assert model_check["machine_decision"] == "PASS"
+
+
 def test_model_review_machine_readable_block_overrides_pass_phrase():
     kwargs = _base_kwargs()
     kwargs["model_review_audit"]["consistency_review"]["summary"] = (

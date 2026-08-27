@@ -17,6 +17,10 @@ _CONFLICT_RE = re.compile(
     r"conflict(?:s|ing)?\s+(?:found|detected)|inconsisten)",
     re.IGNORECASE,
 )
+_MACHINE_DECISION_RE = re.compile(
+    r"^\s*DECISION\s*:\s*(PASS|BLOCK)\b",
+    re.IGNORECASE,
+)
 
 
 def _canonical_digest(value: Dict[str, Any]) -> str:
@@ -181,9 +185,13 @@ def build_delivery_quality_gate(
     )
     failed_chapters = [row for row in (model_audit.get("failed_chapters") or []) if isinstance(row, dict)]
     summary = str(consistency.get("summary") or "").strip()
-    consistency_safe = bool(_SAFE_CONSISTENCY_RE.search(summary)) and not bool(
-        _CONFLICT_RE.search(_SAFE_CONSISTENCY_RE.sub("", summary))
-    )
+    machine_decision = _MACHINE_DECISION_RE.match(summary)
+    if machine_decision:
+        consistency_safe = machine_decision.group(1).upper() == "PASS"
+    else:
+        consistency_safe = bool(_SAFE_CONSISTENCY_RE.search(summary)) and not bool(
+            _CONFLICT_RE.search(_SAFE_CONSISTENCY_RE.sub("", summary))
+        )
     model_ok = True
     if model_review_required:
         model_ok = bool(consistency.get("ok")) and consistency_safe and not failed_chapters
@@ -194,6 +202,9 @@ def build_delivery_quality_gate(
             "required": bool(model_review_required),
             "failed_chapter_count": len(failed_chapters),
             "explicit_no_conflict": consistency_safe,
+            "machine_decision": (
+                machine_decision.group(1).upper() if machine_decision else None
+            ),
         }
     )
     if not model_ok:
