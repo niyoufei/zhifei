@@ -5,6 +5,7 @@ Evidence 单元测试
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,50 @@ from backend.zhifei_autoplan.evidence import (
     format_hit_locator,
     search_ingested_docs,
 )
+
+
+def _write_trusted_audit(tmp_path: Path, specs: list[dict]) -> tuple[Path, list[dict]]:
+    workspace = tmp_path / "workspace"
+    uploads = workspace / "uploads"
+    extracts = workspace / "extracts"
+    audit_file = workspace / "audit" / "ingest.jsonl"
+    uploads.mkdir(parents=True, exist_ok=True)
+    extracts.mkdir(parents=True, exist_ok=True)
+    audit_file.parent.mkdir(parents=True, exist_ok=True)
+    records = []
+    for spec in specs:
+        filename = str(spec["filename"])
+        text = str(spec["text"])
+        source_bytes = f"trusted:{filename}:{text}".encode()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        extract_bytes = text.encode("utf-8")
+        extract_sha256 = hashlib.sha256(extract_bytes).hexdigest()
+        source_path = uploads / f"{source_sha256}_{filename}"
+        extract_path = extracts / f"{source_sha256}_{extract_sha256}.txt"
+        source_path.write_bytes(source_bytes)
+        extract_path.write_bytes(extract_bytes)
+        records.append(
+            {
+                "project_id": "P1",
+                "workspace_dir": str(workspace),
+                "filename": filename,
+                "sha256": source_sha256,
+                "file_id": source_sha256,
+                "pages": int(spec.get("pages") or 1),
+                "source_hint": "drawing",
+                "tags": ["drawing"],
+                "saved_as": str(source_path),
+                "extract_saved_as": str(extract_path),
+                "extract_text_sha256": extract_sha256,
+                "usable": True,
+                "enabled": True,
+            }
+        )
+    audit_file.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in records) + "\n",
+        encoding="utf-8",
+    )
+    return audit_file, records
 
 
 class TestSearchIngestedDocs:
@@ -84,34 +129,44 @@ class TestSearchIngestedDocs:
 
     def test_successful_search(self, tmp_path):
         """成功搜索"""
-        # 创建提取文件
-        extract_file = tmp_path / "extract.txt"
-        extract_file.write_text(
-            "这是一段关于施工方案的测试文本，包含混凝土浇筑的相关内容和质量标准。",
-            encoding="utf-8"
+        audit_file, records = _write_trusted_audit(
+            tmp_path,
+            [
+                {
+                    "filename": "test.pdf",
+                    "text": "这是一段关于施工方案的测试文本，包含混凝土浇筑的相关内容和质量标准。",
+                }
+            ],
         )
-        
-        # 创建审计文件
-        audit_file = tmp_path / "ingest.jsonl"
-        audit_record = {
-            "filename": "test.pdf",
-            "sha256": "abc123",
-            "extract_saved_as": str(extract_file)
-        }
-        audit_file.write_text(json.dumps(audit_record) + "\n", encoding="utf-8")
-        
-        with patch("backend.zhifei_autoplan.evidence.Path") as mock_path:
-            def path_side_effect(p):
-                if "ingest.jsonl" in str(p):
-                    return audit_file
-                return Path(p)
-            mock_path.side_effect = path_side_effect
-            
-            result = search_ingested_docs("混凝土")
-            assert len(result) > 0
-            assert result[0]["filename"] == "test.pdf"
-            assert result[0]["sha256"] == "abc123"
-            assert "snippet" in result[0]
+
+        result = search_ingested_docs("混凝土", audit_path=audit_file)
+        assert len(result) > 0
+        assert result[0]["filename"] == "test.pdf"
+        assert result[0]["sha256"] == records[0]["sha256"]
+        assert "snippet" in result[0]
+
+    def test_search_revalidates_source_bytes_and_rejects_extract_symlink(
+        self,
+        tmp_path,
+    ):
+        audit_file, records = _write_trusted_audit(
+            tmp_path,
+            [{"filename": "围墙图.pdf", "text": "围墙压实系数不小于0.97。"}],
+        )
+        record = records[0]
+        source_path = Path(record["saved_as"])
+        extract_path = Path(record["extract_saved_as"])
+        original_source = source_path.read_bytes()
+
+        source_path.write_bytes(original_source + b"tampered")
+        assert search_ingested_docs("压实系数", audit_path=audit_file) == []
+
+        source_path.write_bytes(original_source)
+        symlink_target = tmp_path / "same-extract-bytes.txt"
+        symlink_target.write_bytes(extract_path.read_bytes())
+        extract_path.unlink()
+        extract_path.symlink_to(symlink_target)
+        assert search_ingested_docs("压实系数", audit_path=audit_file) == []
 
     def test_limit_parameter(self, tmp_path):
         """limit 参数限制结果数量"""
@@ -214,26 +269,18 @@ class TestSearchIngestedDocs:
 
     def test_case_insensitive_search(self, tmp_path):
         """大小写不敏感搜索"""
-        extract_file = tmp_path / "extract.txt"
-        extract_file.write_text("This is a TEST document about Construction.", encoding="utf-8")
-        
-        audit_file = tmp_path / "ingest.jsonl"
-        audit_record = {
-            "filename": "test.pdf",
-            "sha256": "abc123",
-            "extract_saved_as": str(extract_file)
-        }
-        audit_file.write_text(json.dumps(audit_record) + "\n", encoding="utf-8")
-        
-        with patch("backend.zhifei_autoplan.evidence.Path") as mock_path:
-            def path_side_effect(p):
-                if "ingest.jsonl" in str(p):
-                    return audit_file
-                return Path(p)
-            mock_path.side_effect = path_side_effect
-            
-            result = search_ingested_docs("construction")
-            assert len(result) > 0
+        audit_file, _ = _write_trusted_audit(
+            tmp_path,
+            [
+                {
+                    "filename": "test.pdf",
+                    "text": "This is a TEST document about Construction.",
+                }
+            ],
+        )
+
+        result = search_ingested_docs("construction", audit_path=audit_file)
+        assert len(result) > 0
 
     def test_snippet_context(self, tmp_path):
         """snippet 包含上下文"""
@@ -447,64 +494,38 @@ class TestSearchIngestedDocs:
             assert len(result) >= 0
 
     def test_unknown_multi_page_boundary_does_not_invent_page_one(self, tmp_path):
-        extract_file = tmp_path / "multi.txt"
-        extract_file.write_text("钢梁安装构件位置与节点做法。", encoding="utf-8")
-        audit_file = tmp_path / "ingest.jsonl"
-        sha = "1" * 64
-        audit_file.write_text(
-            json.dumps(
+        audit_file, records = _write_trusted_audit(
+            tmp_path,
+            [
                 {
                     "filename": "multi.pdf",
-                    "sha256": sha,
+                    "text": "钢梁安装构件位置与节点做法。",
                     "pages": 3,
-                    "extract_saved_as": str(extract_file),
                 }
-            )
-            + "\n",
-            encoding="utf-8",
+            ],
         )
-
-        with patch("backend.zhifei_autoplan.evidence.Path") as mock_path:
-            def path_side_effect(p):
-                if "ingest.jsonl" in str(p):
-                    return audit_file
-                return Path(p)
-
-            mock_path.side_effect = path_side_effect
-            result = search_ingested_docs("钢梁安装")
+        result = search_ingested_docs("钢梁安装", audit_path=audit_file)
 
         assert result[0]["page"] is None
         assert result[0]["page_boundary_status"] == "unreliable_missing_page_boundaries"
         assert format_hit_locator(result[0]) == "multi.pdf"
+        assert result[0]["sha256"] == records[0]["sha256"]
 
     def test_declared_single_page_hit_uses_full_sha_and_bound_window(self, tmp_path):
-        extract_file = tmp_path / "single.txt"
-        extract_file.write_text("钢梁安装构件位置与节点做法。", encoding="utf-8")
-        audit_file = tmp_path / "ingest.jsonl"
-        sha = "2" * 64
-        audit_file.write_text(
-            json.dumps(
+        audit_file, records = _write_trusted_audit(
+            tmp_path,
+            [
                 {
                     "filename": "single.pdf",
-                    "sha256": sha,
+                    "text": "钢梁安装构件位置与节点做法。",
                     "pages": 1,
-                    "extract_saved_as": str(extract_file),
                 }
-            )
-            + "\n",
-            encoding="utf-8",
+            ],
         )
-
-        with patch("backend.zhifei_autoplan.evidence.Path") as mock_path:
-            def path_side_effect(p):
-                if "ingest.jsonl" in str(p):
-                    return audit_file
-                return Path(p)
-
-            mock_path.side_effect = path_side_effect
-            result = search_ingested_docs("钢梁安装")
+        result = search_ingested_docs("钢梁安装", audit_path=audit_file)
 
         hit = result[0]
+        sha = records[0]["sha256"]
         assert format_hit_locator(hit) == f"single.pdf#p1_{sha}@0"
         assert hit["page_boundary_status"] == "reliable_declared_single_page"
         assert hit["match_start"] == hit["offset"] == 0
@@ -515,65 +536,26 @@ class TestSearchIngestedDocs:
 
 
 def test_best_drawing_hit_excludes_generic_only_matches(tmp_path):
-    generic_extract = tmp_path / "generic.txt"
-    generic_extract.write_text("详见图纸，其余做法参见图纸说明。", encoding="utf-8")
-    specific_extract = tmp_path / "specific.txt"
-    specific_extract.write_text("钢梁安装构件位置与连接做法。", encoding="utf-8")
-    component_extract = tmp_path / "component.txt"
-    component_extract.write_text("节点板连接做法及焊缝尺寸。", encoding="utf-8")
-    audit_file = tmp_path / "ingest.jsonl"
-    audit_file.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "filename": "generic.pdf",
-                        "sha256": "1" * 64,
-                        "pages": 1,
-                        "extract_saved_as": str(generic_extract),
-                    }
-                ),
-                json.dumps(
-                    {
-                        "filename": "specific.pdf",
-                        "sha256": "2" * 64,
-                        "pages": 1,
-                        "extract_saved_as": str(specific_extract),
-                    }
-                ),
-                json.dumps(
-                    {
-                        "filename": "component.pdf",
-                        "sha256": "3" * 64,
-                        "pages": 1,
-                        "extract_saved_as": str(component_extract),
-                    }
-                ),
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+    audit_file, _ = _write_trusted_audit(
+        tmp_path,
+        [
+            {"filename": "generic.pdf", "text": "详见图纸，其余做法参见图纸说明。"},
+            {"filename": "specific.pdf", "text": "钢梁安装构件位置与连接做法。"},
+            {"filename": "component.pdf", "text": "节点板连接做法及焊缝尺寸。"},
+        ],
     )
-
-    with patch("backend.zhifei_autoplan.evidence.Path") as mock_path:
-        def path_side_effect(value):
-            if "ingest.jsonl" in str(value):
-                return audit_file
-            return Path(value)
-
-        mock_path.side_effect = path_side_effect
-        hit = best_drawing_hit("钢梁 钢梁安装 图纸")
-        component_hit = best_drawing_hit("节点板 图纸")
-        generic_only = [
-            best_drawing_hit(query)
-            for query in (
-                "图纸",
-                "图纸施工方案",
-                "施工方案",
-                "施工图纸节点大样说明",
-                "详见图纸 图纸说明",
-            )
-        ]
+    hit = best_drawing_hit("钢梁 钢梁安装 图纸", audit_path=audit_file)
+    component_hit = best_drawing_hit("节点板 图纸", audit_path=audit_file)
+    generic_only = [
+        best_drawing_hit(query, audit_path=audit_file)
+        for query in (
+            "图纸",
+            "图纸施工方案",
+            "施工方案",
+            "施工图纸节点大样说明",
+            "详见图纸 图纸说明",
+        )
+    ]
 
     assert hit is not None
     assert hit["filename"] == "specific.pdf"

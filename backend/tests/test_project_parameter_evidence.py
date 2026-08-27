@@ -37,8 +37,10 @@ def _record(
     digest = hashlib.sha256(source_bytes).hexdigest()
     source_path = uploads / f"{digest}_{filename}"
     source_path.write_bytes(source_bytes)
-    trusted_extract = extracts / f"{digest}.txt"
-    trusted_extract.write_bytes(extract_path.read_bytes())
+    extract_bytes = extract_path.read_bytes()
+    extract_text_sha256 = hashlib.sha256(extract_bytes).hexdigest()
+    trusted_extract = extracts / f"{digest}_{extract_text_sha256}.txt"
+    trusted_extract.write_bytes(extract_bytes)
     return {
         "filename": filename,
         "sha256": digest,
@@ -46,9 +48,7 @@ def _record(
         "workspace_dir": str(workspace),
         "saved_as": str(source_path),
         "extract_saved_as": str(trusted_extract),
-        "extract_text_sha256": hashlib.sha256(
-            trusted_extract.read_bytes()
-        ).hexdigest(),
+        "extract_text_sha256": extract_text_sha256,
         "project_id": project_id,
         "pages": pages,
         "source_hint": source_hint,

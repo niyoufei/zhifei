@@ -3,12 +3,16 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from pathlib import Path
 
 from backend.zhifei_autoplan.project_fact_ledger import (
     build_project_fact_ledger,
     build_project_fact_ledger_from_inputs,
     project_fact_prompt_requirements,
     validate_project_fact_ledger,
+)
+from backend.zhifei_autoplan.project_parameter_evidence import (
+    build_project_parameter_evidence,
 )
 
 _TEST_DOCUMENT_SHA256 = "a" * 64
@@ -24,6 +28,47 @@ def _digest(value) -> str:
         default=str,
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _wall_parameter_evidence(tmp_path: Path) -> dict:
+    workspace = tmp_path / "parameter-evidence"
+    uploads = workspace / "uploads"
+    extracts = workspace / "extracts"
+    audit = workspace / "audit" / "ingest.jsonl"
+    uploads.mkdir(parents=True)
+    extracts.mkdir(parents=True)
+    audit.parent.mkdir(parents=True)
+    filename = "3 围墙.pdf"
+    source_bytes = b"reviewed-wall-drawing"
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    text = "基础开挖至标高后，对下部土层进行压实处理，压实系数不小于0.97。"
+    extract_bytes = text.encode("utf-8")
+    extract_sha256 = hashlib.sha256(extract_bytes).hexdigest()
+    source_path = uploads / f"{source_sha256}_{filename}"
+    extract_path = extracts / f"{source_sha256}_{extract_sha256}.txt"
+    source_path.write_bytes(source_bytes)
+    extract_path.write_bytes(extract_bytes)
+    record = {
+        "project_id": _TEST_PROJECT_ID,
+        "workspace_dir": str(workspace),
+        "filename": filename,
+        "sha256": source_sha256,
+        "file_id": source_sha256,
+        "pages": 1,
+        "source_hint": "drawing",
+        "tags": ["drawing"],
+        "saved_as": str(source_path),
+        "extract_saved_as": str(extract_path),
+        "extract_text_sha256": extract_sha256,
+        "usable": True,
+        "enabled": True,
+    }
+    audit.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+    return build_project_parameter_evidence(
+        project_id=_TEST_PROJECT_ID,
+        tender={},
+        audit_path=audit,
+    )
 
 
 def _approved_file_fact(field, value, *, unit: str = "", file_name: str, anchor: str):
@@ -397,41 +442,25 @@ def test_process_bound_quality_threshold_is_normalized_without_global_scope():
     assert not any("项目事实：质量阈值=" in line for line in prompt_lines)
 
 
-def test_deterministic_project_parameter_evidence_enters_ledger_as_reviewed_design():
-    bundle = _process_bound_quality_threshold()
-    bundle_digest = _digest(bundle)
-    required_item_ids = sorted(item["id"] for item in bundle["items"])
+def test_deterministic_project_parameter_evidence_enters_ledger_as_reviewed_design(
+    tmp_path: Path,
+):
+    evidence = _wall_parameter_evidence(tmp_path)
     ledger = build_project_fact_ledger_from_inputs(
         payload={"project_id": _TEST_PROJECT_ID},
         tender={},
         boq_wbs_cpm={},
-        project_parameter_evidence={
-            "schema_version": "project-parameter-evidence-v1",
-            "project_id": _TEST_PROJECT_ID,
-            "status": "PASS_PROJECT_PARAMETER_EVIDENCE",
-            "ready": True,
-            "coverage_complete": True,
-            "conflicts": [],
-            "required_item_ids": required_item_ids,
-            "matched_item_count": len(required_item_ids),
-            "quality_threshold_bundle_digest": bundle_digest,
-            "quality_threshold": {
-                "value": bundle,
-                "unit": "",
-                "status": "derived",
-                "evidence": {
-                    "locator": "project_parameter_evidence.quality_threshold",
-                    "source_sha256": bundle_digest,
-                },
-            }
-        },
+        project_parameter_evidence=evidence,
     )
 
     fact = ledger["facts"]["quality_threshold"]
     assert fact["source_id"] == "project-parameter-evidence"
     assert fact["source_type"] == "reviewed_design"
     assert fact["status"] == "verified"
-    assert len(fact["value"]["items"]) == 2
+    assert len(fact["value"]["items"]) == 1
+    assert fact["evidence"]["evidence_set_receipt_digest"] == evidence[
+        "evidence_set_receipt_digest"
+    ]
     assert "quality_threshold" in ledger["formal_parameter_readiness"][
         "ready_fields"
     ]
@@ -606,30 +635,11 @@ def test_approved_resolution_requires_value_bound_receipt_and_file_evidence():
     assert unidentified["facts"]["resource_peak"]["status"] == "provisional"
 
 
-def test_project_parameter_evidence_hold_or_digest_mismatch_never_enters_ledger():
-    bundle = _process_bound_quality_threshold()
-    digest = _digest(bundle)
-    required_ids = sorted(item["id"] for item in bundle["items"])
-    report = {
-        "schema_version": "project-parameter-evidence-v1",
-        "project_id": _TEST_PROJECT_ID,
-        "status": "PASS_PROJECT_PARAMETER_EVIDENCE",
-        "ready": True,
-        "coverage_complete": True,
-        "conflicts": [],
-        "required_item_ids": required_ids,
-        "matched_item_count": len(required_ids),
-        "quality_threshold_bundle_digest": digest,
-        "quality_threshold": {
-            "value": bundle,
-            "unit": "",
-            "status": "derived",
-            "evidence": {
-                "locator": "project_parameter_evidence.quality_threshold",
-                "source_sha256": digest,
-            },
-        },
-    }
+def test_project_parameter_evidence_hold_or_digest_mismatch_never_enters_ledger(
+    tmp_path: Path,
+):
+    report = _wall_parameter_evidence(tmp_path)
+    required_ids = report["required_item_ids"]
 
     for mutation in ("hold", "digest"):
         candidate = copy.deepcopy(report)

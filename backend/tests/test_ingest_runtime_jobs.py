@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
+import json
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,8 +13,19 @@ import pytest
 from fastapi import HTTPException
 
 from backend.app.routers import ingest as ingest_router
+from backend.zhifei_autoplan.cross_index import build_cross_index
+from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
 from backend.zhifei_autoplan.drawing_index import build_drawing_index
+from backend.zhifei_autoplan.evidence import search_ingested_docs
+from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
 from backend.zhifei_autoplan.ocr_runtime import OcrResult
+from backend.zhifei_autoplan.project_fact_ledger import (
+    build_project_fact_ledger_from_inputs,
+)
+from backend.zhifei_autoplan.project_parameter_evidence import (
+    build_project_parameter_evidence,
+    validate_project_parameter_evidence,
+)
 
 
 class _Upload:
@@ -125,6 +138,345 @@ def test_ingest_extract_identity_is_accepted_by_drawing_index(
     assert drawing_index["drawings"][0]["extract_saved_as"] == saved[
         "extract_saved_as"
     ]
+
+
+def _digest(value: Any) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _approved_project_fact(project_id: str, field: str, value: Any, unit: str) -> dict:
+    document_sha256 = hashlib.sha256(field.encode("utf-8")).hexdigest()
+    file_name = f"批准参数-{field}.pdf"
+    return {
+        "value": value,
+        "unit": unit,
+        "evidence": {
+            "file_name": file_name,
+            "document_sha256": document_sha256,
+            "locator": f"{file_name}#p1_{document_sha256}@10",
+        },
+        "approval_receipt": {
+            "receipt_id": f"APR-{field}",
+            "status": "approved",
+            "project_id": project_id,
+            "field": field,
+            "value_digest": _digest(
+                {"field": field, "value": value, "unit": unit}
+            ),
+            "summary": f"批准 {field} 的正式项目值",
+            "approved_by": "项目负责人",
+            "approved_at": "2026-08-28T08:00:00+08:00",
+        },
+    }
+
+
+def _formal_sections(ledger: dict[str, Any], drawing_locator: str) -> list[dict[str, str]]:
+    labels = {
+        "planned_duration_days": "总工期",
+        "resource_peak": "资源峰值",
+        "critical_interval_days": "关键线路间隔",
+        "risk_inspection_frequency": "风险检查频次",
+        "deviation_action_deadline": "偏差处置时限",
+    }
+    lines = [
+        (
+            "围墙施工频次1次/周，间距5m，压实系数≥0.97"
+            f"【证据:{drawing_locator}】"
+        )
+    ]
+    for field, fact in ledger["facts"].items():
+        if field == "quality_threshold":
+            for item in fact["value"]["items"]:
+                lines.append(
+                    f"质量阈值 {item['process']}：{item['metric']}"
+                    f"{item['operator']}{item['value']}{item['unit']}"
+                    f"【证据:{item['locator']}】"
+                )
+        elif field in labels:
+            lines.append(
+                f"{labels[field]}={fact['value']}{fact['unit']}"
+                f"【证据:{fact['evidence']['locator']}】"
+            )
+    return [{"title": "围墙施工工艺", "content": "\n".join(lines)}]
+
+
+def _delivery_gate(
+    *,
+    ledger: dict[str, Any],
+    parameters: dict[str, Any],
+    sections: list[dict[str, str]],
+    cross_index: dict[str, Any],
+) -> dict[str, Any]:
+    return build_delivery_quality_gate(
+        strict=True,
+        content_review={"quality_gate": {"pass": True, "blocking_issues": []}},
+        plan_consistency={"ok": True, "canonical": {"duration_days": 150}},
+        model_review_audit={
+            "failed_chapters": [],
+            "consistency_review": {"ok": True, "summary": "未发现实质性冲突。"},
+        },
+        requirement_matrix={
+            "summary": {
+                "strict_delivery_allowed": True,
+                "blocking_requirement_ids": [],
+            }
+        },
+        standard_audit={"ok": True, "violations": []},
+        cross_index=cross_index,
+        model_review_required=True,
+        formal_delivery_required=True,
+        project_parameters=parameters,
+        project_fact_ledger=ledger,
+        sections=sections,
+    )
+
+
+def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_id = "P-TRUST-CHAIN"
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    drawings = asyncio.run(
+        ingest_router._handle_upload(
+            [
+                _Upload(
+                    (
+                        "围墙基础开挖至标高后进行压实，压实系数不小于0.97。"
+                    ).encode(),
+                    "3 围墙图.txt",
+                ),
+                _Upload(
+                    (
+                        "车辆消毒池采用防水混凝土，其强度等级不应低于C25，"
+                        "试配混凝土的抗渗等级应比设计要求提高0.2MPa。"
+                    ).encode(),
+                    "6 车辆消毒池图.txt",
+                ),
+            ],
+            project_id=project_id,
+            source_hint="drawing",
+        )
+    )
+    clarification = asyncio.run(
+        ingest_router._handle_upload(
+            [
+                _Upload(
+                    (
+                        "问题：基础和垫层强度？回复：基础 C30 垫层C20。"
+                        "地面涂膜防水厚度按照多少计入？回复：1.8mm厚。"
+                    ).encode(),
+                    "答疑.txt",
+                )
+            ],
+            project_id=project_id,
+            source_hint="tender_qa",
+        )
+    )
+    audit_path = workspace / "audit" / "ingest.jsonl"
+
+    hits = search_ingested_docs(
+        "压实系数",
+        audit_path=audit_path,
+        project_id=project_id,
+    )
+    assert len(hits) == 1
+    assert hits[0]["extract_text_sha256"] == drawings["saved"][0][
+        "extract_text_sha256"
+    ]
+
+    drawing_index = build_drawing_index(
+        "围墙项目",
+        ["围墙施工工艺"],
+        project_id=project_id,
+        workspace_dir=workspace,
+    )
+    assert drawing_index["integrity_rejections"] == []
+    assert drawing_index["indexed_drawing_count"] == 2
+    wall_binding = next(
+        binding
+        for binding in drawing_index["chapter_bindings"]
+        if binding["chapter"] == "围墙施工工艺"
+    )
+    drawing_locator = wall_binding["locator"]
+
+    parameter_evidence = build_project_parameter_evidence(
+        project_id=project_id,
+        tender={},
+        audit_path=audit_path,
+    )
+    assert parameter_evidence["ready"] is True
+    assert parameter_evidence["matched_item_count"] == 6
+    assert validate_project_parameter_evidence(parameter_evidence)["ok"] is True
+
+    approved = {
+        "planned_duration_days": _approved_project_fact(
+            project_id, "planned_duration_days", 150, "天"
+        ),
+        "resource_peak": _approved_project_fact(
+            project_id, "resource_peak", 20, "人"
+        ),
+        "critical_interval_days": _approved_project_fact(
+            project_id, "critical_interval_days", 5, "天"
+        ),
+        "risk_inspection_frequency": _approved_project_fact(
+            project_id, "risk_inspection_frequency", "1次/周", ""
+        ),
+        "deviation_action_deadline": _approved_project_fact(
+            project_id, "deviation_action_deadline", "36小时", ""
+        ),
+    }
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={
+            "project_id": project_id,
+            "approved_project_fact_resolutions": approved,
+        },
+        tender={},
+        boq_wbs_cpm={},
+        project_parameter_evidence=parameter_evidence,
+    )
+    parameters = probe_missing_parameters(
+        topic="围墙项目",
+        outline=["围墙施工工艺"],
+        requirements=[],
+        tender={},
+        boq={},
+        enterprise_profile={},
+        project_fact_ledger=ledger,
+    )
+    parameters["project_fact_ledger_digest"] = ledger["ledger_digest"]
+    assert parameters["formal_ready"] is True
+    sections = _formal_sections(ledger, drawing_locator)
+    cross_index = build_cross_index(
+        boq={
+            "items": [
+                {
+                    "name": "围墙",
+                    "boq_code": "001",
+                    "quantity": 10,
+                    "unit": "m",
+                    "process": {"name": "围墙施工"},
+                }
+            ],
+            "stats": {
+                "top_quantity_items": [
+                    {"name": "围墙", "quantity": 10, "unit": "m"}
+                ]
+            },
+        },
+        sections=sections,
+        boq_focus={"must_cover_keywords": ["围墙"]},
+        drawing_index=drawing_index,
+        standard_index={"standards": [], "chapter_bindings": []},
+        quality_checks={
+            "boq_focus_item_closure": {
+                "items": [
+                    {
+                        "item": "围墙",
+                        "ok": True,
+                        "reason": "ok",
+                        "hit_sections": [
+                            {
+                                "title": "围墙施工工艺",
+                                "ok": True,
+                                "triplet_count": 1,
+                                "hit_keys": ["频次", "间距", "阈值"],
+                                "has_units": True,
+                                "evidence_count": 1,
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+        project_id=project_id,
+    )
+    assert cross_index["closed_ok_count"] == 1
+    assert cross_index["missing_drawing_locator_count"] == 0
+    gate = _delivery_gate(
+        ledger=ledger,
+        parameters=parameters,
+        sections=sections,
+        cross_index=cross_index,
+    )
+    assert gate["delivery_allowed"] is True, gate
+
+    wall_extract = Path(drawings["saved"][0]["extract_saved_as"])
+    original_extract = wall_extract.read_bytes()
+    wall_extract.write_bytes(original_extract + "篡改".encode())
+    assert search_ingested_docs(
+        "压实系数", audit_path=audit_path, project_id=project_id
+    ) == []
+    assert validate_project_parameter_evidence(parameter_evidence)["ok"] is False
+    tampered_gate = _delivery_gate(
+        ledger=ledger,
+        parameters=parameters,
+        sections=sections,
+        cross_index=cross_index,
+    )
+    assert tampered_gate["delivery_allowed"] is False
+    formal_check = next(
+        check
+        for check in tampered_gate["checks"]
+        if check["name"] == "formal_project_parameters"
+    )
+    tamper_reasons = {
+        row["field"]: row["reasons"]
+        for row in formal_check["source_evidence_errors"]
+    }
+    assert "evidence_set_receipt_invalid" in tamper_reasons["quality_threshold"]
+
+    wall_extract.write_bytes(original_extract)
+    forged_ledger = copy.deepcopy(ledger)
+    quality_fact = forged_ledger["facts"]["quality_threshold"]
+    forged_item = quality_fact["value"]["items"][0]
+    forged_item["document_sha256"] = "f" * 64
+    forged_item["locator"] = f"伪造图纸.pdf#p1_{'f' * 64}@{forged_item['offset']}"
+    evidence = quality_fact["evidence"]
+    evidence["source_sha256"] = _digest(quality_fact["value"])
+    evidence["evidence_digest"] = _digest(
+        {key: value for key, value in evidence.items() if key != "evidence_digest"}
+    )
+    forged_ledger["ledger_digest"] = _digest(
+        {
+            key: value
+            for key, value in forged_ledger.items()
+            if key != "ledger_digest"
+        }
+    )
+    forged_parameters = copy.deepcopy(parameters)
+    forged_parameters["project_fact_ledger_digest"] = forged_ledger[
+        "ledger_digest"
+    ]
+    forged_sections = _formal_sections(forged_ledger, drawing_locator)
+    forged_gate = _delivery_gate(
+        ledger=forged_ledger,
+        parameters=forged_parameters,
+        sections=forged_sections,
+        cross_index=cross_index,
+    )
+    assert forged_gate["delivery_allowed"] is False
+    forged_formal = next(
+        check
+        for check in forged_gate["checks"]
+        if check["name"] == "formal_project_parameters"
+    )
+    forged_reasons = {
+        row["field"]: row["reasons"]
+        for row in forged_formal["source_evidence_errors"]
+    }
+    assert "evidence_set_source_identity_mismatch" in forged_reasons[
+        "quality_threshold"
+    ]
+
+    assert clarification["saved"][0]["extract_text_sha256"]
 
 
 def test_upload_rejects_existing_full_sha_path_with_wrong_bytes(

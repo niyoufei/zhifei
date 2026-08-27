@@ -4,12 +4,282 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from backend.zhifei_autoplan.ingest_tags import effective_record_tags
+
+INGEST_EVIDENCE_SET_RECEIPT_SCHEMA = "ingest-evidence-set-receipt-v1"
+_FULL_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _canonical_digest(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def resolve_trusted_ingest_record(
+    record: Mapping[str, Any] | None,
+    *,
+    workspace_root: str | Path | None = None,
+    read_text: bool = False,
+) -> dict[str, Any]:
+    """Revalidate one ingest audit row against current source/extract bytes."""
+
+    rec = dict(record or {})
+    sha256 = str(rec.get("sha256") or "").strip().lower()
+    file_id = str(rec.get("file_id") or "").strip().lower()
+    extract_sha256 = str(rec.get("extract_text_sha256") or "").strip().lower()
+    filename = Path(str(rec.get("filename") or "")).name
+    if (
+        _FULL_SHA256_RE.fullmatch(sha256) is None
+        or _FULL_SHA256_RE.fullmatch(file_id) is None
+        or sha256 != file_id
+    ):
+        return {"ok": False, "reason": "audit_sha_file_id_mismatch"}
+    if rec.get("enabled") is False or rec.get("usable") is False:
+        return {"ok": False, "reason": "audit_record_disabled"}
+    if _FULL_SHA256_RE.fullmatch(extract_sha256) is None:
+        return {"ok": False, "reason": "extract_text_sha256_mismatch"}
+
+    declared_workspace = Path(str(rec.get("workspace_dir") or ""))
+    expected_workspace = Path(
+        workspace_root if workspace_root is not None else declared_workspace
+    ).resolve(strict=False)
+    if (
+        not str(rec.get("workspace_dir") or "").strip()
+        or declared_workspace.resolve(strict=False) != expected_workspace
+    ):
+        return {"ok": False, "reason": "audit_workspace_mismatch"}
+
+    source_path = Path(str(rec.get("saved_as") or ""))
+    extract_path = Path(str(rec.get("extract_saved_as") or ""))
+    if (
+        not filename
+        or source_path.is_symlink()
+        or not source_path.is_file()
+        or not _is_within(source_path, expected_workspace / "uploads")
+        or source_path.name != f"{sha256}_{filename}"
+    ):
+        return {
+            "ok": False,
+            "reason": "source_path_outside_workspace_or_not_full_sha",
+        }
+    if (
+        extract_path.is_symlink()
+        or not extract_path.is_file()
+        or not _is_within(extract_path, expected_workspace / "extracts")
+        or extract_path.name != f"{sha256}_{extract_sha256}.txt"
+    ):
+        return {
+            "ok": False,
+            "reason": "extract_path_outside_workspace_or_not_full_sha",
+        }
+    try:
+        if _file_sha256(source_path) != sha256:
+            return {"ok": False, "reason": "source_bytes_sha256_mismatch"}
+        if _file_sha256(extract_path) != extract_sha256:
+            return {"ok": False, "reason": "extract_text_sha256_mismatch"}
+        extract_text = extract_path.read_text(encoding="utf-8") if read_text else None
+        source_relative_path = str(
+            source_path.resolve(strict=True).relative_to(expected_workspace)
+        )
+        extract_relative_path = str(
+            extract_path.resolve(strict=True).relative_to(expected_workspace)
+        )
+    except (OSError, UnicodeError, ValueError):
+        return {"ok": False, "reason": "evidence_file_unreadable"}
+
+    result = {
+        "ok": True,
+        "reason": "trusted",
+        "record": rec,
+        "audit_row_digest": _canonical_digest(rec),
+        "project_id": str(rec.get("project_id") or "").strip(),
+        "filename": filename,
+        "source_sha256": sha256,
+        "extract_text_sha256": extract_sha256,
+        "workspace_root": str(expected_workspace),
+        "source_path": str(source_path),
+        "extract_path": str(extract_path),
+        "source_relative_path": source_relative_path,
+        "extract_relative_path": extract_relative_path,
+    }
+    if read_text:
+        result["extract_text"] = extract_text
+    return result
+
+
+def build_ingest_evidence_set_receipt(
+    *,
+    project_id: str,
+    audit_path: str | Path,
+    trusted_records: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Seal the exact current audit rows and source/extract byte identities."""
+
+    path = Path(audit_path).resolve(strict=False)
+    workspace_root = path.parent.parent.resolve(strict=False)
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for trusted in trusted_records:
+        if trusted.get("ok") is not True:
+            continue
+        source_sha256 = str(trusted.get("source_sha256") or "").strip().lower()
+        if source_sha256 in seen:
+            continue
+        seen.add(source_sha256)
+        records.append(
+            {
+                "audit_row_digest": str(trusted.get("audit_row_digest") or ""),
+                "project_id": str(trusted.get("project_id") or ""),
+                "filename": str(trusted.get("filename") or ""),
+                "source_sha256": source_sha256,
+                "extract_text_sha256": str(
+                    trusted.get("extract_text_sha256") or ""
+                ).strip().lower(),
+                "source_relative_path": str(
+                    trusted.get("source_relative_path") or ""
+                ),
+                "extract_relative_path": str(
+                    trusted.get("extract_relative_path") or ""
+                ),
+            }
+        )
+    records.sort(key=lambda row: (row["source_sha256"], row["filename"]))
+    core = {
+        "schema_version": INGEST_EVIDENCE_SET_RECEIPT_SCHEMA,
+        "project_id": str(project_id or "").strip(),
+        "workspace_root": str(workspace_root),
+        "audit_path": str(path),
+        "records": records,
+    }
+    return {**core, "receipt_digest": _canonical_digest(core)}
+
+
+def validate_ingest_evidence_set_receipt(
+    receipt: Mapping[str, Any] | None,
+    *,
+    expected_project_id: str | None = None,
+) -> dict[str, Any]:
+    """Re-read the latest audit rows and current bytes bound by a receipt."""
+
+    value = dict(receipt or {})
+    errors: list[str] = []
+    core = {key: item for key, item in value.items() if key != "receipt_digest"}
+    claimed_digest = str(value.get("receipt_digest") or "").strip().lower()
+    if value.get("schema_version") != INGEST_EVIDENCE_SET_RECEIPT_SCHEMA:
+        errors.append("receipt_schema_invalid")
+    if (
+        _FULL_SHA256_RE.fullmatch(claimed_digest) is None
+        or claimed_digest != _canonical_digest(core)
+    ):
+        errors.append("receipt_digest_mismatch")
+    project_id = str(value.get("project_id") or "").strip()
+    if not project_id or (
+        expected_project_id is not None
+        and project_id != str(expected_project_id or "").strip()
+    ):
+        errors.append("receipt_project_mismatch")
+
+    workspace_root = Path(str(value.get("workspace_root") or ""))
+    audit_path = Path(str(value.get("audit_path") or ""))
+    records = value.get("records") if isinstance(value.get("records"), list) else []
+    if not records:
+        errors.append("receipt_records_missing")
+    if (
+        not workspace_root.is_absolute()
+        or not audit_path.is_absolute()
+        or audit_path.is_symlink()
+        or not audit_path.is_file()
+        or not _is_within(audit_path, workspace_root / "audit")
+    ):
+        errors.append("receipt_audit_path_invalid")
+        current_rows: dict[str, dict[str, Any]] = {}
+    else:
+        current_rows = {}
+        try:
+            lines = audit_path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).splitlines()
+        except OSError:
+            errors.append("receipt_audit_unreadable")
+            lines = []
+        for line in reversed(lines):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            sha256 = str(row.get("sha256") or "").strip().lower()
+            if sha256 and sha256 not in current_rows:
+                current_rows[sha256] = row
+
+    seen: set[str] = set()
+    for raw in records:
+        if not isinstance(raw, Mapping):
+            errors.append("receipt_record_invalid")
+            continue
+        source_sha256 = str(raw.get("source_sha256") or "").strip().lower()
+        if source_sha256 in seen:
+            errors.append("receipt_record_duplicate")
+            continue
+        seen.add(source_sha256)
+        current = current_rows.get(source_sha256)
+        if not isinstance(current, dict):
+            errors.append("receipt_audit_row_missing")
+            continue
+        trusted = resolve_trusted_ingest_record(
+            current,
+            workspace_root=workspace_root,
+        )
+        if trusted.get("ok") is not True:
+            errors.append(str(trusted.get("reason") or "receipt_record_untrusted"))
+            continue
+        expected = {
+            "audit_row_digest": trusted["audit_row_digest"],
+            "project_id": trusted["project_id"],
+            "filename": trusted["filename"],
+            "source_sha256": trusted["source_sha256"],
+            "extract_text_sha256": trusted["extract_text_sha256"],
+            "source_relative_path": trusted["source_relative_path"],
+            "extract_relative_path": trusted["extract_relative_path"],
+        }
+        if dict(raw) != expected:
+            errors.append("receipt_record_mismatch")
+
+    return {
+        "ok": not errors,
+        "errors": list(dict.fromkeys(errors)),
+        "claimed_digest": claimed_digest,
+        "computed_digest": _canonical_digest(core),
+        "record_count": len(records),
+    }
 
 
 def _tokenize_query(query: str) -> list[str]:
@@ -244,6 +514,7 @@ def search_ingested_docs(
         mtime_ns = int(os.stat(resolved_audit_path).st_mtime_ns)
     except OSError:
         mtime_ns = 0
+    workspace_root = resolved_audit_path.parent.parent.resolve(strict=False)
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     for rec in _load_audit_records(str(resolved_audit_path), mtime_ns):
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
@@ -254,14 +525,15 @@ def search_ingested_docs(
             exclude_tags=exclude_tags,
         ):
             continue
-        p = Path(rec.get("extract_saved_as") or "")
-        if not p.exists() or not p.is_file():
+        trusted = resolve_trusted_ingest_record(
+            rec,
+            workspace_root=workspace_root,
+            read_text=True,
+        )
+        if trusted.get("ok") is not True:
             continue
-        try:
-            p_mtime_ns = int(os.stat(p).st_mtime_ns)
-        except OSError:
-            p_mtime_ns = 0
-        text = _load_extract_text(str(p), p_mtime_ns)
+        p = Path(str(trusted["extract_path"]))
+        text = str(trusted.get("extract_text") or "")
         if not text:
             continue
         lower = text.lower()
@@ -286,8 +558,10 @@ def search_ingested_docs(
             hits.append(
                 {
                     "filename": rec.get("filename"),
-                    "sha256": rec.get("sha256"),
+                    "sha256": trusted["source_sha256"],
                     "extract_saved_as": str(p),
+                    "extract_text_sha256": trusted["extract_text_sha256"],
+                    "audit_row_digest": trusted["audit_row_digest"],
                     "offset": m.start(),
                     "snippet": snippet,
                     "matched_token": tok,

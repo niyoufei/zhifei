@@ -491,6 +491,8 @@ def _sanitize_evidence(value: Any, *, default_locator: str = "") -> dict[str, An
         "offset",
         "match_text_sha256",
         "derivation_receipt",
+        "evidence_set_receipt",
+        "evidence_set_receipt_digest",
     )
     result: dict[str, Any] = {}
     for key in allowed:

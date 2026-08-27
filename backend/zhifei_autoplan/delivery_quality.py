@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any
 
+from backend.zhifei_autoplan.evidence import validate_ingest_evidence_set_receipt
 from backend.zhifei_autoplan.project_fact_ledger import (
     FORMAL_REQUIRED_FIELDS,
     validate_project_fact_ledger,
@@ -267,10 +268,48 @@ def _formal_fact_source_errors(
         if source_type == "reviewed_design":
             expected = _canonical_digest(fact.get("value"))
             claimed = str(evidence.get("source_sha256") or "").strip().lower()
+            evidence_set_receipt = (
+                evidence.get("evidence_set_receipt")
+                if isinstance(evidence.get("evidence_set_receipt"), dict)
+                else {}
+            )
+            evidence_set_receipt_digest = str(
+                evidence.get("evidence_set_receipt_digest") or ""
+            ).strip().lower()
             if status != "verified":
                 errors.append("source_status_mismatch")
             if claimed != expected:
                 errors.append("quality_bundle_digest_mismatch")
+            receipt_validation = validate_ingest_evidence_set_receipt(
+                evidence_set_receipt,
+                expected_project_id=expected_project_id,
+            )
+            receipt_source_sha256s = {
+                str(row.get("source_sha256") or "").strip().lower()
+                for row in (evidence_set_receipt.get("records") or [])
+                if isinstance(row, dict)
+            }
+            quality_value = (
+                fact.get("value") if isinstance(fact.get("value"), dict) else {}
+            )
+            item_source_sha256s = {
+                str(item.get("document_sha256") or "").strip().lower()
+                for item in (quality_value.get("items") or [])
+                if isinstance(item, dict)
+            }
+            if (
+                receipt_validation.get("ok") is not True
+                or evidence_set_receipt_digest
+                != str(evidence_set_receipt.get("receipt_digest") or "")
+                .strip()
+                .lower()
+            ):
+                errors.append("evidence_set_receipt_invalid")
+            if (
+                not item_source_sha256s
+                or item_source_sha256s != receipt_source_sha256s
+            ):
+                errors.append("evidence_set_source_identity_mismatch")
             if not _evidence_digest_valid(evidence):
                 errors.append("evidence_digest_invalid")
             return errors

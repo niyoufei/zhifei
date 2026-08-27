@@ -720,56 +720,58 @@ class TestRunAutoplan:
     async def test_project_parameter_evidence_is_returned_and_enters_fact_ledger(
         self,
         mock_dependencies,
+        tmp_path: Path,
     ):
         """Deterministic drawing evidence is observable and ledger-bound."""
-        item = {
-            "id": "wall-foundation-compaction",
-            "process": "围墙基础持力层压实",
-            "metric": "压实系数",
-            "operator": "≥",
-            "value": 0.97,
-            "unit": "",
-            "status": "verified",
-            "source": "reviewed_design",
-            "locator": f"围墙.pdf#p1_{'a' * 64}@12",
-            "document_sha256": "a" * 64,
-            "extract_text_sha256": "e" * 64,
-            "page": 1,
-            "page_text_sha256": "b" * 64,
-            "offset": 12,
-            "end": 28,
-            "page_start_offset": 0,
-            "page_end_offset": 500,
-            "page_match_start": 12,
-            "page_match_end": 28,
-            "match_text_sha256": "c" * 64,
-        }
-        bundle = {"mode": "process_bound", "items": [item]}
-        bundle_digest = _digest(bundle)
-        evidence = {
-            "schema_version": "project-parameter-evidence-v1",
-            "project_id": "P-EVIDENCE",
-            "status": "PASS_PROJECT_PARAMETER_EVIDENCE",
-            "ready": True,
-            "quality_threshold": {
-                "value": bundle,
-                "unit": "",
-                "status": "derived",
-                "confidence": 1.0,
-                "evidence": {
-                    "locator": "project_parameter_evidence.quality_threshold",
-                    "source_sha256": bundle_digest,
+        from backend.zhifei_autoplan.project_parameter_evidence import (
+            build_project_parameter_evidence,
+        )
+
+        workspace = tmp_path / "parameter-evidence"
+        uploads = workspace / "uploads"
+        extracts = workspace / "extracts"
+        audit = workspace / "audit" / "ingest.jsonl"
+        uploads.mkdir(parents=True)
+        extracts.mkdir(parents=True)
+        audit.parent.mkdir(parents=True)
+        filename = "3 围墙.pdf"
+        source_bytes = b"orchestrator-reviewed-wall"
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        extract_text = "基础开挖后压实处理，压实系数不小于0.97。"
+        extract_bytes = extract_text.encode("utf-8")
+        extract_sha256 = hashlib.sha256(extract_bytes).hexdigest()
+        source_path = uploads / f"{source_sha256}_{filename}"
+        extract_path = extracts / f"{source_sha256}_{extract_sha256}.txt"
+        source_path.write_bytes(source_bytes)
+        extract_path.write_bytes(extract_bytes)
+        audit.write_text(
+            json.dumps(
+                {
+                    "project_id": "P-EVIDENCE",
+                    "workspace_dir": str(workspace),
+                    "filename": filename,
+                    "sha256": source_sha256,
+                    "file_id": source_sha256,
+                    "pages": 1,
+                    "source_hint": "drawing",
+                    "tags": ["drawing"],
+                    "saved_as": str(source_path),
+                    "extract_saved_as": str(extract_path),
+                    "extract_text_sha256": extract_sha256,
+                    "usable": True,
+                    "enabled": True,
                 },
-            },
-            "quality_threshold_bundle_digest": bundle_digest,
-            "matched_item_count": 1,
-            "required_item_count": 1,
-            "required_item_ids": [item["id"]],
-            "missing_required_item_ids": [],
-            "unexpected_item_ids": [],
-            "coverage_complete": True,
-            "conflicts": [],
-        }
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        evidence = build_project_parameter_evidence(
+            project_id="P-EVIDENCE",
+            tender={},
+            audit_path=audit,
+        )
+        item = evidence["quality_threshold"]["value"]["items"][0]
 
         with patch(
             "backend.zhifei_autoplan.orchestrator.build_project_parameter_evidence",

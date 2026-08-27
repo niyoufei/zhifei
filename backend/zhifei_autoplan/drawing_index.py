@@ -12,7 +12,10 @@ from backend.zhifei_autoplan.drawing_semantic import (
     pick_chapter_anchor,
     summarize_spatial_anchors,
 )
-from backend.zhifei_autoplan.evidence import best_drawing_hit
+from backend.zhifei_autoplan.evidence import (
+    best_drawing_hit,
+    resolve_trusted_ingest_record,
+)
 from backend.zhifei_autoplan.ingest_tags import effective_record_tags
 
 _HAN_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
@@ -111,22 +114,6 @@ def _declared_page_count(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return count if count > 0 else None
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-    except (OSError, ValueError):
-        return False
-    return True
 
 
 def _audit_path(workspace_dir: str | Path | None) -> Path:
@@ -369,45 +356,14 @@ def build_drawing_index(
             continue
         if not fname or not sha:
             continue
-        record_workspace = Path(str(rec.get("workspace_dir") or ""))
-        source_path = Path(str(rec.get("saved_as") or ""))
-        extract_file = Path(str(rec.get("extract_saved_as") or ""))
-        expected_extract_sha256 = str(
-            rec.get("extract_text_sha256") or ""
-        ).strip().lower()
-        if record_workspace.resolve(strict=False) != workspace_root:
-            _reject(fname, "audit_workspace_mismatch")
+        trusted = resolve_trusted_ingest_record(
+            rec,
+            workspace_root=workspace_root,
+        )
+        if trusted.get("ok") is not True:
+            _reject(fname, str(trusted.get("reason") or "evidence_file_unreadable"))
             continue
-        if (
-            not _is_within(source_path, workspace_root / "uploads")
-            or source_path.is_symlink()
-            or not source_path.is_file()
-            or not source_path.name.startswith(f"{sha}_")
-        ):
-            _reject(fname, "source_path_outside_workspace_or_not_full_sha")
-            continue
-        if (
-            not _is_within(extract_file, workspace_root / "extracts")
-            or extract_file.is_symlink()
-            or not extract_file.is_file()
-            or extract_file.name != f"{sha}_{expected_extract_sha256}.txt"
-        ):
-            _reject(fname, "extract_path_outside_workspace_or_not_full_sha")
-            continue
-        try:
-            if _file_sha256(source_path) != sha:
-                _reject(fname, "source_bytes_sha256_mismatch")
-                continue
-            if (
-                _FULL_SHA256_RE.fullmatch(expected_extract_sha256) is None
-                or _file_sha256(extract_file) != expected_extract_sha256
-            ):
-                _reject(fname, "extract_text_sha256_mismatch")
-                continue
-        except OSError:
-            _reject(fname, "evidence_file_unreadable")
-            continue
-        extract_path = str(extract_file)
+        extract_path = str(trusted["extract_path"])
         preview = str(rec.get("preview_saved_as") or "")
         kw = []
         page_anchors: list[dict[str, Any]] = []

@@ -7,6 +7,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from backend.zhifei_autoplan.evidence import (
+    build_ingest_evidence_set_receipt,
+    resolve_trusted_ingest_record,
+    validate_ingest_evidence_set_receipt,
+)
 from backend.zhifei_autoplan.ingest_tags import effective_record_tags
 
 SCHEMA_VERSION = "project-parameter-evidence-v1"
@@ -75,22 +80,6 @@ def _audit_path(value: str | Path | None) -> Path:
         if value is not None
         else Path("backend/data/audit/ingest.jsonl")
     )
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-    except (OSError, ValueError):
-        return False
-    return True
 
 
 def _tender_source_sha256s(tender: Mapping[str, Any] | None) -> set[str]:
@@ -188,32 +177,14 @@ def _source_records(
         tags = set(effective_record_tags(record))
         if not tags.intersection({"drawing", "tender", "qa"}) or "logo" in tags:
             continue
-        record_workspace = Path(str(record.get("workspace_dir") or ""))
-        source_path = Path(str(record.get("saved_as") or ""))
-        extract_path = Path(str(record.get("extract_saved_as") or ""))
-        declared_extract_sha256 = str(
-            record.get("extract_text_sha256") or ""
-        ).strip().lower()
-        if record_workspace.resolve(strict=False) != workspace_root:
+        trusted = resolve_trusted_ingest_record(
+            record,
+            workspace_root=workspace_root,
+            read_text=True,
+        )
+        if trusted.get("ok") is not True:
             continue
-        if (
-            not _is_within(source_path, workspace_root / "uploads")
-            or not source_path.is_file()
-            or not source_path.name.startswith(f"{sha256}_")
-            or not _is_within(extract_path, workspace_root / "extracts")
-            or not extract_path.is_file()
-            or extract_path.name != f"{sha256}.txt"
-            or _FULL_SHA256_RE.fullmatch(declared_extract_sha256) is None
-        ):
-            continue
-        try:
-            if _file_sha256(source_path) != sha256:
-                continue
-            if _file_sha256(extract_path) != declared_extract_sha256:
-                continue
-            extract_text = extract_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
+        extract_text = str(trusted.get("extract_text") or "")
         declared_pages = record.get("pages")
         try:
             page_count = int(declared_pages)
@@ -233,10 +204,11 @@ def _source_records(
                 "sha256": sha256,
                 "file_id": file_id,
                 "tags": sorted(tags),
-                "saved_as": str(source_path),
-                "extract_saved_as": str(extract_path),
-                "extract_text_sha256": declared_extract_sha256,
+                "saved_as": str(trusted["source_path"]),
+                "extract_saved_as": str(trusted["extract_path"]),
+                "extract_text_sha256": trusted["extract_text_sha256"],
                 "_pages": pages,
+                "_trusted_record": trusted,
             }
         )
     return rows
@@ -545,6 +517,28 @@ def build_project_parameter_evidence(
         for item in selected
         if str(item.get("id") or "")
     }
+    selected_source_sha256s = {
+        str(item.get("document_sha256") or "").strip().lower()
+        for item in selected
+        if _FULL_SHA256_RE.fullmatch(
+            str(item.get("document_sha256") or "").strip().lower()
+        )
+    }
+    evidence_set_receipt = build_ingest_evidence_set_receipt(
+        project_id=pid,
+        audit_path=path,
+        trusted_records=[
+            record["_trusted_record"]
+            for record in records
+            if str(record.get("sha256") or "").strip().lower()
+            in selected_source_sha256s
+            and isinstance(record.get("_trusted_record"), Mapping)
+        ],
+    )
+    evidence_set_validation = validate_ingest_evidence_set_receipt(
+        evidence_set_receipt,
+        expected_project_id=pid,
+    )
     missing_required_item_ids = sorted(required_item_ids - selected_ids)
     unexpected_item_ids = sorted(selected_ids - required_item_ids)
     fact = None
@@ -554,6 +548,7 @@ def build_project_parameter_evidence(
         and not conflicts
         and not missing_required_item_ids
         and not unexpected_item_ids
+        and evidence_set_validation.get("ok") is True
     ):
         fact = {
             "value": bundle,
@@ -563,6 +558,10 @@ def build_project_parameter_evidence(
             "evidence": {
                 "locator": "project_parameter_evidence.quality_threshold",
                 "source_sha256": bundle_digest,
+                "evidence_set_receipt": evidence_set_receipt,
+                "evidence_set_receipt_digest": evidence_set_receipt[
+                    "receipt_digest"
+                ],
             },
         }
     return {
@@ -584,6 +583,11 @@ def build_project_parameter_evidence(
         "ready": fact is not None,
         "quality_threshold": fact,
         "quality_threshold_bundle_digest": bundle_digest,
+        "evidence_set_receipt": evidence_set_receipt,
+        "evidence_set_receipt_digest": evidence_set_receipt.get(
+            "receipt_digest"
+        ),
+        "evidence_set_validation": evidence_set_validation,
         "matched_item_count": len(selected),
         "required_item_count": len(required_item_ids),
         "required_item_ids": sorted(required_item_ids),
@@ -661,9 +665,62 @@ def validate_project_parameter_evidence(value: Any) -> dict[str, Any]:
         != claimed_digest
     ):
         errors.append("fact_evidence_digest_mismatch")
+    receipt = (
+        report.get("evidence_set_receipt")
+        if isinstance(report.get("evidence_set_receipt"), Mapping)
+        else {}
+    )
+    receipt_validation = validate_ingest_evidence_set_receipt(
+        receipt,
+        expected_project_id=str(report.get("project_id") or "").strip(),
+    )
+    receipt_digest = str(receipt.get("receipt_digest") or "").strip().lower()
+    fact_receipt = (
+        fact_evidence.get("evidence_set_receipt")
+        if isinstance(fact_evidence, Mapping)
+        and isinstance(fact_evidence.get("evidence_set_receipt"), Mapping)
+        else {}
+    )
+    fact_receipt_digest = (
+        str(fact_evidence.get("evidence_set_receipt_digest") or "")
+        .strip()
+        .lower()
+        if isinstance(fact_evidence, Mapping)
+        else ""
+    )
+    if receipt_validation.get("ok") is not True:
+        errors.append("evidence_set_receipt_invalid")
+    receipt_source_sha256s = {
+        str(row.get("source_sha256") or "").strip().lower()
+        for row in (receipt.get("records") or [])
+        if isinstance(row, Mapping)
+    }
+    item_source_sha256s = {
+        str(item.get("document_sha256") or "").strip().lower()
+        for item in items
+        if isinstance(item, Mapping)
+    }
+    if (
+        not item_source_sha256s
+        or receipt_source_sha256s != item_source_sha256s
+        or any(
+            _FULL_SHA256_RE.fullmatch(value) is None
+            for value in item_source_sha256s
+        )
+    ):
+        errors.append("evidence_set_source_identity_mismatch")
+    if (
+        _FULL_SHA256_RE.fullmatch(receipt_digest) is None
+        or str(report.get("evidence_set_receipt_digest") or "").strip().lower()
+        != receipt_digest
+        or fact_receipt_digest != receipt_digest
+        or dict(fact_receipt) != dict(receipt)
+    ):
+        errors.append("evidence_set_receipt_binding_mismatch")
     return {
         "ok": not errors,
         "errors": list(dict.fromkeys(errors)),
         "claimed_digest": claimed_digest,
         "computed_digest": computed_digest,
+        "evidence_set_receipt_validation": receipt_validation,
     }
