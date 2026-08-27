@@ -258,6 +258,66 @@ def test_ordinary_pdf_ocr_keeps_ten_page_catalog_bounded_policy(
     ]
 
 
+def test_drawing_pdf_ocr_rejects_short_page_text_sequence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "drawing-short.pdf"
+    source.write_bytes(b"%PDF-test")
+    monkeypatch.setattr(ocr_runtime, "is_tesseract_available", lambda: True)
+    monkeypatch.setattr(ocr_runtime, "guess_ocr_lang", lambda **_kwargs: "chi_sim+eng")
+    monkeypatch.setattr(
+        ocr_runtime,
+        "ocr_pdf_path",
+        lambda *_args, **_kwargs: ocr_runtime.OcrResult(
+            text="第一页\f第二页",
+            pages=3,
+            lang="chi_sim+eng",
+            page_texts=("第一页", "第二页"),
+        ),
+    )
+
+    result = asyncio.run(
+        ingest_router._try_ocr(
+            source,
+            "pdf",
+            "乱码嵌入字体" * 100,
+            source_hint="drawing_standard",
+            declared_pages=3,
+        )
+    )
+
+    assert result is None
+
+
+@pytest.mark.parametrize("declared_pages", [None, 0, True])
+def test_drawing_pdf_ocr_rejects_invalid_declared_page_count(
+    monkeypatch,
+    tmp_path: Path,
+    declared_pages: int | None,
+) -> None:
+    source = tmp_path / "drawing-invalid-pages.pdf"
+    source.write_bytes(b"%PDF-test")
+    monkeypatch.setattr(ocr_runtime, "is_tesseract_available", lambda: True)
+
+    def _must_not_ocr(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("invalid declared page count must stop before OCR")
+
+    monkeypatch.setattr(ocr_runtime, "ocr_pdf_path", _must_not_ocr)
+
+    result = asyncio.run(
+        ingest_router._try_ocr(
+            source,
+            "pdf",
+            "乱码嵌入字体" * 100,
+            source_hint="drawing_standard",
+            declared_pages=declared_pages,
+        )
+    )
+
+    assert result is None
+
+
 def test_handle_upload_preserves_chinese_name_and_rejects_duplicate(monkeypatch, tmp_path: Path) -> None:
     _isolate_workspace(monkeypatch, tmp_path)
     payload = "第一项目施工组织设计验收资料".encode()

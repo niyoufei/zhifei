@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from backend.app.routers import ingest as ingest_router
+from backend.zhifei_autoplan.ocr_runtime import OcrResult
 
 
 class _Upload:
@@ -149,6 +150,7 @@ def test_parse_cache_keeps_legacy_inline_text_compatible(monkeypatch, tmp_path: 
         ingest_router.json.dumps(
             {
                 "parser_version": ingest_router.PARSER_VERSION,
+                "ocr_policy": ingest_router.OCR_POLICY_ORDINARY,
                 "sha256": digest,
                 "parsed": parsed,
             },
@@ -192,6 +194,168 @@ def test_parse_cache_does_not_reuse_runtime_v3_ocr_cache(monkeypatch, tmp_path: 
     assert ingest_router._load_parse_cache(digest) is None
 
 
+def test_same_pdf_ordinary_cache_does_not_pollute_drawing_cache(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "cache")
+    digest = hashlib.sha256(b"same-pdf-cross-policy").hexdigest()
+    ordinary = {
+        "base": {
+            "doc_type": "pdf",
+            "pages": 27,
+            "ocr_pages": 10,
+            "ocr_page_mapping": "source_page_prefix",
+            "extract_text": "普通资料前十页 OCR",
+        },
+        "parsed_type": None,
+        "parsed_meta": None,
+    }
+    ingest_router._save_parse_cache(digest, ordinary, source_hint="tender_qa")
+
+    assert ingest_router._load_parse_cache(digest, source_hint="tender") == ordinary
+    assert ingest_router._parse_cache_path(
+        digest,
+        "tender_qa",
+    ) != ingest_router._parse_cache_path(digest, "drawing_standard")
+    assert ingest_router._load_parse_cache(digest, source_hint="drawing") is None
+
+
+def test_drawing_cache_requires_ocr_for_every_declared_page(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "cache")
+    digest = hashlib.sha256(b"drawing-full-page-cache").hexdigest()
+    complete = {
+        "base": {
+            "doc_type": "pdf",
+            "pages": 27,
+            "ocr_pages": 27,
+            "ocr_page_text_count": 27,
+            "ocr_page_mapping": "source_page_all",
+            "extract_text": "完整图纸 OCR",
+        },
+        "parsed_type": None,
+        "parsed_meta": None,
+    }
+    ingest_router._save_parse_cache(digest, complete, source_hint="drawing")
+    assert ingest_router._load_parse_cache(digest, source_hint="图纸") == complete
+
+    metadata_path = ingest_router._parse_cache_path(digest, "drawing_standard")
+    metadata = ingest_router.json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["parsed"]["base"]["ocr_page_text_count"] = 26
+    metadata_path.write_text(
+        ingest_router.json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert ingest_router._load_parse_cache(digest, source_hint="cad") is None
+
+    incomplete_digest = hashlib.sha256(b"drawing-incomplete-cache").hexdigest()
+    incomplete = {
+        **complete,
+        "base": {
+            **complete["base"],
+            "ocr_pages": 26,
+            "ocr_page_text_count": 26,
+        },
+    }
+    ingest_router._save_parse_cache(
+        incomplete_digest,
+        incomplete,
+        source_hint="drawing_standard",
+    )
+    assert not ingest_router._parse_cache_path(
+        incomplete_digest,
+        "drawing_standard",
+    ).exists()
+    assert ingest_router._load_parse_cache(
+        incomplete_digest,
+        source_hint="cad",
+    ) is None
+
+
+def test_handle_upload_reparses_same_pdf_when_ocr_policy_changes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_workspace(monkeypatch, tmp_path)
+    parse_calls: list[str] = []
+    ocr_policies: list[str] = []
+
+    async def _parse(ext: str, _path: Path, _total_bytes: int) -> dict[str, Any]:
+        parse_calls.append(ext)
+        return {
+            "doc_type": "pdf",
+            "pages": 3,
+            "text_bytes": 2,
+            "extract_text": "\f\f",
+        }
+
+    async def _ocr(
+        _path: Path,
+        _ext: str,
+        _text: str | None,
+        *,
+        source_hint: str | None = None,
+        declared_pages: int | None = None,
+    ) -> OcrResult:
+        policy = ingest_router._ocr_cache_policy(source_hint)
+        ocr_policies.append(policy)
+        pages = declared_pages if policy == ingest_router.OCR_POLICY_DRAWING else 2
+        assert isinstance(pages, int)
+        return OcrResult(
+            text="\f".join(f"第{index + 1}页" for index in range(pages)),
+            pages=pages,
+            lang="chi_sim+eng",
+            page_texts=tuple(f"第{index + 1}页" for index in range(pages)),
+        )
+
+    monkeypatch.setattr(ingest_router, "_extract_text_path_bounded", _parse)
+    monkeypatch.setattr(ingest_router, "_try_ocr", _ocr)
+    monkeypatch.setattr(
+        ingest_router,
+        "_run_isolated_process",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=None),
+    )
+    payload = b"same-pdf-content"
+
+    ordinary = asyncio.run(
+        ingest_router._handle_upload(
+            [_Upload(payload, "ordinary.pdf")],
+            source_hint="tender_qa",
+        )
+    )
+    drawing = asyncio.run(
+        ingest_router._handle_upload(
+            [_Upload(payload, "drawing.pdf")],
+            source_hint="drawing_standard",
+        )
+    )
+    drawing_cached = asyncio.run(
+        ingest_router._handle_upload(
+            [_Upload(payload, "drawing-again.pdf")],
+            source_hint="drawing",
+        )
+    )
+
+    assert ordinary["cache_hits"] == 0
+    assert ordinary["saved"][0]["ocr_pages"] == 2
+    assert ordinary["saved"][0]["ocr_page_mapping"] == "source_page_prefix"
+    assert drawing["cache_hits"] == 0
+    assert drawing["saved"][0]["ocr_pages"] == 3
+    assert drawing["saved"][0]["ocr_page_text_count"] == 3
+    assert drawing["saved"][0]["ocr_page_mapping"] == "source_page_all"
+    assert drawing_cached["cache_hits"] == 1
+    assert drawing_cached["saved"][0]["ocr_pages"] == 3
+    assert drawing_cached["saved"][0]["ocr_page_mapping"] == "source_page_all"
+    assert parse_calls == ["pdf", "pdf"]
+    assert ocr_policies == [
+        ingest_router.OCR_POLICY_ORDINARY,
+        ingest_router.OCR_POLICY_DRAWING,
+    ]
+
+
 def test_parse_cache_keeps_small_extracted_text_inline(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "cache")
     digest = hashlib.sha256(b"small-source").hexdigest()
@@ -219,7 +383,7 @@ def test_pdf_preview_reuses_content_addressed_thumbnail(monkeypatch, tmp_path: P
     monkeypatch.setattr(
         ingest_router,
         "_load_parse_cache",
-        lambda _digest: {
+        lambda _digest, **_kwargs: {
             "base": {"doc_type": "pdf", "pages": 1, "extract_text": "有效正文"},
             "parsed_type": None,
             "parsed_meta": None,
@@ -248,7 +412,7 @@ def test_pdf_preview_worker_crash_is_a_stable_warning(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         ingest_router,
         "_load_parse_cache",
-        lambda _digest: {
+        lambda _digest, **_kwargs: {
             "base": {"doc_type": "pdf", "pages": 1, "extract_text": "有效正文"},
             "parsed_type": None,
             "parsed_meta": None,

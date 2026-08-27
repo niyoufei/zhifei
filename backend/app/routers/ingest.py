@@ -65,7 +65,9 @@ PARSE_CACHE_DIR = Path(
 INGEST_SPOOL_DIR = Path(
     os.environ.get("ZF_AUTOPLAN_INGEST_SPOOL_DIR", "backend/data/autoplan/ingest_spool")
 )
-PARSER_VERSION = "2026.08.runtime-v4-drawing-full-page-ocr"
+PARSER_VERSION = "2026.08.runtime-v5-source-aware-ocr-cache"
+OCR_POLICY_ORDINARY = "ordinary_bounded"
+OCR_POLICY_DRAWING = "drawing_full_page"
 PARSE_CACHE_TEXT_SIDECAR_BYTES = 256 * 1024
 FILE_ID_SEARCH_ROOTS = (
     Path("backend/data/uploads"),
@@ -319,15 +321,22 @@ def _extract_text_path(ext: str, path: Path) -> dict[str, Any]:
     return {"doc_type": ext or "unknown", "pages": None, "text_bytes": None}
 
 
-def _parse_cache_path(digest: str) -> Path:
-    version_digest = hashlib.sha256(PARSER_VERSION.encode("utf-8")).hexdigest()[:12]
+def _ocr_cache_policy(source_hint: str | None = None) -> str:
+    if _normalize_source_hint(source_hint) == "drawing_standard":
+        return OCR_POLICY_DRAWING
+    return OCR_POLICY_ORDINARY
+
+
+def _parse_cache_path(digest: str, source_hint: str | None = None) -> Path:
+    cache_identity = f"{PARSER_VERSION}:{_ocr_cache_policy(source_hint)}"
+    version_digest = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()[:12]
     return PARSE_CACHE_DIR / f"{digest!s}.{version_digest}.json"
 
 
-def _parse_cache_text_path(digest: str) -> Path:
+def _parse_cache_text_path(digest: str, source_hint: str | None = None) -> Path:
     """Return the versioned sidecar used for potentially large extracted text."""
 
-    return _parse_cache_path(digest).with_suffix(".txt")
+    return _parse_cache_path(digest, source_hint).with_suffix(".txt")
 
 
 def _resolve_ingested_files(file_ids: list[str] | None) -> list[tuple[str, Path]]:
@@ -376,7 +385,7 @@ def resolve_ingested_tender_sources(
 
     sources: list[dict[str, str | None]] = []
     for digest, path in _resolve_ingested_files(file_ids):
-        cached = _load_parse_cache(digest)
+        cached = _load_parse_cache(digest, source_hint="tender_qa")
         base = cached.get("base") if isinstance(cached, dict) else None
         extract_text = base.get("extract_text") if isinstance(base, dict) else None
         sources.append(
@@ -388,8 +397,47 @@ def resolve_ingested_tender_sources(
     return sources
 
 
-def _load_parse_cache(digest: str) -> dict[str, Any] | None:
-    path = _parse_cache_path(digest)
+def _valid_positive_page_count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _parse_cache_policy_valid(
+    data: dict[str, Any],
+    parsed: dict[str, Any],
+    *,
+    expected_policy: str,
+) -> bool:
+    if data.get("ocr_policy") != expected_policy:
+        return False
+    if expected_policy != OCR_POLICY_DRAWING:
+        return True
+    base = parsed.get("base")
+    if not isinstance(base, dict):
+        return False
+    declared_pages = _valid_positive_page_count(base.get("pages"))
+    cached_declared_pages = _valid_positive_page_count(data.get("declared_pages"))
+    ocr_pages = _valid_positive_page_count(base.get("ocr_pages"))
+    page_text_count = _valid_positive_page_count(base.get("ocr_page_text_count"))
+    cached_page_text_count = _valid_positive_page_count(data.get("page_text_count"))
+    return (
+        declared_pages is not None
+        and cached_declared_pages == declared_pages
+        and ocr_pages == declared_pages
+        and page_text_count == declared_pages
+        and cached_page_text_count == declared_pages
+        and base.get("ocr_page_mapping") == "source_page_all"
+    )
+
+
+def _load_parse_cache(
+    digest: str,
+    *,
+    source_hint: str | None = None,
+) -> dict[str, Any] | None:
+    expected_policy = _ocr_cache_policy(source_hint)
+    path = _parse_cache_path(digest, source_hint)
     if not path.exists():
         return None
     try:
@@ -405,7 +453,11 @@ def _load_parse_cache(digest: str) -> dict[str, Any] | None:
     ):
         return None
     parsed = data.get("parsed")
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, dict) or not _parse_cache_policy_valid(
+        data,
+        parsed,
+        expected_policy=expected_policy,
+    ):
         return None
     result = dict(parsed)
     sidecar = data.get("extract_text_sidecar")
@@ -415,7 +467,7 @@ def _load_parse_cache(digest: str) -> dict[str, Any] | None:
         return result
     if not isinstance(sidecar, dict):
         return None
-    text_path = _parse_cache_text_path(digest)
+    text_path = _parse_cache_text_path(digest, source_hint)
     if str(sidecar.get("filename") or "") != text_path.name:
         return None
     try:
@@ -447,6 +499,7 @@ def _save_parse_cache(
     digest: str,
     parsed: dict[str, Any],
     *,
+    source_hint: str | None = None,
     write_guard: Callable[..., Any] | None = None,
 ) -> None:
     _guarded_write(
@@ -456,8 +509,9 @@ def _save_parse_cache(
         exist_ok=True,
         mode=0o700,
     )
-    path = _parse_cache_path(digest)
-    text_path = _parse_cache_text_path(digest)
+    ocr_policy = _ocr_cache_policy(source_hint)
+    path = _parse_cache_path(digest, source_hint)
+    text_path = _parse_cache_text_path(digest, source_hint)
     temp_suffix = f".{os.getpid()}.{threading.get_ident()}.tmp"
     temp = path.with_suffix(path.suffix + temp_suffix)
     temp_text = text_path.with_suffix(text_path.suffix + temp_suffix)
@@ -476,10 +530,32 @@ def _save_parse_cache(
         parsed_for_disk["base"] = persisted_base
     payload = {
         "parser_version": PARSER_VERSION,
+        "ocr_policy": ocr_policy,
         "sha256": str(digest),
         "saved_at": time.time(),
         "parsed": parsed_for_disk,
     }
+    if ocr_policy == OCR_POLICY_DRAWING:
+        persisted_base = parsed_for_disk.get("base")
+        payload["declared_pages"] = (
+            _valid_positive_page_count(persisted_base.get("pages"))
+            if isinstance(persisted_base, dict)
+            else None
+        )
+        payload["page_text_count"] = (
+            _valid_positive_page_count(persisted_base.get("ocr_page_text_count"))
+            if isinstance(persisted_base, dict)
+            else None
+        )
+        # Never publish a drawing cache unless it proves complete source-page
+        # coverage.  A later upload must retry OCR instead of reusing a partial
+        # result merely because the file SHA and policy match.
+        if not _parse_cache_policy_valid(
+            payload,
+            parsed_for_disk,
+            expected_policy=ocr_policy,
+        ):
+            return
     try:
         if extracted_text_bytes is not None:
             temp_text.write_bytes(extracted_text_bytes)
@@ -782,6 +858,19 @@ async def _try_ocr(
             lang=lang,
             stop_on_catalog=stop_on_catalog,
         )
+        if full_drawing_ocr:
+            result_pages = _valid_positive_page_count(getattr(res, "pages", None))
+            page_texts = getattr(res, "page_texts", None)
+            page_text_count = len(page_texts) if isinstance(page_texts, tuple) else None
+            if result_pages != declared_pages or page_text_count != declared_pages:
+                logger.warning(
+                    "drawing OCR rejected because source-page coverage is incomplete "
+                    "declared_pages=%s result_pages=%s page_text_count=%s",
+                    declared_pages,
+                    result_pages,
+                    page_text_count,
+                )
+                return None
         return res if res and (res.text or res.page_texts) else None
 
     if ext in {"png", "jpg", "jpeg"}:
@@ -944,7 +1033,11 @@ async def _handle_upload(
             continue
         seen_digests[digest] = out_path
 
-        cached = await asyncio.to_thread(_load_parse_cache, digest)
+        cached = await asyncio.to_thread(
+            _load_parse_cache,
+            digest,
+            source_hint=normalized_hint,
+        )
         cache_hit = isinstance(cached, dict)
         if cache_hit:
             cache_hits += 1
@@ -1013,17 +1106,24 @@ async def _handle_upload(
                 )
                 if ocr_result:
                     if ext == "pdf" and hasattr(ocr_result, "page_texts"):
+                        page_texts = tuple(getattr(ocr_result, "page_texts", ()))
                         merged, mapped = _merge_pdf_ocr_pages(
                             parsed.get("extract_text"),
-                            getattr(ocr_result, "page_texts", ()),
+                            page_texts,
                             parsed.get("pages"),
                         )
                         parsed["ocr_pages"] = int(
                             getattr(ocr_result, "pages", 0) or 0
                         )
-                        parsed["ocr_page_mapping"] = (
-                            "source_page_prefix" if mapped else "unavailable"
-                        )
+                        parsed["ocr_page_text_count"] = len(page_texts)
+                        if mapped and _ocr_cache_policy(
+                            normalized_hint
+                        ) == OCR_POLICY_DRAWING:
+                            parsed["ocr_page_mapping"] = "source_page_all"
+                        else:
+                            parsed["ocr_page_mapping"] = (
+                                "source_page_prefix" if mapped else "unavailable"
+                            )
                         if mapped:
                             parsed["extract_text"] = merged
                     elif isinstance(ocr_result, str):
@@ -1050,6 +1150,7 @@ async def _handle_upload(
                     "parsed_type": parsed_type,
                     "parsed_meta": parsed_meta,
                 },
+                source_hint=normalized_hint,
                 write_guard=_write_guard,
             )
 
@@ -1177,6 +1278,7 @@ async def _handle_upload(
             "sha256": digest,
             "file_id": digest,
             "parser_version": PARSER_VERSION,
+            "ocr_cache_policy": _ocr_cache_policy(normalized_hint),
             "cache_hit": cache_hit,
             "preview_cache_hit": preview_cache_hit,
             "extract_saved_as": str(extract_path) if extract_path else None,
