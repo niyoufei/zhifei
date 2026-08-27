@@ -480,6 +480,8 @@ python3 scripts/run_actions_pipeline.py \\
   --boq /path/to/工程量清单.xlsx
 ```
 
+联调脚本默认不生成插图，以便进行有界的小规模验收；需要同时验证插图链路时，显式追加 `--generate-images`。
+
 ## 常用环境变量
 
 | 变量 | 说明 | 示例 |

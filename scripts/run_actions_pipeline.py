@@ -34,6 +34,14 @@ _SENSITIVE_GENERATION_FIELDS = {
     "image_api_key",
 }
 
+_SUCCESS_JOB_STATUSES = {"done", "succeeded"}
+_TERMINAL_JOB_STATUSES = {
+    *_SUCCESS_JOB_STATUSES,
+    "failed",
+    "cancelled",
+    "interrupted_recoverable",
+}
+
 
 def _require_loopback_base_url(value: str) -> str:
     """Keep the Actions credential and project material on this Mac."""
@@ -280,6 +288,12 @@ def main() -> int:
     ap.add_argument("--no-auto-remediate", dest="auto_remediate", action="store_false", help="Disable auto remediation")
     ap.add_argument("--remediate-mode", default="template", choices=["template", "llm"], help="Remediation mode")
     ap.add_argument("--dry-run", action="store_true", default=False, help="Do not call external LLMs (will use fallback template)")
+    ap.add_argument(
+        "--generate-images",
+        action="store_true",
+        default=False,
+        help="Generate optional document images (disabled by default for bounded validation runs)",
+    )
     ap.add_argument("--no-gate", action="store_true", default=False, help="Do not fail the process even if quality gate fails")
     ap.add_argument("--timeout-sec", type=int, default=900, help="Polling timeout seconds")
     ap.add_argument("--poll-sec", type=float, default=2.0, help="Polling interval seconds")
@@ -354,7 +368,7 @@ def main() -> int:
         "remediate_mode": args.remediate_mode,
         "compare_mode": "summary",
         "compare_max_chars": 1200,
-        "generate_images": True,
+        "generate_images": bool(args.generate_images),
         "dry_run": bool(args.dry_run),
     }
     if args.provider or args.model or args.api_key:
@@ -380,11 +394,11 @@ def main() -> int:
             time.sleep(float(args.poll_sec))
             continue
         job = js.get("job") or {}
-        status = job.get("status") or ""
-        if status in ("done", "failed"):
+        status = str(job.get("status") or "").strip().lower()
+        if status in _TERMINAL_JOB_STATUSES:
             break
         time.sleep(float(args.poll_sec))
-    if status != "done":
+    if status not in _SUCCESS_JOB_STATUSES:
         print(f"[FAIL] job not done: status={status}", file=sys.stderr)
         return 3
 
