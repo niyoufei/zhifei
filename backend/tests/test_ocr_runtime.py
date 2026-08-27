@@ -246,6 +246,26 @@ def test_ocr_pdf_path_marks_nonblank_empty_ocr_as_unreadable(monkeypatch, tmp_pa
     assert result.page_statuses == ("unreadable",)
     assert len(result.page_image_sha256[0]) == 64
 
+    graphics_result = ocr_runtime.ocr_pdf_path(
+        str(pdf_path),
+        max_pages=1,
+        lang="eng",
+        stop_on_catalog=False,
+        allow_graphics_only=True,
+    )
+
+    assert graphics_result.error is None
+    assert graphics_result.source_pages == 1
+    assert graphics_result.page_texts == ("",)
+    assert graphics_result.page_statuses == ("graphics_only",)
+    assert graphics_result.page_image_sha256 == result.page_image_sha256
+    assert graphics_result.diagnostics["status_counts"] == {"graphics_only": 1}
+    assert graphics_result.diagnostics["graphics_only_pages"] == [1]
+    assert (
+        graphics_result.diagnostics["machine_code"]
+        == "OCR_COMPLETE_WITH_GRAPHICS_ONLY"
+    )
+
 
 @pytest.mark.parametrize("primary_outcome", ["empty", "timeout"])
 def test_ocr_pdf_path_recovers_sparse_cad_text_with_bounded_second_pass(
@@ -384,6 +404,7 @@ def test_ocr_pdf_path_recovers_sparse_cad_text_with_bounded_second_pass(
         "unreadable_pages": [],
         "failed_pages": [],
         "timeout_pages": [],
+        "graphics_only_pages": [],
         "recovered_pages": [1],
         "page_lists_truncated": False,
         "error_code": "none",

@@ -570,6 +570,20 @@ def _validate_drawing_locator(
             "page": page,
         }
     if (
+        anchor.get("evidence_eligible") is not True
+        or (
+            str(anchor.get("ocr_status") or "").strip()
+            and str(anchor.get("ocr_status") or "").strip() != "text"
+        )
+        or anchor.get("no_text_locator") is True
+    ):
+        return False, {
+            "reason": "drawing_page_not_text_evidence",
+            "filename": filename,
+            "sha256": locator_sha256,
+            "page": page,
+        }
+    if (
         not str(drawing.get("page_boundary_status") or "").startswith("reliable_")
         or str(anchor.get("boundary_source") or "")
         not in {"form_feed", "declared_single_page"}

@@ -48,11 +48,13 @@ def _valid_indexes(
             "project_id": project_id,
             "drawings": [{"filename": "总图.pdf"}],
             "indexed_drawing_count": 1,
+            "processed_drawing_count": 1,
             "integrity_rejection_count": 0,
             "invalid_identity_count": 0,
             "missing_text_or_ocr_count": 0,
             "locator_unavailable_count": 0,
             "text_index_status": "complete",
+            "page_coverage_status": "complete",
         }
     if project_id and standard_index is None:
         standard_index = {
@@ -714,6 +716,64 @@ def test_formal_direct_export_rejects_incomplete_current_indexes(
         )
 
 
+def test_formal_indexes_accept_processed_graphics_only_drawing_without_locator():
+    indexes = _valid_indexes(project_id="P-GRAPHICS")
+    drawing = indexes["drawing_index"]
+    drawing.update(
+        {
+            "drawings": [
+                {
+                    "filename": "结构布置图.pdf",
+                    "text_status": "processed_no_text_locator",
+                    "graphics_only_pages": [1],
+                }
+            ],
+            "indexed_drawing_count": 0,
+            "processed_drawing_count": 1,
+            "missing_text_or_ocr_count": 0,
+            "locator_unavailable_count": 0,
+            "text_index_status": "no_text_locator",
+            "page_coverage_status": "complete",
+        }
+    )
+
+    export_docx_service._validate_formal_export_indexes(
+        indexes,
+        project_id="P-GRAPHICS",
+    )
+
+
+def test_formal_indexes_reject_graphics_only_drawing_when_focus_requires_locator():
+    indexes = _valid_indexes("钢梁", project_id="P-GRAPHICS-REQUIRED")
+    drawing = indexes["drawing_index"]
+    drawing.update(
+        {
+            "drawings": [
+                {
+                    "filename": "结构布置图.pdf",
+                    "text_status": "processed_no_text_locator",
+                    "graphics_only_pages": [1],
+                }
+            ],
+            "indexed_drawing_count": 0,
+            "processed_drawing_count": 1,
+            "missing_text_or_ocr_count": 0,
+            "locator_unavailable_count": 0,
+            "text_index_status": "no_text_locator",
+            "page_coverage_status": "complete",
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="direct_export_drawing_index_incomplete",
+    ):
+        export_docx_service._validate_formal_export_indexes(
+            indexes,
+            project_id="P-GRAPHICS-REQUIRED",
+        )
+
+
 def _approved_not_applicable_empty_indexes() -> dict:
     project_id = "P-NA"
     cross_index = _cross_index("氧气瓶")
@@ -749,11 +809,13 @@ def _approved_not_applicable_empty_indexes() -> dict:
             "project_id": project_id,
             "drawings": [],
             "indexed_drawing_count": 0,
+            "processed_drawing_count": 0,
             "integrity_rejection_count": 0,
             "invalid_identity_count": 0,
             "missing_text_or_ocr_count": 0,
             "locator_unavailable_count": 0,
             "text_index_status": "no_drawings",
+            "page_coverage_status": "no_drawings",
         },
         "standard_index": {
             "ok": False,

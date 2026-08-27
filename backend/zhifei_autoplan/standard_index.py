@@ -26,6 +26,10 @@ _HAN_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 _MEANINGFUL_TEXT_RE = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]")
 _FULL_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _EMPTY_TEXT_SHA256 = hashlib.sha256(b"").hexdigest()
+_SUPPORTED_OCR_PAGE_PROOF_VERSIONS = {
+    "ocr-page-proof-v2",
+    "ocr-page-proof-v3",
+}
 _STOP = {
     "工程",
     "施工",
@@ -226,9 +230,10 @@ def _standard_pdf_ocr_proof(
     text_sha256 = record.get("ocr_page_text_sha256")
     extract_page_sha256 = record.get("ocr_extract_page_sha256")
     blank_pages = record.get("ocr_blank_pages")
+    proof_version = record.get("ocr_page_proof_version")
     if (
         record.get("ocr_cache_policy") != "standard_full_page"
-        or record.get("ocr_page_proof_version") != "ocr-page-proof-v1"
+        or proof_version not in _SUPPORTED_OCR_PAGE_PROOF_VERSIONS
         or record.get("ocr_page_mapping") != "source_page_all"
         or record.get("ocr_error") not in {None, ""}
         or _declared_page_count(record.get("ocr_source_pages"))
@@ -245,6 +250,11 @@ def _standard_pdf_ocr_proof(
         or len(image_sha256) != declared_pages
         or len(text_sha256) != declared_pages
         or len(extract_page_sha256) != declared_pages
+    ):
+        return [], "ocr_page_proof_incomplete"
+    if proof_version == "ocr-page-proof-v3" and (
+        record.get("ocr_graphics_only_pages") != []
+        or record.get("ocr_no_text_locators") != []
     ):
         return [], "ocr_page_proof_incomplete"
     for status, image_digest, text_digest in zip(

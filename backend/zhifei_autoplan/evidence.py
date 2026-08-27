@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Iterable, Mapping
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +14,12 @@ from backend.zhifei_autoplan.ingest_tags import effective_record_tags
 
 INGEST_EVIDENCE_SET_RECEIPT_SCHEMA = "ingest-evidence-set-receipt-v1"
 _FULL_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_EMPTY_TEXT_SHA256 = hashlib.sha256(b"").hexdigest()
+_FULL_PAGE_OCR_POLICIES = {"drawing_full_page", "standard_full_page"}
+_SUPPORTED_OCR_PAGE_PROOF_VERSIONS = {
+    "ocr-page-proof-v2",
+    "ocr-page-proof-v3",
+}
 
 
 def _canonical_digest(value: Any) -> str:
@@ -26,12 +33,57 @@ def _canonical_digest(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _file_sha256(path: Path) -> str:
+def _read_regular_file_snapshot(
+    path: Path,
+    *,
+    retain_bytes: bool,
+) -> tuple[str, bytes | None]:
+    """Hash one no-follow regular-file snapshot and optionally retain its bytes."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    chunks: list[bytes] | None = [] if retain_bytes else None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError("evidence_path_not_regular")
+        with os.fdopen(fd, "rb", closefd=True) as handle:
+            fd = -1
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                if chunks is not None:
+                    chunks.append(chunk)
+            finished = os.fstat(handle.fileno())
+        current = os.stat(path, follow_symlinks=False)
+        def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_size,
+                value.st_mtime_ns,
+            )
+
+        if _stat_identity(opened) != _stat_identity(finished) or (
+            current.st_dev,
+            current.st_ino,
+            current.st_mode,
+            current.st_size,
+            current.st_mtime_ns,
+        ) != _stat_identity(finished):
+            raise OSError("evidence_path_changed_during_read")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return digest.hexdigest(), b"".join(chunks) if chunks is not None else None
+
+
+def _file_sha256(path: Path) -> str:
+    digest, _ = _read_regular_file_snapshot(path, retain_bytes=False)
+    return digest
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -40,6 +92,127 @@ def _is_within(path: Path, root: Path) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def _validate_full_page_ocr_record(
+    record: Mapping[str, Any],
+    extract_text: str,
+) -> dict[str, Any]:
+    """Validate page proof and derive text eligibility from current extract bytes."""
+
+    policy = str(record.get("ocr_cache_policy") or "").strip()
+    is_pdf = (
+        str(record.get("doc_type") or "").strip().lower() == "pdf"
+        or Path(str(record.get("filename") or "")).suffix.lower() == ".pdf"
+    )
+    if policy not in _FULL_PAGE_OCR_POLICIES or not is_pdf:
+        return {"ok": True, "page_eligibility": []}
+    try:
+        declared_pages = int(record.get("pages"))
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "ocr_declared_pages_invalid"}
+    if isinstance(record.get("pages"), bool) or declared_pages <= 0:
+        return {"ok": False, "reason": "ocr_declared_pages_invalid"}
+    proof_version = str(record.get("ocr_page_proof_version") or "")
+    statuses = record.get("ocr_page_statuses")
+    image_sha256 = record.get("ocr_page_image_sha256")
+    text_sha256 = record.get("ocr_page_text_sha256")
+    extract_page_sha256 = record.get("ocr_extract_page_sha256")
+    blank_pages = record.get("ocr_blank_pages")
+    if (
+        proof_version not in _SUPPORTED_OCR_PAGE_PROOF_VERSIONS
+        or record.get("ocr_page_mapping") != "source_page_all"
+        or record.get("ocr_error") not in {None, ""}
+        or record.get("ocr_source_pages") != declared_pages
+        or record.get("ocr_pages") != declared_pages
+        or record.get("ocr_page_text_count") != declared_pages
+        or not isinstance(statuses, list)
+        or not isinstance(image_sha256, list)
+        or not isinstance(text_sha256, list)
+        or not isinstance(extract_page_sha256, list)
+        or not isinstance(blank_pages, list)
+        or any(
+            len(values) != declared_pages
+            for values in (
+                statuses,
+                image_sha256,
+                text_sha256,
+                extract_page_sha256,
+            )
+        )
+    ):
+        return {"ok": False, "reason": "ocr_page_proof_incomplete"}
+    allowed_statuses = {"text", "blank"}
+    if policy == "drawing_full_page" and proof_version == "ocr-page-proof-v3":
+        allowed_statuses.add("graphics_only")
+    for status, image_digest, text_digest in zip(
+        statuses,
+        image_sha256,
+        text_sha256,
+        strict=True,
+    ):
+        if status not in allowed_statuses:
+            return {"ok": False, "reason": "ocr_page_status_invalid"}
+        if _FULL_SHA256_RE.fullmatch(str(image_digest or "")) is None:
+            return {"ok": False, "reason": "ocr_page_image_digest_invalid"}
+        if _FULL_SHA256_RE.fullmatch(str(text_digest or "")) is None:
+            return {"ok": False, "reason": "ocr_page_text_digest_invalid"}
+        if status == "text" and text_digest == _EMPTY_TEXT_SHA256:
+            return {"ok": False, "reason": "ocr_text_proof_invalid"}
+        if status in {"blank", "graphics_only"} and text_digest != _EMPTY_TEXT_SHA256:
+            return {"ok": False, "reason": "ocr_no_text_proof_invalid"}
+    raw_pages = str(extract_text).split("\f")
+    if len(raw_pages) != declared_pages:
+        return {"ok": False, "reason": "ocr_extract_page_count_mismatch"}
+    actual_extract_page_sha256 = [
+        hashlib.sha256(page.encode("utf-8")).hexdigest()
+        for page in raw_pages
+    ]
+    if extract_page_sha256 != actual_extract_page_sha256:
+        return {"ok": False, "reason": "ocr_extract_page_digest_mismatch"}
+    if blank_pages != [
+        index
+        for index, status in enumerate(statuses, start=1)
+        if status == "blank"
+    ]:
+        return {"ok": False, "reason": "ocr_blank_page_manifest_invalid"}
+    expected_graphics_only_pages = [
+        index
+        for index, status in enumerate(statuses, start=1)
+        if status == "graphics_only"
+    ]
+    graphics_only_pages = record.get("ocr_graphics_only_pages")
+    no_text_locators = record.get("ocr_no_text_locators")
+    if proof_version == "ocr-page-proof-v3":
+        if graphics_only_pages != expected_graphics_only_pages:
+            return {"ok": False, "reason": "ocr_graphics_only_manifest_invalid"}
+        expected_no_text_locators = [
+            {
+                "page": page,
+                "status": "graphics_only",
+                "reason": "no_machine_readable_text",
+                "page_image_sha256": image_sha256[page - 1],
+                "no_text_locator": True,
+            }
+            for page in expected_graphics_only_pages
+        ]
+        if no_text_locators != expected_no_text_locators:
+            return {"ok": False, "reason": "ocr_no_text_locator_invalid"}
+    elif expected_graphics_only_pages:
+        return {"ok": False, "reason": "ocr_graphics_only_version_invalid"}
+    return {
+        "ok": True,
+        "page_eligibility": [
+            {
+                "page": index,
+                "status": status,
+                "evidence_eligible": status == "text",
+                "no_text_locator": status != "text",
+                "page_image_sha256": image_sha256[index - 1],
+            }
+            for index, status in enumerate(statuses, start=1)
+        ],
+    }
 
 
 def resolve_trusted_ingest_record(
@@ -107,12 +280,35 @@ def resolve_trusted_ingest_record(
             "ok": False,
             "reason": "extract_path_outside_workspace_or_not_full_sha",
         }
+    validate_page_proof = str(
+        rec.get("ocr_cache_policy") or ""
+    ).strip() in _FULL_PAGE_OCR_POLICIES
+    retain_extract_bytes = read_text or validate_page_proof
     try:
         if _file_sha256(source_path) != sha256:
             return {"ok": False, "reason": "source_bytes_sha256_mismatch"}
-        if _file_sha256(extract_path) != extract_sha256:
+        actual_extract_sha256, extract_bytes = _read_regular_file_snapshot(
+            extract_path,
+            retain_bytes=retain_extract_bytes,
+        )
+        if actual_extract_sha256 != extract_sha256:
             return {"ok": False, "reason": "extract_text_sha256_mismatch"}
-        extract_text = extract_path.read_text(encoding="utf-8") if read_text else None
+        extract_text = (
+            bytes(extract_bytes or b"").decode("utf-8")
+            if retain_extract_bytes
+            else None
+        )
+        page_proof = _validate_full_page_ocr_record(
+            rec,
+            str(extract_text or ""),
+        )
+        if page_proof.get("ok") is not True:
+            return {
+                "ok": False,
+                "reason": str(
+                    page_proof.get("reason") or "ocr_page_proof_invalid"
+                ),
+            }
         source_relative_path = str(
             source_path.resolve(strict=True).relative_to(expected_workspace)
         )
@@ -136,6 +332,9 @@ def resolve_trusted_ingest_record(
         "extract_path": str(extract_path),
         "source_relative_path": source_relative_path,
         "extract_relative_path": extract_relative_path,
+        "ocr_page_eligibility": list(
+            page_proof.get("page_eligibility") or []
+        ),
     }
     if read_text:
         result["extract_text"] = extract_text
@@ -492,6 +691,62 @@ def _match_page_context(
     }
 
 
+def _ocr_text_evidence_allowed(
+    record: dict[str, Any],
+    page_context: dict[str, Any],
+) -> bool:
+    """Fail closed when a full-page OCR slot is not eligible text evidence."""
+
+    policy = str(record.get("ocr_cache_policy") or "").strip()
+    is_pdf = (
+        str(record.get("doc_type") or "").strip().lower() == "pdf"
+        or Path(str(record.get("filename") or "")).suffix.lower() == ".pdf"
+    )
+    if policy not in _FULL_PAGE_OCR_POLICIES or not is_pdf:
+        return True
+    page = page_context.get("page")
+    declared_pages = _declared_page_count(record)
+    statuses = record.get("ocr_page_statuses")
+    text_sha256 = record.get("ocr_page_text_sha256")
+    extract_page_sha256 = record.get("ocr_extract_page_sha256")
+    try:
+        page_number = int(page)
+    except (TypeError, ValueError):
+        return False
+    if (
+        record.get("ocr_page_proof_version")
+        not in {"ocr-page-proof-v2", "ocr-page-proof-v3"}
+        or record.get("ocr_page_mapping") != "source_page_all"
+        or declared_pages is None
+        or not 1 <= page_number <= declared_pages
+        or not isinstance(statuses, list)
+        or not isinstance(text_sha256, list)
+        or not isinstance(extract_page_sha256, list)
+        or len(statuses) != declared_pages
+        or len(text_sha256) != declared_pages
+        or len(extract_page_sha256) != declared_pages
+        or statuses[page_number - 1] != "text"
+        or text_sha256[page_number - 1] == hashlib.sha256(b"").hexdigest()
+        or extract_page_sha256[page_number - 1]
+        != page_context.get("page_text_sha256")
+    ):
+        return False
+    if record.get("ocr_page_proof_version") == "ocr-page-proof-v3":
+        graphics_only_pages = record.get("ocr_graphics_only_pages")
+        no_text_locators = record.get("ocr_no_text_locators")
+        if not isinstance(graphics_only_pages, list) or not isinstance(
+            no_text_locators,
+            list,
+        ):
+            return False
+        if page_number in graphics_only_pages or any(
+            isinstance(item, Mapping) and item.get("page") == page_number
+            for item in no_text_locators
+        ):
+            return False
+    return True
+
+
 def _tags_match(
     rec_tags: Any,
     *,
@@ -574,40 +829,45 @@ def search_ingested_docs(
         text = str(trusted.get("extract_text") or "")
         if not text:
             continue
-        lower = text.lower()
         for tok in uniq:
-            if tok.lower() not in lower:
-                continue
-            m = re.search(re.escape(tok), text, flags=re.IGNORECASE)
-            if not m:
-                continue
-            page_context = _match_page_context(
-                text,
-                match_start=m.start(),
-                match_end=m.end(),
-                declared_pages=_declared_page_count(rec),
-            )
-            match_window = page_context.get("match_window")
-            snippet = (
-                str(match_window.get("summary") or "")
-                if isinstance(match_window, dict)
-                else " ".join(text[max(0, m.start() - 80) : min(len(text), m.end() + 160)].split())
-            )
-            hits.append(
-                {
-                    "filename": rec.get("filename"),
-                    "sha256": trusted["source_sha256"],
-                    "extract_saved_as": str(p),
-                    "extract_text_sha256": trusted["extract_text_sha256"],
-                    "audit_row_digest": trusted["audit_row_digest"],
-                    "offset": m.start(),
-                    "snippet": snippet,
-                    "matched_token": tok,
-                    **page_context,
-                }
-            )
-            if len(hits) >= limit:
-                return hits
+            for match in re.finditer(re.escape(tok), text, flags=re.IGNORECASE):
+                page_context = _match_page_context(
+                    text,
+                    match_start=match.start(),
+                    match_end=match.end(),
+                    declared_pages=_declared_page_count(rec),
+                )
+                if not _ocr_text_evidence_allowed(rec, page_context):
+                    continue
+                match_window = page_context.get("match_window")
+                snippet = (
+                    str(match_window.get("summary") or "")
+                    if isinstance(match_window, dict)
+                    else " ".join(
+                        text[
+                            max(0, match.start() - 80) : min(
+                                len(text),
+                                match.end() + 160,
+                            )
+                        ].split()
+                    )
+                )
+                hits.append(
+                    {
+                        "filename": rec.get("filename"),
+                        "sha256": trusted["source_sha256"],
+                        "extract_saved_as": str(p),
+                        "extract_text_sha256": trusted["extract_text_sha256"],
+                        "audit_row_digest": trusted["audit_row_digest"],
+                        "offset": match.start(),
+                        "snippet": snippet,
+                        "matched_token": tok,
+                        **page_context,
+                    }
+                )
+                if len(hits) >= limit:
+                    return hits
+                break
     return hits
 
 

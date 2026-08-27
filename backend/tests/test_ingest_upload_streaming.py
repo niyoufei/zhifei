@@ -213,6 +213,7 @@ def test_drawing_pdf_ocr_uses_all_declared_pages_without_catalog_stop(
             "scale": 2.2,
             "lang": "chi_sim+eng",
             "stop_on_catalog": False,
+            "allow_graphics_only": True,
         }
     ]
 
@@ -261,6 +262,7 @@ def test_ordinary_pdf_ocr_keeps_ten_page_catalog_bounded_policy(
             "scale": 2.2,
             "lang": "chi_sim+eng",
             "stop_on_catalog": True,
+            "allow_graphics_only": False,
         }
     ]
 
@@ -297,7 +299,14 @@ def test_drawing_pdf_ocr_rejects_short_page_text_sequence(
     assert isinstance(result, ocr_runtime.OcrResult)
     assert result.pages == 3
     assert len(result.page_texts) == 2
-    assert ingest_router._full_page_ocr_result_proof(result, 3) is None
+    assert (
+        ingest_router._full_page_ocr_result_proof(
+            result,
+            3,
+            expected_policy=ingest_router.OCR_POLICY_DRAWING,
+        )
+        is None
+    )
 
 
 def test_drawing_pdf_ocr_rejects_failed_page_even_when_page_count_matches(
@@ -339,7 +348,14 @@ def test_drawing_pdf_ocr_rejects_failed_page_even_when_page_count_matches(
     assert isinstance(result, ocr_runtime.OcrResult)
     assert result.error == "page_ocr_incomplete"
     assert result.page_statuses == ("failed", "text")
-    assert ingest_router._full_page_ocr_result_proof(result, 2) is None
+    assert (
+        ingest_router._full_page_ocr_result_proof(
+            result,
+            2,
+            expected_policy=ingest_router.OCR_POLICY_DRAWING,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("declared_pages", [None, 0, True])

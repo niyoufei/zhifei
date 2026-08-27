@@ -843,6 +843,47 @@ def test_parse_cache_does_not_reuse_runtime_v5_ocr_cache(monkeypatch, tmp_path: 
     assert ingest_router._load_parse_cache(digest) is None
 
 
+def test_drawing_cache_does_not_reuse_direct_v6_predecessor(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "cache")
+    digest = hashlib.sha256(b"v6-drawing-cache-source").hexdigest()
+    old_version = "2026.08.runtime-v6-bounded-ocr-proof"
+    old_identity = f"{old_version}:{ingest_router.OCR_POLICY_DRAWING}"
+    old_identity_digest = hashlib.sha256(old_identity.encode()).hexdigest()[:12]
+    old_path = ingest_router.PARSE_CACHE_DIR / (
+        f"{digest}.{old_identity_digest}.json"
+    )
+    old_path.parent.mkdir(parents=True)
+    old_path.write_text(
+        ingest_router.json.dumps(
+            {
+                "parser_version": old_version,
+                "ocr_policy": ingest_router.OCR_POLICY_DRAWING,
+                "sha256": digest,
+                "parsed": {
+                    "base": {
+                        "doc_type": "pdf",
+                        "pages": 1,
+                        "ocr_pages": 1,
+                        "ocr_page_mapping": "source_page_all",
+                        "extract_text": "旧 v6 图纸 OCR",
+                    },
+                    "parsed_type": None,
+                    "parsed_meta": None,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert ingest_router.PARSER_VERSION != old_version
+    assert ingest_router._parse_cache_path(digest, "drawing") != old_path
+    assert ingest_router._load_parse_cache(digest, source_hint="drawing") is None
+
+
 def test_same_pdf_ordinary_cache_does_not_pollute_drawing_cache(
     monkeypatch,
     tmp_path: Path,
@@ -903,6 +944,8 @@ def test_drawing_cache_requires_ocr_for_every_declared_page(
             "ocr_page_proof_version": ingest_router.OCR_PAGE_PROOF_VERSION,
             "ocr_error": None,
             "ocr_blank_pages": [],
+            "ocr_graphics_only_pages": [],
+            "ocr_no_text_locators": [],
         },
         "parsed_type": None,
         "parsed_meta": None,
@@ -965,6 +1008,53 @@ def test_drawing_cache_requires_ocr_for_every_declared_page(
         "drawing",
     ).exists()
 
+    graphics_digest = hashlib.sha256(b"drawing-graphics-page-cache").hexdigest()
+    graphics_complete = copy.deepcopy(complete)
+    graphics_complete["base"]["ocr_page_statuses"][2] = "graphics_only"
+    graphics_complete["base"]["ocr_page_text_sha256"][2] = hashlib.sha256(
+        b""
+    ).hexdigest()
+    graphics_complete["base"]["ocr_graphics_only_pages"] = [3]
+    graphics_complete["base"]["ocr_no_text_locators"] = [
+        {
+            "page": 3,
+            "status": "graphics_only",
+            "reason": "no_machine_readable_text",
+            "page_image_sha256": graphics_complete["base"][
+                "ocr_page_image_sha256"
+            ][2],
+            "no_text_locator": True,
+        }
+    ]
+    ingest_router._save_parse_cache(
+        graphics_digest,
+        graphics_complete,
+        source_hint="drawing",
+    )
+    assert ingest_router._load_parse_cache(
+        graphics_digest,
+        source_hint="drawing",
+    ) == graphics_complete
+
+    graphics_cache_path = ingest_router._parse_cache_path(
+        graphics_digest,
+        "drawing",
+    )
+    graphics_metadata = ingest_router.json.loads(
+        graphics_cache_path.read_text(encoding="utf-8")
+    )
+    graphics_metadata["parsed"]["base"]["ocr_no_text_locators"][0][
+        "page_image_sha256"
+    ] = "f" * 64
+    graphics_cache_path.write_text(
+        ingest_router.json.dumps(graphics_metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert ingest_router._load_parse_cache(
+        graphics_digest,
+        source_hint="drawing",
+    ) is None
+
 
 def test_standard_cache_is_full_page_and_isolated_from_drawing(
     monkeypatch,
@@ -997,6 +1087,8 @@ def test_standard_cache_is_full_page_and_isolated_from_drawing(
             "ocr_page_proof_version": ingest_router.OCR_PAGE_PROOF_VERSION,
             "ocr_error": None,
             "ocr_blank_pages": [],
+            "ocr_graphics_only_pages": [],
+            "ocr_no_text_locators": [],
         },
         "parsed_type": None,
         "parsed_meta": None,
@@ -1072,6 +1164,7 @@ def test_try_ocr_standard_pdf_uses_declared_full_page_bound(
         scale: float,
         lang: str,
         stop_on_catalog: bool,
+        allow_graphics_only: bool,
     ) -> OcrResult:
         observed.update(
             {
@@ -1079,6 +1172,7 @@ def test_try_ocr_standard_pdf_uses_declared_full_page_bound(
                 "scale": scale,
                 "lang": lang,
                 "stop_on_catalog": stop_on_catalog,
+                "allow_graphics_only": allow_graphics_only,
             }
         )
         return OcrResult(
@@ -1114,6 +1208,7 @@ def test_try_ocr_standard_pdf_uses_declared_full_page_bound(
         "scale": 2.2,
         "lang": "chi_sim+eng",
         "stop_on_catalog": False,
+        "allow_graphics_only": False,
     }
 
 
@@ -1281,6 +1376,112 @@ def test_handle_upload_standard_uses_full_page_ocr_and_standard_tag_only(
     assert saved["tags"] == ["standard"]
 
 
+def test_drawing_graphics_only_page_is_cached_but_never_searchable_text(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from backend.zhifei_autoplan import evidence as evidence_module
+
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+
+    async def _parse(ext: str, _path: Path, _total_bytes: int) -> dict[str, Any]:
+        assert ext == "pdf"
+        return {
+            "doc_type": "pdf",
+            "pages": 3,
+            "text_bytes": 0,
+            "extract_text": "原生首页\f图形页残字 钢梁安装\f原生末页",
+        }
+
+    page_images = tuple(
+        hashlib.sha256(f"graphics-image-{page}".encode()).hexdigest()
+        for page in range(1, 4)
+    )
+
+    async def _ocr(*_args: Any, **_kwargs: Any) -> OcrResult:
+        return OcrResult(
+            text="总说明\f\f钢梁安装",
+            pages=3,
+            lang="chi_sim+eng",
+            page_texts=("总说明", "", "钢梁安装"),
+            page_statuses=("text", "graphics_only", "text"),
+            page_image_sha256=page_images,
+            source_pages=3,
+            diagnostics={
+                "schema_version": "ocr-diagnostics-v1",
+                "machine_code": "OCR_COMPLETE_WITH_GRAPHICS_ONLY",
+                "error_code": "none",
+                "status_counts": {"graphics_only": 1, "text": 2},
+                "graphics_only_pages": [2],
+            },
+        )
+
+    monkeypatch.setattr(ingest_router, "_extract_text_path_bounded", _parse)
+    monkeypatch.setattr(ingest_router, "_try_ocr", _ocr)
+    monkeypatch.setattr(
+        ingest_router,
+        "_run_isolated_process",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=None),
+    )
+    payload = b"mixed-text-and-graphics-drawing"
+    first = asyncio.run(
+        ingest_router._handle_upload(
+            [_Upload(payload, "mixed.pdf")],
+            source_hint="drawing",
+            project_id="p1",
+        )
+    )
+    second = asyncio.run(
+        ingest_router._handle_upload(
+            [_Upload(payload, "mixed-cache.pdf")],
+            source_hint="drawing",
+            project_id="p1",
+        )
+    )
+
+    saved = first["saved"][0]
+    assert first["cache_hits"] == 0
+    assert second["cache_hits"] == 1
+    assert saved["ocr_page_proof_version"] == "ocr-page-proof-v3"
+    assert saved["ocr_page_statuses"] == ["text", "graphics_only", "text"]
+    assert saved["ocr_graphics_only_pages"] == [2]
+    assert saved["ocr_no_text_locators"] == [
+        {
+            "page": 2,
+            "status": "graphics_only",
+            "reason": "no_machine_readable_text",
+            "page_image_sha256": page_images[1],
+            "no_text_locator": True,
+        }
+    ]
+    assert second["saved"][0]["ocr_no_text_locators"] == saved[
+        "ocr_no_text_locators"
+    ]
+    evidence_module._load_audit_records.cache_clear()
+    audit_path = workspace / "audit" / "ingest.jsonl"
+    text_hit = search_ingested_docs(
+        "钢梁安装",
+        project_id="p1",
+        audit_path=audit_path,
+    )
+    assert text_hit
+    assert text_hit[0]["page"] == 3
+    assert search_ingested_docs(
+        "图形页残字",
+        project_id="p1",
+        audit_path=audit_path,
+    ) == []
+
+    with pytest.raises(HTTPException):
+        asyncio.run(
+            ingest_router._handle_upload(
+                [_Upload(payload, "mixed-standard.pdf")],
+                source_hint="standard",
+                project_id="p1",
+            )
+        )
+
+
 @pytest.mark.parametrize(
     ("source_hint", "expected_code"),
     [
@@ -1355,6 +1556,7 @@ def test_handle_upload_rejects_failed_full_page_ocr_proof(
         "unreadable_pages": [],
         "failed_pages": [1],
         "timeout_pages": [],
+        "graphics_only_pages": [],
         "recovered_pages": [],
     }
     assert len(receipt["receipt_digest"]) == 64

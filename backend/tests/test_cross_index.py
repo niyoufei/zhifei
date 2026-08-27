@@ -69,6 +69,9 @@ def _drawing_index(
                     "snippet": page_summary,
                     "boundary_source": "declared_single_page",
                     "keywords": [],
+                    "ocr_status": "text",
+                    "evidence_eligible": True,
+                    "no_text_locator": False,
                 }
             ]
             if text_status == "indexed"
@@ -946,6 +949,46 @@ def test_self_consistent_forged_window_is_rejected_against_current_extract():
     assert (
         row["drawing_validation"]["reason"]
         == "drawing_match_window_extract_mismatch"
+    )
+
+
+def test_graphics_only_page_cannot_validate_self_consistent_locator():
+    chapter = "钢梁安装施工工艺"
+    drawing_index = _drawing_index(
+        filename="钢梁图.pdf",
+        sha8="58585858",
+        page=1,
+        offset=20,
+        text="钢梁安装构件位置与节点做法。",
+        chapter=chapter,
+    )
+    anchor = drawing_index["drawings"][0]["page_anchors"][0]
+    anchor.update(
+        {
+            "ocr_status": "graphics_only",
+            "evidence_eligible": False,
+            "no_text_locator": True,
+        }
+    )
+    binding = drawing_index["chapter_bindings"][0]
+
+    out = build_cross_index(
+        boq={"items": [{"name": "钢梁"}], "stats": {}},
+        sections=[
+            {
+                "title": chapter,
+                "content": f"钢梁风险→控制→验证。【证据:{binding['locator']}】",
+            }
+        ],
+        boq_focus={"must_cover_keywords": ["钢梁"]},
+        drawing_index=drawing_index,
+        quality_checks=_closed_quality(chapter, "钢梁"),
+    )
+
+    row = out["focus_items"][0]
+    assert row["drawing_locator"] is None
+    assert row["drawing_validation"]["reason"] == (
+        "drawing_page_not_text_evidence"
     )
 
 

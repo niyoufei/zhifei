@@ -66,8 +66,8 @@ PARSE_CACHE_DIR = Path(
 INGEST_SPOOL_DIR = Path(
     os.environ.get("ZF_AUTOPLAN_INGEST_SPOOL_DIR", "backend/data/autoplan/ingest_spool")
 )
-PARSER_VERSION = "2026.08.runtime-v6-bounded-ocr-proof"
-OCR_PAGE_PROOF_VERSION = "ocr-page-proof-v2"
+PARSER_VERSION = "2026.08.runtime-v7-graphics-only-proof"
+OCR_PAGE_PROOF_VERSION = "ocr-page-proof-v3"
 OCR_FAILURE_RECEIPT_VERSION = "ocr-failure-receipt-v1"
 OCR_POLICY_ORDINARY = "ordinary_bounded"
 OCR_POLICY_DRAWING = "drawing_full_page"
@@ -464,6 +464,8 @@ def _page_text_sha256(
 def _full_page_ocr_result_proof(
     result: Any,
     declared_pages: int | None,
+    *,
+    expected_policy: str,
 ) -> dict[str, Any] | None:
     page_count = _valid_positive_page_count(declared_pages)
     if page_count is None or getattr(result, "error", None) not in {None, ""}:
@@ -489,22 +491,30 @@ def _full_page_ocr_result_proof(
         hashlib.sha256(text.encode("utf-8")).hexdigest()
         for text in normalized_texts
     ]
+    allowed_statuses = {"text", "blank"}
+    if expected_policy == OCR_POLICY_DRAWING:
+        allowed_statuses.add("graphics_only")
     for status, page_text, image_digest in zip(
         statuses,
         normalized_texts,
         image_sha256,
         strict=True,
     ):
-        if status not in {"text", "blank"}:
+        if status not in allowed_statuses:
             return None
         if status == "text" and not page_text:
             return None
-        if status == "blank" and page_text:
+        if status in {"blank", "graphics_only"} and page_text:
             return None
         if not isinstance(image_digest, str) or not re.fullmatch(
             r"[0-9a-f]{64}", image_digest
         ):
             return None
+    graphics_only_pages = [
+        index
+        for index, status in enumerate(statuses, start=1)
+        if status == "graphics_only"
+    ]
     return {
         "ocr_page_statuses": list(statuses),
         "ocr_page_image_sha256": list(image_sha256),
@@ -516,6 +526,17 @@ def _full_page_ocr_result_proof(
             index
             for index, status in enumerate(statuses, start=1)
             if status == "blank"
+        ],
+        "ocr_graphics_only_pages": graphics_only_pages,
+        "ocr_no_text_locators": [
+            {
+                "page": page,
+                "status": "graphics_only",
+                "reason": "no_machine_readable_text",
+                "page_image_sha256": image_sha256[page - 1],
+                "no_text_locator": True,
+            }
+            for page in graphics_only_pages
         ],
     }
 
@@ -594,6 +615,10 @@ def _bounded_ocr_diagnostics(
         "unreadable_pages": _bounded_pages("unreadable_pages", "unreadable"),
         "failed_pages": _bounded_pages("failed_pages", "failed"),
         "timeout_pages": _bounded_pages("timeout_pages", "timeout"),
+        "graphics_only_pages": _bounded_pages(
+            "graphics_only_pages",
+            "graphics_only",
+        ),
         "recovered_pages": _bounded_pages("recovered_pages", "recovered"),
     }
 
@@ -680,6 +705,8 @@ def _parse_cache_policy_valid(
     text_sha256 = base.get("ocr_page_text_sha256")
     extract_page_sha256 = base.get("ocr_extract_page_sha256")
     blank_pages = base.get("ocr_blank_pages")
+    graphics_only_pages = base.get("ocr_graphics_only_pages")
+    no_text_locators = base.get("ocr_no_text_locators")
     if (
         base.get("ocr_page_proof_version") != OCR_PAGE_PROOF_VERSION
         or _valid_positive_page_count(base.get("ocr_source_pages"))
@@ -690,6 +717,8 @@ def _parse_cache_policy_valid(
         or not isinstance(text_sha256, list)
         or not isinstance(extract_page_sha256, list)
         or not isinstance(blank_pages, list)
+        or not isinstance(graphics_only_pages, list)
+        or not isinstance(no_text_locators, list)
         or len(statuses) != declared_pages
         or len(image_sha256) != declared_pages
         or len(text_sha256) != declared_pages
@@ -697,13 +726,16 @@ def _parse_cache_policy_valid(
     ):
         return False
     empty_text_sha256 = hashlib.sha256(b"").hexdigest()
+    allowed_statuses = {"text", "blank"}
+    if expected_policy == OCR_POLICY_DRAWING:
+        allowed_statuses.add("graphics_only")
     for status, image_digest, text_digest in zip(
         statuses,
         image_sha256,
         text_sha256,
         strict=True,
     ):
-        if status not in {"text", "blank"}:
+        if status not in allowed_statuses:
             return False
         if not isinstance(image_digest, str) or not re.fullmatch(
             r"[0-9a-f]{64}", image_digest
@@ -713,7 +745,7 @@ def _parse_cache_policy_valid(
             r"[0-9a-f]{64}", text_digest
         ):
             return False
-        if status == "blank" and text_digest != empty_text_sha256:
+        if status in {"blank", "graphics_only"} and text_digest != empty_text_sha256:
             return False
         if status == "text" and text_digest == empty_text_sha256:
             return False
@@ -728,6 +760,25 @@ def _parse_cache_policy_valid(
         for index, status in enumerate(statuses, start=1)
         if status == "blank"
     ]:
+        return False
+    expected_graphics_only_pages = [
+        index
+        for index, status in enumerate(statuses, start=1)
+        if status == "graphics_only"
+    ]
+    if graphics_only_pages != expected_graphics_only_pages:
+        return False
+    expected_no_text_locators = [
+        {
+            "page": page,
+            "status": "graphics_only",
+            "reason": "no_machine_readable_text",
+            "page_image_sha256": image_sha256[page - 1],
+            "no_text_locator": True,
+        }
+        for page in expected_graphics_only_pages
+    ]
+    if no_text_locators != expected_no_text_locators:
         return False
     extract_text = base.get("extract_text")
     return not isinstance(extract_text, str) or _page_text_sha256(
@@ -1139,9 +1190,8 @@ async def _try_ocr(
     """
     base = (existing_text or "").strip()
     normalized_hint = _normalize_source_hint(source_hint)
-    full_page_ocr = ext == "pdf" and _ocr_cache_policy(
-        normalized_hint
-    ) in OCR_POLICIES_FULL_PAGE
+    full_page_policy = _ocr_cache_policy(normalized_hint)
+    full_page_ocr = ext == "pdf" and full_page_policy in OCR_POLICIES_FULL_PAGE
     # Drawings and standards can contain plenty of embedded-font gibberish.
     # Do not treat length alone as proof that page text is machine-readable.
     if len(base) >= 200 and not full_page_ocr:
@@ -1191,6 +1241,7 @@ async def _try_ocr(
             scale=2.2,
             lang=lang,
             stop_on_catalog=stop_on_catalog,
+            allow_graphics_only=full_page_policy == OCR_POLICY_DRAWING,
         )
         if full_page_ocr:
             result_pages = _valid_positive_page_count(getattr(res, "pages", None))
@@ -1205,7 +1256,11 @@ async def _try_ocr(
                     page_text_count,
                 )
                 return res
-            if _full_page_ocr_result_proof(res, declared_pages) is None:
+            if _full_page_ocr_result_proof(
+                res,
+                declared_pages,
+                expected_policy=full_page_policy,
+            ) is None:
                 logger.warning(
                     "full-page OCR rejected because per-page proof is incomplete"
                 )
@@ -1469,6 +1524,9 @@ async def _handle_upload(
                             proof = _full_page_ocr_result_proof(
                                 ocr_result,
                                 _valid_positive_page_count(parsed.get("pages")),
+                                expected_policy=_ocr_cache_policy(
+                                    normalized_hint
+                                ),
                             )
                             if proof is not None:
                                 parsed.update(proof)

@@ -286,10 +286,18 @@ def _validate_formal_export_indexes(
         "standard_index": standard_locator_present,
     }
     index_rows = {
-        "drawing_index": ("drawings", "indexed_drawing_count"),
-        "standard_index": ("standards", "indexed_standard_count"),
+        "drawing_index": (
+            "drawings",
+            "indexed_drawing_count",
+            "processed_drawing_count",
+        ),
+        "standard_index": (
+            "standards",
+            "indexed_standard_count",
+            "indexed_standard_count",
+        ),
     }
-    for name, (rows_field, count_field) in index_rows.items():
+    for name, (rows_field, count_field, coverage_count_field) in index_rows.items():
         index = indexes.get(name)
         if not isinstance(index, dict):
             raise TypeError(f"direct_export_{name}_invalid")
@@ -303,7 +311,10 @@ def _validate_formal_export_indexes(
             "text_index_status",
             rows_field,
             count_field,
+            coverage_count_field,
         }
+        if name == "drawing_index":
+            required_fields.add("page_coverage_status")
         if not required_fields.issubset(index):
             raise ValueError(f"direct_export_{name}_contract_incomplete")
         if str(index.get("project_id") or "").strip() != expected_project_id:
@@ -316,6 +327,7 @@ def _validate_formal_export_indexes(
                 index.get("locator_unavailable_count") or 0
             )
             indexed_count = int(index.get(count_field) or 0)
+            coverage_count = int(index.get(coverage_count_field) or 0)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"direct_export_{name}_contract_incomplete") from exc
         indexed_rows = index.get(rows_field)
@@ -325,17 +337,47 @@ def _validate_formal_export_indexes(
         )
         rows_invalid = (
             not isinstance(indexed_rows, list)
-            or indexed_count < len(indexed_rows or [])
+            or coverage_count < len(indexed_rows or [])
             or missing_text_count != 0
             or locator_unavailable_count != 0
+            or (
+                name == "drawing_index"
+                and (index_requires_rows[name] or bool(indexed_rows))
+                and str(index.get("page_coverage_status") or "").strip()
+                != "complete"
+            )
         )
         complete_rows = bool(indexed_rows)
-        complete_contract = (
-            index.get("ok") is True
-            and str(index.get("text_index_status") or "").strip() == "complete"
-            and complete_rows
-            and not rows_invalid
-        )
+        text_index_status = str(index.get("text_index_status") or "").strip()
+        if name == "drawing_index":
+            drawing_text_semantics_valid = (
+                (
+                    text_index_status == "complete"
+                    and indexed_count == len(indexed_rows or [])
+                )
+                or (
+                    text_index_status == "partial"
+                    and 0 < indexed_count < len(indexed_rows or [])
+                )
+                or (
+                    text_index_status == "no_text_locator"
+                    and indexed_count == 0
+                )
+            )
+            complete_contract = (
+                index.get("ok") is True
+                and drawing_text_semantics_valid
+                and complete_rows
+                and not rows_invalid
+                and (not index_requires_rows[name] or indexed_count > 0)
+            )
+        else:
+            complete_contract = (
+                index.get("ok") is True
+                and text_index_status == "complete"
+                and complete_rows
+                and not rows_invalid
+            )
         empty_exempt_contract = (
             not index_requires_rows[name]
             and isinstance(indexed_rows, list)

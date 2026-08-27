@@ -420,8 +420,16 @@ def _diagnostics(
             for index, status in enumerate(normalized_statuses, start=1)
             if status == "timeout"
         ],
+        "graphics_only_pages": [
+            index
+            for index, status in enumerate(normalized_statuses, start=1)
+            if status == "graphics_only"
+        ],
         "recovered_pages": list(recovered_pages),
     }
+    machine_code = machine_codes.get(error_code, "OCR_RUNTIME_FAILED")
+    if error_code == "none" and counts.get("graphics_only", 0):
+        machine_code = "OCR_COMPLETE_WITH_GRAPHICS_ONLY"
     return {
         "schema_version": "ocr-diagnostics-v1",
         "engine": _OCR_ENGINE,
@@ -437,7 +445,7 @@ def _diagnostics(
             for values in all_page_lists.values()
         ),
         "error_code": str(error_code or "ocr_engine_failed")[:80],
-        "machine_code": machine_codes.get(error_code, "OCR_RUNTIME_FAILED"),
+        "machine_code": machine_code,
     }
 
 
@@ -458,6 +466,7 @@ def ocr_pdf_path(
     *,
     page_timeout_seconds: float = _DEFAULT_PAGE_TIMEOUT_SECONDS,
     attempt_timeout_seconds: float = _DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
+    allow_graphics_only: bool = False,
 ) -> OcrResult:
     """
     OCR a PDF file by rasterizing pages with pypdfium2 and running pytesseract.
@@ -635,6 +644,11 @@ def ocr_pdf_path(
                     elif page_error is not None:
                         page_error_codes.append(page_error)
                         status = "failed"
+                    elif allow_graphics_only:
+                        # A drawing page may be a valid raster/vector plan with
+                        # no machine-readable text.  Keep it distinct from a
+                        # proven blank page and never synthesize OCR text.
+                        status = "graphics_only"
                     else:
                         page_error_codes.append("ocr_zero_text_nonblank")
                         status = "unreadable"

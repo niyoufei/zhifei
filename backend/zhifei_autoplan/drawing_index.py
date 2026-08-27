@@ -64,6 +64,10 @@ _GENERIC_QUERY_PARTS = (
 _MEANINGFUL_TEXT_RE = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]")
 _FULL_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EMPTY_TEXT_SHA256 = hashlib.sha256(b"").hexdigest()
+_SUPPORTED_OCR_PAGE_PROOF_VERSIONS = {
+    "ocr-page-proof-v2",
+    "ocr-page-proof-v3",
+}
 
 
 def _top_keywords(text: str, limit: int = 12) -> list[str]:
@@ -156,8 +160,17 @@ def _page_anchors(
             if isinstance(page_statuses, list) and page <= len(page_statuses)
             else None
         )
-        if require_full_coverage and ocr_status not in {"text", "blank"}:
+        if require_full_coverage and ocr_status not in {
+            "text",
+            "blank",
+            "graphics_only",
+        }:
             return [], "unreliable_ocr_page_proof_incomplete"
+        if ocr_status == "graphics_only":
+            # Processing coverage is proven by the whole-page image digest,
+            # but this page must never become a text anchor or locator.
+            start = end + 1
+            continue
         if meaningful_count >= 2 or (
             require_full_coverage and ocr_status in {"text", "blank"}
         ):
@@ -172,19 +185,14 @@ def _page_anchors(
                     "boundary_source": boundary_source,
                     "ocr_status": ocr_status,
                     "blank_proven": ocr_status == "blank",
+                    "no_text_locator": ocr_status == "blank",
                     "evidence_eligible": meaningful_count >= 2
-                    and ocr_status != "blank",
+                    and ocr_status in {None, "text"},
                 }
             )
         # split() removes the delimiter; account for its one-character width
         # so offsets stay aligned with evidence.search_ingested_docs().
         start = end + 1
-    if (
-        require_full_coverage
-        and declared_pages is not None
-        and len(anchors) != declared_pages
-    ):
-        return [], "unreliable_page_anchor_coverage_incomplete"
     return anchors, f"reliable_{boundary_source}"
 
 
@@ -199,9 +207,12 @@ def _drawing_pdf_ocr_proof(
     text_sha256 = record.get("ocr_page_text_sha256")
     extract_page_sha256 = record.get("ocr_extract_page_sha256")
     blank_pages = record.get("ocr_blank_pages")
+    proof_version = record.get("ocr_page_proof_version")
+    graphics_only_pages = record.get("ocr_graphics_only_pages")
+    no_text_locators = record.get("ocr_no_text_locators")
     if (
         record.get("ocr_cache_policy") != "drawing_full_page"
-        or record.get("ocr_page_proof_version") != "ocr-page-proof-v1"
+        or proof_version not in _SUPPORTED_OCR_PAGE_PROOF_VERSIONS
         or record.get("ocr_page_mapping") != "source_page_all"
         or record.get("ocr_error") not in {None, ""}
         or record.get("ocr_source_pages") != declared_pages
@@ -218,19 +229,29 @@ def _drawing_pdf_ocr_proof(
         or len(extract_page_sha256) != declared_pages
     ):
         return [], "ocr_page_proof_incomplete"
+    if proof_version == "ocr-page-proof-v3" and (
+        not isinstance(graphics_only_pages, list)
+        or not isinstance(no_text_locators, list)
+    ):
+        return [], "ocr_page_proof_incomplete"
+    if proof_version != "ocr-page-proof-v3":
+        graphics_only_pages = []
+        no_text_locators = []
     for status, image_digest, text_digest in zip(
         statuses,
         image_sha256,
         text_sha256,
         strict=True,
     ):
-        if status not in {"text", "blank"}:
+        if status not in {"text", "blank", "graphics_only"}:
+            return [], "ocr_page_failed_or_unreadable"
+        if status == "graphics_only" and proof_version != "ocr-page-proof-v3":
             return [], "ocr_page_failed_or_unreadable"
         if _FULL_SHA256_RE.fullmatch(str(image_digest or "")) is None:
             return [], "ocr_image_proof_invalid"
         if _FULL_SHA256_RE.fullmatch(str(text_digest or "")) is None:
             return [], "ocr_text_proof_invalid"
-        if status == "blank" and text_digest != _EMPTY_TEXT_SHA256:
+        if status in {"blank", "graphics_only"} and text_digest != _EMPTY_TEXT_SHA256:
             return [], "ocr_blank_proof_invalid"
         if status == "text" and text_digest == _EMPTY_TEXT_SHA256:
             return [], "ocr_text_proof_invalid"
@@ -245,6 +266,25 @@ def _drawing_pdf_ocr_proof(
         if status == "blank"
     ]:
         return [], "ocr_blank_page_proof_invalid"
+    expected_graphics_only_pages = [
+        index
+        for index, status in enumerate(statuses, start=1)
+        if status == "graphics_only"
+    ]
+    if graphics_only_pages != expected_graphics_only_pages:
+        return [], "ocr_graphics_only_page_proof_invalid"
+    expected_no_text_locators = [
+        {
+            "page": page,
+            "status": "graphics_only",
+            "reason": "no_machine_readable_text",
+            "page_image_sha256": image_sha256[page - 1],
+            "no_text_locator": True,
+        }
+        for page in expected_graphics_only_pages
+    ]
+    if no_text_locators != expected_no_text_locators:
+        return [], "ocr_no_text_locator_proof_invalid"
     return [str(status) for status in statuses], "complete"
 
 
@@ -269,29 +309,44 @@ def build_drawing_index(
             "drawings": [],
             "chapter_bindings": [],
             "indexed_drawing_count": 0,
+            "processed_drawing_count": 0,
+            "graphics_only_drawing_count": 0,
+            "graphics_only_page_count": 0,
             "missing_text_or_ocr_count": 0,
             "locator_unavailable_count": 0,
             "invalid_identity_count": 0,
             "integrity_rejection_count": 0,
             "integrity_rejections": [],
             "text_index_status": "missing_project_id",
+            "page_coverage_status": "missing_project_id",
             "chapter_binding_status": "missing_project_id",
             "reason": "missing_project_id",
         }
-    if not audit_path.exists():
+    if audit_path.is_symlink() or not audit_path.is_file():
+        reason = (
+            "ingest_audit_path_untrusted"
+            if audit_path.is_symlink()
+            else "no_ingest_audit"
+        )
         return {
             "ok": False,
+            "project_id": pid,
+            "audit_path": str(audit_path),
             "drawings": [],
             "chapter_bindings": [],
             "indexed_drawing_count": 0,
+            "processed_drawing_count": 0,
+            "graphics_only_drawing_count": 0,
+            "graphics_only_page_count": 0,
             "missing_text_or_ocr_count": 0,
             "locator_unavailable_count": 0,
             "invalid_identity_count": 0,
             "integrity_rejection_count": 0,
             "integrity_rejections": [],
-            "text_index_status": "no_ingest_audit",
-            "chapter_binding_status": "no_ingest_audit",
-            "reason": "no_ingest_audit",
+            "text_index_status": reason,
+            "page_coverage_status": reason,
+            "chapter_binding_status": reason,
+            "reason": reason,
         }
 
     workspace_root = (
@@ -359,6 +414,7 @@ def build_drawing_index(
         trusted = resolve_trusted_ingest_record(
             rec,
             workspace_root=workspace_root,
+            read_text=True,
         )
         if trusted.get("ok") is not True:
             _reject(fname, str(trusted.get("reason") or "evidence_file_unreadable"))
@@ -372,17 +428,16 @@ def build_drawing_index(
         extract_bytes_sha256: str | None = None
         extract_text_sha256: str | None = None
         ocr_page_proof_status = "not_required"
+        graphics_only_pages: list[int] = []
+        no_text_locators: list[dict[str, Any]] = []
         topo = {}
         sem = {}
         try:
-            if extract_path and Path(extract_path).exists():
-                extract_bytes = Path(extract_path).read_bytes()
-                extract_text = extract_bytes.decode("utf-8", errors="ignore")
+            if extract_path:
+                extract_text = str(trusted.get("extract_text") or "")
                 trusted_extract_path = extract_path
-                extract_bytes_sha256 = hashlib.sha256(extract_bytes).hexdigest()
-                extract_text_sha256 = hashlib.sha256(
-                    extract_text.encode("utf-8")
-                ).hexdigest()
+                extract_bytes_sha256 = str(trusted["extract_text_sha256"])
+                extract_text_sha256 = extract_bytes_sha256
                 kw = _top_keywords(extract_text, limit=10)
                 declared_pages = _declared_page_count(rec.get("pages"))
                 drawing_pdf = (
@@ -394,6 +449,34 @@ def build_drawing_index(
                     page_statuses, ocr_page_proof_status = (
                         _drawing_pdf_ocr_proof(rec, declared_pages)
                     )
+                    if ocr_page_proof_status == "complete":
+                        raw_extract_pages = extract_text.split("\f")
+                        kw = _top_keywords(
+                            "\n".join(
+                                raw_extract_pages[index]
+                                for index, status in enumerate(page_statuses)
+                                if status == "text"
+                                and index < len(raw_extract_pages)
+                            ),
+                            limit=10,
+                        )
+                        graphics_only_pages = [
+                            index
+                            for index, status in enumerate(
+                                page_statuses,
+                                start=1,
+                            )
+                            if status == "graphics_only"
+                        ]
+                        raw_no_text_locators = rec.get(
+                            "ocr_no_text_locators"
+                        )
+                        if isinstance(raw_no_text_locators, list):
+                            no_text_locators = [
+                                dict(item)
+                                for item in raw_no_text_locators
+                                if isinstance(item, Mapping)
+                            ]
                 page_anchors, page_boundary_status = _page_anchors(
                     extract_text,
                     declared_pages=declared_pages,
@@ -411,8 +494,13 @@ def build_drawing_index(
                     )
                     if not isinstance(proof_extract_page_sha256, list) or any(
                         str(anchor.get("text_sha256") or "")
-                        != str(proof_extract_page_sha256[index] or "")
-                        for index, anchor in enumerate(page_anchors)
+                        != str(
+                            proof_extract_page_sha256[
+                                int(anchor.get("page") or 0) - 1
+                            ]
+                            or ""
+                        )
+                        for anchor in page_anchors
                     ):
                         page_anchors = []
                         page_boundary_status = (
@@ -432,6 +520,28 @@ def build_drawing_index(
         except (AttributeError, TypeError, ValueError):
             topo = {}
             sem = {}
+        has_text_anchor = any(
+            bool(anchor.get("evidence_eligible"))
+            for anchor in page_anchors
+            if isinstance(anchor, dict)
+        )
+        declared_page_count = _declared_page_count(rec.get("pages"))
+        graphics_only_document = bool(graphics_only_pages) and (
+            declared_page_count == len(graphics_only_pages)
+        )
+        text_status = (
+            "indexed"
+            if has_text_anchor
+            else (
+                "processed_no_text_locator"
+                if graphics_only_document
+                else (
+                    "locator_unavailable"
+                    if page_boundary_status.startswith("unreliable_")
+                    else "missing_text_or_ocr"
+                )
+            )
+        )
         drawings.append(
             {
                 "filename": fname,
@@ -443,21 +553,11 @@ def build_drawing_index(
                 "extract_text_sha256": extract_text_sha256,
                 "keywords": kw,
                 "page_anchors": page_anchors,
-                "text_status": (
-                    "indexed"
-                    if any(
-                        bool(anchor.get("evidence_eligible"))
-                        for anchor in page_anchors
-                        if isinstance(anchor, dict)
-                    )
-                    else (
-                        "locator_unavailable"
-                        if page_boundary_status.startswith("unreliable_")
-                        else "missing_text_or_ocr"
-                    )
-                ),
+                "text_status": text_status,
                 "page_boundary_status": page_boundary_status,
                 "ocr_page_proof_status": ocr_page_proof_status,
+                "graphics_only_pages": graphics_only_pages,
+                "no_text_locators": no_text_locators,
                 "chapter_scope": str(rec.get("chapter_scope") or "").strip() or None,
                 "process_scope": str(rec.get("process_scope") or "").strip() or None,
                 "discipline_tags": [
@@ -529,6 +629,7 @@ def build_drawing_index(
         match_window = hit.get("match_window") if isinstance(hit.get("match_window"), dict) else None
         if (
             not isinstance(page_anchor, dict)
+            or page_anchor.get("evidence_eligible") is not True
             or not isinstance(match_window, dict)
             or str(hit.get("page_text_sha256") or "") != str(page_anchor.get("text_sha256") or "")
             or str(hit.get("page_summary") or "") != str(page_anchor.get("snippet") or "")
@@ -560,6 +661,21 @@ def build_drawing_index(
         )
 
     indexed_drawing_count = sum(1 for drawing in drawings if drawing.get("text_status") == "indexed")
+    processed_drawing_count = sum(
+        1
+        for drawing in drawings
+        if drawing.get("text_status")
+        in {"indexed", "processed_no_text_locator"}
+    )
+    graphics_only_drawing_count = sum(
+        1
+        for drawing in drawings
+        if drawing.get("text_status") == "processed_no_text_locator"
+    )
+    graphics_only_page_count = sum(
+        len(drawing.get("graphics_only_pages") or [])
+        for drawing in drawings
+    )
     missing_text_or_ocr_count = sum(
         1 for drawing in drawings if drawing.get("text_status") == "missing_text_or_ocr"
     )
@@ -568,12 +684,15 @@ def build_drawing_index(
     )
     return {
         "ok": bool(drawings)
-        and indexed_drawing_count == len(drawings)
+        and processed_drawing_count == len(drawings)
         and not integrity_rejections,
         "project_id": pid,
-        "drawings": drawings[:30],
+        "drawings": drawings,
         "chapter_bindings": bindings[:24],
         "indexed_drawing_count": indexed_drawing_count,
+        "processed_drawing_count": processed_drawing_count,
+        "graphics_only_drawing_count": graphics_only_drawing_count,
+        "graphics_only_page_count": graphics_only_page_count,
         "missing_text_or_ocr_count": missing_text_or_ocr_count,
         "locator_unavailable_count": locator_unavailable_count,
         "invalid_identity_count": invalid_identity_count,
@@ -585,6 +704,26 @@ def build_drawing_index(
             if drawings
             and indexed_drawing_count == len(drawings)
             and not integrity_rejections
+            else (
+                "partial"
+                if drawings
+                and indexed_drawing_count > 0
+                and processed_drawing_count == len(drawings)
+                and not integrity_rejections
+                else (
+                    "no_text_locator"
+                    if drawings
+                    and graphics_only_drawing_count == len(drawings)
+                    and not integrity_rejections
+                    else ("incomplete" if drawings else "no_drawings")
+                )
+            )
+        ),
+        "page_coverage_status": (
+            "complete"
+            if drawings
+            and processed_drawing_count == len(drawings)
+            and not integrity_rejections
             else ("incomplete" if drawings else "no_drawings")
         ),
         "chapter_binding_status": (
@@ -594,9 +733,14 @@ def build_drawing_index(
                 "drawing_locator_unavailable"
                 if drawings and locator_unavailable_count > 0 and indexed_drawing_count == 0
                 else (
+                    "drawing_no_text_locator"
+                    if drawings
+                    and graphics_only_drawing_count == len(drawings)
+                    else (
                     "drawing_text_or_ocr_missing"
                     if drawings and indexed_drawing_count == 0
                     else ("no_chapter_specific_evidence" if drawings else "no_drawings")
+                    )
                 )
             )
         ),

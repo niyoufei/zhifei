@@ -59,7 +59,7 @@ def _record(
         "tags": [],
         "source_hint": "drawing_standard",
         "ocr_cache_policy": "drawing_full_page",
-        "ocr_page_proof_version": "ocr-page-proof-v1",
+        "ocr_page_proof_version": "ocr-page-proof-v3",
         "ocr_page_mapping": "source_page_all",
         "ocr_source_pages": page_count,
         "ocr_error": None,
@@ -71,6 +71,8 @@ def _record(
             for index, status in enumerate(page_statuses, start=1)
             if status == "blank"
         ],
+        "ocr_graphics_only_pages": [],
+        "ocr_no_text_locators": [],
         "ocr_page_image_sha256": [
             hashlib.sha256(f"image-{index}".encode()).hexdigest()
             for index in range(page_count)
@@ -271,13 +273,12 @@ def test_multi_page_extract_without_boundaries_is_locator_unavailable(
 
     result = build_drawing_index("示例项目", ["钢梁安装施工工艺"], project_id="p1")
 
-    drawing = result["drawings"][0]
-    assert drawing["text_status"] == "locator_unavailable"
-    assert drawing["page_boundary_status"] == "unreliable_missing_page_boundaries"
-    assert drawing["page_anchors"] == []
-    assert result["locator_unavailable_count"] == 1
+    assert result["drawings"] == []
+    assert result["integrity_rejection_count"] == 1
+    assert result["integrity_rejections"][0]["reason"] == (
+        "ocr_extract_page_count_mismatch"
+    )
     assert result["chapter_bindings"] == []
-    assert result["chapter_binding_status"] == "drawing_locator_unavailable"
 
 
 def test_multi_page_form_feed_preserves_real_page_and_offset(monkeypatch, tmp_path: Path) -> None:
@@ -350,6 +351,138 @@ def test_merged_native_and_ocr_pages_validate_against_extract_page_proof(
     assert result["chapter_bindings"][0]["page"] == 2
 
 
+def test_graphics_only_page_has_no_text_anchor_or_chapter_binding(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        tmp_path,
+        filename="结构布置图.pdf",
+        sha="graphics-only",
+        text="总说明。\f屋面支撑残留字样。",
+        pages=2,
+    )
+    record["ocr_page_statuses"] = ["text", "graphics_only"]
+    record["ocr_page_text_sha256"] = [
+        hashlib.sha256("总说明。".encode()).hexdigest(),
+        hashlib.sha256(b"").hexdigest(),
+    ]
+    record["ocr_graphics_only_pages"] = [2]
+    record["ocr_no_text_locators"] = [
+        {
+            "page": 2,
+            "status": "graphics_only",
+            "reason": "no_machine_readable_text",
+            "page_image_sha256": record["ocr_page_image_sha256"][1],
+            "no_text_locator": True,
+        }
+    ]
+    _write_audit(tmp_path, [record])
+    monkeypatch.chdir(tmp_path)
+
+    result = build_drawing_index(
+        "示例项目",
+        ["屋面支撑施工工艺"],
+        project_id="p1",
+    )
+
+    drawing = result["drawings"][0]
+    assert drawing["ocr_page_proof_status"] == "complete"
+    assert drawing["graphics_only_pages"] == [2]
+    assert drawing["no_text_locators"] == record["ocr_no_text_locators"]
+    assert [anchor["page"] for anchor in drawing["page_anchors"]] == [1]
+    assert result["chapter_bindings"] == []
+
+
+def test_fully_graphics_drawing_reports_page_coverage_without_text_complete(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        tmp_path,
+        filename="低清结构线图.pdf",
+        sha="fully-graphics",
+        text="低清残留字符",
+    )
+    record["ocr_page_statuses"] = ["graphics_only"]
+    record["ocr_page_text_sha256"] = [hashlib.sha256(b"").hexdigest()]
+    record["ocr_graphics_only_pages"] = [1]
+    record["ocr_no_text_locators"] = [
+        {
+            "page": 1,
+            "status": "graphics_only",
+            "reason": "no_machine_readable_text",
+            "page_image_sha256": record["ocr_page_image_sha256"][0],
+            "no_text_locator": True,
+        }
+    ]
+    _write_audit(tmp_path, [record])
+    monkeypatch.chdir(tmp_path)
+
+    result = build_drawing_index("示例项目", [], project_id="p1")
+
+    assert result["ok"] is True
+    assert result["indexed_drawing_count"] == 0
+    assert result["processed_drawing_count"] == 1
+    assert result["text_index_status"] == "no_text_locator"
+    assert result["page_coverage_status"] == "complete"
+    assert result["drawings"][0]["text_status"] == (
+        "processed_no_text_locator"
+    )
+
+
+def test_drawing_index_uses_the_validated_extract_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        tmp_path,
+        filename="钢梁可信快照.pdf",
+        sha="trusted-snapshot",
+        text="钢梁安装构件位置与节点做法。",
+    )
+    extract_path = Path(record["extract_saved_as"])
+    _write_audit(tmp_path, [record])
+    original_read_bytes = Path.read_bytes
+
+    def _forbid_extract_reread(path: Path) -> bytes:
+        if path == extract_path:
+            raise AssertionError("validated extract must not be read a second time")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", _forbid_extract_reread)
+    monkeypatch.chdir(tmp_path)
+
+    result = build_drawing_index("示例项目", [], project_id="p1")
+
+    assert result["ok"] is True
+    assert result["drawings"][0]["text_status"] == "indexed"
+
+
+def test_drawing_index_rejects_symlinked_audit_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        tmp_path,
+        filename="围墙图.pdf",
+        sha="audit-symlink",
+        text="围墙构造做法。",
+    )
+    _write_audit(tmp_path, [record])
+    audit_path = tmp_path / "backend/data/audit/ingest.jsonl"
+    real_audit_path = audit_path.with_name("ingest-real.jsonl")
+    audit_path.replace(real_audit_path)
+    audit_path.symlink_to(real_audit_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = build_drawing_index("示例项目", [], project_id="p1")
+
+    assert result["ok"] is False
+    assert result["reason"] == "ingest_audit_path_untrusted"
+    assert result["drawings"] == []
+
+
 def test_forged_audit_identity_and_external_extract_are_rejected(
     monkeypatch,
     tmp_path: Path,
@@ -410,11 +543,12 @@ def test_failed_drawing_ocr_page_blocks_all_page_bindings(
         project_id="p1",
     )
 
-    drawing = result["drawings"][0]
     assert result["ok"] is False
-    assert drawing["text_status"] == "locator_unavailable"
-    assert drawing["page_anchors"] == []
-    assert drawing["ocr_page_proof_status"] == "ocr_page_proof_incomplete"
+    assert result["drawings"] == []
+    assert result["integrity_rejection_count"] == 1
+    assert result["integrity_rejections"][0]["reason"] == (
+        "ocr_page_proof_incomplete"
+    )
     assert result["chapter_bindings"] == []
 
 

@@ -65,7 +65,7 @@ def _record(
         "extract_saved_as": str(extract_path),
         "extract_text_sha256": extract_digest,
         "ocr_cache_policy": "standard_full_page",
-        "ocr_page_proof_version": "ocr-page-proof-v1",
+        "ocr_page_proof_version": "ocr-page-proof-v3",
         "ocr_page_mapping": "source_page_all",
         "ocr_error": None,
         "ocr_source_pages": page_count,
@@ -87,6 +87,8 @@ def _record(
             for index, status in enumerate(statuses, start=1)
             if status == "blank"
         ],
+        "ocr_graphics_only_pages": [],
+        "ocr_no_text_locators": [],
     }
     record.update(extra)
     return record
@@ -280,7 +282,7 @@ def test_standard_index_accepts_explicit_blank_proof_with_complete_page_coverage
                 1,
                 "unreadable",
             ),
-            "ocr_page_failed_or_unreadable",
+            "ocr_page_status_invalid",
         ),
         (
             lambda record: record.__setitem__("ocr_source_pages", 3),
@@ -299,7 +301,7 @@ def test_standard_index_accepts_explicit_blank_proof_with_complete_page_coverage
         ),
         (
             lambda record: record.__setitem__("ocr_blank_pages", [1]),
-            "ocr_blank_page_manifest_mismatch",
+            "ocr_blank_page_manifest_invalid",
         ),
     ],
 )
@@ -370,7 +372,7 @@ def test_standard_index_rejects_partial_page_anchor_even_with_valid_hashes(
     )
 
     assert result["standards"] == []
-    assert "ocr_extract_page_proof_incomplete" in _rejection_codes(result)
+    assert "ocr_extract_page_count_mismatch" in _rejection_codes(result)
 
 
 def test_standard_index_rejects_short_or_mismatched_identity(
