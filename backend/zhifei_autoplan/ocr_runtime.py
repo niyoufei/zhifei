@@ -24,6 +24,7 @@ _MIN_OCR_TIMEOUT_SECONDS = 0.05
 _SECOND_PASS_MIN_SCALE = 3.0
 _SECOND_PASS_MAX_SCALE = 3.5
 _SECOND_PASS_MAX_PIXELS = 24_000_000
+_TIMEOUT_RECOVERY_SCALE = 1.0
 _MAX_DIAGNOSTIC_PAGE_NUMBERS = 64
 
 # The fallback is deliberately fixed and small.  Sparse CAD labels commonly
@@ -338,6 +339,40 @@ def _run_second_pass(
         )
 
 
+def _run_timeout_recovery(
+    *,
+    page: Any,
+    pytesseract: Any,
+    lang: str,
+    deadline: float,
+    attempt_timeout_seconds: float,
+) -> tuple[str, str | None]:
+    """Retry a complex timed-out page once at low resolution with sparse text."""
+
+    bitmap = None
+    source_image = None
+    prepared = None
+    try:
+        if deadline - time.monotonic() < _MIN_OCR_TIMEOUT_SECONDS:
+            return "", "ocr_page_timeout"
+        bitmap = page.render(scale=_TIMEOUT_RECOVERY_SCALE)
+        source_image = bitmap.to_pil()
+        prepared = _preprocess_pil_for_ocr(source_image)
+        return _invoke_tesseract(
+            pytesseract,
+            prepared,
+            lang=lang,
+            config="--psm 11",
+            deadline=deadline,
+            attempt_timeout_seconds=attempt_timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 - native rerender isolation boundary
+        return "", _classify_ocr_exception(exc)
+    finally:
+        closable_prepared = prepared if prepared is not source_image else None
+        _safe_close(closable_prepared, source_image, bitmap)
+
+
 def _bounded_page_numbers(values: list[int] | tuple[int, ...]) -> list[int]:
     return sorted({int(value) for value in values if int(value) >= 1})[
         :_MAX_DIAGNOSTIC_PAGE_NUMBERS
@@ -558,10 +593,8 @@ def ocr_pdf_path(
                 ):
                     status = "blank"
                 elif page_error == "ocr_page_timeout":
-                    page_text, retry_error = _run_second_pass(
+                    page_text, retry_error = _run_timeout_recovery(
                         page=page,
-                        source_image=source_image,
-                        base_scale=base_scale,
                         pytesseract=pytesseract,
                         lang=use_lang,
                         deadline=page_deadline,

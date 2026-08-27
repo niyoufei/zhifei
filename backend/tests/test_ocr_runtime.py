@@ -369,7 +369,9 @@ def test_ocr_pdf_path_recovers_sparse_cad_text_with_bounded_second_pass(
     assert result.error is None
     assert result.page_texts == ("钢梁 GJ-01",)
     assert result.page_statuses == ("text",)
-    assert render_scales == [2.0, 3.0]
+    assert render_scales == (
+        [2.0, 3.0] if primary_outcome == "empty" else [2.0, 1.0]
+    )
     assert [call["config"] for call in ocr_calls] == ["", "--psm 11"]
     assert all(0 < float(call["timeout"]) <= 0.5 for call in ocr_calls)
     assert result.diagnostics == {
