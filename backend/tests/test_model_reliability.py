@@ -19,10 +19,13 @@ from backend.zhifei_autoplan.utils.llm_client import LLMClient
         ("401 invalid api key", "authentication_failed", False),
         ("429 rate limit exceeded", "rate_limited", True),
         ("429 insufficient_quota: credit balance exhausted", "quota_exhausted", False),
+        ("You have no credits remaining. Please add credits.", "quota_exhausted", False),
         ("404 model not found", "model_not_found", False),
         (TimeoutError(), "timeout", True),
         ("503 service unavailable", "provider_unavailable", True),
         ("400 bad request", "invalid_request", False),
+        ("content blocked by safety policy", "content_filtered", False),
+        ("output_truncated", "output_truncated", False),
         ("no_visible_text", "no_visible_text", True),
     ],
 )
@@ -46,6 +49,28 @@ def test_sanitize_provider_message_removes_secret_shaped_values():
     assert message.count("[REDACTED]") == 2
 
 
+def test_internal_requirement_gate_identifier_is_not_a_provider_status_or_filter():
+    result = classify_provider_error(
+        "requirement_evidence_precheckpoint_blocked:REQ-CR-E1AF505EF062",
+        provider="anthropic",
+        model="claude-opus-5",
+    )
+
+    assert result["code"] == "provider_error"
+    assert result["retryable"] is False
+
+
+def test_explicit_provider_unavailable_status_remains_retryable():
+    result = classify_provider_error(
+        "503 provider unavailable",
+        provider="anthropic",
+        model="claude-opus-5",
+    )
+
+    assert result["code"] == "provider_unavailable"
+    assert result["retryable"] is True
+
+
 def test_runtime_opens_after_retryable_threshold_and_resets_on_success():
     runtime = ModelReliabilityRuntime(failure_threshold=2)
     error = classify_provider_error("503 unavailable", provider="openai", model="m")
@@ -55,6 +80,26 @@ def test_runtime_opens_after_retryable_threshold_and_resets_on_success():
     assert runtime.is_open("openai", "m") is True
     runtime.record_success("openai", "m")
     assert runtime.is_open("openai", "m") is False
+
+
+def test_runtime_requires_threshold_for_nonretryable_failure_too():
+    runtime = ModelReliabilityRuntime(failure_threshold=2)
+    error = classify_provider_error("401 invalid api key", provider="openai", model="m")
+    runtime.record_failure("openai", "m", error)
+    assert runtime.is_open("openai", "m") is False
+    runtime.record_failure("openai", "m", error)
+    assert runtime.is_open("openai", "m") is True
+
+
+def test_runtime_isolates_circuits_by_credential_identity():
+    runtime = ModelReliabilityRuntime(failure_threshold=2)
+    error = classify_provider_error("429 rate limit exceeded", provider="openai", model="m")
+    runtime.record_failure("openai", "m", error, "credential-a")
+    runtime.record_failure("openai", "m", error, "credential-a")
+
+    assert runtime.is_open("openai", "m", "credential-a") is True
+    assert runtime.is_open("openai", "m", "credential-b") is False
+    assert runtime.is_open("openai", "m") is True
 
 
 @pytest.mark.asyncio
@@ -166,11 +211,11 @@ async def test_exhausted_internal_retries_count_as_one_circuit_failure():
             retry_base_delay=0,
         )
         first = await client.complete("prompt")
-        assert first["attempts"] == 3
+        assert first["attempts"] == 2
         assert runtime.is_open("openai", "m") is False
 
         second = await client.complete("prompt")
 
-    assert second["attempts"] == 3
-    assert impl.complete.await_count == 6
+    assert second["attempts"] == 2
+    assert impl.complete.await_count == 4
     assert runtime.is_open("openai", "m") is True

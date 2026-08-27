@@ -187,7 +187,13 @@ def plan_chapter_pages(
     titles = [str(x).strip() for x in (outline or []) if str(x).strip()]
     if not titles:
         return {}
-    limit = max(len(titles), int(total_pages or DEFAULT_TOTAL_PAGES))
+    limit = int(total_pages or DEFAULT_TOTAL_PAGES)
+    if len(titles) > limit:
+        raise ValueError(
+            "OUTLINE_EXCEEDS_PAGE_LIMIT: "
+            f"chapter_count={len(titles)} exceeds total_pages={limit}; "
+            "the tender outline must be merged or the page limit explicitly revised"
+        )
     existing = chapter_pages if isinstance(chapter_pages, dict) else {}
 
     result: Dict[str, int] = {}

@@ -9,6 +9,10 @@ from typing import Any, Dict, List
 from backend.zhifei_autoplan.model_aliases import latest_runtime_model_for
 
 
+class ProviderRoutingConfigurationError(RuntimeError):
+    code = "MODEL_PROVIDER_CONFIGURATION_BLOCKED"
+
+
 @dataclass(frozen=True)
 class ProviderSlot:
     slot: str
@@ -465,6 +469,15 @@ def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
     out.pop("providers", None)
     out.pop("model_map", None)
     out.pop("provider_chain", None)
+    # Provider endpoints and credentials are server-owned.  Client-controlled
+    # overrides would bypass admission and could route requests to an unreviewed
+    # endpoint.
+    out.pop("base_url", None)
+    out.pop("secret_key", None)
+    out.pop("token_url", None)
+    out.pop("_provider_admitted_image_slots", None)
+    out["_server_provider_routing_enforced"] = True
+    out["_provider_admission_required"] = not bool(out.get("dry_run", False))
     if not chain:
         if bool(out.get("dry_run", False)):
             out["provider_chain"] = []
@@ -478,8 +491,20 @@ def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "routing_mode": "dry_run_no_text_chain",
             }
             return out
-        raise RuntimeError(
+        raise ProviderRoutingConfigurationError(
             "text_provider_not_configured: no configured credential for the server-side primary or fallback text chain"
+        )
+    unsupported = sorted(
+        {
+            str(item.get("provider") or "").strip().lower()
+            for item in chain
+            if str(item.get("provider") or "").strip().lower()
+            not in {"openai", "anthropic", "google"}
+        }
+    )
+    if unsupported:
+        raise ProviderRoutingConfigurationError(
+            "text_provider_not_admission_capable: " + ",".join(unsupported)
         )
     out["provider_chain"] = chain
     out["provider"] = str(chain[0]["provider"])
@@ -491,7 +516,17 @@ def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
         "automation": bool(resolve_automation_slot()),
         "image_chain": [f"{item.slot}:{item.provider}/{item.model}" for item in resolve_image_slots()],
         "resolved_at": int(time.time()),
+        "routing_mode": "server_allowlist",
     }
+    document_slot = resolve_document_render_slot()
+    out["_provider_admission_extra_slots"] = (
+        [document_slot.as_payload()] if document_slot is not None else []
+    )
+    required_roles = ["text_draft"]
+    if any(str(item.get("slot") or "") == "text_review" for item in chain):
+        required_roles.append("text_review")
+    required_roles.append("document_render")
+    out["_provider_admission_required_roles"] = required_roles
     return out
 
 
@@ -514,6 +549,80 @@ def resolve_text_slot_credentials(slot_id: str | None, provider: str | None) -> 
         if main:
             return main.api_key, main.key_alias
     return None, None
+
+
+def resolve_provider_slot_credentials(
+    slot_id: str | None,
+    provider: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve a server-owned credential without exposing it in route payloads."""
+
+    normalized_slot = _clean_text(slot_id).lower()
+    if normalized_slot == "document_render":
+        slot = resolve_document_render_slot()
+        if slot is not None:
+            return slot.api_key, slot.key_alias
+        return None, None
+    return resolve_text_slot_credentials(normalized_slot, provider)
+
+
+def build_server_provider_admission_candidates(
+    *,
+    profile: str | None = None,
+    allow_fable_escalation: bool = False,
+) -> List[Any]:
+    """Return the current credential-bound route for offline admission checks.
+
+    Credentials remain only on ephemeral ``ProviderCandidate`` objects. Callers
+    must use the provider-admission public projection before serialization.
+    """
+
+    from backend.zhifei_autoplan.provider_admission import ProviderCandidate
+
+    slots = [
+        slot
+        for slot in build_server_text_slots(profile=profile)
+        if allow_fable_escalation or slot.role != "text_escalation"
+    ]
+    document_slot = resolve_document_render_slot()
+    if document_slot is not None:
+        slots.append(document_slot)
+    candidates: List[ProviderCandidate] = []
+    for slot in slots:
+        stream_required = str(slot.role).startswith("text_")
+        candidates.append(
+            ProviderCandidate(
+                slot=slot.slot,
+                role=slot.role,
+                provider=slot.provider,
+                model=slot.model,
+                credential=slot.api_key,
+                key_alias=slot.key_alias,
+                stream_required=stream_required,
+                stream_supported=(
+                    slot.provider in {"openai", "anthropic", "google"}
+                    if stream_required
+                    else True
+                ),
+            )
+        )
+    return candidates
+
+
+def server_provider_admission_required_roles(
+    candidates: List[Any] | None = None,
+    *,
+    require_review: bool = True,
+    require_document_render: bool = True,
+) -> List[str]:
+    rows = candidates if isinstance(candidates, list) else build_server_provider_admission_candidates()
+    roles = {str(getattr(item, "role", "") or "").strip() for item in rows}
+    required = ["text_draft"]
+    if require_review and "text_review" in roles:
+        required.append("text_review")
+    if require_document_render:
+        required.append("document_render")
+    return required
 
 
 def resolve_automation_credentials() -> tuple[str | None, str | None, str | None]:

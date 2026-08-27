@@ -445,7 +445,11 @@ def evaluate_page_quality(page_metrics: list[dict[str, Any]]) -> dict[str, Any]:
         except (TypeError, ValueError):
             continue
         if width > 0 and height > 0:
-            page_ratios.append((int(item["page"]), round(width / height, 6)))
+            ratio = width / height
+            # A4 portrait and A4 landscape are the same physical page geometry.
+            # Compare the orientation-independent short/long ratio so legitimate
+            # landscape table sections are not misclassified as size drift.
+            page_ratios.append((int(item["page"]), round(min(ratio, 1.0 / ratio), 6)))
     geometry_outliers: list[int] = []
     if page_ratios:
         baseline_ratio = sorted(ratio for _, ratio in page_ratios)[len(page_ratios) // 2]

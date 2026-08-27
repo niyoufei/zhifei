@@ -76,12 +76,25 @@ def test_visual_quality_blocks_consecutive_sparse_pages_within_global_budget() -
     assert result["sparse_page_streaks"] == [[20, 21]]
 
 
-def test_visual_quality_blocks_inconsistent_page_geometry() -> None:
+def test_visual_quality_accepts_a4_orientation_changes() -> None:
     result = evaluate_page_quality(
         [
             _page(1, pixel_width=1240, pixel_height=1754),
             _page(2, pixel_width=1240, pixel_height=1754),
             _page(3, pixel_width=1754, pixel_height=1240),
+        ]
+    )
+
+    assert result["status"] == "pass"
+    assert result["page_geometry_outliers"] == []
+
+
+def test_visual_quality_blocks_inconsistent_page_geometry() -> None:
+    result = evaluate_page_quality(
+        [
+            _page(1, pixel_width=1240, pixel_height=1754),
+            _page(2, pixel_width=1240, pixel_height=1754),
+            _page(3, pixel_width=1400, pixel_height=1754),
         ]
     )
 

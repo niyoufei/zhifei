@@ -1,9 +1,14 @@
 from fastapi import FastAPI, BackgroundTasks, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import asyncio
 import os, json
+import subprocess
+import time
+import stat
 from pathlib import Path
 from datetime import datetime
+from contextlib import asynccontextmanager, suppress
 
 from compose_engine import Composer
 from utils_write_docx import write_compose_to_docx
@@ -12,7 +17,177 @@ from backend.zhifei_autoplan.local_env import load_local_env
 
 load_local_env()
 
-app = FastAPI()
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    _reconcile_runtime_jobs()
+    reaper = asyncio.create_task(_orphan_job_reaper(), name="autoplan-orphan-job-reaper")
+    try:
+        yield
+    finally:
+        reaper.cancel()
+        with suppress(asyncio.CancelledError):
+            await reaper
+
+
+app = FastAPI(lifespan=_app_lifespan)
+_SERVICE_STARTED_AT = time.time()
+_STARTUP_RECONCILED_JOBS: list[str] = []
+_STARTUP_RECONCILED_FAILED_JOBS: list[str] = []
+_ORPHAN_REAPER_STATE: dict[str, object] = {
+    "running": False,
+    "interval_seconds": 15,
+    "stale_after_seconds": 60,
+    "last_run_at": None,
+    "last_reconciled": 0,
+    "last_error": None,
+}
+
+
+def _git_runtime_identity() -> dict[str, object]:
+    def _run(*args: str) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=str(Path(".").resolve()),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=0.35,
+                check=False,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+        except Exception:
+            return None
+        if completed.returncode != 0:
+            return None
+        return completed.stdout.strip()
+
+    sealed_head = str(os.environ.get("ZF_BUILD_SHA") or "").strip()
+    sealed_branch = str(os.environ.get("ZF_BUILD_BRANCH") or "").strip()
+    sealed_dirty_raw = str(os.environ.get("ZF_BUILD_DIRTY") or "").strip()
+    head = sealed_head or _run("rev-parse", "HEAD")
+    branch = sealed_branch or _run("branch", "--show-current")
+    porcelain = None if sealed_dirty_raw in {"0", "1"} else _run(
+        "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    dirty = (
+        sealed_dirty_raw == "1"
+        if sealed_dirty_raw in {"0", "1"}
+        else (None if porcelain is None else bool(porcelain))
+    )
+    return {
+        "build_sha": head,
+        "build_branch": branch,
+        "dirty": dirty,
+    }
+
+
+_RUNTIME_IDENTITY_AT_START = _git_runtime_identity()
+
+
+def _release_runtime_identity() -> dict[str, object]:
+    """Freeze the content-addressed release identity at process start."""
+    values = {
+        "release_id": str(os.environ.get("ZF_RELEASE_ID") or "").strip(),
+        "manifest_digest": str(
+            os.environ.get("ZF_RELEASE_MANIFEST_DIGEST") or ""
+        ).strip(),
+        "source_digest": str(
+            os.environ.get("ZF_RELEASE_SOURCE_DIGEST") or ""
+        ).strip(),
+        "runtime_digest": str(os.environ.get("ZF_RUNTIME_DIGEST") or "").strip(),
+        "release_root": str(os.environ.get("ZF_RELEASE_ROOT") or "").strip(),
+    }
+    values["managed"] = all(bool(values[key]) for key in values)
+    values["mode"] = "sealed_release" if values["managed"] else "development"
+    return values
+
+
+_RELEASE_IDENTITY_AT_START = _release_runtime_identity()
+_SUPERVISOR_STATE_FILE_AT_START = str(
+    os.environ.get("ZF_SUPERVISOR_STATE_FILE") or ""
+).strip()
+_SUPERVISOR_PUBLIC_FIELDS = {
+    "status",
+    "release_id",
+    "backend_pid",
+    "ui_pid",
+    "circuit_open",
+    "restart_count_window",
+    "last_health_at",
+    "last_error_code",
+    "health_degraded",
+    "consecutive_health_failures",
+    "first_health_failure_at",
+    "last_probe_error_code",
+    "started_at",
+    "updated_at",
+}
+
+
+def _supervisor_runtime_status() -> dict[str, object]:
+    """Read a small, permission-checked state projection without leaking secrets."""
+    managed = bool(_RELEASE_IDENTITY_AT_START.get("managed"))
+    if not _SUPERVISOR_STATE_FILE_AT_START:
+        return {"managed": managed, "available": False, "status": "unmanaged"}
+    path = Path(_SUPERVISOR_STATE_FILE_AT_START)
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+            return {
+                "managed": managed,
+                "available": False,
+                "status": "state_untrusted",
+            }
+        if info.st_size > 64 * 1024:
+            return {
+                "managed": managed,
+                "available": False,
+                "status": "state_oversized",
+            }
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("invalid supervisor state")
+        public = {
+            key: raw.get(key)
+            for key in _SUPERVISOR_PUBLIC_FIELDS
+            if key in raw
+        }
+        public.update({"managed": managed, "available": True})
+        return public
+    except Exception:
+        return {
+            "managed": managed,
+            "available": False,
+            "status": "state_unavailable",
+        }
+
+
+def _offline_provider_admission_status(*, detailed: bool = False) -> dict[str, object]:
+    """Evaluate the latest receipt without importing an SDK or touching network."""
+
+    from backend.zhifei_autoplan.provider_admission import evaluate_latest_snapshot
+    from backend.zhifei_autoplan.provider_runtime import (
+        build_server_provider_admission_candidates,
+        server_provider_admission_required_roles,
+    )
+
+    candidates = build_server_provider_admission_candidates()
+    required_roles = server_provider_admission_required_roles(candidates)
+    snapshot = evaluate_latest_snapshot(
+        candidates,
+        required_roles,
+        root=os.environ.get("ZF_PROVIDER_ADMISSION_STATE_DIR") or None,
+    )
+    if detailed:
+        return snapshot
+    return {
+        "configured": bool(snapshot.get("configured_slots")),
+        "admitted": str(snapshot.get("status") or "") in {"admitted", "degraded"},
+        "state": str(snapshot.get("status") or "missing"),
+        "generation_allowed": bool(snapshot.get("generation_allowed")),
+        "degraded": bool(snapshot.get("degraded")),
+    }
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,8 +221,76 @@ app.include_router(local_trial_preview_only_router)
 app.include_router(kg_read_only_preview_router)
 
 
+def _reconcile_runtime_jobs() -> None:
+    from backend.zhifei_autoplan.job_store import (
+        get_job,
+        reconcile_legacy_failed_jobs,
+        reconcile_stale_jobs,
+    )
+    from backend.zhifei_autoplan.local_job_queue import ensure_worker_started
+    from backend.zhifei_autoplan.runtime_events import append_runtime_event
+
+    global _STARTUP_RECONCILED_JOBS, _STARTUP_RECONCILED_FAILED_JOBS
+    _STARTUP_RECONCILED_JOBS = reconcile_stale_jobs(stale_after_seconds=60)
+    for job_id in _STARTUP_RECONCILED_JOBS:
+        append_runtime_event(job_id, "startup_reconciled", status="interrupted_recoverable")
+    _STARTUP_RECONCILED_FAILED_JOBS = reconcile_legacy_failed_jobs()
+    for job_id in _STARTUP_RECONCILED_FAILED_JOBS:
+        repaired = get_job(job_id) or {}
+        checkpoint = (
+            (repaired.get("progress") or {}).get("checkpoint")
+            if isinstance(repaired.get("progress"), dict)
+            else {}
+        )
+        append_runtime_event(
+            job_id,
+            "startup_failed_checkpoint_reconciled",
+            checkpoint_status=str((checkpoint or {}).get("status") or "failed_empty"),
+        )
+    ensure_worker_started()
+
+
+async def _orphan_job_reaper() -> None:
+    from backend.zhifei_autoplan.job_store import reconcile_stale_jobs
+    from backend.zhifei_autoplan.local_job_queue import local_dispatch_job_ids
+    from backend.zhifei_autoplan.runtime_events import append_runtime_event
+
+    _ORPHAN_REAPER_STATE["running"] = True
+    try:
+        while True:
+            await asyncio.sleep(int(_ORPHAN_REAPER_STATE["interval_seconds"]))
+            try:
+                reconciled = await asyncio.to_thread(
+                    reconcile_stale_jobs,
+                    stale_after_seconds=int(_ORPHAN_REAPER_STATE["stale_after_seconds"]),
+                    protected_job_ids=local_dispatch_job_ids(),
+                )
+                _ORPHAN_REAPER_STATE["last_run_at"] = time.time()
+                _ORPHAN_REAPER_STATE["last_reconciled"] = len(reconciled)
+                _ORPHAN_REAPER_STATE["last_error"] = None
+                for job_id in reconciled:
+                    try:
+                        append_runtime_event(
+                            job_id,
+                            "stale_job_reconciled",
+                            status="interrupted_recoverable",
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                # One malformed/disappearing historical record must not kill
+                # the permanent reconciliation loop.
+                _ORPHAN_REAPER_STATE["last_run_at"] = time.time()
+                _ORPHAN_REAPER_STATE["last_error"] = type(exc).__name__
+    finally:
+        _ORPHAN_REAPER_STATE["running"] = False
+
+
 @app.get("/health")
 def health():
+    from backend.zhifei_autoplan.job_store import job_runtime_counts
+    from backend.zhifei_autoplan.local_job_queue import local_queue_snapshot
+
     cfg_path = Path("backend/data/autoplan/config.json")
     cfg_mtime = cfg_path.stat().st_mtime if cfg_path.exists() else None
     cfg_version = None
@@ -63,13 +306,10 @@ def health():
             cfg_version_auto = _dt.datetime.fromtimestamp(cfg_mtime).strftime("%Y-%m-%d")
         except Exception:
             cfg_version_auto = None
-    audit_ready = False
-    try:
-        audit_dir = Path("backend/data/audit")
-        audit_dir.mkdir(parents=True, exist_ok=True)
-        audit_ready = audit_dir.exists() and audit_dir.is_dir()
-    except Exception:
-        pass
+    audit_dir = Path("backend/data/audit")
+    audit_ready = audit_dir.exists() and audit_dir.is_dir()
+    identity = dict(_RUNTIME_IDENTITY_AT_START)
+    release_identity = dict(_RELEASE_IDENTITY_AT_START)
     return {
         "ok": True,
         "version": "autoplan-0.1.0",
@@ -80,8 +320,56 @@ def health():
         "config_version": cfg_version,
         "config_version_auto": cfg_version_auto,
         "audit_ready": audit_ready,
+        "build_sha": identity.get("build_sha"),
+        "build_branch": identity.get("build_branch"),
+        "dirty": identity.get("dirty"),
+        "release_id": release_identity.get("release_id"),
+        "manifest_digest": release_identity.get("manifest_digest"),
+        "source_digest": release_identity.get("source_digest"),
+        "runtime_digest": release_identity.get("runtime_digest"),
+        "release_root": release_identity.get("release_root"),
+        "runtime_mode": release_identity.get("mode"),
+        "release_managed": release_identity.get("managed"),
+        "supervisor": _supervisor_runtime_status(),
+        "started_at": _SERVICE_STARTED_AT,
+        "uptime_seconds": max(0, int(time.time() - _SERVICE_STARTED_AT)),
+        "jobs": job_runtime_counts(stale_after_seconds=60),
+        "queue": local_queue_snapshot(),
+        "provider_admission": _offline_provider_admission_status(),
+        "startup_reconciled_jobs": len(_STARTUP_RECONCILED_JOBS),
+        "startup_reconciled_failed_jobs": len(_STARTUP_RECONCILED_FAILED_JOBS),
+        "self_heal": {
+            "enabled": str(os.environ.get("ZF_ENABLE_SELF_HEAL") or "0").strip().lower()
+            in {"1", "true", "yes", "on"},
+            "mode": "opt_in",
+            "orphan_reaper": dict(_ORPHAN_REAPER_STATE),
+        },
         "p0_readiness_supported": True,
         "p0_readiness_path": "/p0/readiness",
+    }
+
+
+@app.get("/livez")
+async def livez():
+    """Constant-time supervisor probe with the frozen release identity.
+
+    This endpoint deliberately performs no job-directory scan, provider
+    admission evaluation, network access, or mutable-state read.  Rich runtime
+    diagnostics remain on ``/health`` for the UI and operators.
+    """
+
+    identity = dict(_RUNTIME_IDENTITY_AT_START)
+    release_identity = dict(_RELEASE_IDENTITY_AT_START)
+    return {
+        "ok": True,
+        "system_id": os.environ.get("ZF_SYSTEM_ID", "docgen-system"),
+        "build_sha": identity.get("build_sha"),
+        "release_id": release_identity.get("release_id"),
+        "manifest_digest": release_identity.get("manifest_digest"),
+        "source_digest": release_identity.get("source_digest"),
+        "runtime_digest": release_identity.get("runtime_digest"),
+        "started_at": _SERVICE_STARTED_AT,
+        "uptime_seconds": max(0, int(time.time() - _SERVICE_STARTED_AT)),
     }
 
 
@@ -93,7 +381,7 @@ def p0_readiness():
 
 
 @app.get("/capabilities")
-def capabilities():
+def capabilities(project_id: str | None = None):
     from backend.zhifei_autoplan.kg_store import get_active_kg
     from backend.zhifei_autoplan.tender_store import load_tender_matrix
     from backend.zhifei_autoplan.boq_store import load_boq_data
@@ -130,8 +418,9 @@ def capabilities():
             "tencent",
         ],
         "kg_active": bool(get_active_kg()),
-        "tender_matrix_loaded": bool(load_tender_matrix()),
-        "boq_loaded": bool(load_boq_data()),
+        "project_id": str(project_id or "").strip() or None,
+        "tender_matrix_loaded": bool(load_tender_matrix(project_id=project_id)),
+        "boq_loaded": bool(load_boq_data(project_id=project_id)),
         "agent_roles_configured": roles_cfg.exists(),
         "modules": {
             "tender_parser": True,
@@ -233,37 +522,24 @@ def update_config_version(version: str | None = None, authorization: str | None 
 @app.get("/model_health")
 def model_health():
     """
-    返回模型配置是否完整（不调用外部API，避免消耗）
+    兼容接口：仅离线返回模型配置与准入聚合，不调用外部API。
     """
-    from backend.zhifei_autoplan.utils.llm_client import LLMClient
-    defaults = LLMClient.load_defaults()
+    status = _offline_provider_admission_status()
     return {
         "ok": True,
-        "default_provider": defaults.get("default_provider"),
-        "default_model": defaults.get("default_model"),
-        "configured": bool(defaults.get("default_provider") and defaults.get("default_model")),
+        **status,
     }
 
 
 @app.get("/model_ping")
 def model_ping():
-    """
-    触发一次最小模型调用（需要已配置默认模型与密钥）
-    """
-    from backend.zhifei_autoplan.utils.llm_client import LLMClient
-    defaults = LLMClient.load_defaults()
-    provider = defaults.get("default_provider")
-    model = defaults.get("default_model")
-    api_key = os.environ.get("ZF_DEFAULT_API_KEY")
-    if not provider or not model or not api_key:
-        return {"ok": False, "error": "missing provider/model/api_key"}
-    try:
-        import asyncio
-        llm = LLMClient(provider=provider, model=model, api_key=api_key)
-        resp = asyncio.run(llm.complete("ping"))
-        return {"ok": True, "provider": provider, "model": model, "resp": resp}
-    except Exception as e:
-        return {"ok": False, "error": repr(e)}
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "MODEL_PING_RETIRED",
+            "message": "无上下文模型探测已停用；系统只在项目证据门通过后执行供应商准入。",
+        },
+    )
 
 class DocStyle(BaseModel):
     paper: str = "A4"
@@ -462,14 +738,13 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
         pass
     # ----------------------------------------------
 
-    # --- AI 正文生成（可选，优先使用 /autoplan/generate 的结果） ---
+    # --- AI 正文复用（仅读） ---
+    # 严禁在 /compose 请求中隐式发起模型调用。生成必须通过受控的
+    # /actions/runs 或 /autoplan/generate 入口，先完成证据门和供应商准入。
+    # 这里只允许复用已有、已持久化的结果。
     try:
         from pathlib import Path as _Path
         _auto_json = _Path("build") / "autoplan_generated.json"
-        _auto_enabled = os.environ.get("ZF_AUTOPLAN_AUTO", "0") == "1"
-        _auto_provider = os.environ.get("ZF_DEFAULT_PROVIDER")
-        _auto_model = os.environ.get("ZF_DEFAULT_MODEL")
-        _auto_key = os.environ.get("ZF_DEFAULT_API_KEY")
         if _auto_json.exists():
             import json as _json
             _auto = _json.loads(_auto_json.read_text(encoding="utf-8"))
@@ -482,26 +757,6 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
                     for s in _auto.get("sections", [])
                     if isinstance(s, dict)
                 ]
-        elif _auto_enabled and _auto_provider and _auto_model:
-            # 若未生成过 AI 正文，则自动触发生成（需配置默认模型）
-            def _bg_generate():
-                from backend.zhifei_autoplan.orchestrator import run_autoplan as _run_autoplan
-                from backend.zhifei_autoplan.exporter import export_autoplan_docx_from_file as _export_autoplan_docx
-                import asyncio as _asyncio
-                payload = {
-                    "topic": req.topic,
-                    "outline": req.outline,
-                    "requirements": [],
-                    "provider": _auto_provider,
-                    "model": _auto_model,
-                    "api_key": _auto_key,
-                    "dry_run": False if _auto_key else True,
-                    "generate_images": True,
-                }
-                _auto = _asyncio.run(_run_autoplan(payload))
-                _auto_json.write_text(_json.dumps({"variants": [_auto]}, ensure_ascii=False, indent=2), encoding="utf-8")
-                _export_autoplan_docx(str(_auto_json), str(_Path("build") / "autoplan_generated.docx"))
-            background_tasks.add_task(_bg_generate)
     except Exception:
         pass
 

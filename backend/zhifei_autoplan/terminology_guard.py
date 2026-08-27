@@ -218,7 +218,17 @@ async def _llm_correct_terms(
         f"词典补充（命中项）：\n{chr(10).join(glossary_ctx) if glossary_ctx else '（无）'}\n"
     )
 
-    resp = await client.complete(prompt, temperature=0.0)
+    try:
+        resp = await client.complete(
+            prompt,
+            temperature=0.0,
+            timeout=240.0,
+            stream=True,
+            project_id="terminology-review",
+            task_type="terminology_correction",
+        )
+    finally:
+        client.close()
     text = str(resp.get("text") or "")
     data = _safe_json_parse(text)
     mapping = data.get("mapping") if isinstance(data.get("mapping"), dict) else {}

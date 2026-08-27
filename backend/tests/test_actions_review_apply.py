@@ -8,6 +8,24 @@ import pytest
 from fastapi import HTTPException
 
 
+@pytest.fixture(autouse=True)
+def _admitted_review_chain(monkeypatch):
+    """Keep review behavior tests offline; admission has separate contract tests."""
+
+    from backend.app.routers import actions_bridge
+
+    async def fake_admission(payload):
+        payload["_provider_admission_run_coordinator"] = object()
+        payload.setdefault("provider_chain", [])
+        return None
+
+    monkeypatch.setattr(
+        actions_bridge,
+        "_ensure_review_provider_admission",
+        fake_admission,
+    )
+
+
 @pytest.mark.asyncio
 async def test_actions_review_apply_calls_remediation_and_persists_copy(tmp_path: Path, monkeypatch):
     from backend.app.routers import actions_bridge
@@ -394,6 +412,153 @@ def test_review_postprocess_can_fail_closed(monkeypatch):
             [result], payload={}, report=None, params={}, fail_closed=True
         )
     assert result["postprocess_errors"][0]["stage"] == "evidence_tracking"
+
+
+def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypatch):
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan import cross_index, param_trace, plan_consistency
+
+    monkeypatch.setattr(actions_bridge, "load_tender_matrix", lambda **kwargs: {})
+    monkeypatch.setattr(actions_bridge, "load_boq_data", lambda **kwargs: {})
+    monkeypatch.setattr(actions_bridge, "recommend_four_new", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        actions_bridge,
+        "run_quality_checks",
+        lambda *args, **kwargs: {"issue_list": []},
+    )
+    monkeypatch.setattr(
+        plan_consistency,
+        "normalize_metrics_in_sections",
+        lambda sections: {"ok": True},
+    )
+    monkeypatch.setattr(
+        param_trace,
+        "build_param_receipt",
+        lambda sections, params: {"ok": True},
+    )
+    monkeypatch.setattr(
+        param_trace,
+        "save_latest_receipt",
+        lambda *args, **kwargs: "receipt.json",
+    )
+    monkeypatch.setattr(cross_index, "build_cross_index", lambda **kwargs: {"rows": []})
+    monkeypatch.setattr(
+        actions_bridge,
+        "build_evidence_tracking",
+        lambda **kwargs: {"rows": [], "summary": {}},
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "audit_standard_citations",
+        lambda *args, **kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "build_delivery_quality_gate",
+        lambda **kwargs: {
+            "delivery_allowed": False,
+            "decision_digest": "blocked-but-not-rebuild-error",
+            "blockers": [{"code": "CONTENT_REVIEW_BLOCKED"}],
+        },
+    )
+
+    result = {"sections": [{"title": "质量管理", "content": "正文"}], "outline": ["质量管理"]}
+    actions_bridge._rebuild_postprocessed_artifacts(
+        [result],
+        payload={"dry_run": True, "quality_strict": False},
+        report=None,
+        params={},
+        fail_closed=True,
+    )
+
+    assert "postprocess_errors" not in result
+    assert result["delivery_quality_gate"]["delivery_allowed"] is False
+
+
+def test_review_postprocess_rejects_unrelated_traceable_locator(monkeypatch):
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan import cross_index, param_trace, plan_consistency
+    from backend.zhifei_autoplan.requirement_evidence_matrix import (
+        build_requirement_evidence_plan,
+    )
+
+    tender = {
+        "items": [
+            {
+                "dimension": "扣分项",
+                "keywords": ["质量验收闭环"],
+                "source_spans": [
+                    {
+                        "file_name": "/private/uploads/招标文件.pdf",
+                        "page": 3,
+                        "start": 88,
+                        "end": 96,
+                        "snippet": "质量验收闭环",
+                    }
+                ],
+            }
+        ]
+    }
+    contract = {
+        "chapters": [
+            {
+                "chapter_id": "CH-001",
+                "title": "质量管理",
+                "agents": {"master": "章节主笔Agent", "compliance": "规范合规Agent"},
+            }
+        ]
+    }
+    plan = build_requirement_evidence_plan(
+        tender=tender,
+        chapter_requirements={},
+        global_requirements=[],
+        agent_contract=contract,
+    )
+    requirement_id = plan["rows"][0]["requirement_id"]
+    result = {
+        "sections": [
+            {
+                "title": "质量管理",
+                "content": (
+                    f"落实质量验收闭环。【要求:{requirement_id}】"
+                    "【证据:无关资料.pdf#p1_deadbeef@9】"
+                ),
+            }
+        ],
+        "outline": ["质量管理"],
+        "requirement_evidence_plan": plan,
+    }
+    monkeypatch.setattr(actions_bridge, "load_tender_matrix", lambda **kwargs: tender)
+    monkeypatch.setattr(actions_bridge, "load_boq_data", lambda **kwargs: {})
+    monkeypatch.setattr(actions_bridge, "recommend_four_new", lambda *args, **kwargs: [])
+    monkeypatch.setattr(actions_bridge, "run_quality_checks", lambda *args, **kwargs: {"issue_list": []})
+    monkeypatch.setattr(plan_consistency, "normalize_metrics_in_sections", lambda sections: {"ok": True})
+    monkeypatch.setattr(param_trace, "build_param_receipt", lambda sections, params: {"ok": True})
+    monkeypatch.setattr(param_trace, "save_latest_receipt", lambda *args, **kwargs: "receipt.json")
+    monkeypatch.setattr(cross_index, "build_cross_index", lambda **kwargs: {"rows": []})
+    monkeypatch.setattr(actions_bridge, "audit_standard_citations", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(
+        actions_bridge,
+        "build_delivery_quality_gate",
+        lambda **kwargs: {"delivery_allowed": True, "blockers": []},
+    )
+
+    with pytest.raises(RuntimeError, match="POSTPROCESS_REBUILD_FAILED"):
+        actions_bridge._rebuild_postprocessed_artifacts(
+            [result],
+            payload={"quality_strict": True, "requirement_evidence_hard_gate": True},
+            report=None,
+            params={},
+            fail_closed=True,
+        )
+    assert result["requirement_evidence_chapter_gates"][0]["ok"] is False
+    assert result["requirement_evidence_chapter_gates"][0]["rows"][0]["status"] == (
+        "EVIDENCE_SOURCE_MISMATCH"
+    )
+    assert any(
+        row["stage"] == "requirement_evidence_chapter_gate"
+        for row in result["postprocess_errors"]
+    )
 
 
 @pytest.mark.asyncio

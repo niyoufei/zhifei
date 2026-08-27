@@ -17,7 +17,10 @@ Transport = Callable[[str, dict[str, Any], float], dict[str, Any]]
 
 
 def _clean_base_url(value: str | None) -> str:
-    return str(value or DEFAULT_BASE_URL).strip().rstrip("/") or DEFAULT_BASE_URL
+    text = str(value or DEFAULT_BASE_URL).strip().rstrip("/")
+    if text in {DEFAULT_BASE_URL, "http://localhost:11434"}:
+        return DEFAULT_BASE_URL
+    raise ValueError("LOCAL_OLLAMA_LOOPBACK_REQUIRED")
 
 
 def _clean_timeout(value: Any) -> float:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -62,8 +63,30 @@ def test_representative_technical_bid_matches_structural_golden_contract(tmp_pat
     assert receipt["section_metrics"][0]["height_cm"] == pytest.approx(contract["page_height_cm"], abs=0.12)
     assert receipt["body_style"]["size_pt"] == contract["body"]["size_pt"]
     assert receipt["body_style"]["line_spacing_pt"] == contract["body"]["line_spacing_pt"]
+    assert receipt["body_style"]["first_line_chars"] == "200"
+    assert receipt["body_style"]["space_before_twips"] in {None, "0"}
+    assert receipt["body_style"]["space_after_twips"] in {None, "0"}
+    assert not any(receipt["package_integrity"].values())
     assert all(receipt["word_fields"][name.lower()] for name in contract["required_fields"])
     assert receipt["word_fields"]["update_on_open"] is contract["update_fields_on_open"]
+
+    with zipfile.ZipFile(output) as package:
+        names = set(package.namelist())
+        styles = package.read("word/styles.xml").decode("utf-8")
+        document_xml = package.read("word/document.xml").decode("utf-8")
+        font_table = package.read("word/fontTable.xml").decode("utf-8")
+        core = package.read("docProps/core.xml").decode("utf-8")
+    assert not any(name.startswith("customXml/") for name in names)
+    assert "docProps/custom.xml" not in names
+    assert 'w:eastAsia="宋体"' in styles
+    assert 'w:ascii="宋体"' in styles
+    assert 'w:hAnsi="宋体"' in styles
+    assert 'w:cs="宋体"' in styles
+    assert 'w:firstLineChars="200"' in styles
+    assert 'w:altName w:val="STSong"' in font_table
+    assert "python-docx" not in core
+    assert "<w:vanish" not in document_xml
+    assert "<w:webHidden" not in document_xml
 
 
 def test_structural_gate_blocks_uncontrolled_word_package(tmp_path: Path) -> None:

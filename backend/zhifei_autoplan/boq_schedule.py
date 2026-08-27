@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import copy
 from typing import Any, Dict, List
 
 from backend.zhifei_autoplan.enterprise_params import pick_productivity
@@ -23,12 +24,103 @@ DEFAULT_PROCESS_ORDER = [
     "通用施工工序",
 ]
 
+# Scheduling must never turn a malformed spreadsheet identifier into an
+# unbounded calendar.  The source value remains available in the stored BoQ;
+# only the derived schedule excludes values outside this defensive envelope.
+MAX_SCHEDULE_QUANTITY = 1_000_000_000_000.0
+MAX_ACTIVITY_DURATION_DAYS = 36_500.0
+
 
 def _f(v: Any, default: float = 0.0) -> float:
     try:
-        return float(v)
+        value = float(v)
+        return value if math.isfinite(value) else float(default)
     except Exception:
         return float(default)
+
+
+def _schedule_quantity(v: Any) -> float | None:
+    try:
+        value = float(v)
+    except Exception:
+        return None
+    if not math.isfinite(value) or value <= 0 or value > MAX_SCHEDULE_QUANTITY:
+        return None
+    return value
+
+
+def _quantity_is_anomalous(v: Any) -> bool:
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return False
+    try:
+        value = float(v)
+    except Exception:
+        return True
+    if value == 0:
+        return False
+    return not math.isfinite(value) or value < 0 or value > MAX_SCHEDULE_QUANTITY
+
+
+def sanitize_boq_for_generation(boq_data: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Return a generation-safe copy while retaining non-numeric source facts.
+
+    Uploaded source files and the persisted parse receipt are never rewritten.
+    Only the in-memory generation view excludes malformed quantities so they
+    cannot leak into prompts, charts, quantitative indexes, or derived facts.
+    """
+
+    source = boq_data if isinstance(boq_data, dict) else {}
+    if not source:
+        return {}
+    result = copy.deepcopy(source)
+    rows = result.get("items") if isinstance(result.get("items"), list) else []
+    valid_quantities: list[float] = []
+    excluded = 0
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        quantity = raw.get("quantity")
+        if _quantity_is_anomalous(quantity):
+            raw["quantity"] = None
+            raw["quantity_validation"] = {
+                "status": "excluded",
+                "code": "BOQ_QUANTITY_OUTLIER_EXCLUDED",
+            }
+            excluded += 1
+            continue
+        value = _schedule_quantity(quantity)
+        if value is not None:
+            valid_quantities.append(value)
+
+    stats = dict(result.get("stats") or {})
+    if excluded:
+        total = sum(valid_quantities)
+        stats["total_quantity"] = round(total, 6)
+        stats["quantity_scale_index"] = round(
+            min(1.0, math.log10(max(1.0, total) + 1.0) / 6.0), 4
+        )
+        stats["construction_density_index"] = round(
+            min(1.0, (total / max(1, len(rows))) / 1500.0), 4
+        )
+        top_rows = sorted(
+            (row for row in rows if isinstance(row, dict) and row.get("quantity") is not None),
+            key=lambda row: float(row.get("quantity") or 0.0),
+            reverse=True,
+        )[:8]
+        stats["top_quantity_items"] = [
+            {
+                key: row.get(key)
+                for key in ("boq_code", "name", "quantity", "unit", "unit_price", "total_price")
+            }
+            for row in top_rows
+        ]
+    result["stats"] = stats
+    result["runtime_validation"] = {
+        "schema_version": "boq-runtime-validation-v1",
+        "excluded_quantity_count": excluded,
+        "generation_safe": True,
+    }
+    return result
 
 
 def _norm_process_name(item: Dict[str, Any]) -> str:
@@ -78,12 +170,17 @@ def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[
                 "resource_units": 0.0,
                 "resource_names": set(),
                 "samples": [],
+                "excluded_quantity_count": 0,
             },
         )
-        qty = _f(it.get("quantity"), 0.0)
+        qty = _schedule_quantity(it.get("quantity"))
         total_price = _f(it.get("total_price"), 0.0)
         grp["item_count"] += 1
-        grp["quantity"] += max(0.0, qty)
+        if qty is None:
+            if _quantity_is_anomalous(it.get("quantity")):
+                grp["excluded_quantity_count"] += 1
+        else:
+            grp["quantity"] += qty
         grp["total_price"] += max(0.0, total_price)
         grp["resource_units"] += _extract_resource_count(it)
         for r in (it.get("resources") or []):
@@ -104,7 +201,13 @@ def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[
         qty = float(g.get("quantity") or 0.0)
         # If quantity is unavailable, use item count as conservative quantity proxy.
         q_for_calc = qty if qty > 0 else float(g.get("item_count") or 1)
-        duration = max(1.0, q_for_calc / speed)
+        raw_duration = max(1.0, q_for_calc / speed)
+        duration_basis = "validated_quantity"
+        if qty <= 0 or raw_duration > MAX_ACTIVITY_DURATION_DAYS:
+            q_for_calc = float(g.get("item_count") or 1)
+            raw_duration = max(1.0, q_for_calc / speed)
+            duration_basis = "item_count_fallback"
+        duration = min(MAX_ACTIVITY_DURATION_DAYS, raw_duration)
         rows.append(
             {
                 "process": pname,
@@ -115,6 +218,8 @@ def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[
                 "resource_units": round(float(g.get("resource_units") or 0.0), 3),
                 "resource_names": sorted(list(g.get("resource_names") or [])),
                 "samples": list(g.get("samples") or []),
+                "excluded_quantity_count": int(g.get("excluded_quantity_count") or 0),
+                "duration_basis": duration_basis,
                 "productivity": {
                     "value": round(speed, 4),
                     "unit": str(prod.get("unit") or "项/天"),
@@ -185,6 +290,9 @@ def build_boq_wbs_cpm(
     total_quantity = sum(_f(x.get("quantity"), 0.0) for x in wbs_rows)
     total_price = sum(_f(x.get("total_price"), 0.0) for x in wbs_rows)
     duration_days = _f(cpm.get("project_duration_days"), 0.0)
+    excluded_quantity_count = sum(
+        int(row.get("excluded_quantity_count") or 0) for row in wbs_rows
+    )
 
     critical_names = []
     cp_ids = cpm.get("critical_path") if isinstance(cpm.get("critical_path"), list) else []
@@ -202,6 +310,7 @@ def build_boq_wbs_cpm(
         "resource_peak": _f(cpm.get("resource_peak"), 0.0),
         "critical_interval_days": _f(cpm.get("critical_interval_days"), 0.0),
         "critical_path_names": critical_names,
+        "excluded_quantity_count": excluded_quantity_count,
     }
 
     # Add a simple deterministic WBS tree path for downstream exports.
@@ -215,4 +324,14 @@ def build_boq_wbs_cpm(
         "activities": activities,
         "cpm": cpm,
         "summary": summary,
+        "schedule_input_warnings": (
+            [
+                {
+                    "code": "BOQ_QUANTITY_OUTLIER_EXCLUDED",
+                    "count": excluded_quantity_count,
+                }
+            ]
+            if excluded_quantity_count
+            else []
+        ),
     }

@@ -7,23 +7,45 @@ import os
 import re
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
 
-from backend.zhifei_autoplan.job_store import create_job, get_job, heartbeat_job, update_job
+from backend.zhifei_autoplan.job_store import (
+    create_job,
+    get_job,
+    heartbeat_job,
+    merge_job,
+    transition_job,
+    update_job,
+)
+from backend.zhifei_autoplan.local_job_queue import submit_isolated_job
+from backend.zhifei_autoplan.runtime_events import append_runtime_event, event_journal_path
+from backend.zhifei_autoplan.generation_checkpoint import (
+    mark_failed_checkpoint_namespace,
+)
 from backend.zhifei_autoplan import export_docx_service as export_docx_core
 from backend.zhifei_autoplan.orchestrator import (
     _build_boq_focus,
     _normalize_provider_chain,
     _provider_chain_for_role,
     _resolve_provider_api_key,
+    new_provider_admission_run_coordinator,
+    probe_provider_candidate,
     run_autoplan,
+)
+from backend.zhifei_autoplan.provider_runtime import (
+    ProviderSlot,
+    ProviderRoutingConfigurationError,
+    apply_server_provider_routing,
+    build_server_provider_admission_candidates,
+    server_provider_admission_required_roles,
 )
 from backend.zhifei_autoplan.multi_agent_runtime import AGENT_ROLE_DIRECTIVES
 from backend.zhifei_autoplan.output_artifacts import save_outputs as save_output_artifacts
@@ -46,6 +68,7 @@ from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
 from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
 from backend.zhifei_autoplan.requirement_evidence_matrix import (
     finalize_requirement_evidence_matrix,
+    validate_chapter_requirement_evidence,
     validate_requirement_evidence_matrix,
 )
 from backend.zhifei_autoplan.compliance_policy import audit_standard_citations
@@ -87,7 +110,11 @@ from backend.zhifei_autoplan.review_revision import (
     variant_version,
 )
 from backend.zhifei_autoplan.zbid_snapshot_mapper import map_zbid_snapshot_to_zdoc_draft_input
-from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
+from backend.app.routers.ingest import (
+    _handle_upload as _handle_ingest_upload,
+    resolve_ingested_file_ids,
+    resolve_ingested_tender_sources,
+)
 from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
 from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
 
@@ -95,12 +122,466 @@ from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
 router = APIRouter(prefix="/actions", tags=["Actions Bridge"])
 
 
+def _provider_admission_api_projection(value: Any) -> Dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+
+    def _chain_entry(item: Any) -> Dict[str, Any]:
+        row = item if isinstance(item, dict) else {}
+        return {
+            "slot": str(row.get("slot") or "")[:80],
+            "role": str(row.get("role") or "")[:80],
+            "provider": str(row.get("provider") or "")[:80],
+            "model": str(row.get("model") or "")[:160],
+        }
+
+    slots: list[dict[str, Any]] = []
+    for item in raw.get("slots") if isinstance(raw.get("slots"), list) else []:
+        row = _chain_entry(item)
+        source = item if isinstance(item, dict) else {}
+        safe_layers: Dict[str, Any] = {}
+        layers = source.get("layers") if isinstance(source.get("layers"), dict) else {}
+        for name in ("configuration", "credentials", "model", "quota", "stream", "circuit"):
+            layer = layers.get(name) if isinstance(layers.get(name), dict) else {}
+            safe_layers[name] = {
+                "status": str(layer.get("status") or "unknown")[:24],
+                "code": str(layer.get("code") or "status_unknown")[:80],
+            }
+        row.update(
+            {
+                "admitted": bool(source.get("admitted")),
+                "layers": safe_layers,
+                "reason_codes": [
+                    str(code)[:80]
+                    for code in (source.get("reason_codes") or [])[:20]
+                    if isinstance(code, str)
+                ],
+                "probe_duration_ms": max(
+                    0, int(source.get("probe_duration_ms") or 0)
+                ),
+            }
+        )
+        slots.append(row)
+    return {
+        "schema_version": str(raw.get("schema_version") or "provider-admission-v1")[:80],
+        "status": str(raw.get("status") or "missing")[:80],
+        "configured_slots": max(0, int(raw.get("configured_slots") or 0)),
+        "receipt_slots": max(0, int(raw.get("receipt_slots") or 0)),
+        "required_roles": [
+            str(role)[:80]
+            for role in (raw.get("required_roles") or [])[:20]
+            if isinstance(role, str)
+        ],
+        "slots": slots,
+        "admitted_chain": [
+            _chain_entry(item)
+            for item in (raw.get("admitted_chain") or [])[:20]
+            if isinstance(item, dict)
+        ],
+        "missing_roles": [
+            str(role)[:80]
+            for role in (raw.get("missing_roles") or [])[:20]
+            if isinstance(role, str)
+        ],
+        "generation_allowed": bool(raw.get("generation_allowed")),
+        "fallback_configured": bool(raw.get("fallback_configured")),
+        "fallback_ready": bool(raw.get("fallback_ready")),
+        "resilience_degraded": bool(raw.get("resilience_degraded")),
+        "degraded": bool(raw.get("degraded")),
+        "public_digest": str(raw.get("public_digest") or "")[:64],
+    }
+
+
+@router.get("/provider_admission")
+def actions_provider_admission(
+    x_actions_key: str | None = Header(default=None),
+):
+    """Return a credential-free, offline re-evaluation of the latest receipt."""
+
+    _auth_actions_key(x_actions_key)
+    from backend.zhifei_autoplan.provider_admission import evaluate_latest_snapshot
+    from backend.zhifei_autoplan.provider_runtime import (
+        build_server_provider_admission_candidates,
+        server_provider_admission_required_roles,
+    )
+
+    candidates = build_server_provider_admission_candidates()
+    required_roles = server_provider_admission_required_roles(candidates)
+    admission = evaluate_latest_snapshot(
+        candidates,
+        required_roles,
+        root=os.environ.get("ZF_PROVIDER_ADMISSION_STATE_DIR") or None,
+    )
+    return {"ok": True, "admission": _provider_admission_api_projection(admission)}
+
+
+@router.get("/claude_usage_stats")
+def actions_claude_usage_stats(
+    project_id: str | None = Query(default=None, max_length=160),
+    task_type: str | None = Query(default=None, max_length=120),
+    x_actions_key: str | None = Header(default=None),
+):
+    """Return prompt-cache/token aggregates without prompts or credentials."""
+
+    _auth_actions_key(x_actions_key)
+    from backend.zhifei_autoplan.claude_usage import claude_usage_stats
+
+    return {
+        "ok": True,
+        "stats": claude_usage_stats(project_id=project_id, task_type=task_type),
+    }
+
+
+def _public_provider_error(value: Any) -> Dict[str, Any]:
+    """Reduce a provider diagnostic to stable, user-safe fields."""
+
+    raw = dict(value) if isinstance(value, dict) else {"message": str(value or "provider_error")}
+    classification_input: Any = raw
+    if not str(raw.get("code") or "").strip():
+        classification_input = str(raw.get("message") or "provider_error")
+    info = classify_provider_error(
+        classification_input,
+        provider=str(raw.get("provider") or ""),
+        model=str(raw.get("model") or ""),
+    )
+    return {
+        "code": str(info.get("code") or "provider_error")[:80],
+        "message": str(info.get("user_message") or "模型调用失败。")[:300],
+        "action": str(info.get("action") or "请确认模型、网络和供应商状态后重试。")[:300],
+        "retryable": bool(info.get("retryable")),
+        "severity": str(info.get("severity") or "error")[:20],
+    }
+
+
+def _public_provider_state(value: Any) -> Dict[str, Any]:
+    """Return provider runtime state without raw SDK/billing/network messages."""
+
+    if not isinstance(value, dict):
+        return {}
+
+    def _scrub(node: Any, *, key: str = "") -> Any:
+        if key in {"last_error", "error"} and node:
+            return _public_provider_error(node)
+        if isinstance(node, dict):
+            result: Dict[str, Any] = {}
+            for child_key, child_value in node.items():
+                normalized = str(child_key).strip().lower().replace("-", "_")
+                if (
+                    normalized
+                    in {
+                        "api_key",
+                        "api_keys",
+                        "authorization",
+                        "credential",
+                        "credentials",
+                        "headers",
+                        "key_alias",
+                        "prompt",
+                        "raw",
+                        "raw_error",
+                        "raw_response",
+                        "request_body",
+                        "response_body",
+                        "secret",
+                        "secret_key",
+                        "token",
+                        "token_url",
+                        "url",
+                    }
+                    or normalized.endswith("_api_key")
+                    or normalized.endswith("_secret")
+                    or normalized.endswith("_token")
+                ):
+                    continue
+                if normalized == "message":
+                    result[str(child_key)] = "模型供应商诊断已脱敏。"
+                else:
+                    result[str(child_key)] = _scrub(child_value, key=normalized)
+            return result
+        if isinstance(node, list):
+            return [_scrub(item) for item in node]
+        return node
+
+    scrubbed = _scrub(value)
+    return scrubbed if isinstance(scrubbed, dict) else {}
+
+
+def _public_runtime_error(error: Any) -> Dict[str, Any]:
+    """Return a stable, bounded error object without repr/prompt leakage."""
+
+    raw = str(error or "").strip()
+    candidates = [raw]
+    if raw.startswith("RuntimeError(") and raw.endswith(")"):
+        inner = raw[len("RuntimeError(") : -1].strip()
+        if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in {"'", '"'}:
+            try:
+                import ast
+
+                candidates.insert(0, str(ast.literal_eval(inner)))
+            except Exception:
+                pass
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            code = str(parsed.get("code") or "RUNTIME_FAILED")[:80]
+            failures = parsed.get("failures") if isinstance(parsed.get("failures"), list) else []
+            safe_failures = []
+            for item in failures[:20]:
+                if not isinstance(item, dict):
+                    continue
+                raw_failure = str(
+                    item.get("error") or item.get("message") or "provider_error"
+                )
+                structured_gate_failure = (
+                    str(item.get("failure_kind") or "") == "quality_gate"
+                    or str(item.get("code") or "")
+                    == "requirement_evidence_failed"
+                    or raw_failure.startswith(
+                        "requirement_evidence_precheckpoint_blocked"
+                    )
+                )
+                if (
+                    code == "REQUIREMENT_EVIDENCE_CHAPTER_BLOCKED"
+                    and structured_gate_failure
+                ):
+                    blocking_candidates = list(
+                        item.get("blocking_requirement_ids") or []
+                    )
+                    if not blocking_candidates and ":" in raw_failure:
+                        blocking_candidates = raw_failure.split(":", 1)[1].split(",")
+                    blocking_ids = [
+                        str(value).strip()[:160]
+                        for value in blocking_candidates
+                        if str(value).strip()
+                        and re.fullmatch(
+                            r"[A-Za-z0-9_.-]{1,160}", str(value).strip()
+                        )
+                    ][:20]
+                    provider_error = {
+                        "code": "requirement_evidence_failed",
+                        "message": "章节正文未满足全部招标要求证据绑定。",
+                        "action": "请按阻断要求补充同段要求与证据标记后，从已保存检查点显式恢复。",
+                        "retryable": False,
+                        "severity": "error",
+                        **(
+                            {"blocking_requirement_ids": blocking_ids}
+                            if blocking_ids
+                            else {}
+                        ),
+                    }
+                else:
+                    provider_error = _public_provider_error(
+                        {
+                            "message": raw_failure,
+                            "provider": str(item.get("provider") or ""),
+                            "model": str(item.get("model") or ""),
+                            **({"code": str(item.get("code"))} if item.get("code") else {}),
+                        }
+                    )
+                safe_failures.append(
+                    {
+                        "title": str(item.get("title") or "")[:200],
+                        "provider": str(item.get("provider") or "")[:80],
+                        "model": str(item.get("model") or "")[:120],
+                        "error": provider_error["code"],
+                        **provider_error,
+                    }
+                )
+            return {
+                "code": code,
+                "message": str(parsed.get("message") or "任务执行失败。")[:500],
+                "action": (
+                    "请按阻断要求修订失败章节，并从已保存检查点显式恢复。"
+                    if code == "REQUIREMENT_EVIDENCE_CHAPTER_BLOCKED"
+                    else "请核对失败章节与模型健康状态后显式重试。"
+                ),
+                "failures": safe_failures,
+            }
+    validation_guidance = (
+        (
+            "招标文件/澄清答疑存在同优先级版式冲突",
+            "TENDER_STYLE_CONFLICT",
+            "招标版式要求存在同优先级冲突，系统未自行裁决。",
+            "请确认冲突处理值后重新生成。",
+        ),
+        (
+            "项目事实台账",
+            "PROJECT_FACTS_INVALID",
+            "项目事实台账未通过完整性或冲突校验。",
+            "请确认项目事实或冲突处理值后重新生成。",
+        ),
+        (
+            "项目适用规范生成前预检未通过",
+            "COMPLIANCE_PREFLIGHT_BLOCKED",
+            "项目适用规范生成前预检未通过。",
+            "请补齐可核验的现行规范元数据后重新生成。",
+        ),
+        (
+            "招标要求—证据计划完整性校验失败",
+            "REQUIREMENT_EVIDENCE_PLAN_INVALID",
+            "招标要求与证据计划未通过完整性校验。",
+            "请补齐要求与章节证据绑定后重新生成。",
+        ),
+        (
+            "招标要求—证据生成前准入失败",
+            "REQUIREMENT_EVIDENCE_PREFLIGHT_BLOCKED",
+            "招标要求的来源定位未通过生成前准入，系统尚未调用模型。",
+            "请补齐阻断要求的可反查来源后重新生成。",
+        ),
+        (
+            "项目适用规范核验未通过",
+            "STANDARD_COMPLIANCE_BLOCKED",
+            "章节初稿已保存，但项目适用规范核验未通过。",
+            "请核对违规规范引用后从检查点恢复。",
+        ),
+        (
+            "招标要求—证据矩阵完整性校验失败",
+            "REQUIREMENT_EVIDENCE_INVALID",
+            "章节初稿已保存，但招标要求与证据矩阵不完整。",
+            "请补齐缺失证据绑定后从检查点恢复。",
+        ),
+        (
+            "招标要求—证据交付硬门未通过",
+            "REQUIREMENT_EVIDENCE_BLOCKED",
+            "章节初稿已保存，但招标要求证据仍存在不可反查项。",
+            "请修复阻断要求后从检查点恢复。",
+        ),
+        (
+            "最终专业交付质量门未通过",
+            "DELIVERY_QUALITY_BLOCKED",
+            "章节初稿已保存，但最终专业交付质量门未通过。",
+            "请根据质量门阻断项修订后从检查点恢复。",
+        ),
+    )
+    for marker, code, message, action in validation_guidance:
+        if marker in raw:
+            return {
+                "code": code,
+                "message": message,
+                "action": action,
+                "error_type": type(error).__name__ if isinstance(error, BaseException) else None,
+            }
+    if isinstance(error, ValueError):
+        return {
+            "code": "VALIDATION_FAILED",
+            "message": "任务未通过输入或质量校验。",
+            "action": "请核对运行阶段和已保存检查点后修正并重试。",
+            "error_type": type(error).__name__,
+        }
+    error_info = classify_provider_error(raw, provider="", model="")
+    return {
+        "code": str(error_info.get("code") or "RUNTIME_FAILED"),
+        "message": str(error_info.get("user_message") or "任务执行失败。")[:500],
+        "action": str(error_info.get("action") or "请查看运行事件后重试。")[:500],
+        "error_type": type(error).__name__ if isinstance(error, BaseException) else None,
+    }
+
+
+def _runtime_failure_transition(
+    error: Any,
+    prior_job: Dict[str, Any] | None,
+) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any] | None]:
+    """Build a truthful failure transition without discarding a complete draft."""
+
+    prior = dict(prior_job or {})
+    prior_progress = dict(prior.get("progress") or {})
+    chapters = dict(prior_progress.get("chapters") or {})
+    checkpoint = dict(prior_progress.get("checkpoint") or {})
+    total = max(0, int(chapters.get("total") or 0))
+    succeeded = max(0, int(chapters.get("succeeded") or 0))
+    failed = max(0, int(chapters.get("failed") or 0))
+    complete_draft = (
+        isinstance(error, ValueError)
+        and total > 0
+        and succeeded == total
+        and failed == 0
+        and str(checkpoint.get("status") or "") in {"draft_complete", "complete"}
+    )
+    public_error = _public_runtime_error(error)
+    phase = str(prior_progress.get("phase") or "generation")
+    stage = "failed"
+    recovery_result: Dict[str, Any] | None = None
+    if complete_draft:
+        phase = "quality_review"
+        stage = "quality_review_failed"
+        if public_error.get("code") == "VALIDATION_FAILED":
+            public_error = {
+                "code": "POST_GENERATION_QUALITY_BLOCKED",
+                "message": "章节初稿已全部保存，但生成后质量校验未通过。",
+                "action": "请保留检查点，核对规范、证据矩阵和交付质量门后显式恢复。",
+                "error_type": "ValueError",
+            }
+        recovery_result = dict(prior.get("result") or {})
+        recovery_result.update(
+            {
+                "section_count": succeeded,
+                "checkpoint_status": str(checkpoint.get("status") or "draft_complete"),
+                "recoverable": True,
+                "delivery_ready": False,
+            }
+        )
+    progress = {
+        "percent": min(99, int(prior_progress.get("percent") or 0)),
+        "stage": stage,
+        "phase": phase,
+        "work_state": "idle",
+        "detail": str(public_error.get("message") or "任务执行失败。"),
+    }
+    return public_error, progress, recovery_result
+
+
+def _seal_failed_run_checkpoints(job_id: str) -> Dict[str, Any] | None:
+    """Make persisted checkpoint scopes agree with a failed run terminal state."""
+
+    try:
+        scopes = mark_failed_checkpoint_namespace(job_id)
+    except Exception:
+        append_runtime_event(
+            job_id,
+            "checkpoint_terminal_update_failed",
+            code="CHECKPOINT_TERMINAL_UPDATE_FAILED",
+        )
+        return None
+    if not scopes:
+        return None
+    saved = sum(max(0, int(item.get("saved_chapter_count") or 0)) for item in scopes)
+    status = "failed_partial" if saved else "failed_empty"
+    projection = {
+        "status": status,
+        "saved_chapter_count": saved,
+        "scopes": scopes,
+    }
+    append_runtime_event(
+        job_id,
+        "checkpoint_terminal_updated",
+        checkpoint_status=status,
+        saved_chapter_count=saved,
+    )
+    return projection
+
+
 def _auth_actions_key(x_actions_key: str | None):
-    expected = os.environ.get("ZF_ACTIONS_KEY", "zf-webui-key").strip()
+    expected = os.environ.get("ZF_ACTIONS_KEY", "").strip()
     if not expected:
-        raise HTTPException(status_code=503, detail="actions key not configured")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SYSTEM_ACTIONS_KEY_NOT_CONFIGURED",
+                "message": "系统内部操作凭据尚未配置，已阻断请求。",
+                "action": "请通过受监管运行环境生成本机凭据后重启服务。",
+            },
+        )
     if (x_actions_key or "").strip() != expected:
-        raise HTTPException(status_code=401, detail="invalid actions key")
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "SYSTEM_ACTIONS_KEY_INVALID",
+                "message": "系统内部操作凭据不匹配，已阻断请求。",
+                "action": "请从最新受监管版本重新打开页面。",
+            },
+        )
 
 
 class ActionsGenerateRequest(BaseModel):
@@ -112,6 +593,9 @@ class ActionsGenerateRequest(BaseModel):
     requirements: List[str] = []
     global_instruction: str | None = None
     chapter_requirements: dict | None = None
+    chapter_summaries: List[dict | str] = []
+    project_stage_context: str | None = None
+    common_construction_requirements: List[str] = []
     provider: str | None = None
     model: str | None = None
     provider_chain: List[dict] | None = None
@@ -128,6 +612,9 @@ class ActionsGenerateRequest(BaseModel):
     max_model_attempts: int | None = None
     max_model_input_chars: int | None = None
     max_model_output_tokens: int | None = None
+    max_chapter_output_tokens: int | None = None
+    model_request_timeout_seconds: int | None = None
+    chapter_deadline_seconds: int | None = None
     strict_tender_outline: bool | None = None
     total_pages_target: int | None = None
     chapter_pages: dict | None = None
@@ -376,8 +863,16 @@ async def actions_params_receipt_get(project_id: str | None = None, x_actions_ke
 
         receipt = load_latest_receipt(project_id=project_id) or {}
         return {"ok": True, "receipt": receipt}
-    except Exception as e:
-        return {"ok": False, "error": repr(e), "receipt": {}}
+    except Exception:
+        return {
+            "ok": False,
+            "error": {
+                "code": "PARAM_RECEIPT_UNAVAILABLE",
+                "message": "参数回执暂时无法读取。",
+                "action": "请稍后重试；如持续失败，请检查受监管服务状态。",
+            },
+            "receipt": {},
+        }
 
 
 async def _save_upload(uf: UploadFile) -> str:
@@ -429,6 +924,30 @@ def _normalize_logic_template_id(raw: Any) -> str | None:
         "TEMPLATE_S": "C",
     }
     return alias.get(s)
+
+
+_VARIANT_PAIR_RE = re.compile(r"^v(\d+)_v(\d+)$")
+
+
+def _parse_variant_pair(raw: Any) -> tuple[int, int] | None:
+    match = _VARIANT_PAIR_RE.fullmatch(str(raw or "").strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _delivery_progress_for_run(*, dry_run: bool) -> Dict[str, str]:
+    if dry_run:
+        return {
+            "stage": "dry_run_done",
+            "phase": "dry_run_done",
+            "detail": "dry-run 预览已完成；未生成专业终稿或正式交付回执",
+        }
+    return {
+        "stage": "done",
+        "phase": "done",
+        "detail": "专业 Word 已完成，可直接下载",
+    }
 
 
 def _normalize_selected_templates(raw: Any) -> List[str]:
@@ -545,10 +1064,21 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
     payload["generation_mode"] = mode
     payload.setdefault("model_preflight", True)
     payload.setdefault("fail_on_model_exhaustion", True)
+    # A dry-run is a connectivity-free diagnostic preview, not a professional
+    # delivery attempt.  Keep the real generation modes strict, but do not let
+    # their defaults turn an offline preview into a failed delivery-quality
+    # run or trigger remediation/model admission work.
+    dry_run = bool(payload.get("dry_run"))
+    if dry_run:
+        payload["quality_strict"] = False
+        payload["auto_remediate"] = False
+        payload["model_preflight"] = False
+        payload["fail_on_model_exhaustion"] = False
     payload["_mode_policy"] = {
         "mode_effective": mode,
         "auto_switched": bool(auto_switched),
         "planned_total_pages": int(pages),
+        "dry_run": dry_run,
     }
     return payload
 
@@ -613,7 +1143,56 @@ def _merge_plan_defaults(payload: dict) -> dict:
     return _apply_generation_mode_policy(payload)
 
 
-def _save_outputs(base_name: str, results: list[dict]) -> dict:
+def _assert_mandatory_generation_sources(payload: dict) -> None:
+    if bool(payload.get("dry_run")):
+        return
+    project_scope = str(payload.get("project_id") or "").strip() or None
+    if project_scope is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROJECT_SCOPE_REQUIRED",
+                "message": "真实生成必须绑定明确项目，禁止使用全局资料池。",
+            },
+        )
+    missing_sources: list[str] = []
+    tender_source = load_tender_matrix(project_id=project_scope) or {}
+    boq_source = load_boq_data(project_id=project_scope) or {}
+    if not isinstance(tender_source.get("outline"), list) or not tender_source.get("outline"):
+        missing_sources.append("tender")
+    if not isinstance(boq_source.get("items"), list) or not boq_source.get("items"):
+        missing_sources.append("boq")
+    if missing_sources:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MANDATORY_SOURCE_NOT_READY",
+                "message": "招标/答疑与工程量清单必须全部解析成功后才能生成。",
+                "missing": missing_sources,
+            },
+        )
+
+
+def _apply_server_provider_routing_or_503(payload: dict) -> dict:
+    try:
+        return apply_server_provider_routing(payload)
+    except ProviderRoutingConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_CONFIGURATION_BLOCKED",
+                "message": "服务端模型路由未配置完整或尚不支持准入，已阻止生成。",
+                "action": "请检查本机主模型、备用模型和文档渲染模型配置。",
+            },
+        ) from exc
+
+
+def _save_outputs(
+    base_name: str,
+    results: list[dict],
+    *,
+    preview_only: bool = False,
+) -> dict:
     postprocess_blocked = [
         {
             "variant": index,
@@ -644,7 +1223,7 @@ def _save_outputs(base_name: str, results: list[dict]) -> dict:
         and isinstance(row.get("delivery_quality_gate"), dict)
         and not bool((row.get("delivery_quality_gate") or {}).get("delivery_allowed"))
     ]
-    if blocked:
+    if blocked and not preview_only:
         raise RuntimeError(
             json.dumps(
                 {
@@ -655,6 +1234,8 @@ def _save_outputs(base_name: str, results: list[dict]) -> dict:
                 ensure_ascii=False,
             )
         )
+    if preview_only:
+        return save_output_artifacts(base_name, results, preview_only=True)
     return save_output_artifacts(base_name, results)
 
 
@@ -702,7 +1283,7 @@ def _prepare_execution_control(
         raw_max_model_parallelism,
         default_model_parallelism,
         1,
-        16,
+        2,
     )
     variant_parallelism = min(variant_parallelism, variants_total, max_model_parallelism)
     agent_parallelism = min(
@@ -773,6 +1354,7 @@ async def _render_professional_outputs_for_job(
     outputs: dict[str, Any],
     progress_callback: Any | None = None,
     execution_runtime: ExecutionControlRuntime | None = None,
+    slot_override: ProviderSlot | None = None,
 ) -> dict[str, Any]:
     """Promote Sonnet-refined DOCX files to the only user-facing Word outputs.
 
@@ -790,6 +1372,10 @@ async def _render_professional_outputs_for_job(
         raise ProfessionalRenderError("中间 Word 不存在，无法自动生成专业交付版")
     if not delivery.get("json"):
         raise ProfessionalRenderError("生成结果 JSON 不存在，无法自动生成专业交付版")
+    if slot_override is None:
+        slot_override = await _admit_current_server_route_for_existing_evidence(
+            execution_runtime=execution_runtime
+        )
 
     render_source = dict(delivery)
     render_source["docx"] = list(source_docx)
@@ -807,6 +1393,8 @@ async def _render_professional_outputs_for_job(
         }
         if execution_runtime is not None:
             render_kwargs["execution_runtime"] = execution_runtime
+        if slot_override is not None:
+            render_kwargs["slot_override"] = slot_override
         rendered = await render_professional_document(**render_kwargs)
         professional_docx.append(str(rendered["professional_docx"]))
         professional_json.append(str(rendered["professional_json"]))
@@ -829,6 +1417,135 @@ async def _render_professional_outputs_for_job(
     delivery["delivery_receipt"] = str(sealed_delivery["receipt"])
     delivery["delivery_decision_digest"] = str(sealed_delivery["decision_digest"])
     return delivery
+
+
+def _admitted_document_render_slot(coordinator: Any) -> ProviderSlot:
+    candidate = (
+        coordinator.admitted_candidate("document_render")
+        if coordinator is not None
+        and callable(getattr(coordinator, "admitted_candidate", None))
+        else None
+    )
+    if candidate is None:
+        raise ProfessionalRenderError(
+            "文档渲染模型未通过本次运行的供应商准入，已阻止专业终稿生成"
+        )
+    return ProviderSlot(
+        slot=candidate.slot,
+        role=candidate.role,
+        provider=candidate.provider,
+        model=candidate.model,
+        api_key=candidate.credential,
+        key_alias="",
+    )
+
+
+async def _admit_current_server_chain_for_existing_evidence(
+    *,
+    execution_runtime: ExecutionControlRuntime | None = None,
+    require_document_render: bool = True,
+) -> Any:
+    """Freshly admit the full current route for an existing-evidence action."""
+
+    candidates = build_server_provider_admission_candidates()
+    required_roles = server_provider_admission_required_roles(
+        candidates,
+        require_document_render=require_document_render,
+    )
+    coordinator = new_provider_admission_run_coordinator({})
+    snapshot = await coordinator.admit_chain_once(
+        candidates=candidates,
+        probe=lambda candidate: probe_provider_candidate(
+            candidate,
+            execution_runtime=execution_runtime,
+        ),
+        required_roles=required_roles,
+    )
+    if not bool(snapshot.get("generation_allowed")):
+        from backend.zhifei_autoplan.provider_admission import public_snapshot
+
+        admission = public_snapshot(snapshot)
+        raise ProfessionalRenderError(
+            "MODEL_PROVIDER_ADMISSION_BLOCKED: 模型供应商准入未通过；"
+            + "、".join(admission.get("missing_roles") or ["unknown"])
+        )
+    return coordinator
+
+
+async def _admit_current_server_route_for_existing_evidence(
+    *,
+    execution_runtime: ExecutionControlRuntime | None = None,
+) -> ProviderSlot:
+    """Freshly admit the full current route before a controlled re-render."""
+
+    coordinator = await _admit_current_server_chain_for_existing_evidence(
+        execution_runtime=execution_runtime
+    )
+    return _admitted_document_render_slot(coordinator)
+
+
+async def _ensure_review_provider_admission(payload: dict[str, Any]) -> Any:
+    """Bind review calls to one fresh, server-owned admission receipt."""
+
+    existing = payload.get("_provider_admission_run_coordinator")
+    if existing is not None:
+        return existing
+    try:
+        routed = apply_server_provider_routing(payload)
+        coordinator = await _admit_current_server_chain_for_existing_evidence(
+            require_document_render=False,
+        )
+    except ProviderRoutingConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_CONFIGURATION_BLOCKED",
+                "message": "服务端模型路由未配置完整，已阻止复核调用。",
+            },
+        ) from exc
+    except ProfessionalRenderError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_ADMISSION_BLOCKED",
+                "message": "模型供应商准入未通过，已在复核模型调用前停止。",
+                "action": "请检查凭据、模型、配额和流式能力。",
+            },
+        ) from exc
+
+    admitted_chain: list[dict[str, Any]] = []
+    for candidate in coordinator.bound_candidates:
+        if not str(candidate.role or "").startswith("text_"):
+            continue
+        admitted = coordinator.admitted_candidate(candidate.role)
+        if admitted is None or admitted.identity_digest != candidate.identity_digest:
+            continue
+        admitted_chain.append(
+            {
+                "slot": candidate.slot,
+                "role": candidate.role,
+                "provider": candidate.provider,
+                "model": candidate.model,
+                # Ephemeral only: payload is a private per-request copy and is
+                # never written back to the job record or response.
+                "api_key": candidate.credential,
+            }
+        )
+    if not admitted_chain:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_ADMISSION_EMPTY",
+                "message": "没有可用的已准入复核模型，已停止调用。",
+            },
+        )
+    routed["provider_chain"] = admitted_chain
+    routed["provider"] = admitted_chain[0]["provider"]
+    routed["model"] = admitted_chain[0]["model"]
+    routed["_provider_admission_run_coordinator"] = coordinator
+    payload.clear()
+    payload.update(routed)
+    return coordinator
 
 
 def _professional_render_failure_result(
@@ -1075,6 +1792,43 @@ def _rebuild_postprocessed_artifacts(
             v["requirement_evidence_validation"] = validate_requirement_evidence_matrix(
                 requirement_matrix
             )
+            chapter_gates: list[dict[str, Any]] = []
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                chapter_gates.append(
+                    validate_chapter_requirement_evidence(
+                        plan=requirement_plan,
+                        title=str(section.get("title") or ""),
+                        section=section,
+                    )
+                )
+            v["requirement_evidence_chapter_gates"] = chapter_gates
+            blocking_requirement_ids = sorted(
+                {
+                    str(requirement_id)
+                    for gate in chapter_gates
+                    for requirement_id in (gate.get("blocking_requirement_ids") or [])
+                    if str(requirement_id).strip()
+                }
+            )
+            requirement_hard_gate = bool(
+                payload.get("requirement_evidence_hard_gate", bool(tender))
+            )
+            if strict and requirement_hard_gate and blocking_requirement_ids:
+                postprocess_errors.append(
+                    {
+                        "stage": "requirement_evidence_chapter_gate",
+                        "error_type": "RequirementEvidencePostprocessBlocked",
+                        "message": json.dumps(
+                            {
+                                "code": "REQUIREMENT_EVIDENCE_POSTPROCESS_BLOCKED",
+                                "blocking_requirement_ids": blocking_requirement_ids,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
         except Exception as exc:
             postprocess_errors.append(
                 {
@@ -1142,17 +1896,12 @@ def _rebuild_postprocessed_artifacts(
             )
             v["delivery_quality_gate"] = delivery_gate
             qc["delivery_quality_gate"] = delivery_gate
-            if not bool(delivery_gate.get("delivery_allowed")):
-                postprocess_errors.append(
-                    {
-                        "stage": "delivery_quality_gate",
-                        "error_type": "DeliveryQualityGateBlocked",
-                        "message": json.dumps(
-                            delivery_gate.get("blockers") or [],
-                            ensure_ascii=False,
-                        ),
-                    }
-                )
+            # A quality decision is not a rebuild failure.  Keep it on the
+            # dedicated delivery gate so formal exports fail with the precise
+            # DELIVERY_QUALITY_GATE_BLOCKED code while an explicit dry-run
+            # preview may still persist non-deliverable diagnostic artifacts.
+            # Genuine derivation failures above remain fail-closed through
+            # ``postprocess_errors``.
         except Exception as exc:
             postprocess_errors.append(
                 {
@@ -1184,9 +1933,18 @@ def _rebuild_postprocessed_artifacts(
 def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
     job = get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="job not found")
-    if str(job.get("status") or "").strip() != "done":
-        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "JOB_NOT_FOUND", "message": "未找到指定任务。"},
+        )
+    if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "JOB_NOT_READY_FOR_RENDER",
+                "message": "任务尚未完成，不能执行专业渲染。",
+            },
+        )
     result = job.get("result") or {}
     json_path = str(result.get("json") or "").strip()
     if not json_path or not Path(json_path).exists():
@@ -1426,6 +2184,9 @@ async def _rewrite_review_section(
     if not original:
         audit["error"] = "empty_section_content"
         return "", audit
+    if payload.get("_provider_admission_run_coordinator") is None:
+        audit["error"] = "provider_admission_required"
+        return "", audit
 
     issue_lines = []
     for index, item in enumerate(issues, start=1):
@@ -1470,15 +2231,26 @@ async def _rewrite_review_section(
             explicit_key=str(entry.get("api_key") or ""),
         )
         attempt: dict[str, Any] = {"slot": slot, "provider": provider, "model": model}
-        client = LLMClient(
-            provider,
-            model,
-            api_key=api_key,
-            base_url=payload.get("base_url"),
-            secret_key=payload.get("secret_key"),
-            token_url=payload.get("token_url"),
-        )
-        response = await client.complete(prompt, timeout=240, max_tokens=12000)
+        client = LLMClient(provider, model, api_key=api_key, retry_attempts=1)
+        try:
+            response = await client.complete(
+                prompt,
+                timeout=240,
+                max_tokens=12000,
+                stream=True,
+            )
+        except Exception as exc:
+            info = classify_provider_error(exc, provider=provider, model=model)
+            attempt.update(
+                {
+                    "status": "failed",
+                    "error": str(info.get("code") or "provider_error")[:80],
+                }
+            )
+            audit["attempts"].append(attempt)
+            continue
+        finally:
+            client.close()
         rewritten = _clean_review_rewrite(str(response.get("text") or ""), title=title)
         if rewritten:
             attempt["status"] = "success"
@@ -1880,7 +2652,12 @@ def _ollama_smoke_model(req_model: str | None) -> str:
 
 
 def _ollama_smoke_base_url(req_base_url: str | None) -> str:
-    return (req_base_url or os.environ.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
+    requested = str(
+        req_base_url or os.environ.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+    ).strip().rstrip("/")
+    if requested in {"http://127.0.0.1:11434", "http://localhost:11434"}:
+        return "http://127.0.0.1:11434"
+    return ""
 
 
 def _ollama_smoke_title(req: ActionsOllamaMainChainSmokeRequest) -> str:
@@ -1971,6 +2748,23 @@ async def actions_ollama_main_chain_smoke(
     model = _ollama_smoke_model(req.model)
     base_url = _ollama_smoke_base_url(req.base_url)
     smoke_type = "ollama_main_chain_no_write"
+    if not base_url:
+        return {
+            "ok": False,
+            "enabled": bool(_ollama_smoke_enabled()),
+            "status": "blocked",
+            "provider": "ollama",
+            "model": model,
+            "base_url": "http://127.0.0.1:11434",
+            "section_count": 0,
+            "sections_preview": [],
+            "error": {
+                "code": "LOCAL_OLLAMA_LOOPBACK_REQUIRED",
+                "message": "仅允许本机 Ollama 127.0.0.1:11434，已阻止其他地址。",
+            },
+            "warning": None,
+            "smoke_type": smoke_type,
+        }
     if not _ollama_smoke_enabled():
         return {
             "ok": False,
@@ -2023,16 +2817,27 @@ async def actions_ollama_main_chain_smoke(
 
 @router.post("/tender/parse")
 async def actions_tender_parse(
-    files: List[UploadFile] = File(...),
+    files: List[UploadFile] | None = File(default=None),
+    file_id: List[str] | None = Query(default=None),
     project_id: str | None = None,
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
-    if not files:
+    if not files and not file_id:
         raise HTTPException(status_code=400, detail="no files")
-    paths = await asyncio.gather(*[_save_upload(f) for f in files])
+    paths = await asyncio.gather(*[_save_upload(f) for f in (files or [])])
+    cached_texts: Dict[str, str] = {}
+    resolved_sources = await asyncio.to_thread(
+        resolve_ingested_tender_sources, file_id
+    )
+    for source in resolved_sources:
+        source_path = str(source["path"])
+        paths.append(source_path)
+        cached_text = source.get("cached_text")
+        if isinstance(cached_text, str):
+            cached_texts[source_path] = cached_text
     parser = TenderParser()
-    matrix = await parser.parse(paths)
+    matrix = await parser.parse(paths, cached_texts=cached_texts)
     matrix_dict = matrix.model_dump()
     parsed_code = _safe_project_scope(matrix_dict.get("project_code"))
     parsed_name = str(matrix_dict.get("project_name") or "").strip() or None
@@ -2040,6 +2845,18 @@ async def actions_tender_parse(
     resolved_project_id = parsed_code or requested_pid
     if not resolved_project_id and parsed_name:
         resolved_project_id = _safe_project_scope(parsed_name)
+    if not resolved_project_id:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PROJECT_SCOPE_REQUIRED", "message": "无法确定招标资料所属项目。"},
+        )
+    if not isinstance(matrix_dict.get("outline"), list) or not matrix_dict.get("outline"):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "TENDER_PARSE_NOT_READY", "message": "未解析出有效招标目录，资料未标记为可生成。"},
+        )
+    matrix_dict["parse_status"] = "ready"
+    matrix_dict["project_id"] = resolved_project_id
     saved_at = save_tender_matrix(matrix_dict, project_id=resolved_project_id)
     return {
         "ok": True,
@@ -2053,22 +2870,41 @@ async def actions_tender_parse(
 
 @router.post("/boq/parse")
 async def actions_boq_parse(
-    file: List[UploadFile] = File(...),
+    file: List[UploadFile] | None = File(default=None),
+    file_id: List[str] | None = Query(default=None),
     project_id: str | None = None,
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
-    if not file:
+    if not file and not file_id:
         raise HTTPException(status_code=400, detail="no file")
-    paths = await asyncio.gather(*[_save_upload(f) for f in file])
+    paths = await asyncio.gather(*[_save_upload(f) for f in (file or [])])
+    paths.extend(await asyncio.to_thread(resolve_ingested_file_ids, file_id))
     parser = BoQParser()
     merged_items = []
     for p in paths:
         items, _ = await parser.parse(p)
         merged_items.extend(items)
     stats = parser._calc_stats(merged_items)
-    payload = {"items": [it.model_dump() for it in merged_items], "stats": stats, "source_file_count": len(paths)}
-    saved_at = save_boq_data(payload, project_id=project_id)
+    project_scope = _safe_project_scope(project_id)
+    if not project_scope:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PROJECT_SCOPE_REQUIRED", "message": "工程量清单必须绑定明确项目。"},
+        )
+    if not merged_items:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "BOQ_PARSE_NOT_READY", "message": "未解析出有效工程量清单条目，资料未标记为可生成。"},
+        )
+    payload = {
+        "items": [it.model_dump() for it in merged_items],
+        "stats": stats,
+        "source_file_count": len(paths),
+        "parse_status": "ready",
+        "project_id": project_scope,
+    }
+    saved_at = save_boq_data(payload, project_id=project_scope)
     return {**payload, "ok": True, "saved_at": saved_at}
 
 
@@ -2126,7 +2962,7 @@ async def actions_professional_render(
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.get("status") != "done":
+    if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
         raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
     result = dict(job.get("result") or {})
     variant = max(1, int(req.variant or 1))
@@ -2135,15 +2971,26 @@ async def actions_professional_render(
     if isinstance(source_docx, list) and source_docx:
         render_source["docx"] = list(source_docx)
     try:
+        admitted_slot = await _admit_current_server_route_for_existing_evidence()
         rendered = await render_professional_document(
             job_id=job_id,
             variant=variant,
             result=render_source,
+            slot_override=admitted_slot,
         )
     except ProfessionalRenderError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        public_error = _public_runtime_error(exc)
+        status_code = (
+            503
+            if str(public_error.get("code") or "").startswith("MODEL_PROVIDER_")
+            else 422
+        )
+        raise HTTPException(status_code=status_code, detail=public_error) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"专业精修与渲染失败: {exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail=_public_runtime_error(exc),
+        ) from exc
 
     if not isinstance(result.get("source_docx"), list):
         existing_docx = result.get("docx")
@@ -2178,6 +3025,7 @@ async def actions_professional_render(
 async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
+    _assert_mandatory_generation_sources(payload)
     resume_from_job_id = str(payload.get("resume_from_job_id") or "").strip()
     if resume_from_job_id:
         if not re.fullmatch(r"[a-f0-9]{32}", resume_from_job_id):
@@ -2185,11 +3033,21 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
         source_job = get_job(resume_from_job_id)
         if not source_job:
             raise HTTPException(status_code=404, detail="resume source job not found")
-        if str(source_job.get("status") or "").strip().lower() not in {"failed", "cancelled"}:
+        if str(source_job.get("status") or "").strip().lower() not in {
+            "failed",
+            "cancelled",
+            "interrupted_recoverable",
+        }:
             raise HTTPException(
                 status_code=409,
-                detail="only failed or cancelled jobs can be resumed",
+                detail="only failed, cancelled or interrupted jobs can be resumed",
             )
+    payload = _apply_server_provider_routing_or_503(payload)
+    provider_admission_run = (
+        new_provider_admission_run_coordinator(payload)
+        if bool(payload.get("_provider_admission_required"))
+        else None
+    )
     variant_plan = _build_variant_plan(payload)
     payload["_variant_plan"] = variant_plan
     payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
@@ -2207,6 +3065,8 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
             local_payload["logic_template_id"] = tid
         # Runtime/callback objects are deliberately attached only after cloning.
         local_payload["_execution_runtime"] = execution_runtime
+        if provider_admission_run is not None:
+            local_payload["_provider_admission_run_coordinator"] = provider_admission_run
         async with direct_sem:
             ordered_results[position] = await run_autoplan(local_payload)
 
@@ -2255,11 +3115,10 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
                 for f in (report.get("flagged") or [])[:24]:
                     title = str(f.get("title") or "").strip()
                     pair = str(f.get("pair") or "").strip()
-                    m = re.match(r"^v(\\d+)_v(\\d+)$", pair)
-                    if not m or not title:
+                    pair_indexes = _parse_variant_pair(pair)
+                    if not pair_indexes or not title:
                         continue
-                    a = int(m.group(1))
-                    b = int(m.group(2))
+                    a, b = pair_indexes
                     # Rewrite the later variant in the max-sim pair.
                     target_idx = max(a, b)
                     if target_idx <= 1 or target_idx > len(results):
@@ -2285,12 +3144,22 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
             _rebuild_postprocessed_artifacts(results, payload=payload, report=report, params=params)
         except Exception:
             pass
-    outputs = _save_outputs("actions_generated", results)
-    outputs = await _render_professional_outputs_for_job(
-        job_id=f"direct-{uuid.uuid4().hex}",
-        outputs=outputs,
-        execution_runtime=execution_runtime,
+    is_dry_run = bool(payload.get("dry_run"))
+    outputs = _save_outputs(
+        "actions_generated",
+        results,
+        preview_only=is_dry_run,
     )
+    if is_dry_run:
+        outputs["delivery_profile"] = "dry_run_preview_no_provider_calls"
+        outputs["delivery_ready"] = False
+    else:
+        outputs = await _render_professional_outputs_for_job(
+            job_id=f"direct-{uuid.uuid4().hex}",
+            outputs=outputs,
+            execution_runtime=execution_runtime,
+            slot_override=_admitted_document_render_slot(provider_admission_run),
+        )
     quality = [v.get("quality_checks") for v in results]
     return {
         "ok": True,
@@ -2301,6 +3170,773 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
     }
 
 
+def run_actions_generation_job(_job_id: str, _payload: dict):
+    heartbeat_stop = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+    try:
+        local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
+        local_payload["_job_id"] = _job_id
+        provider_admission_run = (
+            new_provider_admission_run_coordinator(local_payload)
+            if bool(local_payload.get("_provider_admission_required"))
+            else None
+        )
+
+        def _is_cancelled() -> bool:
+            j = get_job(_job_id) or {}
+            return str(j.get("status") or "").strip().lower() in {
+                "cancel_requested",
+                "cancelled",
+            }
+
+        def _mark_cancelled(result: Dict[str, Any] | None = None) -> None:
+            prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
+            values: Dict[str, Any] = {
+                "error": {
+                    "code": "JOB_CANCELLED",
+                    "message": "用户已取消任务。",
+                    "action": "可从已保存的可信检查点显式恢复。",
+                },
+                "progress": {
+                    "percent": int(prior_progress.get("percent") or 0),
+                    "stage": "cancelled",
+                    "phase": str(prior_progress.get("phase") or "generation"),
+                    "work_state": "idle",
+                    "detail": "用户已取消；未完成章节已停止，已完成章节保留为可信断点。",
+                },
+            }
+            if isinstance(result, dict):
+                values["result"] = result
+            transitioned = transition_job(
+                _job_id,
+                allowed_from={"queued", "running", "cancel_requested", "cancelled"},
+                status="cancelled",
+                **values,
+            )
+            if transitioned is None:
+                return
+            try:
+                from backend.zhifei_autoplan.generation_checkpoint import (
+                    mark_checkpoint_namespace_interrupted,
+                )
+
+                checkpoints = mark_checkpoint_namespace_interrupted(_job_id)
+                if checkpoints:
+                    merge_job(
+                        _job_id,
+                        progress={
+                            "checkpoint": {
+                                "status": "interrupted_recoverable",
+                                "scopes": checkpoints,
+                            }
+                        },
+                    )
+            except Exception:
+                pass
+            append_runtime_event(_job_id, "job_cancelled")
+
+        execution_runtime, execution_policy = _prepare_execution_control(
+            local_payload,
+            cancel_callback=_is_cancelled,
+        )
+        variants_total = int(local_payload["variants"])
+        agent_parallelism = int(execution_policy["chapter_task_parallelism"])
+        variant_parallelism = int(execution_policy["variant_parallelism"])
+        max_model_parallelism = int(execution_policy["max_model_parallelism"])
+
+        agent_runtime = {
+            "mode": "parallel",
+            "master_agent": "主控Agent",
+            "compliance_agent": "合规Agent",
+            "specialist_role_count": len(AGENT_ROLE_DIRECTIVES),
+            "parallelism_semantics": "bounded_chapter_tasks_not_agent_count",
+            "agent_parallelism": agent_parallelism,
+            "variant_parallelism": variant_parallelism,
+            "max_model_parallelism": max_model_parallelism,
+            "variants_total": variants_total,
+            "variants_done": 0,
+            "chapters_total": 0,
+            "chapters_started": 0,
+            "chapters_done": 0,
+            "active_agents": 0,
+            "current_chapters": [],
+        }
+        activity_lock = threading.RLock()
+        activity_state: Dict[str, Any] = {
+            "activity": "主控Agent正在准备章节任务",
+            "work_state": "idle",
+            "chapter_totals": {},
+            "started": set(),
+            "succeeded": set(),
+            "failed": set(),
+            "active": {},
+            "provider": {},
+        }
+
+        def _activity_snapshot() -> tuple[str, Dict[str, Any]]:
+            with activity_lock:
+                runtime = dict(agent_runtime)
+                current = [str(x) for x in activity_state.get("active", {}).values() if str(x).strip()]
+                runtime.update(
+                    {
+                        "chapters_total": int(sum(activity_state.get("chapter_totals", {}).values())),
+                        "chapters_started": len(activity_state.get("started", set())),
+                        "chapters_succeeded": len(activity_state.get("succeeded", set())),
+                        "chapters_failed": len(activity_state.get("failed", set())),
+                        "chapters_done": len(activity_state.get("succeeded", set())),
+                        "active_agents": len(current),
+                        "current_chapters": current[:6],
+                        "provider": dict(activity_state.get("provider") or {}),
+                        "execution_control": execution_runtime.snapshot(),
+                    }
+                )
+                agent_runtime.update(runtime)
+                return str(activity_state.get("activity") or "Agent正在工作"), runtime
+
+        def _heartbeat_loop() -> None:
+            while not heartbeat_stop.is_set():
+                activity, runtime = _activity_snapshot()
+                heartbeat_job(
+                    _job_id,
+                    activity=activity,
+                    progress_updates={
+                        "phase": "generation",
+                        "work_state": str(activity_state.get("work_state") or "idle"),
+                        "chapters": {
+                            "started": int(runtime.get("chapters_started") or 0),
+                            "succeeded": int(runtime.get("chapters_succeeded") or 0),
+                            "failed": int(runtime.get("chapters_failed") or 0),
+                            "total": int(runtime.get("chapters_total") or 0),
+                        },
+                    },
+                    agent_runtime_updates=runtime,
+                )
+                heartbeat_stop.wait(5.0)
+
+        def _variant_progress_callback(variant_id: int):
+            def _callback(event: Dict[str, Any]) -> None:
+                event_name = str(event.get("event") or "").strip()
+                chapter_idx = int(event.get("chapter_index") or 0)
+                chapter_title = str(event.get("chapter_title") or "").strip()
+                total = max(0, int(event.get("chapters_total") or 0))
+                variant_key = str(int(variant_id))
+                chapter_key = f"{variant_key}:{chapter_idx}"
+                with activity_lock:
+                    if total:
+                        activity_state["chapter_totals"][variant_key] = total
+                    if event_name == "preflight_started":
+                        activity_state["work_state"] = "processing_preflight"
+                        activity_state["activity"] = "正在校验项目事实、清单与生成约束"
+                    elif event_name == "boq_schedule_started":
+                        activity_state["work_state"] = "processing_preflight"
+                        activity_state["activity"] = "正在校验工程量清单并构建有界进度网络"
+                    elif event_name == "boq_schedule_completed":
+                        activity_state["work_state"] = "processing_preflight"
+                        warnings = int(event.get("warning_count") or 0)
+                        activity_state["activity"] = (
+                            "清单进度网络已完成，异常数量已隔离"
+                            if warnings
+                            else "清单进度网络已完成"
+                        )
+                    elif event_name == "compliance_preflight":
+                        verified_count = max(
+                            0,
+                            int(event.get("verified_standard_count") or 0),
+                        )
+                        if bool(event.get("ready")) and verified_count > 0:
+                            activity_state["activity"] = (
+                                f"合规Agent已完成生成前预检：{verified_count}项项目适用规范通过核验"
+                            )
+                        else:
+                            activity_state["activity"] = (
+                                "合规Agent正在核验项目适用规范，尚未进入内容生成"
+                            )
+                    elif event_name == "provider_admission_started":
+                        activity_state["work_state"] = "waiting_provider"
+                        activity_state["provider"] = {
+                            "admission_status": "checking",
+                            "required_roles": list(event.get("required_roles") or []),
+                            "candidate_count": int(event.get("candidate_count") or 0),
+                        }
+                        activity_state["activity"] = "正在执行模型供应商生成前准入检查"
+                    elif event_name == "provider_admission_completed":
+                        activity_state["work_state"] = "processing_chapter"
+                        activity_state["provider"] = {
+                            "admission_status": str(event.get("status") or "unknown"),
+                            "generation_allowed": bool(event.get("generation_allowed")),
+                            "degraded": bool(event.get("degraded")),
+                            "admitted_chain": list(event.get("admitted_chain") or []),
+                            "missing_roles": list(event.get("missing_roles") or []),
+                            "public_digest": str(event.get("public_digest") or ""),
+                        }
+                        activity_state["activity"] = (
+                            "模型供应商已降级准入，准备生成"
+                            if bool(event.get("degraded"))
+                            else "模型供应商准入通过，准备生成"
+                        )
+                    elif event_name == "provider_admission_failed":
+                        activity_state["work_state"] = "idle"
+                        activity_state["provider"] = {
+                            "admission_status": "failed",
+                            "code": str(event.get("code") or "MODEL_PROVIDER_ADMISSION_UNAVAILABLE"),
+                        }
+                        activity_state["activity"] = "模型供应商准入失败，任务已安全停止"
+                    elif event_name == "chapter_started":
+                        activity_state["started"].add(chapter_key)
+                        activity_state["active"][chapter_key] = chapter_title
+                        activity_state["work_state"] = "processing_chapter"
+                    elif event_name == "chapter_resumed":
+                        activity_state["started"].add(chapter_key)
+                        activity_state["succeeded"].add(chapter_key)
+                        activity_state["failed"].discard(chapter_key)
+                        activity_state["active"].pop(chapter_key, None)
+                        activity_state["activity"] = f"已从可信断点恢复章节：{chapter_title}"
+                    elif event_name == "chapter_checkpoint_saved":
+                        activity_state["work_state"] = "checkpointing"
+                        activity_state["activity"] = f"章节已安全保存，可断点续编：{chapter_title}"
+                    elif event_name == "chapter_completed":
+                        activity_state["started"].add(chapter_key)
+                        if bool(event.get("ok")):
+                            activity_state["succeeded"].add(chapter_key)
+                            activity_state["failed"].discard(chapter_key)
+                        else:
+                            activity_state["failed"].add(chapter_key)
+                            activity_state["succeeded"].discard(chapter_key)
+                        activity_state["active"].pop(chapter_key, None)
+                    elif event_name == "provider_attempt_started":
+                        activity_state["work_state"] = "waiting_provider"
+                        activity_state["provider"] = {
+                            "slot": str(event.get("slot") or ""),
+                            "name": str(event.get("provider") or ""),
+                            "model": str(event.get("model") or ""),
+                            "request_started_at": time.time(),
+                            "deadline_at": time.time() + int(event.get("request_timeout_seconds") or 240),
+                        }
+                        activity_state["activity"] = (
+                            f"正在等待模型响应：{event.get('provider')}/{event.get('model')} · {chapter_title}"
+                        )
+                    elif event_name == "provider_attempt_finished":
+                        provider_state = dict(activity_state.get("provider") or {})
+                        provider_state["last_ok"] = bool(event.get("ok"))
+                        provider_state["finished_at"] = time.time()
+                        provider_state["circuits"] = (
+                            dict(event.get("circuits"))
+                            if isinstance(event.get("circuits"), dict)
+                            else provider_state.get("circuits") or {}
+                        )
+                        activity_state["provider"] = provider_state
+                        activity_state["work_state"] = "processing_chapter"
+                    elif event_name == "draft_complete":
+                        activity_state["work_state"] = "checkpointing"
+                        activity_state["activity"] = "章节初稿完成，合规Agent正在复核与校验"
+                    elif event_name == "draft_failed":
+                        activity_state["work_state"] = "idle"
+                        activity_state["activity"] = "章节生成存在失败，正在封存检查点与故障证据"
+
+                    current = [
+                        str(x)
+                        for x in activity_state.get("active", {}).values()
+                        if str(x).strip()
+                    ]
+                    if current:
+                        preview = "、".join(current[:3])
+                        suffix = "…" if len(current) > 3 else ""
+                        activity_state["activity"] = (
+                            f"{len(current)}个章节任务正在编辑：{preview}{suffix}"
+                        )
+                    succeeded = len(activity_state.get("succeeded", set()))
+                    failed = len(activity_state.get("failed", set()))
+                    all_total = int(sum(activity_state.get("chapter_totals", {}).values()))
+
+                progress_updates: Dict[str, Any] = {
+                    "chapters_total": all_total,
+                    "chapters_done": succeeded,
+                    "chapters_succeeded": succeeded,
+                    "chapters_failed": failed,
+                    "chapters": {
+                        "started": len(activity_state.get("started", set())),
+                        "succeeded": succeeded,
+                        "failed": failed,
+                        "total": all_total,
+                    },
+                    "phase": "generation",
+                    "work_state": str(activity_state.get("work_state") or "idle"),
+                    "provider": dict(activity_state.get("provider") or {}),
+                }
+                if event.get("checkpoint_status") or event.get("saved_chapter_count") is not None:
+                    progress_updates["checkpoint"] = {
+                        "status": str(event.get("checkpoint_status") or "partial"),
+                        "saved_chapter_count": int(event.get("saved_chapter_count") or 0),
+                    }
+                if all_total > 0:
+                    progress_updates["percent"] = min(75, 15 + int((succeeded / all_total) * 60))
+                activity, runtime = _activity_snapshot()
+                append_runtime_event(
+                    _job_id,
+                    event_name or "generation_progress",
+                    variant_id=variant_id,
+                    chapter_index=chapter_idx,
+                    chapter_title=chapter_title,
+                    ok=event.get("ok"),
+                    provider=event.get("provider"),
+                    model=event.get("model"),
+                    slot=event.get("slot"),
+                    blocking_requirement_ids=[
+                        str(value)[:160]
+                        for value in (event.get("blocking_requirement_ids") or [])[:20]
+                        if str(value).strip()
+                    ],
+                    warning_requirement_ids=[
+                        str(value)[:160]
+                        for value in (event.get("warning_requirement_ids") or [])[:20]
+                        if str(value).strip()
+                    ],
+                    chapters=progress_updates.get("chapters"),
+                )
+                heartbeat_job(
+                    _job_id,
+                    activity=activity,
+                    progress_updates=progress_updates,
+                    agent_runtime_updates=runtime,
+                )
+
+            return _callback
+
+        def _update_progress(percent: int, stage: str, detail: str = "") -> None:
+            p = max(0, min(100, int(percent)))
+            merge_job(
+                _job_id,
+                progress={
+                    "percent": p,
+                    "stage": str(stage or ""),
+                    "phase": str(stage or ""),
+                    "work_state": "idle" if p >= 100 else "processing",
+                    "detail": str(detail or ""),
+                    "variants_total": variants_total,
+                    "variants_done": int(agent_runtime.get("variants_done") or 0),
+                },
+                agent_runtime=agent_runtime,
+            )
+
+        agent_runtime["execution_control"] = execution_runtime.snapshot()
+
+        if _is_cancelled():
+            _mark_cancelled()
+            return
+        started = transition_job(
+            _job_id,
+            allowed_from={"queued"},
+            status="running",
+            agent_runtime=agent_runtime,
+        )
+        if started is None:
+            if _is_cancelled():
+                _mark_cancelled()
+            return
+        append_runtime_event(_job_id, "job_started", execution_policy=execution_policy)
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            name=f"autoplan-heartbeat-{_job_id[:8]}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        _update_progress(5, "job_started", "任务已启动，正在分配多Agent")
+        mode_policy = local_payload.get("_mode_policy") if isinstance(local_payload.get("_mode_policy"), dict) else {}
+        mode_name = str(mode_policy.get("mode_effective") or local_payload.get("generation_mode") or "quality_200")
+        pages_planned = int(mode_policy.get("planned_total_pages") or 0)
+        if bool(mode_policy.get("auto_switched")):
+            _update_progress(
+                8,
+                "mode_switch",
+                f"页数规划={pages_planned}，已自动切换到高质量加速模式（{mode_name}）",
+            )
+        else:
+            _update_progress(
+                8,
+                "mode_ready",
+                f"生成模式={mode_name}，页数规划={pages_planned}",
+            )
+        variant_plan = local_payload.get("_variant_plan")
+        normalized_plan: List[Dict[str, Any]] = []
+        if isinstance(variant_plan, list) and variant_plan:
+            for it in variant_plan:
+                if not isinstance(it, dict):
+                    continue
+                try:
+                    vid = int(it.get("variant_id") or 0)
+                except Exception:
+                    vid = 0
+                if vid <= 0:
+                    continue
+                rec: Dict[str, Any] = {"variant_id": vid}
+                tid = _normalize_logic_template_id(it.get("logic_template_id"))
+                if tid:
+                    rec["logic_template_id"] = tid
+                normalized_plan.append(rec)
+        if not normalized_plan:
+            variants = variants_total
+            variant_ids = local_payload.get("_variant_ids")
+            if not isinstance(variant_ids, list) or not variant_ids:
+                variant_ids = reserve_variant_ids(
+                    project_id=str(local_payload.get("project_id") or "").strip() or None,
+                    count=max(1, variants),
+                    explicit_variant_id=local_payload.get("variant_id"),
+                    explicit_template_id=local_payload.get("logic_template_id") or local_payload.get("logic_template"),
+                )
+            for vid in variant_ids:
+                try:
+                    normalized_plan.append({"variant_id": int(vid)})
+                except Exception:
+                    continue
+        if not normalized_plan:
+            normalized_plan = [{"variant_id": 1}]
+        variant_plan = normalized_plan
+        variants_total = max(1, len(variant_plan))
+        agent_runtime["variants_total"] = variants_total
+        if variant_parallelism > variants_total:
+            variant_parallelism = variants_total
+            local_payload["variant_parallelism"] = variant_parallelism
+            agent_runtime["variant_parallelism"] = variant_parallelism
+        _update_progress(
+            10,
+            "agent_ready",
+            (
+                f"{len(AGENT_ROLE_DIRECTIVES)}个专业角色已进入任务编排："
+                f"同时编写章节={agent_parallelism}，方案并行={variant_parallelism}"
+            ),
+        )
+
+        async def _run_variants_parallel() -> list[dict]:
+            sem = asyncio.Semaphore(max(1, int(variant_parallelism)))
+            lock = asyncio.Lock()
+            done_count = 0
+            ordered: list[dict | None] = [None for _ in range(len(variant_plan))]
+
+            async def _run_one(pos: int, item: Dict[str, Any]):
+                nonlocal done_count
+                if _is_cancelled():
+                    return
+                vid = int(item.get("variant_id") or 1)
+                tid = _normalize_logic_template_id(item.get("logic_template_id"))
+                lp = json.loads(json.dumps(local_payload))
+                lp["variant_id"] = int(vid)
+                if tid:
+                    lp["logic_template_id"] = tid
+                lp["agent_parallelism"] = agent_parallelism
+                lp["_progress_callback"] = _variant_progress_callback(vid)
+                lp["_job_id"] = _job_id
+                # Recovery reads the immutable source namespace but always
+                # writes a complete new checkpoint lineage under this job.
+                lp["_checkpoint_namespace"] = _job_id
+                lp["_resume_checkpoint_namespace"] = str(
+                    local_payload.get("resume_from_job_id") or ""
+                ).strip()
+                lp["_cancel_callback"] = _is_cancelled
+                lp["_execution_runtime"] = execution_runtime
+                if provider_admission_run is not None:
+                    lp["_provider_admission_run_coordinator"] = provider_admission_run
+                async with sem:
+                    if _is_cancelled():
+                        return
+                    detail = f"正在并行编制方案 v{int(vid)}"
+                    if tid:
+                        detail += f"（模板{tid}）"
+                    _update_progress(
+                        15 + int((done_count / max(1, variants_total)) * 65),
+                        "variant_running",
+                        detail,
+                    )
+                    res = await run_autoplan(lp)
+                    ordered[pos] = res
+                async with lock:
+                    done_count += 1
+                    agent_runtime["variants_done"] = int(done_count)
+                    _update_progress(
+                        15 + int((done_count / max(1, variants_total)) * 65),
+                        "variant_running",
+                        f"方案完成进度：{done_count}/{variants_total}",
+                    )
+
+            await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(variant_plan)])
+            return [x for x in ordered if isinstance(x, dict)]
+
+        results = asyncio.run(_run_variants_parallel())
+        agent_runtime["execution_control"] = execution_runtime.snapshot()
+        if _is_cancelled():
+            _mark_cancelled()
+            return
+        # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort.
+        if len(results) >= 2:
+            try:
+                from backend.zhifei_autoplan.variant_similarity import compute_variant_similarity
+                from backend.zhifei_autoplan.diversity_autofix import apply_diversity_autofix
+
+                params = load_params()
+                overrides = local_payload.get("params_override")
+                if isinstance(overrides, dict) and overrides:
+                    for k, v in overrides.items():
+                        if isinstance(v, dict) and isinstance(params.get(k), dict):
+                            merged = dict(params.get(k) or {})
+                            merged.update(v)
+                            params[k] = merged
+                        else:
+                            params[k] = v
+                div_cfg = params.get("variant_diversity") if isinstance(params.get("variant_diversity"), dict) else {}
+                def _run_report():
+                    return compute_variant_similarity(
+                        results,
+                        chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
+                        overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
+                        min_chars=int(div_cfg.get("min_chars") or 800),
+                        ignore_title_keywords=(div_cfg.get("ignore_title_keywords") if isinstance(div_cfg.get("ignore_title_keywords"), list) else None),
+                        relaxed_title_keywords=(div_cfg.get("relaxed_title_keywords") if isinstance(div_cfg.get("relaxed_title_keywords"), list) else None),
+                        relaxed_chapter_threshold=(float(div_cfg.get("relaxed_chapter_threshold")) if div_cfg.get("relaxed_chapter_threshold") is not None else None),
+                    )
+
+                report = _run_report()
+
+                # Auto-fix: deterministic reshape for flagged chapters (do not change tender outline).
+                max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
+                if max_rounds < 0:
+                    max_rounds = 0
+                rounds = 0
+                while rounds < max_rounds and report.get("ok") is False and report.get("flagged"):
+                    changed_any = False
+                    for f in (report.get("flagged") or [])[:24]:
+                        title = str(f.get("title") or "").strip()
+                        pair = str(f.get("pair") or "").strip()
+                        pair_indexes = _parse_variant_pair(pair)
+                        if not pair_indexes or not title:
+                            continue
+                        a, b = pair_indexes
+                        target_idx = max(a, b)
+                        if target_idx <= 1 or target_idx > len(results):
+                            continue
+                        target = results[target_idx - 1]
+                        secs = target.get("sections") if isinstance(target, dict) else None
+                        if not isinstance(secs, list):
+                            continue
+                        for sec in secs:
+                            if not isinstance(sec, dict):
+                                continue
+                            if str(sec.get("title") or "").strip() != title:
+                                continue
+                            if apply_diversity_autofix(sec, params=params, evidence_hint=str(pair)):
+                                changed_any = True
+                            break
+                    if not changed_any:
+                        break
+                    report = _run_report()
+                    rounds += 1
+                _update_progress(86, "cross_variant_check", "正在执行跨方案一致性与差异性审计")
+                _rebuild_postprocessed_artifacts(results, payload=local_payload, report=report, params=params)
+            except Exception:
+                pass
+        if _is_cancelled():
+            _mark_cancelled()
+            return
+        _update_progress(91, "exporting_source", "正在生成可追溯中间稿与质控附件")
+        is_dry_run = bool(local_payload.get("dry_run"))
+        outputs = _save_outputs(
+            f"actions_{_job_id}",
+            results,
+            preview_only=is_dry_run,
+        )
+        if _is_cancelled():
+            _mark_cancelled(outputs)
+            return
+
+        def _professional_progress(variant: int, total: int) -> None:
+            percent = 93 + int(((variant - 1) / max(1, total)) * 6)
+            detail = f"Sonnet 5 正在精修并专业落版：方案 {variant}/{total}"
+            with activity_lock:
+                activity_state["activity"] = detail
+            _update_progress(percent, "professional_rendering", detail)
+
+        if is_dry_run:
+            _update_progress(
+                93,
+                "dry_run_finalizing",
+                "正在封装 dry-run 预览；不会生成专业终稿或正式交付回执",
+            )
+        else:
+            _update_progress(
+                93,
+                "professional_rendering",
+                "Sonnet 5 正在逐章精修、统一视觉规范并执行 Word 质量闸门",
+            )
+        try:
+            if is_dry_run:
+                outputs["delivery_profile"] = "dry_run_preview_no_provider_calls"
+                outputs["delivery_ready"] = False
+            else:
+                outputs = asyncio.run(
+                    _render_professional_outputs_for_job(
+                        job_id=_job_id,
+                        outputs=outputs,
+                        progress_callback=_professional_progress,
+                        execution_runtime=execution_runtime,
+                        slot_override=_admitted_document_render_slot(
+                            provider_admission_run
+                        ),
+                    )
+                )
+        except Exception as render_error:
+            agent_runtime["execution_control"] = execution_runtime.snapshot()
+            recovery, error_info = _professional_render_failure_result(
+                outputs,
+                render_error,
+            )
+            failed_checkpoint = _seal_failed_run_checkpoints(_job_id)
+            if failed_checkpoint is not None:
+                saved_chapter_count = int(
+                    failed_checkpoint.get("saved_chapter_count") or 0
+                )
+                recovery.update(
+                    {
+                        "section_count": saved_chapter_count,
+                        "checkpoint_status": str(
+                            failed_checkpoint.get("status") or "failed_partial"
+                        ),
+                        "recoverable": bool(saved_chapter_count),
+                        "delivery_ready": False,
+                    }
+                )
+            detail = (
+                "专业终稿渲染未完成："
+                f"{error_info.get('user_message') or '外部模型连接失败。'} "
+                "已保全中间稿与质控附件；未将中间稿冒充专业终稿。"
+            )
+            transition_job(
+                _job_id,
+                allowed_from={"running"},
+                status="failed",
+                error={
+                    "code": str(error_info.get("code") or "PROFESSIONAL_RENDER_FAILED"),
+                    "message": detail,
+                    "action": str(error_info.get("action") or "检查模型连接后显式重试专业渲染。"),
+                },
+                result=recovery,
+                agent_runtime=agent_runtime,
+                progress={
+                    "percent": min(99, int(((get_job(_job_id) or {}).get("progress") or {}).get("percent") or 0)),
+                    "stage": "professional_render_failed",
+                    "phase": "professional_rendering",
+                    "work_state": "idle",
+                    "detail": detail,
+                    **(
+                        {"checkpoint": failed_checkpoint}
+                        if failed_checkpoint is not None
+                        else {}
+                    ),
+                },
+            )
+            append_runtime_event(
+                _job_id,
+                "job_failed",
+                code=str(error_info.get("code") or "PROFESSIONAL_RENDER_FAILED"),
+                phase="professional_rendering",
+            )
+            return
+        agent_runtime["execution_control"] = execution_runtime.snapshot()
+        if _is_cancelled():
+            _mark_cancelled(outputs)
+            return
+        completion = _delivery_progress_for_run(dry_run=is_dry_run)
+        _update_progress(100, completion["stage"], completion["detail"])
+        transition_job(
+            _job_id,
+            allowed_from={"running"},
+            status="succeeded",
+            result=outputs,
+            agent_runtime=agent_runtime,
+            progress={
+                "stage": completion["stage"],
+                "phase": completion["phase"],
+                "work_state": "idle",
+                "percent": 100,
+                "detail": completion["detail"],
+            },
+        )
+        append_runtime_event(
+            _job_id,
+            "job_succeeded",
+            phase=completion["phase"],
+            dry_run=is_dry_run,
+        )
+    except Exception as e:
+        error_text = str(e)
+        cancel_probe = locals().get("_is_cancelled")
+        was_cancelled = bool(cancel_probe()) if callable(cancel_probe) else False
+        if was_cancelled or "cancelled_by_user" in error_text:
+            prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
+            transition_job(
+                _job_id,
+                allowed_from={"queued", "running", "cancel_requested", "cancelled"},
+                status="cancelled",
+                error={
+                    "code": "JOB_CANCELLED",
+                    "message": "用户已取消任务。",
+                    "action": "可从已保存的可信检查点显式恢复。",
+                },
+                progress={
+                    "percent": int(prior_progress.get("percent") or 0),
+                    "stage": "cancelled",
+                    "phase": str(prior_progress.get("phase") or "generation"),
+                    "work_state": "idle",
+                    "detail": "用户已取消；未完成章节已停止，已完成章节保留为可信断点。",
+                },
+            )
+            append_runtime_event(_job_id, "job_cancelled")
+        else:
+            prior_job = get_job(_job_id) or {}
+            public_error, failure_progress, recovery_result = _runtime_failure_transition(
+                e,
+                prior_job,
+            )
+            failed_checkpoint = _seal_failed_run_checkpoints(_job_id)
+            if failed_checkpoint is not None:
+                failure_progress["checkpoint"] = failed_checkpoint
+                saved_chapter_count = int(
+                    failed_checkpoint.get("saved_chapter_count") or 0
+                )
+                if recovery_result is None and saved_chapter_count:
+                    recovery_result = dict(prior_job.get("result") or {})
+                if recovery_result is not None:
+                    recovery_result.update(
+                        {
+                            "section_count": saved_chapter_count,
+                            "checkpoint_status": str(
+                                failed_checkpoint.get("status") or "failed_partial"
+                            ),
+                            "recoverable": bool(saved_chapter_count),
+                            "delivery_ready": False,
+                        }
+                    )
+            failure_fields: Dict[str, Any] = {
+                "error": public_error,
+                "progress": failure_progress,
+            }
+            if recovery_result is not None:
+                failure_fields["result"] = recovery_result
+            transition_job(
+                _job_id,
+                allowed_from={"queued", "running"},
+                status="failed",
+                **failure_fields,
+            )
+            append_runtime_event(
+                _job_id,
+                "job_failed",
+                code=public_error.get("code"),
+                phase=str(failure_progress.get("phase") or "generation"),
+                failures=public_error.get("failures"),
+            )
+    finally:
+        heartbeat_stop.set()
+        if heartbeat_thread is not None and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=0.25)
+
 @router.post("/generate_async")
 async def actions_generate_async(
     req: ActionsGenerateRequest,
@@ -2309,459 +3945,32 @@ async def actions_generate_async(
 ):
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
+    _assert_mandatory_generation_sources(payload)
+    resume_from_job_id = str(payload.get("resume_from_job_id") or "").strip()
+    if resume_from_job_id:
+        if not re.fullmatch(r"[a-f0-9]{32}", resume_from_job_id):
+            raise HTTPException(status_code=400, detail="invalid resume_from_job_id")
+        source_job = get_job(resume_from_job_id)
+        if not source_job:
+            raise HTTPException(status_code=404, detail="resume source job not found")
+        if str(source_job.get("status") or "").strip().lower() not in {
+            "failed",
+            "cancelled",
+            "interrupted_recoverable",
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="only failed, cancelled or interrupted jobs can be resumed",
+            )
+    payload = _apply_server_provider_routing_or_503(payload)
     variant_plan = _build_variant_plan(payload)
     payload["_variant_plan"] = variant_plan
     payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
     payload["variants"] = len(variant_plan) if variant_plan else int(payload.get("variants") or 1)
     job_id = create_job(payload, user_id=None)
 
-    def _run_job(_job_id: str, _payload: dict):
-        heartbeat_stop = threading.Event()
-        heartbeat_thread: threading.Thread | None = None
-        try:
-            local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
-            local_payload["_job_id"] = _job_id
-
-            def _is_cancelled() -> bool:
-                j = get_job(_job_id) or {}
-                return str(j.get("status") or "").strip().lower() == "cancelled"
-
-            execution_runtime, execution_policy = _prepare_execution_control(
-                local_payload,
-                cancel_callback=_is_cancelled,
-            )
-            variants_total = int(local_payload["variants"])
-            agent_parallelism = int(execution_policy["chapter_task_parallelism"])
-            variant_parallelism = int(execution_policy["variant_parallelism"])
-            max_model_parallelism = int(execution_policy["max_model_parallelism"])
-
-            agent_runtime = {
-                "mode": "parallel",
-                "master_agent": "主控Agent",
-                "compliance_agent": "合规Agent",
-                "specialist_role_count": len(AGENT_ROLE_DIRECTIVES),
-                "parallelism_semantics": "bounded_chapter_tasks_not_agent_count",
-                "agent_parallelism": agent_parallelism,
-                "variant_parallelism": variant_parallelism,
-                "max_model_parallelism": max_model_parallelism,
-                "variants_total": variants_total,
-                "variants_done": 0,
-                "chapters_total": 0,
-                "chapters_started": 0,
-                "chapters_done": 0,
-                "active_agents": 0,
-                "current_chapters": [],
-            }
-            activity_lock = threading.RLock()
-            activity_state: Dict[str, Any] = {
-                "activity": "主控Agent正在准备章节任务",
-                "chapter_totals": {},
-                "started": set(),
-                "completed": set(),
-                "active": {},
-            }
-
-            def _activity_snapshot() -> tuple[str, Dict[str, Any]]:
-                with activity_lock:
-                    runtime = dict(agent_runtime)
-                    current = [str(x) for x in activity_state.get("active", {}).values() if str(x).strip()]
-                    runtime.update(
-                        {
-                            "chapters_total": int(sum(activity_state.get("chapter_totals", {}).values())),
-                            "chapters_started": len(activity_state.get("started", set())),
-                            "chapters_done": len(activity_state.get("completed", set())),
-                            "active_agents": len(current),
-                            "current_chapters": current[:6],
-                        }
-                    )
-                    agent_runtime.update(runtime)
-                    return str(activity_state.get("activity") or "Agent正在工作"), runtime
-
-            def _heartbeat_loop() -> None:
-                while not heartbeat_stop.is_set():
-                    activity, runtime = _activity_snapshot()
-                    heartbeat_job(
-                        _job_id,
-                        activity=activity,
-                        agent_runtime_updates=runtime,
-                    )
-                    heartbeat_stop.wait(5.0)
-
-            def _variant_progress_callback(variant_id: int):
-                def _callback(event: Dict[str, Any]) -> None:
-                    event_name = str(event.get("event") or "").strip()
-                    chapter_idx = int(event.get("chapter_index") or 0)
-                    chapter_title = str(event.get("chapter_title") or "").strip()
-                    total = max(0, int(event.get("chapters_total") or 0))
-                    variant_key = str(int(variant_id))
-                    chapter_key = f"{variant_key}:{chapter_idx}"
-                    with activity_lock:
-                        if total:
-                            activity_state["chapter_totals"][variant_key] = total
-                        if event_name == "compliance_preflight":
-                            verified_count = max(
-                                0,
-                                int(event.get("verified_standard_count") or 0),
-                            )
-                            if bool(event.get("ready")) and verified_count > 0:
-                                activity_state["activity"] = (
-                                    f"合规Agent已完成生成前预检：{verified_count}项项目适用规范通过核验"
-                                )
-                            else:
-                                activity_state["activity"] = (
-                                    "合规Agent正在核验项目适用规范，尚未进入内容生成"
-                                )
-                        elif event_name == "chapter_started":
-                            activity_state["started"].add(chapter_key)
-                            activity_state["active"][chapter_key] = chapter_title
-                        elif event_name == "chapter_resumed":
-                            activity_state["started"].add(chapter_key)
-                            activity_state["completed"].add(chapter_key)
-                            activity_state["active"].pop(chapter_key, None)
-                            activity_state["activity"] = f"已从可信断点恢复章节：{chapter_title}"
-                        elif event_name == "chapter_checkpoint_saved":
-                            activity_state["activity"] = f"章节已安全保存，可断点续编：{chapter_title}"
-                        elif event_name == "chapter_completed":
-                            activity_state["started"].add(chapter_key)
-                            activity_state["completed"].add(chapter_key)
-                            activity_state["active"].pop(chapter_key, None)
-                        elif event_name == "draft_complete":
-                            activity_state["activity"] = "章节初稿完成，合规Agent正在复核与校验"
-
-                        current = [
-                            str(x)
-                            for x in activity_state.get("active", {}).values()
-                            if str(x).strip()
-                        ]
-                        if current:
-                            preview = "、".join(current[:3])
-                            suffix = "…" if len(current) > 3 else ""
-                            activity_state["activity"] = (
-                                f"{len(current)}个章节任务正在编辑：{preview}{suffix}"
-                            )
-                        done = len(activity_state.get("completed", set()))
-                        all_total = int(sum(activity_state.get("chapter_totals", {}).values()))
-
-                    progress_updates: Dict[str, Any] = {
-                        "chapters_total": all_total,
-                        "chapters_done": done,
-                    }
-                    if all_total > 0:
-                        progress_updates["percent"] = min(75, 15 + int((done / all_total) * 60))
-                    activity, runtime = _activity_snapshot()
-                    heartbeat_job(
-                        _job_id,
-                        activity=activity,
-                        progress_updates=progress_updates,
-                        agent_runtime_updates=runtime,
-                    )
-
-                return _callback
-
-            def _update_progress(percent: int, stage: str, detail: str = "") -> None:
-                p = max(0, min(100, int(percent)))
-                update_job(
-                    _job_id,
-                    progress={
-                        "percent": p,
-                        "stage": str(stage or ""),
-                        "detail": str(detail or ""),
-                        "variants_total": variants_total,
-                        "variants_done": int(agent_runtime.get("variants_done") or 0),
-                    },
-                    agent_runtime=agent_runtime,
-                )
-
-            agent_runtime["execution_control"] = execution_runtime.snapshot()
-
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            update_job(_job_id, status="running", agent_runtime=agent_runtime)
-            heartbeat_thread = threading.Thread(
-                target=_heartbeat_loop,
-                name=f"autoplan-heartbeat-{_job_id[:8]}",
-                daemon=True,
-            )
-            heartbeat_thread.start()
-            _update_progress(5, "job_started", "任务已启动，正在分配多Agent")
-            mode_policy = local_payload.get("_mode_policy") if isinstance(local_payload.get("_mode_policy"), dict) else {}
-            mode_name = str(mode_policy.get("mode_effective") or local_payload.get("generation_mode") or "quality_200")
-            pages_planned = int(mode_policy.get("planned_total_pages") or 0)
-            if bool(mode_policy.get("auto_switched")):
-                _update_progress(
-                    8,
-                    "mode_switch",
-                    f"页数规划={pages_planned}，已自动切换到高质量加速模式（{mode_name}）",
-                )
-            else:
-                _update_progress(
-                    8,
-                    "mode_ready",
-                    f"生成模式={mode_name}，页数规划={pages_planned}",
-                )
-            variant_plan = local_payload.get("_variant_plan")
-            normalized_plan: List[Dict[str, Any]] = []
-            if isinstance(variant_plan, list) and variant_plan:
-                for it in variant_plan:
-                    if not isinstance(it, dict):
-                        continue
-                    try:
-                        vid = int(it.get("variant_id") or 0)
-                    except Exception:
-                        vid = 0
-                    if vid <= 0:
-                        continue
-                    rec: Dict[str, Any] = {"variant_id": vid}
-                    tid = _normalize_logic_template_id(it.get("logic_template_id"))
-                    if tid:
-                        rec["logic_template_id"] = tid
-                    normalized_plan.append(rec)
-            if not normalized_plan:
-                variants = variants_total
-                variant_ids = local_payload.get("_variant_ids")
-                if not isinstance(variant_ids, list) or not variant_ids:
-                    variant_ids = reserve_variant_ids(
-                        project_id=str(local_payload.get("project_id") or "").strip() or None,
-                        count=max(1, variants),
-                        explicit_variant_id=local_payload.get("variant_id"),
-                        explicit_template_id=local_payload.get("logic_template_id") or local_payload.get("logic_template"),
-                    )
-                for vid in variant_ids:
-                    try:
-                        normalized_plan.append({"variant_id": int(vid)})
-                    except Exception:
-                        continue
-            if not normalized_plan:
-                normalized_plan = [{"variant_id": 1}]
-            variant_plan = normalized_plan
-            variants_total = max(1, len(variant_plan))
-            agent_runtime["variants_total"] = variants_total
-            if variant_parallelism > variants_total:
-                variant_parallelism = variants_total
-                local_payload["variant_parallelism"] = variant_parallelism
-                agent_runtime["variant_parallelism"] = variant_parallelism
-            _update_progress(
-                10,
-                "agent_ready",
-                (
-                    f"{len(AGENT_ROLE_DIRECTIVES)}个专业角色已进入任务编排："
-                    f"同时编写章节={agent_parallelism}，方案并行={variant_parallelism}"
-                ),
-            )
-
-            async def _run_variants_parallel() -> list[dict]:
-                sem = asyncio.Semaphore(max(1, int(variant_parallelism)))
-                lock = asyncio.Lock()
-                done_count = 0
-                ordered: list[dict | None] = [None for _ in range(len(variant_plan))]
-
-                async def _run_one(pos: int, item: Dict[str, Any]):
-                    nonlocal done_count
-                    if _is_cancelled():
-                        return
-                    vid = int(item.get("variant_id") or 1)
-                    tid = _normalize_logic_template_id(item.get("logic_template_id"))
-                    lp = json.loads(json.dumps(local_payload))
-                    lp["variant_id"] = int(vid)
-                    if tid:
-                        lp["logic_template_id"] = tid
-                    lp["agent_parallelism"] = agent_parallelism
-                    lp["_progress_callback"] = _variant_progress_callback(vid)
-                    lp["_job_id"] = _job_id
-                    lp["_checkpoint_namespace"] = str(
-                        local_payload.get("resume_from_job_id") or _job_id
-                    )
-                    lp["_cancel_callback"] = _is_cancelled
-                    lp["_execution_runtime"] = execution_runtime
-                    async with sem:
-                        if _is_cancelled():
-                            return
-                        detail = f"正在并行编制方案 v{int(vid)}"
-                        if tid:
-                            detail += f"（模板{tid}）"
-                        _update_progress(
-                            15 + int((done_count / max(1, variants_total)) * 65),
-                            "variant_running",
-                            detail,
-                        )
-                        res = await run_autoplan(lp)
-                        ordered[pos] = res
-                    async with lock:
-                        done_count += 1
-                        agent_runtime["variants_done"] = int(done_count)
-                        _update_progress(
-                            15 + int((done_count / max(1, variants_total)) * 65),
-                            "variant_running",
-                            f"方案完成进度：{done_count}/{variants_total}",
-                        )
-
-                await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(variant_plan)])
-                return [x for x in ordered if isinstance(x, dict)]
-
-            results = asyncio.run(_run_variants_parallel())
-            agent_runtime["execution_control"] = execution_runtime.snapshot()
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort.
-            if len(results) >= 2:
-                try:
-                    from backend.zhifei_autoplan.variant_similarity import compute_variant_similarity
-                    from backend.zhifei_autoplan.diversity_autofix import apply_diversity_autofix
-
-                    params = load_params()
-                    overrides = local_payload.get("params_override")
-                    if isinstance(overrides, dict) and overrides:
-                        for k, v in overrides.items():
-                            if isinstance(v, dict) and isinstance(params.get(k), dict):
-                                merged = dict(params.get(k) or {})
-                                merged.update(v)
-                                params[k] = merged
-                            else:
-                                params[k] = v
-                    div_cfg = params.get("variant_diversity") if isinstance(params.get("variant_diversity"), dict) else {}
-                    def _run_report():
-                        return compute_variant_similarity(
-                            results,
-                            chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
-                            overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
-                            min_chars=int(div_cfg.get("min_chars") or 800),
-                            ignore_title_keywords=(div_cfg.get("ignore_title_keywords") if isinstance(div_cfg.get("ignore_title_keywords"), list) else None),
-                            relaxed_title_keywords=(div_cfg.get("relaxed_title_keywords") if isinstance(div_cfg.get("relaxed_title_keywords"), list) else None),
-                            relaxed_chapter_threshold=(float(div_cfg.get("relaxed_chapter_threshold")) if div_cfg.get("relaxed_chapter_threshold") is not None else None),
-                        )
-
-                    report = _run_report()
-
-                    # Auto-fix: deterministic reshape for flagged chapters (do not change tender outline).
-                    max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
-                    if max_rounds < 0:
-                        max_rounds = 0
-                    rounds = 0
-                    while rounds < max_rounds and report.get("ok") is False and report.get("flagged"):
-                        changed_any = False
-                        for f in (report.get("flagged") or [])[:24]:
-                            title = str(f.get("title") or "").strip()
-                            pair = str(f.get("pair") or "").strip()
-                            m = re.match(r"^v(\\d+)_v(\\d+)$", pair)
-                            if not m or not title:
-                                continue
-                            a = int(m.group(1))
-                            b = int(m.group(2))
-                            target_idx = max(a, b)
-                            if target_idx <= 1 or target_idx > len(results):
-                                continue
-                            target = results[target_idx - 1]
-                            secs = target.get("sections") if isinstance(target, dict) else None
-                            if not isinstance(secs, list):
-                                continue
-                            for sec in secs:
-                                if not isinstance(sec, dict):
-                                    continue
-                                if str(sec.get("title") or "").strip() != title:
-                                    continue
-                                if apply_diversity_autofix(sec, params=params, evidence_hint=str(pair)):
-                                    changed_any = True
-                                break
-                        if not changed_any:
-                            break
-                        report = _run_report()
-                        rounds += 1
-                    _update_progress(86, "cross_variant_check", "正在执行跨方案一致性与差异性审计")
-                    _rebuild_postprocessed_artifacts(results, payload=local_payload, report=report, params=params)
-                except Exception:
-                    pass
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            _update_progress(91, "exporting_source", "正在生成可追溯中间稿与质控附件")
-            outputs = _save_outputs(f"actions_{_job_id}", results)
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
-                return
-
-            def _professional_progress(variant: int, total: int) -> None:
-                percent = 93 + int(((variant - 1) / max(1, total)) * 6)
-                detail = f"Sonnet 5 正在精修并专业落版：方案 {variant}/{total}"
-                with activity_lock:
-                    activity_state["activity"] = detail
-                _update_progress(percent, "professional_rendering", detail)
-
-            _update_progress(
-                93,
-                "professional_rendering",
-                "Sonnet 5 正在逐章精修、统一视觉规范并执行 Word 质量闸门",
-            )
-            try:
-                outputs = asyncio.run(
-                    _render_professional_outputs_for_job(
-                        job_id=_job_id,
-                        outputs=outputs,
-                        progress_callback=_professional_progress,
-                        execution_runtime=execution_runtime,
-                    )
-                )
-            except Exception as render_error:
-                agent_runtime["execution_control"] = execution_runtime.snapshot()
-                recovery, error_info = _professional_render_failure_result(
-                    outputs,
-                    render_error,
-                )
-                detail = (
-                    "专业终稿渲染未完成："
-                    f"{error_info.get('user_message') or '外部模型连接失败。'} "
-                    "已保全中间稿与质控附件；未将中间稿冒充专业终稿。"
-                )
-                update_job(
-                    _job_id,
-                    status="failed",
-                    error=detail,
-                    result=recovery,
-                    agent_runtime=agent_runtime,
-                    progress={
-                        "percent": 99,
-                        "stage": "professional_render_failed",
-                        "detail": detail,
-                    },
-                )
-                return
-            agent_runtime["execution_control"] = execution_runtime.snapshot()
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
-                return
-            _update_progress(100, "done", "专业 Word 已完成，可直接下载")
-            update_job(_job_id, status="done", result=outputs, agent_runtime=agent_runtime)
-        except Exception as e:
-            error_text = repr(e)
-            cancel_probe = locals().get("_is_cancelled")
-            was_cancelled = bool(cancel_probe()) if callable(cancel_probe) else False
-            if was_cancelled or "cancelled_by_user" in error_text:
-                prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
-                update_job(
-                    _job_id,
-                    status="cancelled",
-                    error="cancelled_by_user",
-                    progress={
-                        "percent": int(prior_progress.get("percent") or 0),
-                        "stage": "cancelled",
-                        "detail": "用户已取消；未完成章节已停止，已完成章节保留为可信断点。",
-                    },
-                )
-            else:
-                update_job(
-                    _job_id,
-                    status="failed",
-                    error=error_text,
-                    progress={"percent": 100, "stage": "failed", "detail": error_text},
-                )
-        finally:
-            heartbeat_stop.set()
-            if heartbeat_thread is not None and heartbeat_thread.is_alive():
-                heartbeat_thread.join(timeout=0.25)
-
-    background_tasks.add_task(_run_job, job_id, payload)
-    return {"ok": True, "job_id": job_id, "status": "queued"}
+    queue_depth = submit_isolated_job(job_id, run_actions_generation_job, job_id, payload)
+    return {"ok": True, "job_id": job_id, "run_id": job_id, "status": "queued", "queue_depth": queue_depth}
 
 
 @router.post("/job_cancel")
@@ -2774,10 +3983,24 @@ async def actions_job_cancel(req: ActionsJobCancelRequest, x_actions_key: str | 
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     status = str(job.get("status") or "").strip().lower()
-    if status in {"done", "failed", "cancelled"}:
+    if status in {"done", "succeeded", "failed", "cancelled", "interrupted_recoverable"}:
         return {"ok": True, "job_id": job_id, "status": status}
-    update_job(job_id, status="cancelled", error="cancelled_by_user")
-    return {"ok": True, "job_id": job_id, "status": "cancelled"}
+    transitioned = transition_job(
+        job_id,
+        allowed_from={"queued", "running"},
+        status="cancel_requested",
+        error={
+            "code": "JOB_CANCEL_REQUESTED",
+            "message": "已收到取消请求，正在停止活动工作并封存检查点。",
+            "action": "请等待任务确认取消；已完成章节不会被删除。",
+        },
+        progress={"work_state": "cancelling", "stage": "cancel_requested"},
+    )
+    if transitioned is None:
+        latest = get_job(job_id) or {}
+        return {"ok": True, "job_id": job_id, "status": latest.get("status")}
+    append_runtime_event(job_id, "cancel_requested")
+    return {"ok": True, "job_id": job_id, "status": "cancel_requested"}
 
 
 @router.get("/job_status")
@@ -2786,14 +4009,38 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    runtime = job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {}
+    public_provider = _public_provider_state(progress.get("provider") or runtime.get("provider") or {})
+    public_progress = dict(progress)
+    if isinstance(public_progress.get("provider"), dict):
+        public_progress["provider"] = _public_provider_state(public_progress["provider"])
+    public_runtime = dict(runtime)
+    if isinstance(public_runtime.get("provider"), dict):
+        public_runtime["provider"] = _public_provider_state(public_runtime["provider"])
+    chapters = progress.get("chapters") if isinstance(progress.get("chapters"), dict) else {
+        "started": int(progress.get("chapters_started") or runtime.get("chapters_started") or 0),
+        "succeeded": int(progress.get("chapters_succeeded") or runtime.get("chapters_succeeded") or progress.get("chapters_done") or 0),
+        "failed": int(progress.get("chapters_failed") or runtime.get("chapters_failed") or 0),
+        "total": int(progress.get("chapters_total") or runtime.get("chapters_total") or 0),
+    }
     out = {
         "job_id": job.get("job_id"),
+        "run_id": job.get("job_id"),
         "status": job.get("status"),
         "error": job.get("error"),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
-        "progress": job.get("progress") if isinstance(job.get("progress"), dict) else {},
-        "agent_runtime": job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {},
+        "heartbeat_at": progress.get("heartbeat_at"),
+        "phase": progress.get("phase") or progress.get("stage"),
+        "work_state": progress.get("work_state") or "idle",
+        "chapters": chapters,
+        "provider": public_provider,
+        "checkpoint": progress.get("checkpoint") or {},
+        "warnings": progress.get("warnings") if isinstance(progress.get("warnings"), list) else [],
+        "progress": public_progress,
+        "agent_runtime": public_runtime,
+        "event_journal": str(event_journal_path(job_id) or "") or None,
     }
     result = job.get("result") or {}
     if isinstance(result, dict):
@@ -2815,6 +4062,33 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
             except Exception:
                 pass
     return {"ok": True, "job": out}
+
+
+@router.post("/runs")
+async def actions_create_run(
+    req: ActionsGenerateRequest,
+    background_tasks: BackgroundTasks,
+    x_actions_key: str | None = Header(default=None),
+):
+    """Unified run-creation alias; legacy generate_async remains supported."""
+
+    return await actions_generate_async(req, background_tasks, x_actions_key)
+
+
+@router.get("/runs/{run_id}")
+async def actions_get_run(
+    run_id: str,
+    x_actions_key: str | None = Header(default=None),
+):
+    return await actions_job_status(run_id, x_actions_key)
+
+
+@router.post("/runs/{run_id}/cancel")
+async def actions_cancel_run(
+    run_id: str,
+    x_actions_key: str | None = Header(default=None),
+):
+    return await actions_job_cancel(ActionsJobCancelRequest(job_id=run_id), x_actions_key)
 
 
 @router.get("/review/issues")
@@ -2955,7 +4229,11 @@ async def actions_review_apply(
     pid = str(target.get("project_id") or (job.get("payload") or {}).get("project_id") or "").strip() or None
     boq_focus = target.get("boq_focus") if isinstance(target.get("boq_focus"), dict) else {}
     params = load_params()
-    payload_obj = (job.get("payload") or {}) if isinstance(job.get("payload"), dict) else {}
+    payload_obj = (
+        copy.deepcopy(job.get("payload") or {})
+        if isinstance(job.get("payload"), dict)
+        else {}
+    )
     overrides = payload_obj.get("params_override")
     if isinstance(overrides, dict) and overrides:
         for k, v in overrides.items():
@@ -2965,6 +4243,13 @@ async def actions_review_apply(
                 params[k] = merged
             else:
                 params[k] = v
+
+    # Manual replacements need no text model.  As soon as an AI rewrite is
+    # required, run one fresh full-chain admission and reuse it for both review
+    # rounds and the final professional renderer.
+    review_admission = None
+    if grouped:
+        review_admission = await _ensure_review_provider_admission(payload_obj)
 
     modified_titles: set[str] = set()
     for section in sections:
@@ -3110,10 +4395,15 @@ async def actions_review_apply(
     candidate_version = result_version(candidate_variants)
     candidate_suffix = revision["revision_id"].lower()
     out = _save_outputs(f"actions_{job_id}_{candidate_suffix}", candidate_variants)
-    out = await _render_professional_outputs_for_job(
-        job_id=f"{job_id}-{candidate_suffix}",
-        outputs=out,
-    )
+    render_kwargs: dict[str, Any] = {
+        "job_id": f"{job_id}-{candidate_suffix}",
+        "outputs": out,
+    }
+    if review_admission is not None:
+        render_kwargs["slot_override"] = _admitted_document_render_slot(
+            review_admission
+        )
+    out = await _render_professional_outputs_for_job(**render_kwargs)
     candidate_artifacts = artifact_manifest(out)
     finalize_revision_snapshot(
         job_id=job_id,
@@ -3238,7 +4528,7 @@ async def actions_result(
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.get("status") != "done":
+    if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
         return {"ok": False, "status": job.get("status"), "error": job.get("error")}
     result = job.get("result") or {}
     json_path = result.get("json")
@@ -3304,7 +4594,7 @@ async def actions_download(
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.get("status") != "done":
+    if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
         raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
     result = job.get("result") or {}
     path = result.get(kind)

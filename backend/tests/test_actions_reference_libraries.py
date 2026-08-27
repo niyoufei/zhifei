@@ -11,6 +11,13 @@ from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ingest_parse_cache(monkeypatch, tmp_path: Path) -> None:
+    from backend.app.routers import ingest as ingest_router
+
+    monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "ingest-cache")
+
+
 def _write_audit(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(rec, ensure_ascii=False) for rec in records), encoding="utf-8")

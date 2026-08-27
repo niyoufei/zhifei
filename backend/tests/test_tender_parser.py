@@ -6,6 +6,7 @@ TenderParser 单元测试
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -73,6 +74,74 @@ class TestStyleRequirements:
 
         assert style["line_spacing"] == 1.5
         assert "line_spacing_pt" not in style
+
+
+class TestChapterRequirements:
+    """章节要求只接受可执行条款，评分残句保留为待复核证据。"""
+
+    def test_fragments_are_excluded_and_actionable_requirement_is_retained(
+        self, parser
+    ):
+        title = "质量管理与验收"
+        fragments = [
+            "内容未提供或无任何针对性、可行性，本项不得",
+            "每提供 1 个得 2 分，本项满分 4",
+            "中规定提供的业绩证明材料",
+        ]
+        executable = "投标人必须建立质量保证体系，明确岗位职责和验收流程"
+        text = "\n".join([title, *fragments, executable])
+
+        requirements, review_rows = parser._extract_chapter_requirement_candidates(
+            text, [title]
+        )
+
+        assert requirements == {title: [executable]}
+        assert parser._extract_chapter_requirements(text, [title]) == requirements
+        assert [row["requirement"] for row in review_rows] == fragments
+        assert all(row["status"] == "NEEDS_REVIEW" for row in review_rows)
+        assert all(row["mandatory"] is False for row in review_rows)
+        assert all(row["prompt_eligible"] is False for row in review_rows)
+        reasons = {
+            row["requirement"]: set(row["reason_codes"]) for row in review_rows
+        }
+        assert "TRUNCATED_SUFFIX" in reasons[fragments[0]]
+        assert "SCORE_ONLY_FRAGMENT" in reasons[fragments[1]]
+        assert "TRUNCATED_PREFIX" in reasons[fragments[2]]
+
+    def test_build_matrix_exposes_review_metadata_without_prompt_input(self, parser):
+        title = "质量管理与验收"
+        fragment = "每提供 1 个得 2 分，本项满分 4"
+        executable = "施工单位应编制材料复验计划并明确验收责任人"
+        text = "\n".join([title, fragment, executable])
+        parser._extract_outline = lambda _text: (
+            [title],
+            {"source": "test", "global_requirements": []},
+        )
+        parser._extract_style_requirements = lambda _text: (
+            {},
+            {"source": "none", "global_requirements": []},
+        )
+        parser._extract_index_matrix_sync = lambda _sections, _sources: []
+
+        matrix = parser._build_matrix_from_texts([("/path/tender.pdf", text)])
+
+        assert matrix.chapter_requirements == {title: [executable]}
+        review = matrix.extraction_meta["chapter_requirement_review"]
+        assert review["status"] == "NEEDS_REVIEW"
+        assert review["count"] == 1
+        assert review["prompt_excluded_count"] == 1
+        assert review["rows"][0]["requirement"] == fragment
+
+    def test_numbered_requirement_with_arbitrary_subject_is_retained(self, parser):
+        title = "进度纠偏"
+        executable = "（1）施工期间应设置每日纠偏闭环"
+
+        requirements, review_rows = parser._extract_chapter_requirement_candidates(
+            f"{title}\n{executable}", [title]
+        )
+
+        assert requirements == {title: [executable]}
+        assert review_rows == []
 
 
 # ==============================================================================
@@ -658,6 +727,41 @@ class TestParse:
 
         assert isinstance(result, TenderIndexMatrix)
         assert len(result.items) == 6
+
+    @pytest.mark.asyncio
+    async def test_cpu_rules_pipeline_runs_off_event_loop_thread(self, parser):
+        event_loop_thread = threading.get_ident()
+        worker_threads = []
+        original = parser._build_matrix_from_texts
+
+        def tracked_build(texts):
+            worker_threads.append(threading.get_ident())
+            return original(texts)
+
+        parser._build_matrix_from_texts = tracked_build
+        parser._read_source_text = lambda path: (path, "工程概况\n质量标准要求")
+
+        result = await parser.parse(["/path/to/tender.pdf"])
+
+        assert isinstance(result, TenderIndexMatrix)
+        assert worker_threads
+        assert worker_threads[0] != event_loop_thread
+
+    @pytest.mark.asyncio
+    async def test_validated_cached_text_skips_source_parser(self, parser):
+        calls = []
+        parser._read_source_text = lambda path: calls.append(path) or (path, "unexpected")
+
+        result = await parser.parse(
+            ["/path/to/tender.pdf", "/path/to/clarification.docx"],
+            cached_texts={
+                "/path/to/tender.pdf": "工程概况\n质量标准要求",
+                "/path/to/clarification.docx": "答疑：质量要求修正",
+            },
+        )
+
+        assert isinstance(result, TenderIndexMatrix)
+        assert calls == []
 
     @pytest.mark.asyncio
     async def test_parse_multiple_pdfs(self, parser):

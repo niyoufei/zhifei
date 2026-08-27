@@ -8,6 +8,47 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict
 
 
+DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
+
+
+def model_request_input_chars(prompt: Any, request_kwargs: Dict[str, Any] | None = None) -> int:
+    """Count every text block that the provider adapter will transmit."""
+
+    kwargs = request_kwargs if isinstance(request_kwargs, dict) else {}
+    stable = kwargs.get("stable_system_prompt")
+    if stable in (None, ""):
+        stable = kwargs.get("system_prompt")
+    shared = kwargs.get("shared_context_prompt")
+    return sum(len(str(value or "")) for value in (prompt, stable, shared))
+
+
+def model_request_output_tokens(
+    provider: Any,
+    request_kwargs: Dict[str, Any] | None = None,
+) -> int:
+    """Return the output-token reservation used by the provider adapter.
+
+    ``AnthropicProvider`` defaults to 8,192 output tokens. Reserving zero when
+    a caller omits ``max_tokens`` would let a run bypass its output-token
+    budget, so the execution controller mirrors that adapter default.
+    """
+
+    kwargs = request_kwargs if isinstance(request_kwargs, dict) else {}
+    value = kwargs.get("max_tokens")
+    if value in (None, ""):
+        value = kwargs.get("max_output_tokens")
+    if value in (None, ""):
+        value = (
+            DEFAULT_ANTHROPIC_MAX_TOKENS
+            if str(provider or "").strip().lower() == "anthropic"
+            else 0
+        )
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 class ExecutionCancelledError(RuntimeError):
     """Raised before a provider call when the durable job is cancelled."""
 
@@ -85,6 +126,9 @@ class ExecutionControlRuntime:
         self._input_chars = 0
         self._requested_output_tokens = 0
         self._actual_input_tokens = 0
+        self._actual_uncached_input_tokens = 0
+        self._cache_creation_input_tokens = 0
+        self._cache_read_input_tokens = 0
         self._actual_output_tokens = 0
         self._actual_output_chars = 0
         self._active = 0
@@ -217,11 +261,21 @@ class ExecutionControlRuntime:
                     return value
             return 0
 
-        input_tokens = _usage_int("input_tokens", "prompt_tokens", "prompt_token_count")
+        uncached_input_tokens = _usage_int("input_tokens", "prompt_tokens", "prompt_token_count")
+        cache_creation_input_tokens = _usage_int("cache_creation_input_tokens")
+        cache_read_input_tokens = _usage_int("cache_read_input_tokens")
+        input_tokens = (
+            uncached_input_tokens
+            + cache_creation_input_tokens
+            + cache_read_input_tokens
+        )
         output_tokens = _usage_int("output_tokens", "completion_tokens", "candidates_token_count")
         output_chars = len(str(result.get("text") or ""))
         with self._lock:
             self._actual_input_tokens += input_tokens
+            self._actual_uncached_input_tokens += uncached_input_tokens
+            self._cache_creation_input_tokens += cache_creation_input_tokens
+            self._cache_read_input_tokens += cache_read_input_tokens
             self._actual_output_tokens += output_tokens
             self._actual_output_chars += output_chars
 
@@ -240,6 +294,15 @@ class ExecutionControlRuntime:
                     "input_chars": self._input_chars,
                     "requested_output_tokens": self._requested_output_tokens,
                     "actual_input_tokens": self._actual_input_tokens,
+                    "actual_uncached_input_tokens": self._actual_uncached_input_tokens,
+                    "cache_creation_input_tokens": self._cache_creation_input_tokens,
+                    "cache_read_input_tokens": self._cache_read_input_tokens,
+                    "cache_hit_ratio": round(
+                        self._cache_read_input_tokens / self._actual_input_tokens,
+                        6,
+                    )
+                    if self._actual_input_tokens
+                    else 0.0,
                     "actual_output_tokens": self._actual_output_tokens,
                     "actual_output_chars": self._actual_output_chars,
                     "active": self._active,

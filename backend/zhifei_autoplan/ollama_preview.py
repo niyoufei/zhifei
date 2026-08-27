@@ -10,7 +10,7 @@ from typing import Any, Callable
 from backend.zhifei_autoplan.preview_advisory_quality_gate import attach_preview_advisory_quality_gate
 
 
-DEFAULT_BASE_URL = "http://localhost:11434"
+DEFAULT_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "qwen3.5:4b"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 LOCAL_LLM_PREVIEW_FLAG = "ZDOC_LOCAL_LLM_PREVIEW_ENABLED"
@@ -124,7 +124,10 @@ def _clean_text(value: Any, *, limit: int = 12000) -> str:
 
 
 def _clean_base_url(value: str | None) -> str:
-    return str(value or DEFAULT_BASE_URL).strip().rstrip("/") or DEFAULT_BASE_URL
+    text = str(value or DEFAULT_BASE_URL).strip().rstrip("/")
+    if text in {"http://127.0.0.1:11434", "http://localhost:11434"}:
+        return DEFAULT_BASE_URL
+    return ""
 
 
 def _clean_timeout(value: Any) -> float:
@@ -2046,6 +2049,16 @@ def run_ollama_preview(
             model=resolved_model,
             base_url=resolved_base_url,
             warning="ollama_preview_disabled",
+        )
+
+    if not resolved_base_url:
+        return _fallback_response(
+            enabled=True,
+            status="blocked",
+            model=resolved_model,
+            base_url=DEFAULT_BASE_URL,
+            error="LOCAL_OLLAMA_LOOPBACK_REQUIRED",
+            warning="仅允许访问本机 127.0.0.1:11434，已阻止其他地址。",
         )
 
     text = _clean_text(content)

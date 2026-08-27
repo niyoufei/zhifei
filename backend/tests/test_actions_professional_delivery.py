@@ -22,7 +22,10 @@ async def test_professional_delivery_promotes_rendered_word_and_preserves_source
 
     rendered_calls: list[int] = []
 
-    async def fake_render(*, job_id, variant, result):
+    admitted_slot = object()
+
+    async def fake_render(*, job_id, variant, result, slot_override=None):
+        assert slot_override is admitted_slot
         rendered_calls.append(variant)
         professional_docx = tmp_path / f"professional-v{variant}.docx"
         professional_json = tmp_path / f"professional-v{variant}.json"
@@ -80,6 +83,7 @@ async def test_professional_delivery_promotes_rendered_word_and_preserves_source
     delivered = await actions_bridge._render_professional_outputs_for_job(
         job_id="job-professional",
         outputs=outputs,
+        slot_override=admitted_slot,
     )
 
     assert rendered_calls == [1, 2]
@@ -111,7 +115,10 @@ async def test_professional_delivery_fails_atomically_without_exposing_source_as
     for path in source_docs:
         path.write_bytes(b"source")
 
-    async def fake_render(*, job_id, variant, result):
+    admitted_slot = object()
+
+    async def fake_render(*, job_id, variant, result, slot_override=None):
+        assert slot_override is admitted_slot
         if variant == 2:
             raise ProfessionalRenderError("专业质量门禁未通过")
         return {
@@ -127,6 +134,7 @@ async def test_professional_delivery_fails_atomically_without_exposing_source_as
         await actions_bridge._render_professional_outputs_for_job(
             job_id="job-professional-failed",
             outputs=outputs,
+            slot_override=admitted_slot,
         )
 
     assert outputs == {"json": str(source_json), "docx": [str(path) for path in source_docs]}

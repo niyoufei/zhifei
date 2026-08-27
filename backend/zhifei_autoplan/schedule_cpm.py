@@ -284,18 +284,29 @@ def run_cpm(activities: List[Dict[str, Any]]) -> Dict[str, Any]:
         cur = best_pred.get(cur)
     cp.reverse()
 
-    timeline: Dict[int, float] = {}
+    # Compute the peak with an interval sweep instead of expanding one entry
+    # per calendar day.  The previous implementation was O(project duration)
+    # in both time and memory, so one malformed BoQ quantity could attempt to
+    # allocate an effectively unbounded timeline and starve the API process.
+    # A sweep is exact for the same half-open intervals [start, end) and is
+    # O(number of activities log number of activities), independent of the
+    # numeric duration magnitude.
+    resource_events: Dict[float, float] = {}
     for n in order:
         rs = max(0.0, _f((by_id.get(n) or {}).get("resource_units"), 0.0))
         if rs <= 0:
             continue
         s = es.get(n, 0.0)
         e = ef.get(n, s)
-        lo = int(math.floor(s))
-        hi = int(math.ceil(e))
-        for t in range(lo, max(lo + 1, hi)):
-            timeline[t] = timeline.get(t, 0.0) + rs
-    resource_peak = max(timeline.values()) if timeline else 0.0
+        if not (math.isfinite(s) and math.isfinite(e)) or e <= s:
+            continue
+        resource_events[s] = resource_events.get(s, 0.0) + rs
+        resource_events[e] = resource_events.get(e, 0.0) - rs
+    resource_peak = 0.0
+    resource_active = 0.0
+    for stamp in sorted(resource_events):
+        resource_active += resource_events[stamp]
+        resource_peak = max(resource_peak, resource_active)
 
     cp_starts = [es.get(n, 0.0) for n in cp]
     cp_diffs = [cp_starts[i + 1] - cp_starts[i] for i in range(len(cp_starts) - 1) if (cp_starts[i + 1] - cp_starts[i]) > 0]
@@ -330,6 +341,7 @@ def run_cpm(activities: List[Dict[str, Any]]) -> Dict[str, Any]:
         "critical_path": cp,
         "project_duration_days": round(project_duration, 3),
         "resource_peak": round(resource_peak, 3),
+        "resource_peak_algorithm": "interval_sweep_v2",
         "critical_interval_days": round(critical_interval, 3),
         "graph": {
             "node_count": int(g.number_of_nodes()),

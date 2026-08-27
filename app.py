@@ -11,6 +11,7 @@ from typing import Any
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 from backend.zhifei_autoplan.compliance_policy import (
@@ -44,6 +45,51 @@ except Exception:
 
 
 st.set_page_config(page_title="施组专家系统", page_icon="📄", layout="wide", initial_sidebar_state="collapsed")
+
+
+_PAGE_LANGUAGE_GUARD_HTML = """
+<!doctype html>
+<html lang="zh-CN" translate="no" class="notranslate">
+<head><meta name="google" content="notranslate"></head>
+<body>
+<script>
+(() => {
+  "use strict";
+  try {
+    const parentDocument = window.parent.document;
+    const root = parentDocument.documentElement;
+    root.setAttribute("lang", "zh-CN");
+    root.setAttribute("translate", "no");
+    root.classList.add("notranslate");
+
+    if (!parentDocument.head.querySelector('meta[name="google"][content="notranslate"]')) {
+      const meta = parentDocument.createElement("meta");
+      meta.setAttribute("name", "google");
+      meta.setAttribute("content", "notranslate");
+      parentDocument.head.appendChild(meta);
+    }
+  } catch (error) {
+    console.warn("Page language guard could not access the parent document.", error);
+  }
+})();
+</script>
+</body>
+</html>
+"""
+
+
+def _inject_page_language_guard() -> None:
+    """Keep this Chinese UI and its canonical A-E labels out of page translation."""
+
+    components.html(
+        _PAGE_LANGUAGE_GUARD_HTML,
+        height=0,
+        scrolling=False,
+        tab_index=-1,
+    )
+
+
+_inject_page_language_guard()
 
 
 def _load_project_types() -> list[str]:
@@ -160,27 +206,6 @@ def _env_first(*keys: str) -> str:
     return ""
 
 
-def _provider_key_from_env(provider: str | None) -> str:
-    p = str(provider or "").strip().lower()
-    env_map = {
-        "openai": ("ZF_OPENAI_API_KEY", "OPENAI_API_KEY"),
-        "google": ("ZF_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"),
-        "grok": ("ZF_GROK_API_KEY", "GROK_API_KEY", "XAI_API_KEY"),
-        "anthropic": ("ANTHROPIC_API_KEY",),
-        "deepseek": ("DEEPSEEK_API_KEY",),
-        "zhipu": ("ZHIPU_API_KEY",),
-        "qwen": ("QWEN_API_KEY", "DASHSCOPE_API_KEY"),
-        "baidu": ("BAIDU_API_KEY",),
-        "iflytek": ("IFLYTEK_API_KEY",),
-        "tencent": ("TENCENT_API_KEY",),
-    }
-    for k in env_map.get(p, ()):
-        v = os.environ.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
-
-
 def _sync_provider_model(provider_key: str, model_key: str) -> None:
     provider = str(st.session_state.get(provider_key) or "").strip().lower()
     latest = _latest_model_for(provider)
@@ -189,13 +214,19 @@ def _sync_provider_model(provider_key: str, model_key: str) -> None:
 
 
 def _provider_status(provider: str | None) -> tuple[bool, str]:
-    name = str(provider or "").strip().lower()
-    if not name:
-        return False, "未选择提供商"
-    configured = bool(_provider_key_from_env(name))
-    if configured:
-        return True, "已连接本机安全凭据（密钥不在页面显示）"
-    return False, "尚未配置本机凭据；也可临时在下方输入"
+    admission = st.session_state.get("_provider_admission")
+    if not isinstance(admission, dict):
+        return False, "供应商准入状态尚未取得"
+    state = str(admission.get("status") or "missing")
+    labels = {
+        "admitted": "模型供应商已准入",
+        "degraded": "模型供应商已降级准入",
+        "expired": "模型供应商准入已过期，将在证据门通过后重新检查",
+        "stale_route": "模型路由已变化，将在证据门通过后重新检查",
+        "configured_not_admitted": "模型已配置但尚未准入",
+        "missing": "模型供应商尚未形成准入回执",
+    }
+    return state in {"admitted", "degraded"}, labels.get(state, "模型供应商准入状态未知")
 
 
 def _normalize_provider(raw: str | None, *, fallback: str) -> str:
@@ -534,6 +565,49 @@ def _headers(actions_key: str) -> dict[str, str]:
     return {"X-Actions-Key": actions_key.strip()}
 
 
+def _stable_http_error(path: str, status_code: int, raw_text: str) -> RuntimeError:
+    """Project only a stable backend error; never surface raw response text."""
+    status_defaults = {
+        400: ("REQUEST_REJECTED", "请求内容未通过校验。", "请核对输入资料后重试。"),
+        401: ("SYSTEM_ACCESS_DENIED", "系统内部凭据无效。", "请从最新受监管版本重新打开页面。"),
+        403: ("SYSTEM_ACCESS_DENIED", "当前操作未获授权。", "请核对本机运行状态后重试。"),
+        404: ("SYSTEM_RESOURCE_NOT_FOUND", "请求的任务或文件不存在。", "请刷新页面并重新选择任务。"),
+        409: ("SYSTEM_STATE_CONFLICT", "任务状态已经变化，本次操作未执行。", "请刷新最新状态后重试。"),
+        413: ("UPLOAD_TOO_LARGE", "上传资料超过允许大小。", "请拆分文件或减少单批资料后重试。"),
+        422: ("REQUEST_VALIDATION_FAILED", "请求参数不完整或格式不正确。", "请检查必填项后重试。"),
+        429: ("SERVICE_RATE_LIMITED", "服务当前请求过多。", "请稍候再试。"),
+    }
+    default = status_defaults.get(
+        int(status_code),
+        (
+            "BACKEND_SERVICE_UNAVAILABLE" if int(status_code) >= 500 else "REQUEST_FAILED",
+            "后端服务暂时不可用。" if int(status_code) >= 500 else "请求未能完成。",
+            "请检查系统运行状态后重试。",
+        ),
+    )
+    detail: Any = None
+    try:
+        parsed = json.loads(str(raw_text or ""))
+        detail = parsed.get("detail") if isinstance(parsed, dict) else None
+        if detail is None and isinstance(parsed, dict):
+            detail = parsed.get("error") or parsed
+    except Exception:
+        detail = None
+    if isinstance(detail, dict):
+        raw_code = str(detail.get("code") or "").strip().upper()
+        code = raw_code if re.fullmatch(r"[A-Z][A-Z0-9_]{2,79}", raw_code) else default[0]
+        message = str(detail.get("message") or default[1]).strip()[:300]
+        action = str(detail.get("action") or default[2]).strip()[:300]
+    else:
+        code, message, action = default
+    sensitive_literal = re.compile(
+        r"(?i)\b(?:bearer|sk|secret|token|key)[-_ :][A-Za-z0-9._~+/=-]{6,}"
+    )
+    message = sensitive_literal.sub("[已脱敏]", message)
+    action = sensitive_literal.sub("[已脱敏]", action)
+    return RuntimeError(f"{code}：{message} 建议：{action}（{path}，HTTP {status_code}）")
+
+
 def _backend_identity_check(base_url: str, expected_system_id: str) -> tuple[bool, str]:
     try:
         r = requests.get(base_url.rstrip("/") + "/health", timeout=3)
@@ -590,7 +664,7 @@ def _post_files(
         timeout=timeout,
     )
     if resp.status_code >= 400:
-        raise RuntimeError(f"{path} 失败: {resp.status_code} {resp.text[:400]}")
+        raise _stable_http_error(path, resp.status_code, resp.text)
     return resp.json()
 
 
@@ -611,7 +685,29 @@ def _post_json(
         timeout=timeout,
     )
     if resp.status_code >= 400:
-        raise RuntimeError(f"{path} 失败: {resp.status_code} {resp.text[:400]}")
+        raise _stable_http_error(path, resp.status_code, resp.text)
+    return resp.json()
+
+
+def _post_file_ids(
+    base_url: str,
+    path: str,
+    actions_key: str,
+    file_ids: list[str],
+    *,
+    project_id: str,
+    timeout: int = 900,
+) -> dict[str, Any]:
+    params: list[tuple[str, str]] = [("project_id", str(project_id))]
+    params.extend(("file_id", str(item)) for item in file_ids if str(item).strip())
+    resp = requests.post(
+        base_url.rstrip("/") + path,
+        headers=_headers(actions_key),
+        params=params,
+        timeout=timeout,
+    )
+    if resp.status_code >= 400:
+        raise _stable_http_error(path, resp.status_code, resp.text)
     return resp.json()
 
 
@@ -641,8 +737,165 @@ def _get_json(
         timeout=timeout,
     )
     if resp.status_code >= 400:
-        raise RuntimeError(f"{path} 失败: {resp.status_code} {resp.text[:400]}")
+        raise _stable_http_error(path, resp.status_code, resp.text)
     return resp.json()
+
+
+def _normalize_runtime_job_id(raw: Any) -> str:
+    """Return the only job-id shape that may cross the browser URL boundary."""
+
+    if isinstance(raw, (list, tuple)):
+        raw = raw[-1] if raw else ""
+    value = str(raw or "").strip().lower()
+    return value if re.fullmatch(r"[0-9a-f]{32}", value) else ""
+
+
+def _query_runtime_job_id() -> str:
+    try:
+        return _normalize_runtime_job_id(st.query_params.get("job_id"))
+    except Exception:
+        return ""
+
+
+def _persist_active_job_query(job_id: Any) -> bool:
+    """Persist only an opaque job id; credentials and request data stay server-side."""
+
+    normalized = _normalize_runtime_job_id(job_id)
+    if not normalized:
+        return False
+    try:
+        if _query_runtime_job_id() != normalized:
+            st.query_params["job_id"] = normalized
+        st.session_state.pop("_active_job_query_restore_attempted", None)
+        return True
+    except Exception:
+        return False
+
+
+def _clear_active_job_query(expected_job_id: Any | None = None) -> None:
+    """Clear a completed/stale URL job id without disturbing a newer one."""
+
+    expected = _normalize_runtime_job_id(expected_job_id)
+    try:
+        current = _query_runtime_job_id()
+        if expected and current and current != expected:
+            return
+        if "job_id" in st.query_params:
+            del st.query_params["job_id"]
+    except Exception:
+        pass
+
+
+def _active_job_from_snapshot(job: Any, requested_job_id: Any) -> dict[str, Any] | None:
+    """Build the minimal browser state from the authenticated public snapshot."""
+
+    if not isinstance(job, dict):
+        return None
+    expected = _normalize_runtime_job_id(requested_job_id)
+    snapshot_id = _normalize_runtime_job_id(job.get("job_id") or job.get("run_id"))
+    if not expected or snapshot_id != expected:
+        return None
+
+    status = str(job.get("status") or "").strip().lower()
+    status = {
+        "done": "succeeded",
+        "interrupted": "interrupted_recoverable",
+    }.get(status, status)
+    if status not in {
+        "queued",
+        "running",
+        "cancel_requested",
+        "interrupted_recoverable",
+        "failed",
+        "succeeded",
+    }:
+        return None
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    agent_runtime = (
+        job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {}
+    )
+    try:
+        variants = max(
+            1,
+            min(
+                5,
+                int(
+                    job.get("variants")
+                    or progress.get("variants_total")
+                    or agent_runtime.get("variants_total")
+                    or 1
+                ),
+            ),
+        )
+    except (TypeError, ValueError):
+        variants = 1
+    try:
+        started_at = float(job.get("created_at") or time.time())
+    except (TypeError, ValueError):
+        started_at = time.time()
+    return {
+        "job_id": snapshot_id,
+        "status": status,
+        "project_id": str(job.get("project_id") or "").strip(),
+        "variants": variants,
+        "started_at": started_at,
+        "progress": progress,
+        "agent_runtime": agent_runtime,
+        "restored_from_url": True,
+    }
+
+
+def _restore_active_job_from_query(base_url: str, actions_key: str) -> bool:
+    """Recover a refreshed Streamlit session from the authenticated job snapshot."""
+
+    if st.session_state.get("active_job"):
+        return False
+    try:
+        raw_job_id = st.query_params.get("job_id")
+    except Exception:
+        return False
+    if raw_job_id in (None, "", []):
+        return False
+    job_id = _normalize_runtime_job_id(raw_job_id)
+    if not job_id:
+        _clear_active_job_query()
+        return False
+    if st.session_state.get("_active_job_query_restore_attempted") == job_id:
+        return False
+    st.session_state["_active_job_query_restore_attempted"] = job_id
+    try:
+        response = _get_json(
+            base_url,
+            "/actions/job_status",
+            actions_key,
+            params={"job_id": job_id},
+            timeout=15,
+        )
+    except Exception as exc:
+        # A transient outage must not permanently consume the one-session
+        # recovery attempt. Keep the query id so the next refresh reconciles
+        # the durable job before any new submission.
+        st.session_state.pop("_active_job_query_restore_attempted", None)
+        if "SYSTEM_RESOURCE_NOT_FOUND" in str(exc):
+            _clear_active_job_query(job_id)
+        raise
+    if not isinstance(response, dict):
+        _clear_active_job_query(job_id)
+        return False
+    active = _active_job_from_snapshot(response.get("job"), job_id)
+    if active is None:
+        _clear_active_job_query(job_id)
+        return False
+    st.session_state["active_job"] = active
+    return True
+
+
+def _finish_active_job(job_id: Any) -> None:
+    """End browser tracking atomically enough to prevent terminal reload loops."""
+
+    _clear_active_job_query(job_id)
+    st.session_state["active_job"] = None
+    st.session_state.pop("_active_job_query_restore_attempted", None)
 
 
 def _download_bytes(
@@ -661,7 +914,7 @@ def _download_bytes(
         timeout=timeout,
     )
     if resp.status_code >= 400:
-        raise RuntimeError(f"下载 {kind} v{variant} 失败: {resp.status_code} {resp.text[:300]}")
+        raise _stable_http_error(f"/actions/download/{kind}/v{variant}", resp.status_code, resp.text)
     return resp.content
 
 
@@ -678,7 +931,13 @@ def _uploaded_file_size(uploaded_file: Any) -> int:
         uploaded_file.seek(original_pos)
 
 
-def _ingest_docs(base_url: str, files: list[Any], project_id: str, source_hint: str | None = None) -> dict[str, Any]:
+def _ingest_docs(
+    base_url: str,
+    files: list[Any],
+    project_id: str,
+    source_hint: str | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
     class _StreamingUploadReader:
         def __init__(self, source: Any, size: int) -> None:
             self._source = source
@@ -709,15 +968,46 @@ def _ingest_docs(base_url: str, files: list[Any], project_id: str, source_hint: 
         params["source_hint"] = str(source_hint)
     body = MultipartEncoder(fields=payload)
     resp = requests.post(
-        base_url.rstrip("/") + "/ingest/upload",
+        base_url.rstrip("/") + "/ingest/jobs",
         params=params,
         data=body,
         headers={"Content-Type": body.content_type},
         timeout=900,
     )
     if resp.status_code >= 400:
-        raise RuntimeError(f"/ingest/upload 失败: {resp.status_code} {resp.text[:400]}")
-    return resp.json()
+        raise _stable_http_error("/ingest/jobs", resp.status_code, resp.text)
+    created = resp.json()
+    job_id = str(created.get("job_id") or "").strip()
+    if not job_id:
+        raise RuntimeError("/ingest/jobs 未返回 job_id")
+    deadline = time.monotonic() + 20 * 60
+    while time.monotonic() < deadline:
+        status_response = requests.get(
+            base_url.rstrip("/") + f"/ingest/jobs/{job_id}",
+            timeout=30,
+        )
+        if status_response.status_code >= 400:
+            raise _stable_http_error(
+                f"/ingest/jobs/{job_id}",
+                status_response.status_code,
+                status_response.text,
+            )
+        job = status_response.json().get("job") or {}
+        progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+        if callable(progress_callback):
+            progress_callback(progress)
+        status = str(job.get("status") or "").strip().lower()
+        if status in {"succeeded", "done"}:
+            result = job.get("result") if isinstance(job.get("result"), dict) else {}
+            result["job_id"] = job_id
+            return result
+        if status in {"failed", "cancelled", "interrupted_recoverable"}:
+            error = job.get("error")
+            raise RuntimeError(
+                json.dumps(error, ensure_ascii=False) if isinstance(error, dict) else str(error or status)
+            )
+        time.sleep(0.5)
+    raise RuntimeError(f"资料导入任务超时: job_id={job_id}")
 
 
 def _normalize_reference_text_list_ui(raw: Any) -> list[str]:
@@ -802,8 +1092,7 @@ def _build_ollama_preview_request_payload() -> dict[str, Any]:
         "section_title": str(st.session_state.get("ollama_preview_section_title") or topic).strip() or topic,
         "instruction": instruction or "只做人工预览增强，指出缺项、风险和可人工采纳的优化建议；不要改写正文，不要生成新事实。",
         "model": str(st.session_state.get("ollama_preview_model") or "qwen3.5:4b").strip() or "qwen3.5:4b",
-        "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
-        or "http://localhost:11434",
+        "base_url": "http://127.0.0.1:11434",
         "timeout": _ollama_preview_timeout_state(),
     }
 
@@ -939,7 +1228,7 @@ def _render_case_library_panel(base_url: str, actions_key: str) -> None:
             accept_multiple_files=True,
             key="case_library_files",
         )
-        if st.button("加入案例库", key="case_library_upload_btn", use_container_width=True):
+        if st.button("加入案例库", key="case_library_upload_btn", width="stretch"):
             try:
                 if not files:
                     raise ValueError("请先选择案例文件")
@@ -1014,7 +1303,7 @@ def _render_image_library_panel(base_url: str, actions_key: str) -> None:
             accept_multiple_files=True,
             key="image_library_files",
         )
-        if st.button("加入图片库", key="image_library_upload_btn", use_container_width=True):
+        if st.button("加入图片库", key="image_library_upload_btn", width="stretch"):
             try:
                 if not files:
                     raise ValueError("请先选择图片文件")
@@ -1050,7 +1339,8 @@ def _render_ollama_preview_panel(base_url: str, actions_key: str) -> None:
         st.caption("仅调用 `/actions/ollama/preview` 做只读预览，不写 job/result bundle，不接主生成链，不自动改正文。")
         m1, m2, m3 = st.columns([2, 2, 1])
         with m1:
-            st.text_input("Ollama 地址", key="ollama_preview_base_url")
+            st.caption("Ollama 地址（系统锁定）")
+            st.code("http://127.0.0.1:11434", language=None)
         with m2:
             st.text_input("本地模型", key="ollama_preview_model")
             st.caption(
@@ -1063,7 +1353,7 @@ def _render_ollama_preview_panel(base_url: str, actions_key: str) -> None:
         st.text_area("人工预览指令", key="ollama_preview_instruction", height=80)
         st.text_area("待预览补充正文（可选）", key="ollama_preview_content", height=120)
 
-        if st.button("本地模型预览", key="ollama_preview_btn", type="secondary", use_container_width=True):
+        if st.button("本地模型预览", key="ollama_preview_btn", type="secondary", width="stretch"):
             try:
                 if not actions_key.strip():
                     raise ValueError("Actions Key 不能为空")
@@ -1096,6 +1386,91 @@ def _render_ollama_preview_panel(base_url: str, actions_key: str) -> None:
                 st.code(normalized.get("content") or "", language="markdown")
 
 
+def _render_claude_cache_metrics_panel(base_url: str, actions_key: str) -> None:
+    """Render privacy-safe Claude token/cache aggregates from persisted usage."""
+
+    with st.expander("Claude Token / Prompt Cache 统计", expanded=False):
+        st.caption(
+            "数据来自 Claude API 的 usage 字段；仅记录模型、Token、耗时、估算费用、项目 ID 和任务类型，"
+            "不记录 API Key、提示词、项目正文或用户隐私。缓存默认采用 5 分钟 ephemeral TTL。"
+        )
+        if not actions_key.strip():
+            st.info("填写 Actions Key 后可读取后端 Claude 使用统计。")
+            return
+        try:
+            response = _get_json(base_url, "/actions/claude_usage_stats", actions_key, timeout=30)
+            stats = response.get("stats") if isinstance(response, dict) else {}
+            stats = stats if isinstance(stats, dict) else {}
+            totals = stats.get("totals") if isinstance(stats.get("totals"), dict) else {}
+        except Exception as exc:
+            error = _stable_ui_error(exc)
+            st.warning(f"Claude 统计暂不可用：{error.get('message') or '后端返回异常'}")
+            return
+
+        columns = st.columns(6)
+        values = (
+            ("总输入 Token", int(totals.get("total_input_tokens") or 0)),
+            ("总输出 Token", int(totals.get("output_tokens") or 0)),
+            ("Cache Write", int(totals.get("cache_creation_input_tokens") or 0)),
+            ("Cache Read", int(totals.get("cache_read_input_tokens") or 0)),
+            ("Cache 命中率", f"{float(totals.get('cache_hit_ratio') or 0.0):.1%}"),
+            ("估算费用", f"${float(totals.get('estimated_cost_usd') or 0.0):.4f}"),
+        )
+        for column, (label, value) in zip(columns, values):
+            column.metric(label, value)
+
+        st.caption(
+            f"调用 {int(totals.get('calls') or 0)} 次；未缓存输入 "
+            f"{int(totals.get('input_tokens') or 0)} Token；按无缓存基线估算节省 "
+            f"${float(totals.get('estimated_savings_usd') or 0.0):.4f} "
+            f"（{float(totals.get('estimated_savings_ratio') or 0.0):.1%}）。"
+        )
+
+        model_rows = stats.get("by_model") if isinstance(stats.get("by_model"), list) else []
+        if model_rows:
+            st.markdown("**各模型调用量**")
+            st.dataframe(model_rows, width="stretch", hide_index=True)
+
+        current_project_id = str(st.session_state.get("project_id_text") or "").strip()
+        project_stats = stats
+        if current_project_id:
+            try:
+                project_response = _get_json(
+                    base_url,
+                    "/actions/claude_usage_stats",
+                    actions_key,
+                    params={"project_id": current_project_id},
+                    timeout=30,
+                )
+                candidate = project_response.get("stats") if isinstance(project_response, dict) else {}
+                if isinstance(candidate, dict):
+                    project_stats = candidate
+            except Exception:
+                project_stats = {"totals": {}, "by_task": []}
+
+        project_totals = (
+            project_stats.get("totals")
+            if isinstance(project_stats.get("totals"), dict)
+            else {}
+        )
+        project_label = current_project_id or "全部项目（尚未选择当前项目）"
+        st.markdown(f"**当前项目 API 消耗：{project_label}**")
+        st.caption(
+            f"输入 {int(project_totals.get('total_input_tokens') or 0)} Token，"
+            f"输出 {int(project_totals.get('output_tokens') or 0)} Token，"
+            f"Cache Read {int(project_totals.get('cache_read_input_tokens') or 0)} Token，"
+            f"估算费用 ${float(project_totals.get('estimated_cost_usd') or 0.0):.4f}。"
+        )
+        task_rows = (
+            project_stats.get("by_task")
+            if isinstance(project_stats.get("by_task"), list)
+            else []
+        )
+        if task_rows:
+            st.markdown("**当前项目各任务 API 消耗**")
+            st.dataframe(task_rows, width="stretch", hide_index=True)
+
+
 def _append_log(message: str) -> None:
     st.session_state.setdefault("run_logs", [])
     st.session_state["run_logs"].append(f"[{_now()}] {message}")
@@ -1118,6 +1493,70 @@ def _render_progress(percent: int, label: str) -> None:
         st.progress(p)
         if txt:
             st.caption(txt)
+
+
+def _stable_ui_error(exc: Exception) -> dict[str, str]:
+    """Convert local runtime failures into stable, non-sensitive Chinese UI errors."""
+
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return {
+            "code": "BACKEND_UNAVAILABLE",
+            "message": "后端服务暂不可用，当前操作结果尚无法确认。",
+            "action": "等待系统恢复后先核对任务状态；页面不会自动重复提交。",
+        }
+    if isinstance(exc, requests.exceptions.Timeout):
+        return {
+            "code": "BACKEND_TIMEOUT",
+            "message": "后端请求超时，本次操作未确认完成。",
+            "action": "请先检查任务状态，避免重复提交；确认无运行任务后再重试。",
+        }
+
+    raw = str(exc or "").strip()
+    if "Connection refused" in raw or "Failed to establish a new connection" in raw:
+        return {
+            "code": "BACKEND_UNAVAILABLE",
+            "message": "后端服务暂不可用，当前操作结果尚无法确认。",
+            "action": "等待系统恢复后先核对任务状态；页面不会自动重复提交。",
+        }
+    if isinstance(exc, ValueError):
+        return {
+            "code": "INPUT_INVALID",
+            "message": raw[:300] or "输入资料或配置不完整。",
+            "action": "请按页面提示补齐或修正输入后重试。",
+        }
+
+    for candidate in (raw, raw[raw.find("{") :] if "{" in raw else ""):
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        detail = parsed.get("detail") if isinstance(parsed.get("detail"), dict) else parsed
+        code = str(detail.get("code") or "RUNTIME_REQUEST_FAILED")[:80]
+        message = str(detail.get("message") or "后端未完成本次操作。")[:500]
+        action = str(detail.get("action") or "请核对任务状态和资料后重试。")[:500]
+        return {"code": code, "message": message, "action": action}
+
+    if "超时" in raw or "timeout" in raw.lower():
+        return {
+            "code": "INGEST_TIMEOUT",
+            "message": "资料处理超过允许时间，本次操作未确认完成。",
+            "action": "请先检查任务状态，再拆分大型文件或稍后重试。",
+        }
+    if "失败: 4" in raw or "失败: 5" in raw:
+        return {
+            "code": "BACKEND_REQUEST_REJECTED",
+            "message": "后端拒绝或未能完成本次请求。",
+            "action": "请核对必传资料、文件解析状态和后端健康状态后重试。",
+        }
+    return {
+        "code": "RUNTIME_REQUEST_FAILED",
+        "message": "系统未能完成本次操作，未进入可确认的生成阶段。",
+        "action": "请核对任务状态与运行日志后重试。",
+    }
 
 
 def _set_preflight_status(stage: int, label: str, *, state: str = "running") -> None:
@@ -1157,19 +1596,15 @@ def _init_state() -> None:
         fallback="google",
     )
     env_main_model = _env_first("ZF_LLM_MAIN_MODEL") or _latest_model_for(env_main_provider) or _latest_model_for("google")
-    env_main_key = _env_first("ZF_LLM_MAIN_API_KEY")
-
     env_f1_provider_raw = _env_first("ZF_LLM_FALLBACK1_PROVIDER")
     env_f1_provider = _normalize_provider(env_f1_provider_raw, fallback="") if env_f1_provider_raw else ""
     env_f1_model = _env_first("ZF_LLM_FALLBACK1_MODEL") or (_latest_model_for(env_f1_provider) if env_f1_provider else "")
-    env_f1_key = _env_first("ZF_LLM_FALLBACK1_API_KEY")
-    env_f1_enabled = bool(env_f1_provider and env_f1_model and (env_f1_key or _provider_key_from_env(env_f1_provider)))
+    env_f1_enabled = bool(env_f1_provider and env_f1_model)
 
     env_f2_provider_raw = _env_first("ZF_LLM_FALLBACK2_PROVIDER")
     env_f2_provider = _normalize_provider(env_f2_provider_raw, fallback="") if env_f2_provider_raw else ""
     env_f2_model = _env_first("ZF_LLM_FALLBACK2_MODEL") or (_latest_model_for(env_f2_provider) if env_f2_provider else "")
-    env_f2_key = _env_first("ZF_LLM_FALLBACK2_API_KEY")
-    env_f2_enabled = bool(env_f2_provider and env_f2_model and (env_f2_key or _provider_key_from_env(env_f2_provider)))
+    env_f2_enabled = bool(env_f2_provider and env_f2_model)
     env_image_provider = _env_first("ZF_IMAGE_MAIN_PROVIDER") or "openai"
     env_image_model = _env_first("ZF_IMAGE_MAIN_MODEL", "OPENAI_IMAGE_MODEL") or "gpt-image-2"
 
@@ -1196,15 +1631,12 @@ def _init_state() -> None:
         "image_model": env_image_model,
         "provider_text": env_main_provider,
         "model_text": env_main_model,
-        "api_key_text": env_main_key,
         "fallback_1_enabled": env_f1_enabled,
         "fallback_1_provider": env_f1_provider,
         "fallback_1_model": env_f1_model,
-        "fallback_1_api_key": env_f1_key,
         "fallback_2_enabled": env_f2_enabled,
         "fallback_2_provider": env_f2_provider,
         "fallback_2_model": env_f2_model,
-        "fallback_2_api_key": env_f2_key,
         "chapter_requirements_text": "",
         "params_override_text": "",
         "template_key": PROJECT_TYPES[0] if PROJECT_TYPES else "",
@@ -1245,7 +1677,6 @@ def _init_state() -> None:
         "image_library_upload_process_scope": "",
         "image_library_upload_caption": "",
         "image_library_upload_description": "",
-        "ollama_preview_base_url": "http://localhost:11434",
         "ollama_preview_model": "qwen3.5:4b",
         "ollama_preview_timeout": 60,
         "ollama_preview_section_title": "",
@@ -1430,14 +1861,14 @@ def _render_outline_editor() -> list[str]:
             action = ("del", i)
 
     c_add, c_clear = st.columns([1, 1])
-    if c_add.button("新增章节", use_container_width=True):
+    if c_add.button("新增章节", width="stretch"):
         items.append("")
         pages.append(2)
         st.session_state["outline_items"] = items
         st.session_state["outline_pages"] = pages
         _clear_outline_widget_state()
         st.rerun()
-    if c_clear.button("清空目录", use_container_width=True):
+    if c_clear.button("清空目录", width="stretch"):
         st.session_state["outline_items"] = []
         st.session_state["outline_pages"] = []
         st.session_state["chapter_page_map"] = {}
@@ -1607,8 +2038,7 @@ def _build_ollama_section_review_request_payload(section: dict[str, Any], *, sec
         "section_content": _section_review_content_ui(section)[:12000],
         "review_focus": review_focus or "章节完整性、缺项、风险点、可执行字段、证据支撑和表达清晰度",
         "model": str(st.session_state.get("ollama_preview_model") or "qwen3.5:4b").strip() or "qwen3.5:4b",
-        "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
-        or "http://localhost:11434",
+        "base_url": "http://127.0.0.1:11434",
         "timeout": _ollama_preview_timeout_state(),
     }
 
@@ -1843,7 +2273,7 @@ def _render_ollama_section_review_panel(
             f"模型={st.session_state.get('ollama_preview_model') or 'qwen3.5:4b'}"
         )
 
-        if st.button("本地模型复核本章", key=f"ollama_section_review_btn_v{variant}", type="secondary", use_container_width=True):
+        if st.button("本地模型复核本章", key=f"ollama_section_review_btn_v{variant}", type="secondary", width="stretch"):
             try:
                 if not actions_key.strip():
                     raise ValueError("Actions Key 不能为空")
@@ -1921,7 +2351,7 @@ def _render_ollama_section_review_panel(
                         file_name=f"ollama_section_review_v{variant}_s{int(selected_index) + 1}.md",
                         mime="text/markdown",
                         key=f"ollama_section_review_download_md_v{variant}_s{int(selected_index)}",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 with dl_txt:
                     st.download_button(
@@ -1930,7 +2360,7 @@ def _render_ollama_section_review_panel(
                         file_name=f"ollama_section_review_v{variant}_s{int(selected_index) + 1}.txt",
                         mime="text/plain",
                         key=f"ollama_section_review_download_txt_v{variant}_s{int(selected_index)}",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 st.markdown("**草稿对比预览（不写回）**")
                 st.caption("当前仅生成草稿对比预览，不写回正文，不更新成果，不触发导出。")
@@ -1950,7 +2380,7 @@ def _render_ollama_section_review_panel(
                     "生成草稿对比预览（不写回）",
                     key=f"ollama_section_draft_preview_btn_v{variant}_s{int(selected_index)}",
                     type="secondary",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     try:
                         if not actions_key.strip():
@@ -1971,8 +2401,7 @@ def _render_ollama_section_review_panel(
                             "draft_content": str(draft_content or "").strip(),
                             "provider": "ollama",
                             "model": str(normalized.get("model") or st.session_state.get("ollama_preview_model") or "qwen3.5:4b"),
-                            "base_url": str(st.session_state.get("ollama_preview_base_url") or "http://localhost:11434").strip()
-                            or "http://localhost:11434",
+                            "base_url": "http://127.0.0.1:11434",
                             "prompt": str(st.session_state.get("ollama_section_review_focus") or "").strip()
                             or "基于本地模型章节复核建议生成草稿对比预览",
                             "confirmed_by": "streamlit_manual_preview",
@@ -2034,7 +2463,7 @@ def _render_ollama_section_review_panel(
                                 label,
                                 key=f"ollama_section_draft_decision_{action_name}_btn_v{variant}_s{int(selected_index)}",
                                 type="secondary",
-                                use_container_width=True,
+                                width="stretch",
                             ):
                                 try:
                                     if not actions_key.strip():
@@ -2111,7 +2540,7 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
             file_name=f"autoplan_{job_id}_delivery_receipt.json",
             mime="application/json",
             key="dl_delivery_receipt",
-            use_container_width=True,
+            width="stretch",
         )
 
     tabs = st.tabs([f"方案 v{i}" for i in range(1, variants + 1)])
@@ -2127,7 +2556,7 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
                     file_name=f"autoplan_{job_id}_v{i}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     key=f"dl_docx_{i}",
-                    use_container_width=True,
+                    width="stretch",
                 )
                 receipt = files.get("professional_render_receipt")
                 if isinstance(receipt, dict):
@@ -2143,7 +2572,7 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
                     file_name=f"autoplan_{job_id}_compare_v{i}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     key=f"dl_cmp_{i}",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if files.get("focus_xlsx"):
                 st.download_button(
@@ -2152,7 +2581,7 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
                     file_name=f"autoplan_{job_id}_focus_v{i}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"dl_xlsx_{i}",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if files.get("score_overview_xlsx"):
                 st.download_button(
@@ -2161,7 +2590,7 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
                     file_name=f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{i}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"dl_score_overview_{i}",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if files.get("expert_review_docx"):
                 st.download_button(
@@ -2170,7 +2599,7 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
                     file_name=f"autoplan_{job_id}_专家复核提要版_v{i}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     key=f"dl_expert_review_{i}",
-                    use_container_width=True,
+                    width="stretch",
                 )
             q = (result.get("quality_by_variant") or {}).get(i) or {}
             if q:
@@ -2187,7 +2616,7 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
                 )
                 stages = runtime.get("pipeline_stages") if isinstance(runtime.get("pipeline_stages"), list) else []
                 if stages:
-                    st.dataframe(stages, use_container_width=True, hide_index=True)
+                    st.dataframe(stages, width="stretch", hide_index=True)
             variant_reference = _variant_reference_summaries_ui(result, i, runtime)
             for label, summary, id_key in [
                 (
@@ -2241,7 +2670,7 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
                         }
                     )
                 with st.expander("章节级参考库摘要", expanded=False):
-                    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+                    st.dataframe(table_rows, width="stretch", hide_index=True)
             _render_ollama_section_review_panel(base_url, actions_key, result, i)
 
 
@@ -2293,14 +2722,14 @@ def _render_review_insight_dashboard(insight: dict[str, Any], variant: int) -> N
     if dimensions:
         st.dataframe(
             [{"质控维度": row.get("dimension"), "状态": row.get("status")} for row in dimensions if isinstance(row, dict)],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
     top_risks = insight.get("top_risks") if isinstance(insight.get("top_risks"), list) else []
     if top_risks:
         with st.expander(f"高风险评分项 · v{variant}", expanded=True):
-            st.dataframe(top_risks, use_container_width=True, hide_index=True)
+            st.dataframe(top_risks, width="stretch", hide_index=True)
 
     actions = [str(item).strip() for item in (insight.get("priority_actions") or []) if str(item).strip()]
     if actions:
@@ -2315,9 +2744,18 @@ def _cancel_active_job(base_url: str, actions_key: str) -> None:
     if not job_id:
         st.warning("当前没有可中止任务")
         return
-    _post_json(base_url, "/actions/job_cancel", actions_key, {"job_id": job_id}, timeout=60)
-    _append_log(f"任务已请求中止: {job_id}")
-    st.session_state["active_job"] = None
+    response = _post_json(
+        base_url,
+        "/actions/job_cancel",
+        actions_key,
+        {"job_id": job_id},
+        timeout=60,
+    )
+    returned_status = str(response.get("status") or "cancel_requested").strip().lower()
+    active["status"] = returned_status or "cancel_requested"
+    st.session_state["active_job"] = active
+    _persist_active_job_query(job_id)
+    _append_log(f"任务已请求中止，等待工作进程确认: {job_id}")
 
 
 def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[str, Any]:
@@ -2457,7 +2895,8 @@ def _poll_active_job(base_url: str, actions_key: str, poll_sec: float) -> None:
 
     js = _get_json(base_url, "/actions/job_status", actions_key, params={"job_id": job_id}, timeout=90)
     job = js.get("job") or {}
-    status = str(job.get("status") or "")
+    status = str(job.get("status") or "").strip().lower()
+    status = {"interrupted": "interrupted_recoverable"}.get(status, status)
     progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
     agent_runtime = job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {}
     st.session_state["active_job"]["status"] = status
@@ -2471,7 +2910,7 @@ def _poll_active_job(base_url: str, actions_key: str, poll_sec: float) -> None:
             return int(default)
 
     st.info(f"任务状态：{status}（job_id={job_id}）")
-    if status in {"queued", "running"}:
+    if status in {"queued", "running", "cancel_requested"}:
         activity_view = build_job_activity(job)
         st.markdown(activity_html(activity_view), unsafe_allow_html=True)
         percent = _to_int(progress.get("percent") or 0, 0)
@@ -2496,31 +2935,65 @@ def _poll_active_job(base_url: str, actions_key: str, poll_sec: float) -> None:
                 f"章节并行={max(1, ap)}，方案并行={max(1, vp)}，"
                 f"完成方案={max(0, variants_done)}/{max(1, variants_total)}"
             )
+        chapters = job.get("chapters") if isinstance(job.get("chapters"), dict) else progress.get("chapters") or {}
+        if isinstance(chapters, dict) and int(chapters.get("total") or 0) > 0:
+            st.caption(
+                "章节："
+                f"已启动 {int(chapters.get('started') or 0)} · "
+                f"成功 {int(chapters.get('succeeded') or 0)} · "
+                f"失败 {int(chapters.get('failed') or 0)} · "
+                f"总计 {int(chapters.get('total') or 0)}"
+            )
+        provider_state = job.get("provider") if isinstance(job.get("provider"), dict) else {}
+        if provider_state.get("name") or provider_state.get("model"):
+            st.caption(
+                f"当前模型：{provider_state.get('slot') or '-'} · "
+                f"{provider_state.get('name') or '-'} / {provider_state.get('model') or '-'}"
+            )
         return
 
     if status == "cancelled":
         _append_log(f"任务已中止: {job_id}")
         st.warning("任务已中止")
-        st.session_state["active_job"] = None
+        _finish_active_job(job_id)
+        return
+
+    if status == "interrupted_recoverable":
+        error = job.get("error") if isinstance(job.get("error"), dict) else {}
+        st.warning(str(error.get("message") or "任务因服务中断停止，检查点已保留。"))
+        if error.get("action"):
+            st.caption(str(error.get("action")))
+        _finish_active_job(job_id)
         return
 
     if status == "failed":
-        _append_log(f"任务失败: {job.get('error')}")
-        _render_progress(100, "failed · 100%")
-        st.error(f"任务失败: {job.get('error')}")
-        st.session_state["active_job"] = None
+        error = job.get("error") if isinstance(job.get("error"), dict) else {
+            "code": "RUNTIME_FAILED",
+            "message": str(job.get("error") or "任务执行失败。"),
+        }
+        current_percent = max(0, min(99, _to_int(progress.get("percent") or 0, 0)))
+        _append_log(f"任务失败: {error.get('code')} {error.get('message')}")
+        _render_progress(current_percent, f"failed · {current_percent}% · {error.get('code')}")
+        st.error(str(error.get("message") or "任务执行失败。"))
+        if error.get("action"):
+            st.caption(f"建议：{error.get('action')}")
+        failures = error.get("failures") if isinstance(error.get("failures"), list) else []
+        if failures:
+            st.dataframe(failures, width="stretch", hide_index=True)
+        _finish_active_job(job_id)
         return
 
-    if status != "done":
+    if status not in {"done", "succeeded"}:
         return
 
-    _render_progress(100, "done · 100%")
+    _clear_active_job_query(job_id)
+    _render_progress(100, "succeeded · 100%")
     _append_log("任务完成，开始下载结果")
     bundle = _collect_job_result(base_url, actions_key, job_id)
     bundle["project_id"] = active.get("project_id")
     st.session_state["run_result"] = bundle
     _append_log("结果下载完成")
-    st.session_state["active_job"] = None
+    _finish_active_job(job_id)
 
 
 def _review_cache_key(job_id: str, variant: int) -> str:
@@ -2578,7 +3051,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     st.subheader("问题清单审核与原文回写")
     c1, c2, c3 = st.columns([1, 1, 2])
     variant = c1.selectbox("审核方案", options=list(range(1, variants + 1)), format_func=lambda x: f"v{x}", key=f"review_variant_{job_id}")
-    if c2.button("载入问题清单", key=f"load_review_{job_id}", use_container_width=True):
+    if c2.button("载入问题清单", key=f"load_review_{job_id}", width="stretch"):
         try:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
@@ -2601,7 +3074,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     edited = st.data_editor(
         rows,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         key=f"review_editor_{job_id}_v{variant}",
         disabled=["issue_id", "title", "type", "severity", "problem", "suggestion", "section_excerpt"],
         column_config={
@@ -2618,7 +3091,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
     )
 
     b1, b2 = st.columns([1, 1])
-    if b1.button("应用勾选项 · AI复核精修并重编", key=f"apply_review_{job_id}_v{variant}", type="primary", use_container_width=True):
+    if b1.button("应用勾选项 · AI复核精修并重编", key=f"apply_review_{job_id}_v{variant}", type="primary", width="stretch"):
         try:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
@@ -2665,7 +3138,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
         except Exception as e:
             _render_review_apply_error(e, prefix="回写失败")
 
-    if b2.button("全部问题 · AI复核精修并重编", key=f"apply_all_review_{job_id}_v{variant}", use_container_width=True):
+    if b2.button("全部问题 · AI复核精修并重编", key=f"apply_all_review_{job_id}_v{variant}", width="stretch"):
         try:
             if not actions_key.strip():
                 raise ValueError("Actions Key 不能为空")
@@ -2730,7 +3203,7 @@ def _render_review_workspace(base_url: str, actions_key: str) -> None:
                 ),
                 key=f"review_rollback_revision_{job_id}",
             )
-            if st.button("回退到所选安全版本", key=f"review_rollback_{job_id}", use_container_width=True):
+            if st.button("回退到所选安全版本", key=f"review_rollback_{job_id}", width="stretch"):
                 try:
                     with st.spinner("正在验证版本并重新生成专业交付 Word…"):
                         rollback_resp = _post_json(
@@ -2767,7 +3240,7 @@ st.markdown(workflow_html(), unsafe_allow_html=True)
 
 # 连接参数改为系统内置，不在页面展示。
 base_url = str(st.session_state.get("_base_url") or os.environ.get("ZF_BACKEND_BASE_URL", "http://127.0.0.1:8010")).strip()
-actions_key = str(st.session_state.get("_actions_key") or os.environ.get("ZF_ACTIONS_KEY", "zf-webui-key")).strip()
+actions_key = str(st.session_state.get("_actions_key") or os.environ.get("ZF_ACTIONS_KEY", "")).strip()
 expected_system_id = str(os.environ.get("ZF_SYSTEM_ID", "docgen-system")).strip() or "docgen-system"
 try:
     poll_sec = float(st.session_state.get("_poll_sec") or os.environ.get("ZF_POLL_SEC", "2.0"))
@@ -2779,6 +3252,13 @@ st.session_state["_actions_key"] = actions_key
 st.session_state["_poll_sec"] = poll_sec
 st.session_state["auto_refresh"] = bool(st.session_state.get("auto_refresh", True))
 
+if not actions_key:
+    st.error(
+        "SYSTEM_ACTIONS_KEY_NOT_CONFIGURED：系统内部操作凭据尚未配置，"
+        "已阻断页面请求。请从最新受监管版本重新启动系统。"
+    )
+    st.stop()
+
 identity_ok, identity_msg = _backend_identity_check(base_url, expected_system_id)
 if not identity_ok:
     st.error(
@@ -2787,12 +3267,45 @@ if not identity_ok:
     )
     st.stop()
 
+try:
+    admission_response = _get_json(
+        base_url,
+        "/actions/provider_admission",
+        actions_key,
+        timeout=5,
+    )
+    admission_snapshot = admission_response.get("admission")
+    st.session_state["_provider_admission"] = (
+        admission_snapshot if isinstance(admission_snapshot, dict) else {}
+    )
+except Exception:
+    st.session_state["_provider_admission"] = {
+        "status": "unavailable",
+        "generation_allowed": False,
+        "degraded": False,
+        "admitted_chain": [],
+    }
+
+try:
+    if _restore_active_job_from_query(base_url, actions_key):
+        restored_job_id = str((st.session_state.get("active_job") or {}).get("job_id") or "")
+        _append_log(f"页面刷新后已恢复任务状态: {restored_job_id}")
+except Exception as exc:
+    recovery_error = _stable_ui_error(exc)
+    _append_log(
+        f"任务状态恢复暂缓[{recovery_error['code']}]: {recovery_error['message']}"
+    )
+    st.warning(
+        f"TASK_STATE_RECOVERY_DEFERRED：{recovery_error['message']}"
+        " 页面未重复提交任务；后端恢复后可刷新页面重试。"
+    )
+
 status_col, stop_col = st.columns([4, 1])
 with status_col:
     top_status_holder = st.empty()
     _render_task_status(top_status_holder)
 with stop_col:
-    if st.button("停止/中止任务", type="secondary", use_container_width=True):
+    if st.button("停止/中止任务", type="secondary", width="stretch"):
         try:
             _cancel_active_job(base_url, actions_key)
             st.rerun()
@@ -2904,7 +3417,7 @@ outline = _render_outline_editor()
 
 # Optional tender-outline loader
 c_load, c_health = st.columns([1, 1])
-if c_load.button("从评审标准载入目录", use_container_width=True):
+if c_load.button("从评审标准载入目录", width="stretch"):
     try:
         if not actions_key.strip():
             raise ValueError("Actions Key 不能为空")
@@ -2987,7 +3500,7 @@ if c_load.button("从评审标准载入目录", use_container_width=True):
     except Exception as e:
         st.error(f"载入目录失败: {e}")
 
-if c_health.button("检查后端连接", use_container_width=True):
+if c_health.button("检查后端连接", width="stretch"):
     try:
         r = requests.get(base_url.rstrip("/") + "/health", timeout=20)
         if r.status_code < 400:
@@ -3075,42 +3588,37 @@ with st.expander("模型与生成策略（高级）", expanded=False):
             help="控制同时调用模型编写的章节数量；不是专业Agent角色数量。提高该值会增加限流和失败风险。",
         )
     with c2:
-        st.checkbox("生成图片/思维导图", key="generate_images")
-        st.selectbox("图片模型提供商", options=["openai", "google"], key="image_provider")
-        st.text_input("图片模型", key="image_model")
-        image_ready, image_status = _provider_status(st.session_state.get("image_provider"))
-        (st.success if image_ready else st.warning)(f"图片模型：{image_status}")
-        image_backup_provider = _env_first("ZF_IMAGE_FALLBACK1_PROVIDER")
-        image_backup_model = _env_first("ZF_IMAGE_FALLBACK1_MODEL")
-        if image_backup_provider and image_backup_model:
-            backup_ready, backup_status = _provider_status(image_backup_provider)
-            (st.success if backup_ready else st.warning)(
-                f"图片备用：{image_backup_provider}/{image_backup_model}；{backup_status}"
-            )
+        st.checkbox(
+            "生成本地图表/思维导图",
+            key="generate_images",
+            help="使用已导入项目图片和确定性本地绘图；不会调用未准入的外部图片模型。",
+        )
+        st.selectbox(
+            "外部图片模型提供商",
+            options=["未准入（本地确定性模式）"],
+            disabled=True,
+        )
+        st.warning(
+            "IMAGE_PROVIDER_ADMISSION_REQUIRED：外部图片模型尚未建立独立准入，"
+            "因此保持关闭；文本/文档模型准入不代表图片模型已准入。"
+        )
         st.number_input("方案并行数", min_value=1, max_value=5, key="variant_parallelism")
     with c3:
-        st.selectbox(
-            "主文本模型提供商",
-            options=TEXT_PROVIDER_OPTIONS,
-            key="provider_text",
-            on_change=_sync_provider_model,
-            args=("provider_text", "model_text"),
-        )
-        st.text_input("主文本模型", key="model_text")
-        main_latest = _latest_model_for(st.session_state.get("provider_text"))
-        if main_latest:
-            st.caption(f"建议最新模型：{main_latest}")
         main_ready, main_status = _provider_status(st.session_state.get("provider_text"))
         (st.success if main_ready else st.warning)(main_status)
-        st.text_input("主文本模型 API Key", key="api_key_text", type="password")
-        if str(st.session_state.get("provider_text") or "").strip().lower() == "anthropic":
-            st.info(
-                "自动分级：Sonnet 5 负责目录解析与章节起草；Opus 5 负责关键章节精修和全文一致性终审。"
-            )
-            st.checkbox(
-                "允许 Fable 5 异常升级（默认关闭，仅在 Opus 无法完成时使用）",
-                key="allow_fable_escalation",
-            )
+        admission = st.session_state.get("_provider_admission") or {}
+        route_labels = [
+            f"{item.get('slot')}:{item.get('provider')}/{item.get('model')}"
+            for item in (admission.get("admitted_chain") or [])
+            if isinstance(item, dict)
+        ]
+        if route_labels:
+            st.caption("服务端准入链：" + " → ".join(route_labels))
+        st.info("模型、路由与凭据由本机后端统一管理；页面不读取、显示或传输密钥。")
+        st.checkbox(
+            "允许 Fable 5 异常升级（默认关闭）",
+            key="allow_fable_escalation",
+        )
     st.info(
         "14个专业角色已启用：主控、合规、招标评分响应、证据溯源、技术深度、清单响应、图纸接口、"
         "进度资源、风险闭环、图表质量、全篇一致性、专业渲染、文档视觉质检和交付验收。"
@@ -3118,38 +3626,8 @@ with st.expander("模型与生成策略（高级）", expanded=False):
     )
     st.caption("并行说明：章节并行只控制同时编写的章节数；方案并行控制A/B/C/D/E多份方案是否同时生成。")
 
-    st.markdown("**文本模型备选链（主模型失败时自动切换）**")
-    f1, f2 = st.columns(2)
-    with f1:
-        st.checkbox("启用备选1", key="fallback_1_enabled")
-        st.selectbox(
-            "备选1提供商",
-            options=FALLBACK_PROVIDER_OPTIONS,
-            key="fallback_1_provider",
-            format_func=lambda x: "（不选择）" if str(x or "") == "" else str(x),
-            on_change=_sync_provider_model,
-            args=("fallback_1_provider", "fallback_1_model"),
-        )
-        st.text_input("备选1模型", key="fallback_1_model")
-        f1_latest = _latest_model_for(st.session_state.get("fallback_1_provider"))
-        if f1_latest:
-            st.caption(f"备选1建议：{f1_latest}")
-        st.text_input("备选1 API Key（可留空走环境变量）", key="fallback_1_api_key", type="password")
-    with f2:
-        st.checkbox("启用备选2", key="fallback_2_enabled")
-        st.selectbox(
-            "备选2提供商",
-            options=FALLBACK_PROVIDER_OPTIONS,
-            key="fallback_2_provider",
-            format_func=lambda x: "（不选择）" if str(x or "") == "" else str(x),
-            on_change=_sync_provider_model,
-            args=("fallback_2_provider", "fallback_2_model"),
-        )
-        st.text_input("备选2模型", key="fallback_2_model")
-        f2_latest = _latest_model_for(st.session_state.get("fallback_2_provider"))
-        if f2_latest:
-            st.caption(f"备选2建议：{f2_latest}")
-        st.text_input("备选2 API Key（可留空走环境变量）", key="fallback_2_api_key", type="password")
+    st.markdown("**文本模型备选链（服务端管理）**")
+    st.caption("主模型、备用模型、熔断与降级均以生成前准入回执为准，前端不能覆盖。")
 
     st.text_area("章级要求 JSON（可选）", key="chapter_requirements_text", height=100)
     st.text_area("参数覆盖 JSON（可选）", key="params_override_text", height=100)
@@ -3160,11 +3638,12 @@ st.markdown(
 )
 _render_reference_libraries_panel(base_url, actions_key)
 _render_ollama_preview_panel(base_url, actions_key)
+_render_claude_cache_metrics_panel(base_url, actions_key)
 current_case_library_options = _build_case_library_request_options()
 current_image_library_options = _build_image_library_request_options()
 
 st.markdown(launch_html(), unsafe_allow_html=True)
-run_btn = st.button("一键生成", type="primary", use_container_width=True)
+run_btn = st.button("一键生成", type="primary", width="stretch")
 
 progress_holder = st.empty()
 status_holder = st.empty()
@@ -3231,19 +3710,43 @@ if run_btn:
         pb = progress_holder.progress(0)
         status_holder.info("准备执行")
 
-        _set_preflight_status(1, "解析招标文件")
+        def _show_ingest_progress(group_name: str, base_percent: int, span: int):
+            def _callback(progress: dict[str, Any]) -> None:
+                files_progress = progress.get("files") if isinstance(progress.get("files"), dict) else {}
+                completed = int(files_progress.get("completed") or 0)
+                total = max(1, int(files_progress.get("total") or 1))
+                current_file = str(progress.get("current_file") or "").strip()
+                percent = min(base_percent + span, base_percent + int((completed / total) * span))
+                pb.progress(percent)
+                suffix = f"：{current_file}" if current_file else ""
+                status_holder.info(f"{group_name} {completed}/{total}{suffix}")
+            return _callback
+
+        _set_preflight_status(1, "导入并解析招标文件")
         _render_task_status(top_status_holder)
-        _append_log("步骤 1/6: 解析招标文件")
+        _append_log("步骤 1/6: 导入并解析招标文件")
         _render_logs(log_holder)
         tender_parse_files = list(tender_files or [])
-        tr = _post_files(
+        tender_ingest = _ingest_docs(
+            base_url,
+            tender_parse_files,
+            project_id,
+            source_hint="tender_qa",
+            progress_callback=_show_ingest_progress("招标/答疑导入", 0, 14),
+        )
+        tender_file_ids = [
+            str(item.get("file_id") or item.get("sha256") or "").strip()
+            for item in (tender_ingest.get("accepted") or tender_ingest.get("saved") or [])
+            if isinstance(item, dict)
+        ]
+        if tender_ingest.get("rejected") or not tender_file_ids:
+            raise RuntimeError("招标/答疑存在未解析文件，已阻止生成")
+        tr = _post_file_ids(
             base_url,
             "/actions/tender/parse",
             actions_key,
-            "files",
-            tender_parse_files,
-            params={"project_id": project_id},
-            timeout=900,
+            tender_file_ids,
+            project_id=project_id,
         )
         matrix = tr.get("matrix") or {}
         auto_topic, auto_pid = _apply_project_defaults_from_tender(matrix)
@@ -3251,8 +3754,10 @@ if run_btn:
         project_id = _safe_project_id(resolved_pid or project_id)
         if auto_topic:
             topic = auto_topic
+            _queue_widget_update("topic_text", auto_topic)
             _append_log(f"项目主题已自动对齐：{topic}")
         if auto_pid:
+            _queue_widget_update("project_id_text", project_id)
             _append_log(f"项目ID已自动对齐：{project_id}")
 
         # 版式自动设置：招标明确要求 > 当前输入 > 系统默认值。
@@ -3317,24 +3822,34 @@ if run_btn:
         _append_log("图表策略已启用：每章按篇幅选取1–2幅有效图表，全篇最多24幅；项目概况章节不插图，不重复填充。")
         pb.progress(20)
 
-        _set_preflight_status(2, "解析工程量清单")
+        _set_preflight_status(2, "导入并解析工程量清单")
         _render_task_status(top_status_holder)
-        _append_log("步骤 2/6: 解析工程量清单")
+        _append_log("步骤 2/6: 导入并解析工程量清单")
         _render_logs(log_holder)
-        _post_files(
+        boq_ingest = _ingest_docs(
+            base_url,
+            list(boq_files),
+            project_id,
+            source_hint="boq",
+            progress_callback=_show_ingest_progress("工程量清单导入", 20, 14),
+        )
+        boq_file_ids = [
+            str(item.get("file_id") or item.get("sha256") or "").strip()
+            for item in (boq_ingest.get("accepted") or boq_ingest.get("saved") or [])
+            if isinstance(item, dict)
+        ]
+        if boq_ingest.get("rejected") or not boq_file_ids:
+            raise RuntimeError("工程量清单存在未解析文件，已阻止生成")
+        _post_file_ids(
             base_url,
             "/actions/boq/parse",
             actions_key,
-            "file",
-            list(boq_files),
-            params={"project_id": project_id},
-            timeout=900,
+            boq_file_ids,
+            project_id=project_id,
         )
         pb.progress(35)
 
         ingest_groups = [
-            ("招标/答疑", list(tender_files or []), "tender_qa"),
-            ("工程量清单", list(boq_files or []), "boq"),
             ("图纸/标准资料", list(drawing_files or []), "drawing_standard"),
             ("现场照片", list(site_photo_files or []), "site_photo"),
         ]
@@ -3343,11 +3858,25 @@ if run_btn:
         _render_task_status(top_status_holder)
         _append_log(f"步骤 3/6: 入库资料 ({ingest_total} 个文件)")
         _render_logs(log_holder)
-        for group_name, group_files, source_hint in ingest_groups:
+        optional_warnings: list[dict[str, Any]] = []
+        for group_index, (group_name, group_files, source_hint) in enumerate(ingest_groups):
             if not group_files:
                 continue
             _append_log(f"  - 入库 {group_name}：{len(group_files)} 个")
-            _ingest_docs(base_url, group_files, project_id, source_hint=source_hint)
+            ingest_result = _ingest_docs(
+                base_url,
+                group_files,
+                project_id,
+                source_hint=source_hint,
+                progress_callback=_show_ingest_progress(group_name, 35 + group_index * 7, 7),
+            )
+            optional_warnings.extend(
+                item for item in (ingest_result.get("warnings") or []) if isinstance(item, dict)
+            )
+            if ingest_result.get("rejected"):
+                _append_log(f"  - {group_name} 有 {len(ingest_result.get('rejected') or [])} 个文件降级")
+        if optional_warnings:
+            status_holder.warning("可选资料存在降级，详情已写入运行日志")
         pb.progress(50)
 
         plan_payload: dict[str, Any] = {
@@ -3409,70 +3938,7 @@ if run_btn:
             "case_library": current_case_library_options,
             "image_library": current_image_library_options,
         }
-        provider_chain_payload: list[dict[str, str]] = []
-        provider_chain_labels: list[str] = []
-        provider_chain_legacy: list[str] = []
-        model_map: dict[str, str] = {}
-        api_keys_map: dict[str, str] = {}
-
-        def _append_provider(slot: str, pv: str, md: str, ak: str) -> None:
-            p = str(pv or "").strip().lower()
-            m = str(md or "").strip()
-            k = str(ak or "").strip()
-            if not p or not m:
-                return
-            provider_chain_payload.append(
-                {
-                    "slot": str(slot or "").strip() or f"slot_{len(provider_chain_payload) + 1}",
-                    "provider": p,
-                    "model": m,
-                    "api_key": k,
-                }
-            )
-            provider_chain_labels.append(f"{slot}:{p}")
-            provider_chain_legacy.append(p)
-            if p not in model_map:
-                model_map[p] = m
-            if p not in api_keys_map and k:
-                api_keys_map[p] = k
-            if k:
-                api_keys_map[str(slot or "").strip() or p] = k
-
-        _append_provider(
-            "main",
-            str(st.session_state.get("provider_text") or ""),
-            str(st.session_state.get("model_text") or ""),
-            str(st.session_state.get("api_key_text") or ""),
-        )
-        if bool(st.session_state.get("fallback_1_enabled")):
-            _append_provider(
-                "fallback_1",
-                str(st.session_state.get("fallback_1_provider") or ""),
-                str(st.session_state.get("fallback_1_model") or ""),
-                str(st.session_state.get("fallback_1_api_key") or ""),
-            )
-        if bool(st.session_state.get("fallback_2_enabled")):
-            _append_provider(
-                "fallback_2",
-                str(st.session_state.get("fallback_2_provider") or ""),
-                str(st.session_state.get("fallback_2_model") or ""),
-                str(st.session_state.get("fallback_2_api_key") or ""),
-            )
-
-        if provider_chain_payload:
-            primary_provider = str(provider_chain_payload[0].get("provider") or "").strip().lower()
-            generate_payload["provider"] = primary_provider
-            generate_payload["model"] = str(provider_chain_payload[0].get("model") or "").strip()
-            generate_payload["provider_chain"] = provider_chain_payload
-            # Back-end 按 providers 顺序执行章节级轮询重试（主 + 备选）。
-            if len(provider_chain_legacy) > 1:
-                generate_payload["providers"] = provider_chain_legacy
-                generate_payload["model_map"] = model_map
-            if primary_provider in api_keys_map and api_keys_map[primary_provider]:
-                generate_payload["api_key"] = api_keys_map[primary_provider]
-            if api_keys_map:
-                generate_payload["api_keys"] = api_keys_map
-            _append_log(f"文本模型链：{' -> '.join(provider_chain_labels)}")
+        _append_log("文本模型链：由后端服务端白名单与生成前供应商准入统一决定")
         if params_override:
             generate_payload["params_override"] = params_override
         if current_case_library_options.get("enabled"):
@@ -3507,6 +3973,7 @@ if run_btn:
             "base_url": base_url,
             "started_at": time.time(),
         }
+        _persist_active_job_query(job_id)
         st.session_state["preflight_status"] = None
         _render_task_status(top_status_holder)
         _append_log(f"步骤 6/6: 任务已排队 job_id={job_id}")
@@ -3514,15 +3981,18 @@ if run_btn:
         status_holder.success("任务已提交，正在后台生成")
 
     except Exception as e:
+        public_error = _stable_ui_error(e)
+        error_label = f"{public_error['code']}：{public_error['message']}"
         current_preflight = st.session_state.get("preflight_status") or {}
         _set_preflight_status(
             int(current_preflight.get("stage") or 0),
-            str(e),
+            error_label,
             state="failed",
         )
         _render_task_status(top_status_holder)
-        status_holder.error(f"执行失败: {e}")
-        _append_log(f"失败: {e}")
+        status_holder.error(error_label)
+        status_holder.caption(f"建议：{public_error['action']}")
+        _append_log(f"失败[{public_error['code']}]: {public_error['message']}")
 
 _render_logs(log_holder)
 
@@ -3535,8 +4005,11 @@ if st.session_state.get("active_job"):
     except Exception as e:
         fail_n = int(st.session_state.get("poll_fail_count") or 0) + 1
         st.session_state["poll_fail_count"] = fail_n
-        _append_log(f"轮询失败: {e}")
-        st.warning(f"后端暂时不可达，正在自动重连（第{fail_n}次）：{e}")
+        public_error = _stable_ui_error(e)
+        _append_log(f"轮询失败[{public_error['code']}]: {public_error['message']}")
+        st.warning(
+            f"{public_error['code']}：{public_error['message']}（自动重连第{fail_n}次）"
+        )
         _render_task_status(top_status_holder)
 
 if st.session_state.get("run_result"):

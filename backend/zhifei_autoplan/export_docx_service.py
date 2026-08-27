@@ -11,9 +11,14 @@ from backend.zhifei_autoplan.job_store import create_job, update_job
 from backend.zhifei_autoplan.media import generate_boq_chart, generate_ingested_previews, generate_outline_mindmap
 from backend.zhifei_autoplan.orchestrator import _build_boq_focus
 from backend.zhifei_autoplan.params_runtime import get_image_defaults, load_params
-from backend.zhifei_autoplan.provider_runtime import iterate_image_failover_slots
 from backend.zhifei_autoplan.quality_check import run_quality_checks, strip_nonconcrete_language
 from backend.zhifei_autoplan.tender_store import load_tender_matrix
+
+
+def _no_admitted_image_slots() -> tuple[Any, ...]:
+    """Default fail-closed policy for export-time external image providers."""
+
+    return ()
 
 
 def _accepts_keyword(fn: Callable[..., Any], keyword: str) -> bool:
@@ -117,7 +122,7 @@ def build_export_media(
     generate_boq_chart_fn: Callable[[dict[str, Any]], list[dict[str, Any]]] = generate_boq_chart,
     generate_ingested_previews_fn: Callable[..., list[dict[str, Any]]] = generate_ingested_previews,
     get_image_defaults_fn: Callable[[dict[str, Any]], dict[str, Any]] = get_image_defaults,
-    iterate_image_failover_slots_fn: Callable[[], Any] = iterate_image_failover_slots,
+    iterate_image_failover_slots_fn: Callable[[], Any] = _no_admitted_image_slots,
     generate_outline_mindmap_fn: Callable[..., dict[str, Any] | None] = generate_outline_mindmap,
     resolve_logo_fn: Callable[..., Any] | None = None,
     prepare_logo_for_embedding_fn: Callable[[Any], Any] | None = None,
@@ -246,11 +251,12 @@ def build_export_mindmap_media(
     workspace_dir: str,
     aspect_ratio: str,
     logo_embed: str | None,
-    iterate_image_failover_slots_fn: Callable[[], Any] = iterate_image_failover_slots,
+    iterate_image_failover_slots_fn: Callable[[], Any] = _no_admitted_image_slots,
     generate_outline_mindmap_fn: Callable[..., dict[str, Any] | None] = generate_outline_mindmap,
 ) -> dict[str, Any] | None:
     saw_supported_slot = False
-    for image_slot in iterate_image_failover_slots_fn():
+    slot_rows = list(iterate_image_failover_slots_fn() or [])
+    for image_slot in slot_rows:
         provider = str(getattr(image_slot, "provider", None) or "").strip().lower()
         if provider not in {"openai", "google"}:
             continue
@@ -275,7 +281,7 @@ def build_export_mindmap_media(
         )
         if mindmap:
             return mindmap
-    if saw_supported_slot:
+    if saw_supported_slot or not slot_rows:
         return _call_with_optional_workspace(
             generate_outline_mindmap_fn,
             raw_request.get("topic"),

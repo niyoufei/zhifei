@@ -2095,7 +2095,7 @@ def test_ollama_preview_enabled_success_uses_api_chat(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert result["content"] == "缺项：需补充验收频次。"
-    assert seen["url"] == "http://localhost:11434/api/chat"
+    assert seen["url"] == "http://127.0.0.1:11434/api/chat"
     assert seen["payload"]["stream"] is False
     assert seen["payload"]["think"] is False
     assert seen["payload"]["messages"][0]["role"] == "user"
@@ -2135,6 +2135,24 @@ def test_ollama_preview_enabled_exception_returns_fallback(monkeypatch) -> None:
     assert result["ok"] is False
     assert result["status"] == "fallback"
     assert result["error"] == "ollama_preview_error:RuntimeError"
+
+
+def test_ollama_preview_rejects_non_loopback_url_without_transport(monkeypatch) -> None:
+    monkeypatch.setenv("ZDOC_OLLAMA_PREVIEW_ENABLED", "1")
+
+    def fail_transport(*_args, **_kwargs):
+        raise AssertionError("non-loopback Ollama URL must never be contacted")
+
+    result = run_ollama_preview(
+        content="脱敏章节内容",
+        base_url="http://example.invalid:11434/internal",
+        transport=fail_transport,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["error"] == "LOCAL_OLLAMA_LOOPBACK_REQUIRED"
+    assert result["base_url"] == "http://127.0.0.1:11434"
 
 
 def test_ollama_section_review_disabled_does_not_call_network(monkeypatch) -> None:
@@ -2181,7 +2199,7 @@ def test_ollama_section_review_enabled_success_returns_review_type(monkeypatch) 
     assert result["review_type"] == "section_review"
     assert result["fallback_reason"] is None
     assert result["content"] == "缺项：需补充验收记录。"
-    assert seen["url"] == "http://localhost:11434/api/chat"
+    assert seen["url"] == "http://127.0.0.1:11434/api/chat"
     assert "人工章节复核助手" in prompt
     assert "厂房项目" in prompt
     assert "质量保证措施" in prompt

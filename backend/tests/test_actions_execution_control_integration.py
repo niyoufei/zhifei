@@ -21,15 +21,15 @@ def test_prepare_execution_control_clamps_nested_parallelism_and_budgets() -> No
 
     runtime, policy = actions_bridge._prepare_execution_control(payload)
 
-    assert payload["variant_parallelism"] == 3
-    assert payload["agent_parallelism"] == 2
-    assert policy["max_model_parallelism"] == 6
+    assert payload["variant_parallelism"] == 2
+    assert payload["agent_parallelism"] == 1
+    assert policy["max_model_parallelism"] == 2
     assert policy["model_parallelism_source"] == "request"
     assert policy["max_model_attempts"] == 123
     assert policy["max_input_chars"] == 456_000
     assert policy["max_requested_output_tokens"] == 7_890
     assert runtime.snapshot()["limits"] == {
-        "max_concurrency": 6,
+        "max_concurrency": 2,
         "max_model_attempts": 123,
         "max_input_chars": 456_000,
         "max_requested_output_tokens": 7_890,
@@ -89,6 +89,22 @@ async def test_direct_generate_shares_one_runtime_with_variants_and_renderer(mon
     )
     monkeypatch.setattr(
         actions_bridge,
+        "_assert_mandatory_generation_sources",
+        lambda _payload: None,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_apply_server_provider_routing_or_503",
+        lambda payload: dict(payload),
+    )
+    admitted_slot = object()
+    monkeypatch.setattr(
+        actions_bridge,
+        "_admitted_document_render_slot",
+        lambda _coordinator: admitted_slot,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
         "_build_variant_plan",
         lambda _payload: [{"variant_id": 1}, {"variant_id": 2}],
     )
@@ -110,13 +126,24 @@ async def test_direct_generate_shares_one_runtime_with_variants_and_renderer(mon
     monkeypatch.setattr(
         actions_bridge,
         "_save_outputs",
-        lambda _name, _results: {"docx": ["a.docx", "b.docx"], "json": ["r.json"]},
+        lambda _name, _results, **_kwargs: {
+            "docx": ["a.docx", "b.docx"],
+            "json": ["r.json"],
+        },
     )
 
-    async def _fake_render(*, job_id, outputs, progress_callback=None, execution_runtime=None):
+    async def _fake_render(
+        *,
+        job_id,
+        outputs,
+        progress_callback=None,
+        execution_runtime=None,
+        slot_override=None,
+    ):
         nonlocal render_runtime
         assert job_id.startswith("direct-")
         assert progress_callback is None
+        assert slot_override is admitted_slot
         render_runtime = execution_runtime
         return dict(outputs)
 
@@ -135,5 +162,5 @@ async def test_direct_generate_shares_one_runtime_with_variants_and_renderer(mon
     assert len(runtimes) == 2
     assert runtimes[0] is runtimes[1]
     assert render_runtime is runtimes[0]
-    assert response["execution_control"]["limits"]["max_concurrency"] == 4
+    assert response["execution_control"]["limits"]["max_concurrency"] == 2
     assert [item["variant_id"] for item in response["result"]] == [1, 2]

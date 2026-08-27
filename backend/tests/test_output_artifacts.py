@@ -61,3 +61,40 @@ def test_save_outputs_writes_expected_artifact_bundle(tmp_path: Path, monkeypatc
     saved = payload["variants"][0]["sections"][0]
     assert saved["case_reference_pack"]["selected_case_ids"] == ["case-1"]
     assert saved["image_selection_pack"]["selected_image_ids"] == ["image-1"]
+
+
+def test_preview_only_writes_sanitized_json_without_formal_exporters(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    formal_calls: list[str] = []
+    monkeypatch.setattr(
+        output_artifacts,
+        "export_autoplan_docx",
+        lambda *_args, **_kwargs: formal_calls.append("docx"),
+    )
+    monkeypatch.setattr(
+        output_artifacts,
+        "export_autoplan_compare_docx",
+        lambda *_args, **_kwargs: formal_calls.append("compare_docx"),
+    )
+    monkeypatch.setattr(
+        output_artifacts,
+        "export_autoplan_focus_xlsx",
+        lambda *_args, **_kwargs: formal_calls.append("focus_xlsx"),
+    )
+
+    out = output_artifacts.save_outputs(
+        "preview_test",
+        [{"sections": [], "dynamic_prompt": "sensitive prompt"}],
+        preview_only=True,
+    )
+
+    assert formal_calls == []
+    assert out["docx"] == []
+    assert out["compare_docx"] == []
+    assert out["focus_xlsx"] == []
+    assert Path(out["json"]).is_file()
+    payload = json.loads(Path(out["json"]).read_text(encoding="utf-8"))
+    assert payload["variants"][0]["dynamic_prompt"] == "[OMITTED]"

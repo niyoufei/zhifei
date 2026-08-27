@@ -10,6 +10,8 @@ from backend.zhifei_autoplan.generation_checkpoint import (
     cleanup_checkpoint_namespace,
     finalize_generation_checkpoint,
     load_section_checkpoint,
+    mark_checkpoint_namespace_interrupted,
+    mark_failed_checkpoint_namespace,
     save_section_checkpoint,
 )
 
@@ -119,6 +121,15 @@ def test_finalize_and_cleanup(tmp_path):
         result={"title": "施工部署", "content": "正文"},
         root=tmp_path,
     )
+    save_section_checkpoint(
+        namespace="job-4",
+        scope="variant-1",
+        binding=binding,
+        chapter_index=1,
+        chapter_title="质量管理",
+        result={"title": "质量管理", "content": "正文"},
+        root=tmp_path,
+    )
     summary = finalize_generation_checkpoint(
         namespace="job-4",
         scope="variant-1",
@@ -128,3 +139,48 @@ def test_finalize_and_cleanup(tmp_path):
     assert summary["status"] == "complete"
     assert cleanup_checkpoint_namespace("job-4", root=tmp_path) is True
     assert not (tmp_path / "job-4").exists()
+
+
+def test_interrupted_namespace_preserves_saved_sections(tmp_path):
+    binding = _binding()
+    save_section_checkpoint(
+        namespace="job-5",
+        scope="variant-1",
+        binding=binding,
+        chapter_index=0,
+        chapter_title="施工部署",
+        result={"title": "施工部署", "content": "可信正文"},
+        root=tmp_path,
+    )
+
+    summaries = mark_checkpoint_namespace_interrupted("job-5", root=tmp_path)
+
+    assert summaries[0]["status"] == "interrupted_recoverable"
+    assert summaries[0]["saved_chapter_count"] == 1
+    assert load_section_checkpoint(
+        namespace="job-5",
+        scope="variant-1",
+        binding=binding,
+        chapter_index=0,
+        chapter_title="施工部署",
+        root=tmp_path,
+    )["content"] == "可信正文"
+
+
+def test_failed_namespace_uses_saved_section_count(tmp_path):
+    binding = _binding()
+    save_section_checkpoint(
+        namespace="job-6",
+        scope="variant-1",
+        binding=binding,
+        chapter_index=0,
+        chapter_title="施工部署",
+        result={"title": "施工部署", "content": "可信正文"},
+        root=tmp_path,
+    )
+
+    summaries = mark_failed_checkpoint_namespace("job-6", root=tmp_path)
+
+    assert summaries[0]["status"] == "failed_partial"
+    assert summaries[0]["saved_chapter_count"] == 1
+    assert summaries[0]["chapters_total"] == 2

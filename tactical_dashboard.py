@@ -165,7 +165,7 @@ def _render_graph_board(nodes: List[Dict[str, Any]]) -> None:
     c2.metric("Trap Logic", trap_count)
     c3.metric("Score Booster", booster_count)
 
-    st.dataframe(rows, use_container_width=True, height=420)
+    st.dataframe(rows, width="stretch", height=420)
 
 
 def _stream_trigger_logs(tender_text: str, nodes: List[Dict[str, Any]]) -> List[str]:
@@ -244,7 +244,7 @@ left, right = st.columns([1.1, 1.4])
 
 with left:
     st.subheader("模块 A - 战术图谱看板")
-    if st.button("加载战术图谱", use_container_width=True):
+    if st.button("加载战术图谱", width="stretch"):
         if not kg_root.exists():
             st.error(f"知识图谱目录不存在: {kg_root}")
         else:
@@ -277,7 +277,7 @@ with right:
         accept_multiple_files=False,
     )
 
-    if st.button("启动战术生成", type="primary", use_container_width=True):
+    if st.button("启动战术生成", type="primary", width="stretch"):
         if tender_file is None or boq_file is None:
             st.error("请先上传招标文件和工程量清单。")
         elif not kg_root.exists():

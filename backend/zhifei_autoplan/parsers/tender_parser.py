@@ -13,6 +13,9 @@ from backend.zhifei_autoplan.requirement_decisions import (
     build_requirement_decision_matrix,
     style_from_requirement_matrix,
 )
+from backend.zhifei_autoplan.requirement_evidence_matrix import (
+    classify_chapter_requirement_quality,
+)
 
 from backend.zhifei_autoplan.models import (
     TenderIndexMatrix,
@@ -40,11 +43,38 @@ class TenderParser:
     def __init__(self, llm: Optional[LLMClient] = None):
         self.llm = llm
 
-    async def parse(self, pdf_paths: List[str]) -> TenderIndexMatrix:
-        # 并发读取多份资料（PDF 优先，其它格式走统一解析器）
-        texts = await asyncio.gather(
-            *[asyncio.to_thread(self._read_source_text, p) for p in pdf_paths]
-        )
+    async def parse(
+        self,
+        pdf_paths: List[str],
+        *,
+        cached_texts: Dict[str, str] | None = None,
+    ) -> TenderIndexMatrix:
+        # Ingest already extracted and content-addressed these sources.  Reuse
+        # only caller-supplied, parser-version-validated text; uncached paths
+        # retain the existing PDF/UnifiedParser fallback.
+        cache = cached_texts or {}
+
+        async def _load(path: str) -> Tuple[str, str]:
+            cached = cache.get(path)
+            if isinstance(cached, str):
+                return path, cached
+            return await asyncio.to_thread(self._read_source_text, path)
+
+        texts = await asyncio.gather(*[_load(path) for path in pdf_paths])
+
+        # Section splitting, outline/style extraction and evidence projection
+        # scan the complete tender corpus repeatedly.  Keep that CPU-bound
+        # rules pipeline off the caller's event-loop thread; otherwise a large
+        # tender can make FastAPI's lightweight /health endpoint time out even
+        # though the backend process is still healthy.
+        matrix = await asyncio.to_thread(self._build_matrix_from_texts, texts)
+        if self.llm:
+            await self._complete_index_prompts()
+        return matrix
+
+    def _build_matrix_from_texts(
+        self, texts: List[Tuple[str, str]]
+    ) -> TenderIndexMatrix:
 
         qa_texts = [t for p, t in texts if self._is_qa_file(p, t)]
         base_texts = [t for p, t in texts if not self._is_qa_file(p, t)]
@@ -53,7 +83,7 @@ class TenderParser:
             merged_text = merged_text + "\n\n【答疑优先文本】\n" + "\n\n".join(qa_texts)
 
         sections = self._split_sections(merged_text)
-        items = await self._extract_index_matrix(sections, texts)
+        items = self._extract_index_matrix_sync(sections, texts)
         outline, outline_meta = self._extract_outline(merged_text)
         style, style_meta = self._extract_style_requirements(merged_text)
         style_sources: List[Dict[str, Any]] = []
@@ -82,7 +112,10 @@ class TenderParser:
             style = style_from_requirement_matrix(style_decision_matrix)
             style_meta["source"] = "source_decision_matrix"
         chapter_pages = self._extract_chapter_page_targets(merged_text, outline)
-        chapter_requirements = self._extract_chapter_requirements(merged_text, outline)
+        (
+            chapter_requirements,
+            chapter_requirement_review,
+        ) = self._extract_chapter_requirement_candidates(merged_text, outline)
         project_name, project_code = self._extract_project_meta(merged_text)
         global_requirements = []
         global_requirements.extend(style_meta.get("global_requirements") or [])
@@ -91,6 +124,12 @@ class TenderParser:
             "outline": outline_meta,
             "style": style_meta,
             "requirement_decision_matrix": style_decision_matrix,
+            "chapter_requirement_review": {
+                "status": "NEEDS_REVIEW" if chapter_requirement_review else "READY",
+                "count": len(chapter_requirement_review),
+                "prompt_excluded_count": len(chapter_requirement_review),
+                "rows": chapter_requirement_review,
+            },
         }
         return TenderIndexMatrix(
             project_name=project_name,
@@ -105,6 +144,17 @@ class TenderParser:
             global_requirements=global_requirements,
             extraction_meta=extraction_meta,
         )
+
+    async def _complete_index_prompts(self) -> None:
+        if not self.llm:
+            return
+        for dim in TenderDimension:
+            prompt = f"从招标文本中提取 {dim.value} 的关键指标，输出关键词列表。"
+            await self.llm.complete(
+                prompt,
+                project_id="tender-ingestion",
+                task_type="tender_index_extraction",
+            )
 
     def _extract_project_meta(self, text: str) -> tuple[str | None, str | None]:
         lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
@@ -996,25 +1046,44 @@ class TenderParser:
         return chapter_pages
 
     def _extract_chapter_requirements(self, text: str, outline: list[str]) -> Dict[str, Any]:
+        requirements, _review = self._extract_chapter_requirement_candidates(
+            text, outline
+        )
+        return requirements
+
+    def _extract_chapter_requirement_candidates(
+        self, text: str, outline: list[str]
+    ) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
-        抽取与章节标题强相关的“应包含/要求/提供”条款。
-        规则：以标题为锚点向后截取少量文本，抓取含关键动词的句子。
+        抽取可执行章节条款，并把评分残句/截断残句隔离为待复核记录。
+
+        ``chapter_requirements`` 只返回可进入模型提示词的完整要求；待复核
+        记录保留在 extraction_meta 中，供人工修复来源文本，不参与 mandatory gate。
         """
         merged = text or ""
         if not merged.strip() or not outline:
-            return {}
+            return {}, []
         lines = [ln.strip() for ln in merged.splitlines() if ln.strip()]
         joined = "\n".join(lines)
         chapter_reqs: Dict[str, Any] = {}
+        review_rows: List[Dict[str, Any]] = []
         verbs = ("应", "必须", "提供", "包含", "阐述", "说明", "明确")
         for title in outline[:30]:
             # 简单锚点：找到标题出现位置后截取一段
             idx = joined.find(title)
             if idx < 0:
                 continue
-            chunk = joined[idx : idx + 600]
-            cand = []
-            for sent in re.split(r"[。；;\n]", chunk):
+            window_end = min(len(joined), idx + 600)
+            chunk = joined[idx:window_end]
+            window_truncated = (
+                window_end < len(joined)
+                and bool(chunk)
+                and chunk[-1] not in "。；;\n"
+            )
+            sentences = re.split(r"[。；;\n]", chunk)
+            cand: List[str] = []
+            chapter_review_count = 0
+            for sentence_index, sent in enumerate(sentences):
                 s = sent.strip()
                 if not s or len(s) < 6:
                     continue
@@ -1022,14 +1091,48 @@ class TenderParser:
                     # 避免把目录行本身当要求
                     if title in s and len(s) < len(title) + 8:
                         continue
-                    cand.append(s[:120])
+                    quality_input: Any = s
+                    if window_truncated and sentence_index == len(sentences) - 1:
+                        quality_input = {
+                            "requirement": s,
+                            "planning_status": "NEEDS_REVIEW",
+                            "review_reason_codes": ["EXTRACTION_WINDOW_TRUNCATED"],
+                        }
+                    quality = classify_chapter_requirement_quality(quality_input)
+                    if quality["quality_status"] == "READY":
+                        if s not in cand:
+                            cand.append(s)
+                    elif chapter_review_count < 6:
+                        review_rows.append(
+                            {
+                                "chapter_title": title,
+                                "requirement": s,
+                                "status": "NEEDS_REVIEW",
+                                "mandatory": False,
+                                "prompt_eligible": False,
+                                "reason_codes": list(
+                                    quality.get("review_reason_codes") or []
+                                ),
+                            }
+                        )
+                        chapter_review_count += 1
                 if len(cand) >= 6:
                     break
             if cand:
                 chapter_reqs[title] = cand
-        return chapter_reqs
+        return chapter_reqs, review_rows
 
     async def _extract_index_matrix(
+        self, sections: List[Section], sources: List[Tuple[str, str]]
+    ) -> List[TenderIndexItem]:
+        items = await asyncio.to_thread(
+            self._extract_index_matrix_sync, sections, sources
+        )
+        if self.llm:
+            await self._complete_index_prompts()
+        return items
+
+    def _extract_index_matrix_sync(
         self, sections: List[Section], sources: List[Tuple[str, str]]
     ) -> List[TenderIndexItem]:
         dim_keywords = {
@@ -1066,10 +1169,6 @@ class TenderParser:
                             )
                         )
                         break
-
-            if self.llm:
-                prompt = f"从招标文本中提取 {dim.value} 的关键指标，输出关键词列表。"
-                await self.llm.complete(prompt)
 
             items.append(
                 TenderIndexItem(

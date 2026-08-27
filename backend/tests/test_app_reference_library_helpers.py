@@ -95,7 +95,7 @@ def test_ollama_preview_request_payload_defaults_to_manual_preview_boundary():
 
     assert payload["section_title"] == "施工组织设计方案"
     assert payload["model"] == "qwen3.5:4b"
-    assert payload["base_url"] == "http://localhost:11434"
+    assert payload["base_url"] == "http://127.0.0.1:11434"
     assert payload["timeout"] == 60
     assert "不要改写正文" in payload["instruction"]
     assert "项目主题：施工组织设计方案" in payload["content"]
@@ -119,7 +119,7 @@ def test_ollama_preview_request_payload_uses_current_page_context_and_clamps_tim
             "ollama_preview_section_title": "施工部署复核",
             "ollama_preview_instruction": "只列风险。",
             "ollama_preview_model": " qwen3:0.6b ",
-            "ollama_preview_base_url": "http://localhost:11434/",
+            "ollama_preview_base_url": "http://example.invalid:11434/",
             "ollama_preview_timeout": 999,
         }
     )
@@ -129,7 +129,7 @@ def test_ollama_preview_request_payload_uses_current_page_context_and_clamps_tim
     assert payload["section_title"] == "施工部署复核"
     assert payload["instruction"] == "只列风险。"
     assert payload["model"] == "qwen3:0.6b"
-    assert payload["base_url"] == "http://localhost:11434/"
+    assert payload["base_url"] == "http://127.0.0.1:11434"
     assert payload["timeout"] == 300
     assert "项目主题：厂房施工组织设计" in payload["content"]
     assert "- 工程概况" in payload["content"]

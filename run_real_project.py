@@ -112,8 +112,11 @@ def _arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--self-heal",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="启用知识图谱自愈合Agent并在缺口后自动二次重跑。",
+        default=False,
+        help=(
+            "启用知识图谱自愈合；未绑定供应商准入候选时仅使用本地"
+            "确定性回退，不会调用外部模型。"
+        ),
     )
     p.add_argument(
         "--self-heal-provider",

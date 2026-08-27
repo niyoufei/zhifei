@@ -4,7 +4,15 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
 from backend.app.routers import ingest as ingest_router
+
+
+@pytest.fixture(autouse=True)
+def _isolate_parse_cache(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "ingest-cache")
 
 
 class _ChunkOnlyUpload:
@@ -92,3 +100,72 @@ def test_handle_upload_streams_large_files_to_disk(monkeypatch, tmp_path: Path) 
     audit_record = json.loads(audit_rows[0])
     assert audit_record["bytes"] == len(payload)
     assert audit_record["saved_as"] == saved["saved_as"]
+
+
+def _isolate_workspace(monkeypatch, tmp_path: Path) -> Path:
+    workspace_root = tmp_path / "workspace"
+    monkeypatch.setattr(
+        ingest_router,
+        "_resolve_workspace_context",
+        lambda session_id=None, workspace_dir=None: {
+            "session_id": "sess-abnormal-upload",
+            "workspace_dir": str(workspace_root),
+        },
+    )
+
+    async def _no_ocr(path: Path, ext: str, base_text: str | None) -> None:
+        return None
+
+    monkeypatch.setattr(ingest_router, "_try_ocr", _no_ocr)
+    return workspace_root
+
+
+def test_handle_upload_preserves_chinese_name_and_rejects_duplicate(monkeypatch, tmp_path: Path) -> None:
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = "第一项目施工组织设计验收资料".encode("utf-8")
+    first = _ChunkOnlyUpload(payload, filename="中文资料文件.txt")
+    duplicate = _ChunkOnlyUpload(payload, filename="重复资料文件.txt")
+
+    result = asyncio.run(ingest_router._handle_upload([first, duplicate]))
+
+    assert [item["filename"] for item in result["saved"]] == ["中文资料文件.txt"]
+    assert result["rejected"] == [
+        {
+            "filename": "重复资料文件.txt",
+            "code": "DUPLICATE_FILE",
+            "sha256": result["saved"][0]["sha256"],
+            "duplicate_of": result["saved"][0]["saved_as"],
+        }
+    ]
+
+
+def test_handle_upload_rejects_empty_and_damaged_files(monkeypatch, tmp_path: Path) -> None:
+    _isolate_workspace(monkeypatch, tmp_path)
+    with pytest.raises(HTTPException) as empty_error:
+        asyncio.run(ingest_router._handle_upload([_ChunkOnlyUpload(b"", filename="空文件.txt")]))
+    assert empty_error.value.status_code == 400
+    assert empty_error.value.detail == "all files are empty"
+
+    damaged = _ChunkOnlyUpload(b"%PDF-1.7\nthis is not a valid PDF", filename="损坏文件.pdf")
+    with pytest.raises(HTTPException) as damaged_error:
+        asyncio.run(ingest_router._handle_upload([damaged]))
+    assert damaged_error.value.status_code == 422
+    assert damaged_error.value.detail["code"] == "ALL_FILES_REJECTED"
+    assert damaged_error.value.detail["rejected"][0]["code"] == "FILE_PARSE_FAILED"
+
+
+def test_handle_upload_stops_when_stream_exceeds_size_limit(monkeypatch, tmp_path: Path) -> None:
+    workspace_root = _isolate_workspace(monkeypatch, tmp_path)
+    monkeypatch.setattr(ingest_router, "MAX_UPLOAD_BYTES", 10)
+    oversized = _ChunkOnlyUpload(b"01234567890", filename="超大文件.txt")
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(ingest_router._handle_upload([oversized]))
+
+    assert error.value.status_code == 413
+    assert error.value.detail == {
+        "code": "UPLOAD_TOO_LARGE",
+        "filename": "超大文件.txt",
+        "max_bytes": 10,
+    }
+    assert not list((workspace_root / "uploads").rglob(".upload_*"))

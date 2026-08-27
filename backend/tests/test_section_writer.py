@@ -4,6 +4,163 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from backend.zhifei_autoplan.agents.section_writer import SectionWriter
+from backend.zhifei_autoplan.requirement_evidence_matrix import (
+    validate_chapter_requirement_evidence,
+)
+
+
+@pytest.mark.asyncio
+async def test_token_limited_chapter_gets_one_evidence_aware_continuation():
+    llm = MagicMock()
+    llm.provider = "anthropic"
+    llm.complete = AsyncMock(
+        side_effect=[
+            {
+                "text": "第一段正文达到上限",
+                "provider": "anthropic",
+                "model": "draft",
+                "stop_reason": "max_tokens",
+            },
+            {
+                "text": (
+                    "【要求:REQ-505-A】续写闭合"
+                    "【证据:招标文件.pdf#p2_deadbeef@120】"
+                ),
+                "provider": "anthropic",
+                "model": "draft",
+                "stop_reason": "end_turn",
+            },
+        ]
+    )
+    writer = SectionWriter(llm=llm)
+
+    evidence_row = {
+        "requirement_id": "REQ-505-A",
+        "requirement": "必须落实工期控制",
+        "target_chapters": ["工期与质量"],
+        "mandatory": True,
+        "evidence_required": True,
+        "responsibility": [],
+        "source_evidence": [
+            {"traceable_locator": "招标文件.pdf#p2_deadbeef@120"}
+        ],
+    }
+
+    result = await writer.write(
+        "工期与质量",
+        {
+            "requirements": [
+                "【要求绑定:REQ-505-A】必须落实工期控制；落实段落必须保留"
+                "【要求:REQ-505-A】标记，并引用"
+                "【证据:招标文件.pdf#p2_deadbeef@120】。"
+            ],
+            "requirement_evidence_rows": [evidence_row],
+            "max_chapter_output_tokens": 8192,
+        },
+    )
+
+    assert result["error"] is None
+    assert result["continuation_count"] == 1
+    assert "第一段正文" in result["content"]
+    assert "【要求:REQ-505-A】" in result["content"]
+    continuation_prompt = llm.complete.await_args_list[1].args[0]
+    assert "只续写" in continuation_prompt
+    assert "REQ-505-A" in continuation_prompt
+    gate = validate_chapter_requirement_evidence(
+        plan={"rows": [evidence_row]},
+        title="工期与质量",
+        section={"content": result["content"]},
+    )
+    assert gate["ok"] is True
+
+
+def test_continuation_prompt_does_not_drop_requirement_after_twentieth_row():
+    rows = []
+    for index in range(1, 22):
+        requirement_id = f"REQ-{index:02d}"
+        rows.append(
+            {
+                "requirement_id": requirement_id,
+                "requirement": f"落实第{index}项控制要求",
+                "target_chapters": ["综合管理"],
+                "mandatory": True,
+                "evidence_required": True,
+                "responsibility": [],
+                "source_evidence": [
+                    {
+                        "traceable_locator": (
+                            f"招标文件.pdf#p1_{index:06x}@{index}"
+                        )
+                    }
+                ],
+            }
+        )
+
+    prompt = SectionWriter()._build_continuation_prompt(
+        "综合管理",
+        {"requirement_evidence_rows": rows},
+        partial_text="尚未落实任何强制要求",
+    )
+
+    assert "【要求绑定:REQ-01】" in prompt
+    assert "【要求绑定:REQ-21】" in prompt
+
+
+@pytest.mark.asyncio
+async def test_continuation_repeats_marker_when_token_stop_splits_evidence_pair():
+    llm = MagicMock()
+    llm.provider = "anthropic"
+    llm.complete = AsyncMock(
+        side_effect=[
+            {"text": "工期闭环【要求:REQ-A】", "stop_reason": "max_tokens"},
+            {
+                "text": "工期闭环【要求:REQ-A】【证据:招标文件.pdf#p3_cafebabe@88】",
+                "stop_reason": "end_turn",
+            },
+        ]
+    )
+    row = {
+        "requirement_id": "REQ-A",
+        "requirement": "落实工期闭环",
+        "target_chapters": ["进度管理"],
+        "mandatory": True,
+        "evidence_required": True,
+        "responsibility": [],
+        "source_evidence": [
+            {"traceable_locator": "招标文件.pdf#p3_cafebabe@88"}
+        ],
+    }
+
+    result = await SectionWriter(llm=llm).write(
+        "进度管理", {"requirement_evidence_rows": [row]}
+    )
+
+    continuation_prompt = llm.complete.await_args_list[1].args[0]
+    assert "【要求绑定:REQ-A】" in continuation_prompt
+    gate = validate_chapter_requirement_evidence(
+        plan={"rows": [row]},
+        title="进度管理",
+        section={"content": result["content"]},
+    )
+    assert gate["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_second_token_stop_fails_closed_as_output_truncated():
+    llm = MagicMock()
+    llm.provider = "anthropic"
+    llm.complete = AsyncMock(
+        side_effect=[
+            {"text": "第一段", "stop_reason": "max_tokens"},
+            {"text": "第二段", "stop_reason": "max_tokens"},
+        ]
+    )
+    writer = SectionWriter(llm=llm)
+
+    result = await writer.write("长章节", {})
+
+    assert result["error"] == "output_truncated"
+    assert result["continuation_count"] == 1
 
 
 class TestSectionWriterInit:
@@ -178,20 +335,26 @@ class TestWrite:
         writer = SectionWriter(llm=None)
         result = await writer.write("工程概况", {})
         assert result["title"] == "工程概况"
-        assert "prompt" in result
+        assert "prompt" not in result
+        assert len(result["prompt_digest"]) == 64
+        assert result["prompt_char_count"] > 0
+        assert result["prompt_layout_version"] == "section-envelope-v3"
         assert "【量化指标】" in result["content"]
         assert "【风险→控制→验证】" in result["content"]
         assert "【证据:" in result["content"]
         assert result["generation_mode"] == "fallback"
 
     @pytest.mark.asyncio
-    async def test_write_without_llm_includes_prompt(self):
-        """Test write without LLM still generates prompt."""
+    async def test_write_without_llm_keeps_prompt_ephemeral(self):
+        """Prompt content is used to derive metadata but never returned or persisted."""
         writer = SectionWriter(llm=None)
         context = {"requirements": ["要求1"]}
+        prompt = writer._build_prompt("施工方案", context)
         result = await writer.write("施工方案", context)
-        assert "要求1" in result["prompt"]
-        assert "施工方案" in result["prompt"]
+        assert "要求1" in prompt
+        assert "施工方案" in prompt
+        assert "prompt" not in result
+        assert result["prompt_char_count"] == len(prompt)
 
     @pytest.mark.asyncio
     async def test_write_with_successful_llm_response(self):
@@ -284,7 +447,11 @@ class TestWrite:
         result = await writer.write("章节", {})
         assert "title" in result
         assert "content" in result
-        assert "prompt" in result
+        assert "prompt" not in result
+        assert len(result["prompt_digest"]) == 64
+        assert result["prompt_char_count"] > 0
+        assert set(result["prompt_segment_chars"]) == {"stable", "shared", "dynamic"}
+        assert result["prompt_layout_version"] == "section-envelope-v3"
         assert "provider" in result
         assert "model" in result
         assert "error" in result
@@ -372,7 +539,8 @@ class TestEdgeCases:
         result = await writer.write("特殊章节", context)
         # Should not crash
         assert result["title"] == "特殊章节"
-        assert "<script>" in result["prompt"]
+        assert "<script>" in writer._build_prompt("特殊章节", context)
+        assert "prompt" not in result
 
     def test_fallback_different_titles(self):
         """Test fallback generates different content for different titles."""

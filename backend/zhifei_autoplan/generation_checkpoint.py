@@ -30,10 +30,18 @@ CHECKPOINT_DIR = Path(
         "backend/data/autoplan/checkpoints",
     )
 )
-SCHEMA_VERSION = "generation-checkpoint-v1"
+SCHEMA_VERSION = "generation-checkpoint-v2"
 _LOCK = threading.RLock()
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SECRET_FRAGMENTS = ("api_key", "apikey", "token", "secret", "password", "credential")
+_RAW_PROMPT_KEYS = {
+    "prompt",
+    "messages",
+    "system_prompt",
+    "stable_system_prompt",
+    "shared_context_prompt",
+    "dynamic_prompt",
+}
 
 
 class CheckpointIntegrityError(RuntimeError):
@@ -42,6 +50,8 @@ class CheckpointIntegrityError(RuntimeError):
 
 def _json_safe(value: Any, *, key: str = "") -> Any:
     lowered = str(key or "").lower()
+    if lowered in _RAW_PROMPT_KEYS:
+        return "[OMITTED]"
     if any(fragment in lowered for fragment in _SECRET_FRAGMENTS):
         return "[REDACTED]"
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -100,6 +110,8 @@ def build_generation_binding(
     project_fact_digest: Any,
     requirement_plan_digest: Any,
     provider_routes: Any,
+    provider_admission_digest: Any = None,
+    prompt_contract: Any = None,
 ) -> dict[str, Any]:
     """Build the immutable metadata identity for one generation attempt."""
 
@@ -125,7 +137,11 @@ def build_generation_binding(
         "variant_id": str(variant_id or "").strip() or None,
         "project_fact_digest": str(project_fact_digest or "").strip() or None,
         "requirement_plan_digest": str(requirement_plan_digest or "").strip() or None,
+        "provider_admission_digest": str(provider_admission_digest or "").strip() or None,
         "provider_routes": safe_routes,
+        # Store only a digest: this invalidates reuse whenever any prompt-shaping
+        # input changes without duplicating project material in checkpoint files.
+        "prompt_contract_digest": _digest(prompt_contract),
     }
     return {**core, "binding_digest": _digest(core)}
 
@@ -284,9 +300,38 @@ def finalize_generation_checkpoint(
     with _LOCK:
         record = _read_verified(path) if path.exists() else None
         expected = str(binding.get("binding_digest") or "").strip()
+        target_status = str(status or "complete")
+        allowed_statuses = {
+            "complete",
+            "draft_complete",
+            "failed_partial",
+            "failed_empty",
+            "interrupted_recoverable",
+        }
+        if target_status not in allowed_statuses:
+            raise ValueError("invalid checkpoint terminal status")
         if record is None or str(record.get("binding_digest") or "") != expected:
+            if target_status in {"complete", "draft_complete"}:
+                raise CheckpointIntegrityError("checkpoint_finalize_binding_mismatch")
             record = _empty_record(binding)
-        record["status"] = str(status or "complete")
+        if target_status in {"complete", "draft_complete"}:
+            outline = list(((record.get("binding") or {}).get("outline") or []))
+            if not outline:
+                raise CheckpointIntegrityError("checkpoint_finalize_empty_outline")
+            sections = record.get("sections") if isinstance(record.get("sections"), Mapping) else {}
+            expected_indexes = {str(index) for index in range(len(outline))}
+            if set(sections) != expected_indexes:
+                raise CheckpointIntegrityError("checkpoint_finalize_incomplete_sections")
+            for index, section in sections.items():
+                if not isinstance(section, Mapping):
+                    raise CheckpointIntegrityError("checkpoint_section_invalid")
+                claimed = str(section.get("section_digest") or "")
+                section_core = {key: value for key, value in section.items() if key != "section_digest"}
+                if not claimed or claimed != _digest(section_core):
+                    raise CheckpointIntegrityError(
+                        f"checkpoint_section_integrity_mismatch:{index}"
+                    )
+        record["status"] = target_status
         record["updated_at"] = time.time()
         _write_atomic(path, record)
     return checkpoint_summary(record)
@@ -301,8 +346,62 @@ def checkpoint_summary(record: Mapping[str, Any] | None) -> dict[str, Any]:
         "status": str(data.get("status") or "missing"),
         "saved_chapter_count": len(sections),
         "saved_chapter_indexes": sorted(int(x) for x in sections if str(x).isdigit()),
+        "chapters_total": len(((data.get("binding") or {}).get("outline") or []))
+        if isinstance(data.get("binding"), Mapping)
+        else 0,
         "updated_at": data.get("updated_at"),
     }
+
+
+def mark_checkpoint_namespace_interrupted(
+    namespace: Any,
+    *,
+    root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Mark every verified scope in a job namespace as explicitly recoverable."""
+
+    safe_namespace = _validate_name(namespace, field="namespace")
+    base = Path(root) if root is not None else CHECKPOINT_DIR
+    target = base / safe_namespace
+    summaries: list[dict[str, Any]] = []
+    if not target.exists():
+        return summaries
+    with _LOCK:
+        for path in sorted(target.glob("*.json")):
+            record = _read_verified(path)
+            if record is None:
+                continue
+            record["status"] = "interrupted_recoverable"
+            record["updated_at"] = time.time()
+            _write_atomic(path, record)
+            summaries.append(checkpoint_summary(record))
+    return summaries
+
+
+def mark_failed_checkpoint_namespace(
+    namespace: Any,
+    *,
+    root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Repair legacy failed jobs whose checkpoints were mislabeled complete."""
+
+    safe_namespace = _validate_name(namespace, field="namespace")
+    base = Path(root) if root is not None else CHECKPOINT_DIR
+    target = base / safe_namespace
+    summaries: list[dict[str, Any]] = []
+    if not target.exists():
+        return summaries
+    with _LOCK:
+        for path in sorted(target.glob("*.json")):
+            record = _read_verified(path)
+            if record is None:
+                continue
+            sections = record.get("sections") if isinstance(record.get("sections"), Mapping) else {}
+            record["status"] = "failed_partial" if sections else "failed_empty"
+            record["updated_at"] = time.time()
+            _write_atomic(path, record)
+            summaries.append(checkpoint_summary(record))
+    return summaries
 
 
 def cleanup_checkpoint_namespace(

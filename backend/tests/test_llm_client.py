@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
 
@@ -356,7 +357,12 @@ class TestComplete:
             client = LLMClient(provider="openai", model="gpt-4", api_key="test-key")
             result = await client.complete("test prompt", temperature=0.7)
 
-            mock_impl.complete.assert_called_once_with("test prompt", temperature=0.7)
+            mock_impl.complete.assert_called_once_with(
+                "test prompt",
+                temperature=0.7,
+                timeout=240.0,
+                stream=True,
+            )
             assert result["text"] == "response"
 
     @pytest.mark.asyncio
@@ -399,8 +405,58 @@ class TestComplete:
             await client.complete("test", max_tokens=100, temperature=0.5, top_p=0.9)
 
             mock_impl.complete.assert_called_once_with(
-                "test", max_tokens=100, temperature=0.5, top_p=0.9
+                "test",
+                max_tokens=100,
+                temperature=0.5,
+                top_p=0.9,
+                timeout=240.0,
+                stream=True,
             )
+
+    @pytest.mark.asyncio
+    async def test_preflight_uses_cross_provider_minimum_output_budget(self):
+        mock_impl = MagicMock()
+        mock_impl.complete = AsyncMock(return_value={"text": "OK"})
+
+        with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
+            client = LLMClient(
+                provider="openai", model="gpt-admission", api_key="test-key"
+            )
+            result = await client.preflight(timeout=10)
+
+        assert result["ok"] is True
+        assert mock_impl.complete.await_args.kwargs["max_tokens"] == 16
+
+    @pytest.mark.asyncio
+    async def test_anthropic_budget_counts_cached_prefix_and_default_output_tokens(self):
+        mock_impl = MagicMock()
+        mock_impl.complete = AsyncMock(return_value={"text": "response"})
+        runtime = ExecutionControlRuntime(
+            max_input_chars=100_000,
+            max_requested_output_tokens=100_000,
+        )
+        prompt = "当前章节动态要求"
+        stable = "固定系统规则与项目事实库"
+        shared = "已生成章节摘要与项目上下文"
+
+        with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
+            client = LLMClient(
+                provider="anthropic",
+                model="claude-sonnet-test",
+                api_key="test-key",
+                execution_runtime=runtime,
+            )
+            result = await client.complete(
+                prompt,
+                stable_system_prompt=stable,
+                shared_context_prompt=shared,
+                cache_mode="section",
+            )
+
+        assert result["text"] == "response"
+        usage = runtime.snapshot()["usage"]
+        assert usage["input_chars"] == len(prompt) + len(stable) + len(shared)
+        assert usage["requested_output_tokens"] == 8192
 
 
 def test_llm_client_import_does_not_pull_main_chain_modules(assert_clean_import):

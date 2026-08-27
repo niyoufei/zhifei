@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from backend.zhifei_autoplan.exporter import (
     export_autoplan_compare_docx,
@@ -10,11 +11,66 @@ from backend.zhifei_autoplan.exporter import (
 )
 
 
-def save_outputs(base_name: str, results: list[dict]) -> dict:
+_RAW_PROMPT_KEYS = {
+    "prompt",
+    "messages",
+    "system_prompt",
+    "stable_system_prompt",
+    "shared_context_prompt",
+    "dynamic_prompt",
+}
+
+
+def _without_raw_prompts(value: Any, *, key: str = "") -> Any:
+    if str(key or "").strip().lower() in _RAW_PROMPT_KEYS:
+        return "[OMITTED]"
+    if isinstance(value, dict):
+        return {
+            str(child_key): _without_raw_prompts(child_value, key=str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_raw_prompts(item) for item in value]
+    if isinstance(value, tuple):
+        return [_without_raw_prompts(item) for item in value]
+    return value
+
+
+def sanitize_output_payload(value: Any) -> Any:
+    """Return a persistence-safe result tree without raw model prompts."""
+
+    return _without_raw_prompts(value)
+
+
+def save_outputs(
+    base_name: str,
+    results: list[dict],
+    *,
+    preview_only: bool = False,
+) -> dict:
     build_dir = Path("build")
     build_dir.mkdir(parents=True, exist_ok=True)
     out_json = build_dir / f"{base_name}.json"
-    out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+    out_json.write_text(
+        json.dumps(
+            {"variants": sanitize_output_payload(results)},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    if preview_only:
+        # A dry-run is a diagnostic preview, not a bidder-facing delivery.
+        # Persist the sanitized structured result, but never route it through
+        # formal DOCX/XLSX exporters or their professional delivery gates.
+        return {
+            "json": str(out_json),
+            "docx": [],
+            "compare_docx": [],
+            "focus_xlsx": [],
+            "score_overview_xlsx": [],
+            "expert_review_docx": [],
+        }
     docx_files = []
     compare_files = []
     focus_xlsx_files = []

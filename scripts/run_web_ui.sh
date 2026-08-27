@@ -9,6 +9,42 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Production launches never execute the mutable workspace.  The only default
+# route is the content-addressed release selected by the fixed current pointer.
+# Developers may still run this legacy workspace path, but only by making that
+# diagnostic intent explicit.
+if [ "${ZF_DEV_WORKSPACE_MODE:-0}" != "1" ]; then
+  BOOTSTRAP_PYTHON="/usr/bin/python3"
+  OS_HOME="$("$BOOTSTRAP_PYTHON" -I -B -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+  case "$OS_HOME" in /*) ;; *) exit 2 ;; esac
+  SEALED_BASE="${OS_HOME}/Library/Application Support/com.zhifei.construction-expert"
+  TRUSTED_BOOTSTRAP="${SEALED_BASE}/bootstrap/launch_current.py"
+  if [ ! -x "$BOOTSTRAP_PYTHON" ] || [ ! -f "$TRUSTED_BOOTSTRAP" ] || [ -L "$TRUSTED_BOOTSTRAP" ]; then
+    printf '%s\n' \
+      '{"ok":false,"error_code":"LAUNCH_BOOTSTRAP_MISSING","message":"固定外置可信启动入口不可用，请重新执行本地封存"}' \
+      >&2
+    exit 2
+  fi
+  SEALED_ARGS=()
+  for arg in "$@"; do
+    case "$arg" in
+      -b|--background)
+        # The immutable supervisor is always detached by its start command.
+        ;;
+      --no-open)
+        SEALED_ARGS+=("$arg")
+        ;;
+      *)
+        printf '%s\n' \
+          '{"ok":false,"error_code":"LAUNCH_ARGUMENT_UNSUPPORTED","message":"不可变启动入口收到不受支持的参数"}' \
+          >&2
+        exit 2
+        ;;
+    esac
+  done
+  exec "$BOOTSTRAP_PYTHON" -I -B "$TRUSTED_BOOTSTRAP" "${SEALED_ARGS[@]}"
+fi
+
 # Optional local secrets file (single-user machine). Not committed to git.
 KEYS_FILE="${ZF_KEYS_FILE:-$ROOT/.runtime/local_keys.env}"
 if [ -f "$KEYS_FILE" ]; then
@@ -52,6 +88,11 @@ for arg in "$@"; do
   esac
 done
 
+# Use one explicit value for the backend health contract and the watchdog
+# launcher.  This makes Finder/app-bundle cold starts equivalent to the
+# maintained background-start script.
+export ZF_ENABLE_SELF_HEAL="${ZF_ENABLE_SELF_HEAL:-1}"
+
 BACKEND_PORT="${BACKEND_PORT:-8010}"
 WEB_PORT="${WEB_PORT:-8501}"
 SYSTEM_ID="${ZF_SYSTEM_ID:-docgen-system}"
@@ -64,7 +105,12 @@ PID_OLLAMA="$RUNTIME_DIR/ollama.pid"
 mkdir -p logs "$RUNTIME_DIR"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export ZF_SYSTEM_ID="$SYSTEM_ID"
-export ZF_ACTIONS_KEY="${ZF_ACTIONS_KEY:-zf-webui-key}"
+# No shared/default credential is permitted.  backend/app.py load the local
+# 0600 env file themselves in development; sealed releases receive the same
+# generated credential from the supervisor's 0600 env file.
+if [ -n "${ZF_ACTIONS_KEY:-}" ]; then
+  export ZF_ACTIONS_KEY
+fi
 export ZF_BACKEND_BASE_URL="${ZF_BACKEND_BASE_URL:-http://127.0.0.1:${BACKEND_PORT}}"
 # Resolve the project compliance registry from the repository, regardless of
 # whether the app is launched from Terminal, Finder, LaunchAgent, or an app
@@ -73,11 +119,14 @@ export ZF_COMPLIANCE_ROOT="${ZF_COMPLIANCE_ROOT:-$ROOT/知识图谱/compliance}"
 
 # Local-model preview defaults for Apple Silicon machines.  This is an
 # optional, read-only reviewer and never blocks the main generation service.
-export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
+# Local preview is a strict loopback-only diagnostic.  Do not inherit a
+# caller-controlled URL: prompts and chapter text must never leave this Mac
+# through the Ollama compatibility path.
+export OLLAMA_BASE_URL="http://127.0.0.1:11434"
 export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.5:4b}"
 export ZDOC_OLLAMA_PREVIEW_ENABLED="${ZDOC_OLLAMA_PREVIEW_ENABLED:-1}"
 export ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED="${ZDOC_LOCAL_LLM_OLLAMA_PREVIEW_ENABLED:-true}"
-export ZDOC_OLLAMA_PREVIEW_BASE_URL="${ZDOC_OLLAMA_PREVIEW_BASE_URL:-$OLLAMA_BASE_URL}"
+export ZDOC_OLLAMA_PREVIEW_BASE_URL="$OLLAMA_BASE_URL"
 export ZDOC_OLLAMA_PREVIEW_MODEL="${ZDOC_OLLAMA_PREVIEW_MODEL:-$OLLAMA_MODEL}"
 
 OLLAMA_BIN="${ZF_OLLAMA_BIN:-}"
@@ -274,9 +323,10 @@ if [ "$BACKGROUND" = true ]; then
     echo "[ERROR] Web UI 启动失败，请检查 logs/streamlit.err.log"
     exit 1
   fi
-  # Optional self-heal watchdog (disabled by default to avoid macOS Desktop permission issues).
-  # Disabled when already running inside watchdog context to avoid recursion.
-  if [ "${ZF_ENABLE_SELF_HEAL:-0}" = "1" ] && [ "${ZF_WATCHDOG_MODE:-0}" != "1" ]; then
+  # Self-heal is enabled by default for local launches so every supported
+  # desktop entry point gets the same crash-recovery behavior.  Set the flag
+  # explicitly to 0 only for controlled diagnostics.
+  if [ "${ZF_ENABLE_SELF_HEAL:-1}" = "1" ] && [ "${ZF_WATCHDOG_MODE:-0}" != "1" ]; then
     wd_need_start=true
     if [ -f "$PID_WATCHDOG" ]; then
       wd_pid="$(cat "$PID_WATCHDOG" 2>/dev/null || true)"
@@ -289,7 +339,7 @@ if [ "$BACKGROUND" = true ]; then
         BACKEND_PORT="$BACKEND_PORT" \
         WEB_PORT="$WEB_PORT" \
         ZF_WATCHDOG_MODE=1 \
-        ZF_ENABLE_SELF_HEAL=0 \
+        ZF_ENABLE_SELF_HEAL=1 \
         "$ROOT/scripts/web_ui_watchdog.sh" \
         >> logs/webui_watchdog.out.log 2>> logs/webui_watchdog.err.log < /dev/null &
       echo $! > "$PID_WATCHDOG"

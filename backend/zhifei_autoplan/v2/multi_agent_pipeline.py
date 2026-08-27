@@ -23,6 +23,7 @@ from backend.zhifei_autoplan.v2.quantitative_boq_engine import (
 from backend.zhifei_autoplan.v2.docx_generator import generate_v2_docx
 from backend.zhifei_autoplan.v2.visual_generation import generate_document_visual_assets
 from backend.zhifei_autoplan.v2.self_healing_agent import SelfHealingAgent
+from backend.zhifei_autoplan.provider_admission import ProviderCandidate
 
 DEFAULT_PIPELINE_OUTPUT = Path("build/v2_multi_agent_output.json")
 DEFAULT_MISSING_REPORT = Path("build/Missing_Knowledge_Report.md")
@@ -69,6 +70,7 @@ class MultiAgentDocPipeline:
         self_healing_provider: Optional[str] = None,
         self_healing_model: Optional[str] = None,
         self_healing_api_key: Optional[str] = None,
+        self_healing_admitted_candidate: ProviderCandidate | None = None,
         min_gemini_usefulness_score: float = 30.0,
     ):
         self.kg_db_path = Path(kg_db_path)
@@ -76,6 +78,7 @@ class MultiAgentDocPipeline:
         self.self_healing_provider = self_healing_provider
         self.self_healing_model = self_healing_model
         self.self_healing_api_key = self_healing_api_key
+        self.self_healing_admitted_candidate = self_healing_admitted_candidate
         self.min_gemini_usefulness_score = max(0.0, min(100.0, float(min_gemini_usefulness_score)))
 
     def _read_tender_text(self, path: str) -> str:
@@ -915,8 +918,12 @@ class MultiAgentDocPipeline:
             provider=self.self_healing_provider,
             model=self.self_healing_model,
             api_key=self.self_healing_api_key,
+            admitted_candidate=self.self_healing_admitted_candidate,
         )
-        built = await healer.build_patch_nodes(gaps)
+        try:
+            built = await healer.build_patch_nodes(gaps)
+        finally:
+            healer.close()
         nodes = built.get("nodes") or []
         persisted = healer.persist_patch_nodes(graph_root=graph_root, nodes=nodes)
 
@@ -942,7 +949,7 @@ class MultiAgentDocPipeline:
         enable_self_healing: bool = False,
         enable_docx_export: bool = False,
         docx_output_path: Path | str | None = None,
-        enable_visual_generation: bool = True,
+        enable_visual_generation: bool = False,
         visual_output_dir: Path | str | None = None,
         visual_provider: str = "google",
         visual_model: str = "imagen-3.0-generate-002",

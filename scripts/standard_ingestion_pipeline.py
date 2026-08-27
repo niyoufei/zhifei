@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import math
-import os
 import random
 import re
 import sys
@@ -31,6 +30,15 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
 from backend.zhifei_autoplan.compliance_policy import canonical_standard_code
+from backend.zhifei_autoplan.orchestrator import (
+    new_provider_admission_run_coordinator,
+    probe_provider_candidate,
+)
+from backend.zhifei_autoplan.provider_admission import ProviderCandidate, public_snapshot
+from backend.zhifei_autoplan.provider_runtime import (
+    build_server_provider_admission_candidates,
+    server_provider_admission_required_roles,
+)
 from modules.parser.parser_unify import UnifiedParser
 
 STANDARD_CODE_RE_LIST = [
@@ -92,6 +100,23 @@ class FileResult:
     source_size: int = 0
     source_mtime_ns: int = 0
     error: str = ""
+
+
+class IngestionProviderAdmissionError(RuntimeError):
+    """Credential-free, stable failure raised before ingestion model calls."""
+
+    def __init__(self, code: str, message: str, action: str) -> None:
+        self.code = str(code or "MODEL_PROVIDER_ADMISSION_BLOCKED")
+        self.message = str(message or "模型供应商准入未通过，已停止模型调用。")
+        self.action = str(action or "请检查服务端模型供应商配置后重试。")
+        super().__init__(f"{self.code}: {self.message}")
+
+    def as_dict(self) -> Dict[str, str]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "action": self.action,
+        }
 
 
 def _normalize_line(text: str) -> str:
@@ -457,19 +482,76 @@ class AsyncLLMRateLimiter:
             await asyncio.sleep(min(2.0, max(0.02, wait_for)))
 
 
-def _resolve_api_key(provider: str) -> str:
-    p = (provider or "").strip().lower()
-    if p == "google":
-        return (
-            os.getenv("ZF_GOOGLE_API_KEY", "")
-            or os.getenv("GOOGLE_API_KEY", "")
-            or os.getenv("GEMINI_API_KEY", "")
+async def _admit_ingestion_text_candidate(
+    *,
+    admission_root: Path,
+) -> Tuple[ProviderCandidate, Dict[str, Any]]:
+    """Freshly admit and bind the server-owned candidate used for ingestion.
+
+    CLI values and caller payloads are intentionally absent from this function.
+    The returned credential exists only on the exact ``ProviderCandidate`` that
+    was probed and selected by the fresh admission receipt.
+    """
+
+    candidates = list(build_server_provider_admission_candidates())
+    required_roles = list(server_provider_admission_required_roles(candidates))
+    coordinator = new_provider_admission_run_coordinator(
+        {"_provider_admission_root": str(admission_root)}
+    )
+    try:
+        snapshot = await coordinator.admit_chain_once(
+            candidates=candidates,
+            probe=probe_provider_candidate,
+            required_roles=required_roles,
         )
-    if p == "openai":
-        return os.getenv("ZF_OPENAI_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
-    if p == "grok":
-        return os.getenv("ZF_GROK_API_KEY", "") or os.getenv("GROK_API_KEY", "") or os.getenv("XAI_API_KEY", "")
-    return os.getenv("LLM_API_KEY", "")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise IngestionProviderAdmissionError(
+            "MODEL_PROVIDER_ADMISSION_UNAVAILABLE",
+            "模型供应商准入检查未能完成，已在模型调用前停止。",
+            "请检查本机网络和服务端供应商配置后重试。",
+        ) from exc
+
+    public = public_snapshot(snapshot)
+    if not bool(snapshot.get("generation_allowed")):
+        raise IngestionProviderAdmissionError(
+            "MODEL_PROVIDER_ADMISSION_BLOCKED",
+            "模型供应商准入未通过，已在规范解析模型调用前停止。",
+            "请检查凭据、模型、配额、流式能力和文档渲染槽位后重试。",
+        )
+
+    role_decisions = (
+        snapshot.get("role_decision")
+        if isinstance(snapshot.get("role_decision"), dict)
+        else {}
+    )
+    selected = (
+        role_decisions.get("text_draft", {}).get("selected")
+        if isinstance(role_decisions.get("text_draft"), dict)
+        else None
+    )
+    selected_digest = (
+        str(selected.get("identity_digest") or "")
+        if isinstance(selected, dict)
+        else ""
+    )
+    candidate = next(
+        (
+            item
+            for item in coordinator.bound_candidates
+            if item.identity_digest == selected_digest
+            and str(item.role or "").startswith("text_")
+        ),
+        None,
+    )
+    if candidate is None or not candidate.credential:
+        raise IngestionProviderAdmissionError(
+            "MODEL_PROVIDER_ADMISSION_EMPTY",
+            "没有可用且与准入回执精确绑定的文本模型，已停止调用。",
+            "请重新执行供应商准入检查后重试。",
+        )
+    return candidate, public
 
 
 def _build_chunk_prompt(*, file_name: str, standard_code: str, chunk_id: int, chunk_text: str) -> str:
@@ -599,17 +681,28 @@ async def _llm_extract_chunk(
     prompt: str,
     chunk_id: int,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
-    last_error = "unknown"
+    last_error = "MODEL_PROVIDER_RESPONSE_UNAVAILABLE"
     token_est = max(256, math.ceil(len(prompt) / 3))
+    # At most one recovery retry is allowed.  Timeouts, malformed output and
+    # permanent failures are never duplicated; only explicit 429/recoverable
+    # 5xx classifications may consume the single retry.
+    max_attempts = max(1, min(2, int(llm_retries or 1)))
 
-    for attempt in range(1, llm_retries + 1):
+    for attempt in range(1, max_attempts + 1):
         async with llm_semaphore:
             await llm_limiter.wait(token_est)
-            resp = await llm_client.complete(prompt, temperature=0, timeout_sec=120)
+            resp = await llm_client.complete(
+                prompt,
+                temperature=0,
+                timeout_sec=120,
+                retry_attempts=1,
+            )
 
         err = _normalize_line(str(resp.get("error") or ""))
         if err:
-            last_error = err
+            error_info = resp.get("error_info") if isinstance(resp.get("error_info"), dict) else {}
+            retry_code = _normalize_line(str(error_info.get("code") or "provider_error"))
+            last_error = retry_code or "provider_error"
         else:
             payload = _extract_json_object(str(resp.get("text") or ""))
             if isinstance(payload, dict):
@@ -632,9 +725,13 @@ async def _llm_extract_chunk(
                         params.append(cleaned)
                 return clauses, params, ""
             last_error = "invalid_json_output"
+            retry_code = "invalid_json_output"
 
-        if attempt < llm_retries:
+        retry_allowed = retry_code in {"rate_limited", "provider_unavailable"}
+        if retry_allowed and attempt < max_attempts:
             await asyncio.sleep(min(10.0, 1.3**attempt + random.random() * 0.8))
+        else:
+            break
 
     return [], [], last_error
 
@@ -911,56 +1008,84 @@ async def run_pipeline(
             continue
         files.append(p)
 
-    parse_sem = asyncio.Semaphore(max(1, max_workers))
-    parse_executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
-    llm_semaphore = asyncio.Semaphore(max(1, llm_workers))
-    llm_limiter = AsyncLLMRateLimiter(
-        min_interval_sec=llm_min_interval,
-        max_tokens_per_minute=llm_max_tokens_per_minute,
-    )
-
-    api_key = _resolve_api_key(llm_provider)
-    if not api_key:
-        raise RuntimeError("LLM强制模式已启用，但未找到API Key（需设置ZF_GOOGLE_API_KEY/GOOGLE_API_KEY/GEMINI_API_KEY）")
-    llm_client = LLMClient(provider=llm_provider, model=llm_model, api_key=api_key)
-    if getattr(llm_client, "_impl", None) is None:
-        raise RuntimeError(f"LLM客户端初始化失败: {getattr(llm_client, '_init_error', 'unknown')}")
-
-    tasks = [
-        asyncio.create_task(
-            _process_one_file(
-                path,
-                output_dir=output_dir,
-                semaphore=parse_sem,
-                parse_executor=parse_executor,
-                llm_client=llm_client,
-                llm_semaphore=llm_semaphore,
-                llm_limiter=llm_limiter,
-                llm_retries=llm_retries,
-                ocr_max_pages=ocr_max_pages,
-                max_chunks_per_file=max_chunks_per_file,
-            )
-        )
-        for path in files
-    ]
-
     results: List[FileResult] = list(skipped_results)
-    pbar = tqdm(total=len(tasks), desc="规范LLM深度入库", unit="file", ncols=130)
-    try:
-        for fut in asyncio.as_completed(tasks):
-            result = await fut
-            results.append(result)
-            name = Path(result.source_file).name
-            if result.ok:
-                pbar.set_description(
-                    f"正在解析: {name[:32]}... 强条:{result.mandatory_count} 参数:{result.parameter_count}"
+    admission_public: Dict[str, Any] = {}
+    admitted_candidate: ProviderCandidate | None = None
+    # A completely cached/empty run is deterministic and performs no provider
+    # admission or model-client construction.  It may still refresh the local
+    # manifest/catalog below.
+    if files:
+        admitted_candidate, admission_public = await _admit_ingestion_text_candidate(
+            admission_root=output_dir / "_provider_admission",
+        )
+        llm_client = LLMClient(
+            provider=admitted_candidate.provider,
+            model=admitted_candidate.model,
+            api_key=admitted_candidate.credential,
+            reliability_identity=admitted_candidate.identity_digest,
+            retry_attempts=1,
+        )
+        if getattr(llm_client, "_impl", None) is None:
+            llm_client.close()
+            raise IngestionProviderAdmissionError(
+                "MODEL_PROVIDER_CLIENT_INIT_FAILED",
+                "已准入模型客户端初始化失败，未发起规范解析模型调用。",
+                "请检查服务端模型依赖与准入配置后重试。",
+            )
+
+        parse_executor: ThreadPoolExecutor | None = None
+        tasks: List[asyncio.Task[FileResult]] = []
+        pbar: Any = None
+        try:
+            parse_sem = asyncio.Semaphore(max(1, max_workers))
+            parse_executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
+            llm_semaphore = asyncio.Semaphore(max(1, llm_workers))
+            llm_limiter = AsyncLLMRateLimiter(
+                min_interval_sec=llm_min_interval,
+                max_tokens_per_minute=llm_max_tokens_per_minute,
+            )
+            tasks = [
+                asyncio.create_task(
+                    _process_one_file(
+                        path,
+                        output_dir=output_dir,
+                        semaphore=parse_sem,
+                        parse_executor=parse_executor,
+                        llm_client=llm_client,
+                        llm_semaphore=llm_semaphore,
+                        llm_limiter=llm_limiter,
+                        llm_retries=max(1, min(2, int(llm_retries or 1))),
+                        ocr_max_pages=ocr_max_pages,
+                        max_chunks_per_file=max_chunks_per_file,
+                    )
                 )
-            else:
-                pbar.set_description(f"解析失败: {name[:32]}...")
-            pbar.update(1)
-    finally:
-        pbar.close()
-        parse_executor.shutdown(wait=True)
+                for path in files
+            ]
+            pbar = tqdm(total=len(tasks), desc="规范LLM深度入库", unit="file", ncols=130)
+            for fut in asyncio.as_completed(tasks):
+                result = await fut
+                results.append(result)
+                name = Path(result.source_file).name
+                if result.ok:
+                    pbar.set_description(
+                        f"正在解析: {name[:32]}... 强条:{result.mandatory_count} 参数:{result.parameter_count}"
+                    )
+                else:
+                    pbar.set_description(f"解析失败: {name[:32]}...")
+                pbar.update(1)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            try:
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                if pbar is not None:
+                    pbar.close()
+                if parse_executor is not None:
+                    parse_executor.shutdown(wait=True)
+                llm_client.close()
 
     success = [r for r in results if r.ok]
     failed = [r for r in results if not r.ok]
@@ -1017,8 +1142,10 @@ async def run_pipeline(
         "success": len(success),
         "failed": len(failed),
         "llm_enabled": True,
-        "llm_provider": llm_provider,
-        "llm_model": llm_model,
+        "llm_invoked": bool(files),
+        "llm_provider": admitted_candidate.provider if admitted_candidate is not None else "",
+        "llm_model": admitted_candidate.model if admitted_candidate is not None else "",
+        "provider_admission": admission_public,
         "limit": limit or 0,
         "force_reindex": bool(force_reindex),
         "recursive": bool(recursive),
@@ -1082,9 +1209,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-workers", type=int, default=2, help="文件解析并发数")
     parser.add_argument("--llm-workers", type=int, default=2, help="LLM并发数")
-    parser.add_argument("--llm-provider", type=str, default=os.getenv("ZF_STANDARD_LLM_PROVIDER", "google"))
-    parser.add_argument("--llm-model", type=str, default=os.getenv("ZF_STANDARD_LLM_MODEL", "gemini-2.5-flash"))
-    parser.add_argument("--llm-retries", type=int, default=4, help="LLM重试次数")
+    parser.add_argument(
+        "--llm-provider",
+        type=str,
+        default="server-admitted",
+        help="兼容参数（已弃用）；实际供应商仅由服务端准入链决定",
+    )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        default="server-admitted",
+        help="兼容参数（已弃用）；实际模型仅由服务端准入链决定",
+    )
+    parser.add_argument("--llm-retries", type=int, default=2, help="总尝试上限（最多一次可恢复重试）")
     parser.add_argument("--llm-min-interval", type=float, default=1.8, help="LLM最小调用间隔（秒）")
     parser.add_argument("--llm-max-tokens-per-minute", type=int, default=120000, help="LLM每分钟估算Token上限")
     parser.add_argument("--ocr-max-pages", type=int, default=24, help="每个PDF最多OCR页数")
@@ -1103,7 +1240,11 @@ def main() -> int:
     if not args.input_dir.exists() or not args.input_dir.is_dir():
         print(f"输入目录不存在: {args.input_dir}")
         return 2
-    return asyncio.run(_amain(args))
+    try:
+        return asyncio.run(_amain(args))
+    except IngestionProviderAdmissionError as exc:
+        print(json.dumps({"ok": False, "error": exc.as_dict()}, ensure_ascii=False))
+        return 3
 
 
 if __name__ == "__main__":

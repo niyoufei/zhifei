@@ -191,6 +191,10 @@ async def test_multi_agent_pipeline_can_trigger_self_healing(tmp_path: Path) -> 
         output_path=output_path,
         missing_report_path=report_path,
         enable_self_healing=True,
+        # External/auxiliary visual work is default-off in production.  This
+        # test opts in explicitly because it verifies the deterministic local
+        # visual-agent path.
+        enable_visual_generation=True,
         enable_docx_export=True,
         docx_output_path=docx_path,
     )

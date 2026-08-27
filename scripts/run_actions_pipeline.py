@@ -21,8 +21,56 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
+
+
+_SENSITIVE_GENERATION_FIELDS = {
+    "api_key",
+    "base_url",
+    "secret_key",
+    "token_url",
+    "image_api_key",
+}
+
+
+def _require_loopback_base_url(value: str) -> str:
+    """Keep the Actions credential and project material on this Mac."""
+    raw = str(value or "").strip().rstrip("/")
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            "LOCAL_BACKEND_LOOPBACK_REQUIRED: 后端地址必须是本机 127.0.0.1"
+        ) from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or port is None
+        or not 1 <= port <= 65535
+    ):
+        raise ValueError(
+            "LOCAL_BACKEND_LOOPBACK_REQUIRED: 后端地址必须是本机 127.0.0.1"
+        )
+    return f"http://127.0.0.1:{port}"
+
+
+def _server_routed_generation_payload(payload: dict) -> dict:
+    """Drop credentials and client-side provider routes before serialization."""
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key not in _SENSITIVE_GENERATION_FIELDS
+        and key not in {"provider", "model", "image_provider", "image_model"}
+    }
 
 
 def _hdr(actions_key: str) -> dict:
@@ -38,12 +86,17 @@ def _post_json(
     params: dict | None = None,
     timeout: int = 120,
 ) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
+    wire_payload = (
+        _server_routed_generation_payload(payload)
+        if path in {"/actions/generate_async", "/actions/runs"}
+        else dict(payload or {})
+    )
     r = requests.post(
         url,
         headers={**_hdr(actions_key), "Content-Type": "application/json"},
         params=params or {},
-        json=payload,
+        json=wire_payload,
         timeout=timeout,
     )
     if r.status_code >= 400:
@@ -52,7 +105,7 @@ def _post_json(
 
 
 def _get_json(base: str, path: str, actions_key: str, params: dict | None = None, timeout: int = 60) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
     r = requests.get(url, headers=_hdr(actions_key), params=params or {}, timeout=timeout)
     if r.status_code >= 400:
         raise RuntimeError(f"GET {path} failed: {r.status_code} {r.text[:500]}")
@@ -69,7 +122,7 @@ def _post_files(
     params: dict | None = None,
     timeout: int = 300,
 ) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
     files = []
     handles = []
     try:
@@ -91,7 +144,7 @@ def _post_files(
 
 
 def _ingest_files(base: str, file_paths: list[str], *, project_id: str | None = None, timeout: int = 300) -> dict:
-    url = base + "/ingest/upload"
+    url = _require_loopback_base_url(base) + "/ingest/upload"
     files = []
     handles = []
     try:
@@ -114,7 +167,7 @@ def _ingest_files(base: str, file_paths: list[str], *, project_id: str | None = 
 
 
 def _download(base: str, actions_key: str, job_id: str, kind: str, variant: int, out_path: Path, timeout: int = 300):
-    url = base + "/actions/download"
+    url = _require_loopback_base_url(base) + "/actions/download"
     r = requests.get(
         url,
         headers=_hdr(actions_key),
@@ -232,12 +285,19 @@ def main() -> int:
     ap.add_argument("--poll-sec", type=float, default=2.0, help="Polling interval seconds")
     ap.add_argument("--download", action="store_true", default=True, help="Download artifacts to build/actions_runs/<job_id>/")
     ap.add_argument("--no-download", dest="download", action="store_false", help="Do not download artifacts")
-    ap.add_argument("--provider", default="", help="Optional LLM provider override")
-    ap.add_argument("--model", default="", help="Optional LLM model override")
-    ap.add_argument("--api-key", default=os.environ.get("ZF_DEFAULT_API_KEY", ""), help="Optional API key override")
+    # Retained only so old invocations fail safely instead of silently changing
+    # meaning.  Provider routing and credentials are server-owned and these
+    # values are never serialized.
+    ap.add_argument("--provider", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--model", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--api-key", default="", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
-    base = (args.base_url or "").rstrip("/")
+    try:
+        base = _require_loopback_base_url(args.base_url)
+    except ValueError as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 2
     if not args.actions_key.strip():
         print("[FAIL] missing actions key: set env ZF_ACTIONS_KEY or pass --actions-key", file=sys.stderr)
         return 2
@@ -297,12 +357,9 @@ def main() -> int:
         "generate_images": True,
         "dry_run": bool(args.dry_run),
     }
-    if args.provider:
-        gen["provider"] = args.provider
-    if args.model:
-        gen["model"] = args.model
-    if args.api_key:
-        gen["api_key"] = args.api_key
+    if args.provider or args.model or args.api_key:
+        print("[WARN] 已忽略客户端模型路由或密钥；生成仅使用后端已准入供应商。")
+    gen = _server_routed_generation_payload(gen)
 
     ret = _post_json(base, "/actions/generate_async", args.actions_key, gen)
     job_id = ret.get("job_id") or ""

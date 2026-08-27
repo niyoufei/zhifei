@@ -2,21 +2,26 @@
 # 在桌面创建启动快捷方式（与系统文件分离）
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DESKTOP="${HOME}/Desktop"
+BOOTSTRAP_PYTHON="/usr/bin/python3"
+OS_HOME="$("$BOOTSTRAP_PYTHON" -I -B -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+case "$OS_HOME" in /*) ;; *) exit 2 ;; esac
+DESKTOP="${OS_HOME}/Desktop"
 SHORTCUT="$DESKTOP/启动文档生成系统.command"
 
-cat > "$SHORTCUT" << LAUNCHER
+cat > "$SHORTCUT" <<'LAUNCHER'
 #!/usr/bin/env bash
 # 文档生成系统 - 桌面快捷方式
-cd "$ROOT"
+set -euo pipefail
 echo "正在启动文档生成系统..."
-chmod +x scripts/run_web_ui.sh 2>/dev/null || true
-./scripts/run_web_ui.sh
-echo ""
-echo "服务运行中，关闭此窗口会停止 Web。"
-echo "如需后台模式，可执行：ZF_ENABLE_SELF_HEAL=1 ./scripts/run_web_ui.sh --background"
+BOOTSTRAP_PYTHON="/usr/bin/python3"
+OS_HOME="$("$BOOTSTRAP_PYTHON" -I -B -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+case "$OS_HOME" in /*) ;; *) exit 2 ;; esac
+TRUSTED_BOOTSTRAP="${OS_HOME}/Library/Application Support/com.zhifei.construction-expert/bootstrap/launch_current.py"
+if [ ! -x "$BOOTSTRAP_PYTHON" ] || [ ! -f "$TRUSTED_BOOTSTRAP" ] || [ -L "$TRUSTED_BOOTSTRAP" ]; then
+  echo "尚未构建可启动的最新不可变本地发布。" >&2
+  exit 2
+fi
+exec "$BOOTSTRAP_PYTHON" -I -B "$TRUSTED_BOOTSTRAP"
 LAUNCHER
 chmod +x "$SHORTCUT"
 

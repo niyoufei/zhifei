@@ -13,6 +13,14 @@ from backend.zhifei_autoplan.providers.ollama_provider import (
 )
 
 
+def test_ollama_provider_rejects_non_loopback_base_url() -> None:
+    with pytest.raises(ValueError, match="LOCAL_OLLAMA_LOOPBACK_REQUIRED"):
+        OllamaProvider(
+            model="local-model",
+            base_url="http://example.invalid:11434",
+        )
+
+
 def test_build_ollama_chat_payload_uses_chat_defaults() -> None:
     payload = build_ollama_chat_payload("检查施工部署", system_prompt="只输出建议", options={"temperature": 0})
 

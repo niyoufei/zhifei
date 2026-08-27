@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import tempfile
 import zipfile
@@ -12,6 +13,7 @@ from typing import Any
 
 from docx import Document
 from docx.oxml.ns import qn
+from lxml import etree
 
 
 _A4_WIDTH_CM = 21.0
@@ -104,6 +106,22 @@ def _normalise_font(value: Any) -> str:
     return aliases.get(name, name)
 
 
+def _declared_font(value: Any) -> str:
+    raw = str(value or "").strip()
+    aliases = {
+        "simsun": "宋体",
+        "stsong": "宋体",
+        "songti sc": "宋体",
+        "simhei": "黑体",
+        "heiti sc": "黑体",
+        "stheiti": "黑体",
+        "fangsong": "仿宋体",
+        "stfangsong": "仿宋体",
+        "仿宋": "仿宋体",
+    }
+    return aliases.get(raw.lower(), aliases.get(raw, raw))
+
+
 def _stable_digest(payload: dict[str, Any]) -> str:
     material = dict(payload)
     for key in ("created_at", "receipt", "docx"):
@@ -116,7 +134,17 @@ def _read_package_xml(source: Path) -> dict[str, str]:
     with zipfile.ZipFile(source) as package:
         names = set(package.namelist())
         result: dict[str, str] = {}
-        for name in ("word/document.xml", "word/settings.xml"):
+        for name in (
+            "word/document.xml",
+            "word/settings.xml",
+            "word/styles.xml",
+            "word/fontTable.xml",
+            "word/numbering.xml",
+            "word/_rels/document.xml.rels",
+            "docProps/core.xml",
+            "docProps/app.xml",
+            "[Content_Types].xml",
+        ):
             if name in names:
                 result[name] = package.read(name).decode("utf-8", errors="replace")
         footer_names = sorted(name for name in names if re.fullmatch(r"word/footer[0-9]+\.xml", name))
@@ -125,6 +153,87 @@ def _read_package_xml(source: Path) -> dict[str, str]:
         )
         result["package_names"] = "\n".join(sorted(names))
         return result
+
+
+def _relationship_target(rels_name: str, target: str) -> str:
+    if rels_name == "_rels/.rels":
+        base = ""
+    else:
+        rels_dir = posixpath.dirname(rels_name)
+        owner_dir = posixpath.dirname(rels_dir)
+        base = owner_dir
+    return posixpath.normpath(posixpath.join(base, str(target or ""))).lstrip("/")
+
+
+def _audit_package_integrity(source: Path) -> dict[str, Any]:
+    invalid_xml: list[str] = []
+    duplicate_relationship_ids: list[dict[str, Any]] = []
+    dangling_relationships: list[dict[str, Any]] = []
+    duplicate_bookmark_ids: list[str] = []
+    duplicate_bookmark_names: list[str] = []
+    custom_parts: list[str] = []
+    with zipfile.ZipFile(source) as package:
+        names = set(package.namelist())
+        custom_parts = sorted(
+            name for name in names if name.startswith("customXml/") or name == "docProps/custom.xml"
+        )
+        parsed: dict[str, Any] = {}
+        for name in sorted(names):
+            if not (name.endswith(".xml") or name.endswith(".rels")):
+                continue
+            try:
+                parsed[name] = etree.fromstring(package.read(name))
+            except Exception:
+                invalid_xml.append(name)
+        for name, root in parsed.items():
+            if not name.endswith(".rels"):
+                continue
+            seen: set[str] = set()
+            duplicates: set[str] = set()
+            for rel in root:
+                rel_id = str(rel.get("Id") or "")
+                if rel_id in seen:
+                    duplicates.add(rel_id)
+                seen.add(rel_id)
+                if str(rel.get("TargetMode") or "").lower() == "external":
+                    continue
+                target = _relationship_target(name, str(rel.get("Target") or ""))
+                if target and target not in names:
+                    dangling_relationships.append({"part": name, "id": rel_id, "target": target})
+            if duplicates:
+                duplicate_relationship_ids.append({"part": name, "ids": sorted(duplicates)})
+        document_root = parsed.get("word/document.xml")
+        if document_root is not None:
+            ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            ids: list[str] = []
+            bookmark_names: list[str] = []
+            for item in document_root.xpath("//w:bookmarkStart", namespaces=ns):
+                ids.append(str(item.get(qn("w:id")) or ""))
+                bookmark_names.append(str(item.get(qn("w:name")) or ""))
+            duplicate_bookmark_ids = sorted({value for value in ids if value and ids.count(value) > 1})
+            duplicate_bookmark_names = sorted(
+                {value for value in bookmark_names if value and value != "_GoBack" and bookmark_names.count(value) > 1}
+            )
+    return {
+        "invalid_xml": invalid_xml,
+        "duplicate_relationship_ids": duplicate_relationship_ids,
+        "dangling_relationships": dangling_relationships,
+        "duplicate_bookmark_ids": duplicate_bookmark_ids,
+        "duplicate_bookmark_names": duplicate_bookmark_names,
+        "custom_parts": custom_parts,
+    }
+
+
+def _xml_text(root: Any, local_name: str) -> str:
+    if root is None:
+        return ""
+    for element in root.iter():
+        try:
+            if etree.QName(element).localname == local_name:
+                return str(element.text or "").strip()
+        except Exception:
+            continue
+    return ""
 
 
 def _field_present(xml: str, field_name: str) -> bool:
@@ -180,6 +289,7 @@ def audit_docx_structural_quality(
     try:
         document = Document(str(source))
         package_xml = _read_package_xml(source)
+        package_integrity = _audit_package_integrity(source)
     except Exception as exc:
         report = {
             "schema": "zhifei.docx_structural_quality.v1",
@@ -196,6 +306,18 @@ def audit_docx_structural_quality(
             raise DocxStructuralQualityError("最终 Word 包无法读取", report=report) from exc
         return report
 
+    for code, key in (
+        ("PACKAGE_XML_INVALID", "invalid_xml"),
+        ("DUPLICATE_RELATIONSHIP_ID", "duplicate_relationship_ids"),
+        ("DANGLING_RELATIONSHIP", "dangling_relationships"),
+        ("DUPLICATE_BOOKMARK_ID", "duplicate_bookmark_ids"),
+        ("DUPLICATE_BOOKMARK_NAME", "duplicate_bookmark_names"),
+        ("SENSITIVE_CUSTOM_XML_REMAINS", "custom_parts"),
+    ):
+        items = package_integrity.get(key) or []
+        if items:
+            hard_failures.append({"code": code, "items": items[:40]})
+
     visible_paragraphs = [p for p in document.paragraphs if str(p.text or "").strip()]
     visible_text = "\n".join(str(p.text or "") for p in visible_paragraphs)
     visible_chars = len(re.sub(r"\s+", "", visible_text))
@@ -206,6 +328,7 @@ def audit_docx_structural_quality(
         hard_failures.append({"code": "DOCUMENT_CONTENT_TOO_THIN", "visible_chars": visible_chars})
 
     section_metrics: list[dict[str, Any]] = []
+    section_story_refs: list[dict[str, Any]] = []
     expected = dict(expected_style or {})
     margins = expected.get("margins_cm") if isinstance(expected.get("margins_cm"), dict) else {}
     margins = {
@@ -215,6 +338,27 @@ def audit_docx_structural_quality(
         "left": expected.get("margin_left_cm", margins.get("left", 2.0)),
     }
     for index, section in enumerate(document.sections, start=1):
+        section_properties = section._sectPr
+        header_types = {
+            str(node.get(qn("w:type")) or "default")
+            for node in section_properties.findall(qn("w:headerReference"))
+        }
+        footer_types = {
+            str(node.get(qn("w:type")) or "default")
+            for node in section_properties.findall(qn("w:footerReference"))
+        }
+        story_ref = {
+            "section": index,
+            "header_types": sorted(header_types),
+            "footer_types": sorted(footer_types),
+            "default_header": "default" in header_types,
+            "default_footer": "default" in footer_types,
+        }
+        section_story_refs.append(story_ref)
+        if not story_ref["default_header"] or not story_ref["default_footer"]:
+            hard_failures.append({"code": "SECTION_HEADER_FOOTER_REFERENCE_MISSING", **story_ref})
+        if index > 1 and (header_types != {"default", "first", "even"} or footer_types != {"default", "first", "even"}):
+            hard_failures.append({"code": "SECTION_HEADER_FOOTER_VARIANTS_INCOMPLETE", **story_ref})
         metric = {
             "section": index,
             "width_cm": _cm(section.page_width),
@@ -228,7 +372,16 @@ def audit_docx_structural_quality(
         }
         section_metrics.append(metric)
         if str(expected.get("paper") or "A4").upper() == "A4":
-            if abs(metric["width_cm"] - _A4_WIDTH_CM) > 0.12 or abs(metric["height_cm"] - _A4_HEIGHT_CM) > 0.12:
+            portrait_a4 = (
+                abs(metric["width_cm"] - _A4_WIDTH_CM) <= 0.12
+                and abs(metric["height_cm"] - _A4_HEIGHT_CM) <= 0.12
+            )
+            landscape_a4 = (
+                abs(metric["width_cm"] - _A4_HEIGHT_CM) <= 0.12
+                and abs(metric["height_cm"] - _A4_WIDTH_CM) <= 0.12
+            )
+            metric["orientation"] = "landscape" if landscape_a4 else "portrait"
+            if not portrait_a4 and not landscape_a4:
                 hard_failures.append({"code": "PAGE_SIZE_NOT_A4", **metric})
         for name, fallback in (("top", 2.5), ("right", 2.0), ("bottom", 2.0), ("left", 2.0)):
             expected_margin = float(margins.get(name, fallback))
@@ -255,14 +408,14 @@ def audit_docx_structural_quality(
         normal_size = None
         normal_spacing_pt = None
         hard_failures.append({"code": "NORMAL_STYLE_MISSING"})
-    expected_font = str(expected.get("body_font") or "宋体")
+    expected_font = _declared_font(expected.get("body_font") or "宋体")
     expected_size = float(expected.get("body_size_pt") or expected.get("body_size") or 14.0)
     expected_spacing_pt = expected.get("line_spacing_pt")
     if not normal_font:
         hard_failures.append({"code": "BODY_FONT_UNDEFINED"})
-    elif _normalise_font(normal_font) != _normalise_font(expected_font):
+    elif str(normal_font).strip() != str(expected_font).strip():
         hard_failures.append(
-            {"code": "BODY_FONT_MISMATCH", "expected": expected_font, "actual": normal_font}
+            {"code": "BODY_EAST_ASIA_FONT_MISMATCH", "expected": expected_font, "actual": normal_font}
         )
     if normal_size is None or abs(normal_size - expected_size) > 0.2:
         hard_failures.append(
@@ -279,8 +432,83 @@ def audit_docx_structural_quality(
                 }
             )
 
+    try:
+        normal_p_pr = document.styles["Normal"]._element.pPr
+        normal_ind = normal_p_pr.find(qn("w:ind")) if normal_p_pr is not None else None
+        first_line_chars = normal_ind.get(qn("w:firstLineChars")) if normal_ind is not None else None
+        normal_spacing_el = normal_p_pr.find(qn("w:spacing")) if normal_p_pr is not None else None
+        before_twips = normal_spacing_el.get(qn("w:before")) if normal_spacing_el is not None else None
+        after_twips = normal_spacing_el.get(qn("w:after")) if normal_spacing_el is not None else None
+    except Exception:
+        first_line_chars = None
+        before_twips = None
+        after_twips = None
+    if str(first_line_chars or "") != "200":
+        hard_failures.append({"code": "BODY_FIRST_LINE_CHARS_MISSING", "expected": "200", "actual": first_line_chars})
+    if str(before_twips or "0") != "0" or str(after_twips or "0") != "0":
+        hard_failures.append(
+            {
+                "code": "BODY_PARAGRAPH_SPACING_NONZERO",
+                "before_twips": before_twips,
+                "after_twips": after_twips,
+            }
+        )
+
+    expected_title_font = _declared_font(expected.get("title_font") or "宋体")
+    expected_title_size = float(expected.get("title_size_pt") or expected.get("title_size") or 16.0)
+    expected_heading_sizes = {
+        "Heading 1": float(expected.get("doc_title_size") or expected_title_size),
+        "Heading 2": expected_title_size,
+        "Heading 3": expected_title_size,
+    }
+    heading_style_issues: list[dict[str, Any]] = []
+    for style_name in ("Heading 1", "Heading 2", "Heading 3"):
+        try:
+            style = document.styles[style_name]
+            font_name = _font_name(style)
+            size = _pt(style.font.size)
+            expected_heading_size = expected_heading_sizes[style_name]
+            if font_name != expected_title_font or size is None or abs(size - expected_heading_size) > 0.2 or style.font.bold is not True:
+                heading_style_issues.append(
+                    {
+                        "style": style_name,
+                        "font": font_name,
+                        "size_pt": size,
+                        "expected_size_pt": expected_heading_size,
+                        "bold": style.font.bold,
+                    }
+                )
+        except Exception:
+            heading_style_issues.append({"style": style_name, "missing": True})
+    if heading_style_issues:
+        hard_failures.append(
+            {
+                "code": "HEADING_STYLE_CONTRACT_MISMATCH",
+                "expected_font": expected_title_font,
+                "expected_sizes_pt": expected_heading_sizes,
+                "items": heading_style_issues,
+            }
+        )
+    try:
+        caption = document.styles["Caption"]
+        caption_font = _font_name(caption)
+        caption_size = _pt(caption.font.size)
+        if caption_font != expected_font or caption_size is None or abs(caption_size - expected_size) > 0.2:
+            hard_failures.append(
+                {
+                    "code": "CAPTION_STYLE_CONTRACT_MISMATCH",
+                    "expected_font": expected_font,
+                    "expected_size_pt": expected_size,
+                    "actual_font": caption_font,
+                    "actual_size_pt": caption_size,
+                }
+            )
+    except Exception:
+        hard_failures.append({"code": "CAPTION_STYLE_MISSING"})
+
     document_xml = package_xml.get("word/document.xml", "")
     settings_xml = package_xml.get("word/settings.xml", "")
+    styles_xml = package_xml.get("word/styles.xml", "")
     footers_xml = package_xml.get("word/footers.xml", "")
     if not _field_present(document_xml, "TOC"):
         hard_failures.append({"code": "TOC_FIELD_MISSING"})
@@ -289,6 +517,49 @@ def audit_docx_structural_quality(
     for field_name in ("PAGE", "NUMPAGES"):
         if not _field_present(footers_xml, field_name):
             hard_failures.append({"code": f"{field_name}_FIELD_MISSING"})
+    if "<wp:anchor" in document_xml:
+        hard_failures.append({"code": "FLOATING_IMAGE_ANCHOR_PRESENT"})
+    if re.search(r"<w:(?:vanish|webHidden)\b", document_xml):
+        hard_failures.append({"code": "HIDDEN_TEXT_REMAINS"})
+    if re.search(r"<w:(?:ins|del|moveFrom|moveTo)\b", document_xml):
+        hard_failures.append({"code": "TRACKED_CHANGES_REMAIN"})
+    package_names = set(str(package_xml.get("package_names") or "").splitlines())
+    if any(re.fullmatch(r"word/comments[0-9]*\.xml", name) for name in package_names):
+        hard_failures.append({"code": "COMMENTS_REMAIN"})
+
+    core_root = None
+    app_root = None
+    try:
+        core_root = etree.fromstring(package_xml.get("docProps/core.xml", "").encode("utf-8"))
+    except Exception:
+        pass
+    try:
+        app_root = etree.fromstring(package_xml.get("docProps/app.xml", "").encode("utf-8"))
+    except Exception:
+        pass
+    metadata_values = {
+        "creator": _xml_text(core_root, "creator"),
+        "lastModifiedBy": _xml_text(core_root, "lastModifiedBy"),
+        "description": _xml_text(core_root, "description"),
+        "company": _xml_text(app_root, "Company"),
+        "manager": _xml_text(app_root, "Manager"),
+    }
+    metadata_values = {key: value for key, value in metadata_values.items() if value}
+    if metadata_values:
+        hard_failures.append({"code": "DOCUMENT_METADATA_REMAINS", "fields": metadata_values})
+
+    try:
+        styles_root = etree.fromstring(styles_xml.encode("utf-8"))
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        normal_nodes = styles_root.xpath("//w:style[@w:styleId='Normal']/w:rPr/w:rFonts", namespaces=ns)
+        font_attrs = normal_nodes[0].attrib if normal_nodes else {}
+        missing_font_attrs = [
+            name for name in ("ascii", "hAnsi", "eastAsia", "cs") if not font_attrs.get(qn(f"w:{name}"))
+        ]
+        if missing_font_attrs:
+            hard_failures.append({"code": "BODY_FONT_ATTRIBUTES_INCOMPLETE", "missing": missing_font_attrs})
+    except Exception:
+        hard_failures.append({"code": "STYLES_XML_UNREADABLE"})
 
     heading_count = 0
     hierarchy: list[int] = []
@@ -369,10 +640,14 @@ def audit_docx_structural_quality(
         "heading_count": heading_count,
         "table_count": len(document.tables),
         "section_metrics": section_metrics,
+        "section_story_references": section_story_refs,
         "body_style": {
             "font": normal_font,
             "size_pt": normal_size,
             "line_spacing_pt": normal_spacing_pt,
+            "first_line_chars": first_line_chars,
+            "space_before_twips": before_twips,
+            "space_after_twips": after_twips,
         },
         "word_fields": {
             "toc": _field_present(document_xml, "TOC"),
@@ -383,6 +658,7 @@ def audit_docx_structural_quality(
             ),
         },
         "figure_delivery": figure_summary,
+        "package_integrity": package_integrity,
         "hard_failures": hard_failures,
         "warnings": warnings,
     }

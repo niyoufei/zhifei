@@ -7,6 +7,7 @@ from backend.zhifei_autoplan.provider_runtime import (
     resolve_automation_credentials,
     resolve_document_render_slot,
     resolve_image_slots,
+    resolve_provider_slot_credentials,
     resolve_text_slots,
 )
 
@@ -51,12 +52,22 @@ def test_apply_server_provider_routing_uses_env_text_chain(monkeypatch) -> None:
         ],
         "api_key": "client-secret",
         "api_keys": {"main": "client-secret"},
+        "image_api_key": "client-image-secret",
+        "base_url": "https://unreviewed.example.invalid/v1",
+        "secret_key": "client-secret-key",
+        "token_url": "https://unreviewed.example.invalid/token",
     }
 
     prepared = apply_server_provider_routing(payload)
 
     assert "api_key" not in prepared
     assert "api_keys" not in prepared
+    assert "image_api_key" not in prepared
+    assert "base_url" not in prepared
+    assert "secret_key" not in prepared
+    assert "token_url" not in prepared
+    assert prepared["_server_provider_routing_enforced"] is True
+    assert prepared["_provider_admission_required"] is True
     assert prepared["provider"] == "openai"
     assert prepared["model"] == "gpt-5.4"
     assert prepared["provider_chain"] == [
@@ -75,6 +86,12 @@ def test_apply_server_provider_routing_uses_env_text_chain(monkeypatch) -> None:
     ]
     assert prepared["text_chain_profile"] == "default"
     assert prepared["_server_provider_roles"]["text_chain_profile"] == "default"
+    assert prepared["_server_provider_roles"]["routing_mode"] == "server_allowlist"
+    assert prepared["_provider_admission_required_roles"] == [
+        "text_draft",
+        "document_render",
+    ]
+    assert prepared["_provider_admission_extra_slots"] == []
 
 
 def test_apply_server_provider_routing_uses_cost_guard_text_chain_profile(monkeypatch) -> None:
@@ -130,6 +147,7 @@ def test_apply_server_provider_routing_allows_dry_run_without_text_slots(monkeyp
     assert prepared["provider_chain"] == []
     assert prepared["text_chain_profile"] == "default"
     assert prepared["_server_provider_roles"]["routing_mode"] == "dry_run_no_text_chain"
+    assert prepared["_provider_admission_required"] is False
 
 
 def test_resolve_text_slots_optional_google_text_fallback(monkeypatch) -> None:
@@ -218,6 +236,24 @@ def test_resolve_document_render_slot_has_no_cross_provider_fallback(monkeypatch
     assert resolve_document_render_slot() is None
 
 
+def test_operation_specific_admission_does_not_require_unused_renderer(monkeypatch) -> None:
+    from backend.zhifei_autoplan.provider_runtime import (
+        build_server_provider_admission_candidates,
+        server_provider_admission_required_roles,
+    )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "server-anthropic-key")
+    candidates = build_server_provider_admission_candidates()
+
+    roles = server_provider_admission_required_roles(
+        candidates,
+        require_document_render=False,
+    )
+
+    assert "text_draft" in roles
+    assert "document_render" not in roles
+
+
 def test_apply_server_provider_routing_orders_anthropic_tiered_chain(monkeypatch) -> None:
     monkeypatch.setenv("ZF_LLM_MAIN_PROVIDER", "anthropic")
     monkeypatch.setenv("ZF_LLM_MAIN_MODEL", "claude-opus-5")
@@ -236,6 +272,31 @@ def test_apply_server_provider_routing_orders_anthropic_tiered_chain(monkeypatch
         "text_backup",
         "text_escalation",
     ]
+    assert prepared["_provider_admission_extra_slots"] == [
+        {
+            "slot": "document_render",
+            "provider": "anthropic",
+            "model": "claude-sonnet-5",
+            "key_alias": "ANTHROPIC_API_KEY",
+        }
+    ]
+    assert prepared["_provider_admission_required_roles"] == [
+        "text_draft",
+        "text_review",
+        "document_render",
+    ]
+
+
+def test_resolve_provider_slot_credentials_keeps_secret_server_side(monkeypatch) -> None:
+    monkeypatch.setenv("ZF_LLM_MAIN_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setenv("OPENAI_API_KEY_TEXT_BACKUP", "backup-secret")
+
+    text_key, text_alias = resolve_provider_slot_credentials("text_draft", "anthropic")
+    render_key, render_alias = resolve_provider_slot_credentials("document_render", "anthropic")
+
+    assert (text_key, text_alias) == ("anthropic-secret", "ANTHROPIC_API_KEY")
+    assert (render_key, render_alias) == ("anthropic-secret", "ANTHROPIC_API_KEY")
 
 
 def test_resolve_image_slots_uses_openai_then_google(monkeypatch) -> None:

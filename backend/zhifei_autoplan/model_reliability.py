@@ -35,8 +35,26 @@ def _status_from_error(error: Any, message: str) -> int | None:
                 return int(candidate)
         except (TypeError, ValueError):
             pass
-    match = re.search(r"(?<!\d)(400|401|403|404|408|409|422|429|5\d\d)(?!\d)", message)
-    return int(match.group(1)) if match else None
+    # Do not treat arbitrary three-digit substrings as HTTP statuses.  Internal
+    # requirement identifiers such as ``REQ-CR-E1AF505EF062`` are common in
+    # quality-gate failures and previously turned into a fabricated HTTP 505.
+    status_codes = r"400|401|403|404|408|409|422|429|5\d\d"
+    contextual = re.search(
+        rf"(?i)\b(?:http(?:\s+status)?|status(?:\s+code)?|error(?:\s+code)?|code)"
+        rf"\s*[:=]?\s*({status_codes})(?![A-Za-z0-9])",
+        message,
+    )
+    if contextual:
+        return int(contextual.group(1))
+    described = re.search(
+        rf"(?i)(?<![A-Za-z0-9])({status_codes})(?![A-Za-z0-9])\s*(?:-|:)?\s*"
+        r"(?:bad\s+request|invalid|unauthorized|forbidden|not\s+found|timed?\s*out|"
+        r"timeout|conflict|unprocessable|rate\s+limit|too\s+many\s+requests|"
+        r"internal\s+server\s+error|bad\s+gateway|service\s+unavailable|"
+        r"gateway\s+timeout|provider\s+unavailable|unavailable)",
+        message,
+    )
+    return int(described.group(1)) if described else None
 
 
 def _retry_after(error: Any) -> float | None:
@@ -64,6 +82,7 @@ _USER_GUIDANCE: Dict[str, tuple[str, str]] = {
     "content_filtered": ("模型供应商拒绝了本次内容。", "请检查输入资料和指令中的敏感或不合规内容。"),
     "invalid_request": ("发送给模型的参数或请求格式不受支持。", "请检查模型名称、上下文长度和高级参数。"),
     "no_visible_text": ("模型响应中没有可用正文。", "系统会重试；持续发生时请切换模型或关闭扩展思考。"),
+    "output_truncated": ("模型正文达到输出上限且续写仍未完成。", "请缩小章节范围或提高有界续写预算后重试。"),
     "api_key_missing": ("未找到对应供应商 API Key。", "请在本机安全凭据中配置后再试。"),
     "secret_key_missing": ("未找到对应供应商 Secret Key。", "请在本机安全凭据中配置后再试。"),
     "provider_not_configured": ("模型供应商尚未完成配置。", "请配置供应商、模型名称和本机安全凭据。"),
@@ -117,6 +136,8 @@ def classify_provider_error(
         "billing hard limit",
         "billing limit",
         "out of credits",
+        "no credits remaining",
+        "add credits",
         "余额不足",
         "额度不足",
         "配额已用尽",
@@ -148,12 +169,26 @@ def classify_provider_error(
         )
     ):
         code, retryable = "network_error", True
-    elif any(x in lower for x in ("content filter", "safety", "blocked")):
+    elif any(
+        x in lower
+        for x in (
+            "content filter",
+            "content_filter",
+            "content policy",
+            "safety filter",
+            "safety policy",
+            "blocked by safety",
+            "safety blocked",
+            "moderation_blocked",
+        )
+    ):
         code, retryable = "content_filtered", False
     elif any(x in lower for x in ("invalid request", "bad request", "unprocessable")) or status in {400, 409, 422}:
         code, retryable = "invalid_request", False
     elif lower in {"no_visible_text", "empty_response"}:
         code, retryable = "no_visible_text", True
+    elif lower in {"output_truncated", "max_output_tokens"}:
+        code, retryable = "output_truncated", False
     elif lower in {"api_key_missing", "secret_key_missing"}:
         code, retryable = lower, False
     elif lower in {"provider_not_configured", "ollama_provider_disabled"}:
@@ -181,14 +216,29 @@ class ModelReliabilityRuntime:
     states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @staticmethod
-    def key(provider: str, model: str) -> str:
-        return f"{str(provider or '').strip().lower()}::{str(model or '').strip()}"
+    def key(provider: str, model: str, identity: str | None = None) -> str:
+        base = f"{str(provider or '').strip().lower()}::{str(model or '').strip()}"
+        normalized_identity = str(identity or "").strip().lower()
+        return f"{base}::{normalized_identity}" if normalized_identity else base
 
-    def is_open(self, provider: str, model: str) -> bool:
-        return bool(self.states.get(self.key(provider, model), {}).get("open"))
+    def is_open(self, provider: str, model: str, identity: str | None = None) -> bool:
+        exact = self.key(provider, model, identity)
+        if identity:
+            return bool(self.states.get(exact, {}).get("open")) or bool(
+                self.states.get(self.key(provider, model), {}).get("open")
+            )
+        # Compatibility/read-side aggregate for callers that do not know the
+        # credential identity. Runtime model calls always provide one when a
+        # credential exists, so one exhausted key cannot quarantine another.
+        prefix = self.key(provider, model) + "::"
+        return bool(self.states.get(exact, {}).get("open")) or any(
+            bool(value.get("open"))
+            for key, value in self.states.items()
+            if key.startswith(prefix)
+        )
 
-    def record_success(self, provider: str, model: str) -> None:
-        state = self.states.setdefault(self.key(provider, model), {})
+    def record_success(self, provider: str, model: str, identity: str | None = None) -> None:
+        state = self.states.setdefault(self.key(provider, model, identity), {})
         state.update(
             {
                 "open": False,
@@ -200,11 +250,20 @@ class ModelReliabilityRuntime:
         )
         state["successes"] = int(state.get("successes") or 0) + 1
 
-    def record_failure(self, provider: str, model: str, error_info: Dict[str, Any]) -> None:
-        state = self.states.setdefault(self.key(provider, model), {})
+    def record_failure(
+        self,
+        provider: str,
+        model: str,
+        error_info: Dict[str, Any],
+        identity: str | None = None,
+    ) -> None:
+        state = self.states.setdefault(self.key(provider, model, identity), {})
         count = int(state.get("consecutive_failures") or 0) + 1
-        terminal = not bool(error_info.get("retryable"))
-        should_open = bool(terminal or count >= max(1, int(self.failure_threshold)))
+        # A single attributable failure is evidence for provider rotation, not
+        # enough evidence to quarantine the provider for the whole run.  This
+        # keeps the circuit contract literal: two consecutive logical failures
+        # open the default breaker, while a successful call resets the streak.
+        should_open = bool(count >= max(1, int(self.failure_threshold)))
         state.update(
             {
                 "consecutive_failures": count,

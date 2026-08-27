@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.zhifei_autoplan import professional_document_renderer as renderer
+from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
 from backend.zhifei_autoplan.professional_document_renderer import (
     ProfessionalRenderError,
     _merge_professional_style,
@@ -234,15 +235,82 @@ async def test_refine_chunk_blocks_evidence_loss() -> None:
 
 
 @pytest.mark.asyncio
+async def test_refine_chunk_blocks_evidence_locator_substitution() -> None:
+    replacement = "【证据：其他项目文件#p99】质量管理措施、检查、复核、验收和归档闭环。" * 30
+    provider = _FakeProvider(
+        [
+            {
+                "text": json.dumps(
+                    {
+                        "title": "质量管理",
+                        "content": replacement,
+                        "change_summary": [],
+                        "evidence_preserved": True,
+                    },
+                    ensure_ascii=False,
+                )
+            }
+        ]
+    )
+
+    with pytest.raises(ProfessionalRenderError, match="证据定位发生替换或增补"):
+        await _refine_chunk(
+            provider,
+            topic="测试项目",
+            title="质量管理",
+            content="【证据：本项目招标文件#p15】质量管理措施、检查、复核、验收和归档闭环。" * 30,
+            chunk_index=1,
+            chunk_total=1,
+            editorial_priorities=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_refine_chunk_blocks_requirement_marker_change() -> None:
+    provider = _FakeProvider(
+        [
+            {
+                "text": json.dumps(
+                    {
+                        "title": "质量管理",
+                        "content": "质量管理措施、检查、复核、验收和归档闭环。" * 40,
+                        "change_summary": [],
+                        "evidence_preserved": True,
+                    },
+                    ensure_ascii=False,
+                )
+            }
+        ]
+    )
+
+    with pytest.raises(ProfessionalRenderError, match="要求绑定标记发生变化"):
+        await _refine_chunk(
+            provider,
+            topic="测试项目",
+            title="质量管理",
+            content=(
+                "【要求:REQ-GLOBAL-001】质量管理措施、检查、复核、验收和归档闭环。"
+                * 30
+            ),
+            chunk_index=1,
+            chunk_total=1,
+            editorial_priorities=[],
+        )
+
+
+@pytest.mark.asyncio
 async def test_controlled_complete_retries_transient_provider_error(monkeypatch) -> None:
+    class TemporaryProviderError(RuntimeError):
+        status_code = 503
+
     class Provider:
         def __init__(self) -> None:
             self.calls = 0
 
         async def complete(self, prompt, **kwargs):
             self.calls += 1
-            if self.calls < 3:
-                raise ConnectionError("temporary reset")
+            if self.calls < 2:
+                raise TemporaryProviderError("service unavailable")
             return {"text": "ok"}
 
     delays: list[int] = []
@@ -250,7 +318,7 @@ async def test_controlled_complete_retries_transient_provider_error(monkeypatch)
     async def no_delay(attempt, **kwargs):
         delays.append(attempt)
 
-    monkeypatch.setenv("ZHIFEI_PROFESSIONAL_RENDER_RETRY_ATTEMPTS", "3")
+    monkeypatch.setenv("ZHIFEI_PROFESSIONAL_RENDER_RETRY_ATTEMPTS", "2")
     monkeypatch.setattr(renderer, "bounded_retry_delay", no_delay)
     provider = Provider()
 
@@ -263,8 +331,8 @@ async def test_controlled_complete_retries_transient_provider_error(monkeypatch)
     )
 
     assert out["text"] == "ok"
-    assert provider.calls == 3
-    assert delays == [1, 2]
+    assert provider.calls == 2
+    assert delays == [1]
 
 
 @pytest.mark.asyncio
@@ -300,3 +368,33 @@ async def test_controlled_complete_does_not_retry_auth_error(monkeypatch) -> Non
 
     assert provider.calls == 1
     assert delays == []
+
+
+@pytest.mark.asyncio
+async def test_controlled_complete_counts_stable_shared_and_anthropic_default_budget() -> None:
+    class Provider:
+        async def complete(self, prompt, **kwargs):
+            return {"text": "ok"}
+
+    runtime = ExecutionControlRuntime(
+        max_input_chars=100_000,
+        max_requested_output_tokens=100_000,
+    )
+    prompt = "当前章节要求"
+    stable = "固定系统规则与项目事实库"
+    shared = "已生成章节摘要"
+
+    result = await renderer._controlled_complete(
+        Provider(),
+        prompt,
+        execution_runtime=runtime,
+        provider_name="anthropic",
+        model_name="claude-sonnet-test",
+        stable_system_prompt=stable,
+        shared_context_prompt=shared,
+    )
+
+    assert result["text"] == "ok"
+    usage = runtime.snapshot()["usage"]
+    assert usage["input_chars"] == len(prompt) + len(stable) + len(shared)
+    assert usage["requested_output_tokens"] == 8192

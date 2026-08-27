@@ -105,8 +105,15 @@ def generate_image_openai(
             response = client.images.edit(image=handles, input_fidelity="high", **common)
         else:
             response = client.images.generate(n=1, **common)
-    except Exception as exc:
-        return {"ok": False, "paths": [], "text": "", "error": repr(exc), "model": model_id, "provider": "openai"}
+    except Exception:
+        return {
+            "ok": False,
+            "paths": [],
+            "text": "",
+            "error": "IMAGE_PROVIDER_REQUEST_FAILED",
+            "model": model_id,
+            "provider": "openai",
+        }
     finally:
         for handle in handles:
             try:
@@ -155,7 +162,12 @@ def generate_image(
         return generate_image_openai(prompt, api_key, model, aspect_ratio, input_image_paths, out_dir)
     if normalized == "google":
         return generate_image_gemini(prompt, api_key, model, aspect_ratio, input_image_paths, out_dir)
-    return {"ok": False, "paths": [], "text": "", "error": f"unsupported_image_provider:{normalized}"}
+    return {
+        "ok": False,
+        "paths": [],
+        "text": "",
+        "error": "IMAGE_PROVIDER_UNSUPPORTED",
+    }
 
 
 def _guess_mime(path: Path) -> str:
@@ -263,8 +275,14 @@ def generate_image_gemini(
                 image_config=types.ImageConfig(aspect_ratio=str(aspect_ratio or "16:9")),
             ),
         )
-    except Exception as e:
-        return {"ok": False, "paths": [], "text": "", "error": repr(e), "model": model_id}
+    except Exception:
+        return {
+            "ok": False,
+            "paths": [],
+            "text": "",
+            "error": "IMAGE_PROVIDER_REQUEST_FAILED",
+            "model": model_id,
+        }
     finally:
         _close_gemini_client_safely(client)
 
