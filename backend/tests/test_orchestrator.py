@@ -15,6 +15,7 @@ from backend.zhifei_autoplan.orchestrator import (
     _provider_chain_for_role,
     run_autoplan,
 )
+from backend.zhifei_autoplan.execution_control import ExecutionBudgetExceededError
 
 
 def test_long_chapter_deadline_allows_one_bounded_continuation() -> None:
@@ -2062,6 +2063,48 @@ class TestPickProviderWithList:
                 "llm_cls": mock_llm_cls,
                 "llm_calls": llm_calls,
             }
+
+    @pytest.mark.asyncio
+    async def test_execution_budget_exhaustion_is_not_reported_as_provider_failure(
+        self,
+        mock_deps_prov,
+    ):
+        class _BudgetWriter:
+            def __init__(self, llm):
+                self.llm = llm
+
+            async def write(self, title, ctx):
+                raise ExecutionBudgetExceededError(
+                    dimension="model_attempts",
+                    attempted=5,
+                    limit=4,
+                )
+
+        with patch("backend.zhifei_autoplan.orchestrator.SectionWriter", _BudgetWriter):
+            with pytest.raises(RuntimeError) as exc_info:
+                await run_autoplan(
+                    {
+                        "outline": ["章节1"],
+                        "provider_chain": [
+                            {
+                                "slot": "text_draft",
+                                "provider": "anthropic",
+                                "model": "claude-sonnet-5",
+                                "api_key": "test-key",
+                            }
+                        ],
+                        "fail_on_model_exhaustion": True,
+                        "quality_strict": False,
+                        "auto_remediate": False,
+                        "generate_images": False,
+                        "dry_run": False,
+                    }
+                )
+
+        failure = json.loads(str(exc_info.value))
+        assert failure["code"] == "EXECUTION_BUDGET_EXCEEDED"
+        assert failure["failures"][0]["code"] == "EXECUTION_BUDGET_EXCEEDED"
+        assert failure["failures"][0]["failure_kind"] == "execution_control"
 
     @pytest.mark.asyncio
     async def test_tiered_route_uses_sonnet_for_draft_and_opus_for_critical_review(self, mock_deps_prov):

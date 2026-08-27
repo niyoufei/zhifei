@@ -395,7 +395,11 @@ def _public_runtime_error(error: Any) -> Dict[str, Any]:
                 "action": (
                     "请按阻断要求修订失败章节，并从已保存检查点显式恢复。"
                     if code == "REQUIREMENT_EVIDENCE_CHAPTER_BLOCKED"
-                    else "请核对失败章节与模型健康状态后显式重试。"
+                    else (
+                        "请移除过小的手工预算，或按章节数量提高任务级模型调用预算后重新发起任务。"
+                        if code == "EXECUTION_BUDGET_EXCEEDED"
+                        else "请核对失败章节与模型健康状态后显式重试。"
+                    )
                 ),
                 "failures": safe_failures,
             }

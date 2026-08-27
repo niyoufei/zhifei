@@ -37,6 +37,33 @@ def test_public_runtime_error_unwraps_model_chain_without_repr_leakage() -> None
     assert "RuntimeError" not in json.dumps(result, ensure_ascii=False)
 
 
+def test_public_runtime_error_preserves_execution_budget_exhaustion() -> None:
+    payload = {
+        "code": "EXECUTION_BUDGET_EXCEEDED",
+        "message": "本次任务的模型调用安全预算已用尽，正文生成已停止。",
+        "failures": [
+            {
+                "title": "第一章",
+                "provider": "anthropic",
+                "model": "claude-sonnet-5",
+                "failure_kind": "execution_control",
+                "code": "EXECUTION_BUDGET_EXCEEDED",
+                "error": "EXECUTION_BUDGET_EXCEEDED",
+            }
+        ],
+    }
+
+    result = actions_bridge._public_runtime_error(
+        RuntimeError(json.dumps(payload, ensure_ascii=False))
+    )
+
+    assert result["code"] == "EXECUTION_BUDGET_EXCEEDED"
+    assert result["failures"][0]["code"] == "EXECUTION_BUDGET_EXCEEDED"
+    assert "预算" in result["message"]
+    assert "预算" in result["action"]
+    assert "模型健康" not in result["action"]
+
+
 def test_public_runtime_error_keeps_requirement_gate_out_of_provider_classifier() -> None:
     payload = {
         "code": "REQUIREMENT_EVIDENCE_CHAPTER_BLOCKED",

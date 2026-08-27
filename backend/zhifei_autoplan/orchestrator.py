@@ -81,7 +81,11 @@ from backend.zhifei_autoplan.generation_checkpoint import (
     load_section_checkpoint,
     save_section_checkpoint,
 )
-from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
+from backend.zhifei_autoplan.execution_control import (
+    ExecutionBudgetExceededError,
+    ExecutionCancelledError,
+    ExecutionControlRuntime,
+)
 from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
 from backend.zhifei_autoplan.case_library_service import (
     build_case_reference_pack,
@@ -2182,7 +2186,16 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if isinstance(last, dict):
                     last.setdefault("model_slot", slot_id)
                     last.setdefault("model_role", _model_role_for_slot(slot_id))
+            except ExecutionCancelledError:
+                raise
             except Exception as e:
+                budget_exhausted = isinstance(e, ExecutionBudgetExceededError)
+                error_info = classify_provider_error(
+                    e.as_dict() if budget_exhausted else e,
+                    provider=str(p or ""),
+                    model=str(m or ""),
+                )
+                error_code = str(error_info.get("code") or "provider_error")
                 last = _attach_section_meta(
                     {
                         "title": title,
@@ -2191,7 +2204,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                         "model": m,
                         "model_slot": slot_id,
                         "model_role": _model_role_for_slot(slot_id),
-                        "error": f"section_write_failed: {e}",
+                        "error": error_code,
+                        "error_info": error_info,
+                        "code": error_code,
+                        "failure_kind": (
+                            "execution_control" if budget_exhausted else "provider"
+                        ),
                     }
                 )
                 _emit_provider_progress(
@@ -2204,8 +2222,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     slot=str(slot_id or ""),
                     ok=False,
                     error_type=type(e).__name__,
+                    error_code=error_code,
                     circuits=model_reliability.snapshot(),
                 )
+                if budget_exhausted:
+                    break
                 continue
             finally:
                 if llm is not None:
@@ -2601,6 +2622,22 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                         # Keep provider/timeout failures from the same wave.  A
                         # local quality-gate failure must not erase independent
                         # model-chain evidence needed for a truthful retry.
+                        "failures": failed_sections,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        execution_budget_failures = [
+            row
+            for row in failed_sections
+            if str(row.get("code") or "") == "EXECUTION_BUDGET_EXCEEDED"
+        ]
+        if execution_budget_failures:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "EXECUTION_BUDGET_EXCEEDED",
+                        "message": "本次任务的模型调用安全预算已用尽，正文生成已停止。",
                         "failures": failed_sections,
                     },
                     ensure_ascii=False,

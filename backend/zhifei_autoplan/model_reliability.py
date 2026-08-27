@@ -88,6 +88,10 @@ _USER_GUIDANCE: Dict[str, tuple[str, str]] = {
     "provider_not_configured": ("模型供应商尚未完成配置。", "请配置供应商、模型名称和本机安全凭据。"),
     "ollama_provider_disabled": ("本地 Ollama 正文调用未启用。", "如确需本地正文调用，请先完成本地模型验收并启用开关。"),
     "circuit_open": ("该模型在本次任务中已被熔断。", "系统将跳过它并尝试健康的备用模型。"),
+    "EXECUTION_BUDGET_EXCEEDED": (
+        "本次任务的模型调用安全预算已用尽。",
+        "请移除过小的手工预算，或按章节数量提高任务级模型调用预算后重新发起任务。",
+    ),
     "provider_error": ("模型调用失败。", "请查看安全诊断码，并确认模型、网络和供应商状态。"),
 }
 
