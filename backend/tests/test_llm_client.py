@@ -428,6 +428,20 @@ class TestComplete:
         assert mock_impl.complete.await_args.kwargs["max_tokens"] == 16
 
     @pytest.mark.asyncio
+    async def test_anthropic_preflight_leaves_room_for_visible_text_after_thinking(self):
+        mock_impl = MagicMock()
+        mock_impl.complete = AsyncMock(return_value={"text": "OK"})
+
+        with patch.object(LLMClient, "_init_provider", return_value=mock_impl):
+            client = LLMClient(
+                provider="anthropic", model="claude-opus-test", api_key="test-key"
+            )
+            result = await client.preflight(timeout=10)
+
+        assert result["ok"] is True
+        assert mock_impl.complete.await_args.kwargs["max_tokens"] == 256
+
+    @pytest.mark.asyncio
     async def test_anthropic_budget_counts_cached_prefix_and_default_output_tokens(self):
         mock_impl = MagicMock()
         mock_impl.complete = AsyncMock(return_value={"text": "response"})

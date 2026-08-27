@@ -55,8 +55,19 @@ async def test_anthropic_provider_ignores_thinking_blocks_and_collects_all_text_
 
 
 @pytest.mark.asyncio
-async def test_anthropic_provider_rejects_thinking_only_response_as_no_visible_text():
-    from backend.zhifei_autoplan.providers.anthropic_provider import AnthropicProvider
+async def test_anthropic_provider_rejects_thinking_only_response_as_no_visible_text(
+    monkeypatch,
+):
+    from backend.zhifei_autoplan.providers import anthropic_provider
+
+    AnthropicProvider = anthropic_provider.AnthropicProvider
+    usage_event = {}
+
+    def _record_usage(**kwargs):
+        usage_event.update(kwargs)
+        return {"log_persisted": False}
+
+    monkeypatch.setattr(anthropic_provider, "record_claude_usage", _record_usage)
 
     def create(**kwargs):
         return SimpleNamespace(
@@ -74,6 +85,8 @@ async def test_anthropic_provider_rejects_thinking_only_response_as_no_visible_t
 
     assert result["text"] == ""
     assert result["error"] == "no_visible_text"
+    assert usage_event["status"] == "error"
+    assert usage_event["error_type"] == "no_visible_text"
 
 
 @pytest.mark.asyncio

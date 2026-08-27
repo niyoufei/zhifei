@@ -371,6 +371,8 @@ class AnthropicProvider(BaseProvider):
             # This provider adapter is used for plain-text chapter generation;
             # an unfinished agent/tool turn is not a valid terminal chapter.
             terminal_error = "provider_error"
+        elif not text:
+            terminal_error = "no_visible_text"
         usage = normalize_claude_usage(getattr(msg, "usage", None) if msg else None)
         if cache_warm_leader and not cache_warm_finished:
             _finish_cache_warm(
@@ -431,6 +433,4 @@ class AnthropicProvider(BaseProvider):
         }
         if terminal_error:
             result["error"] = terminal_error
-        elif not text:
-            result["error"] = "no_visible_text"
         return result

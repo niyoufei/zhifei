@@ -293,13 +293,18 @@ class LLMClient:
     async def preflight(self, *, timeout: float = 30.0) -> Dict[str, Any]:
         """Validate credentials/model availability with a minimal visible-text call."""
 
+        # OpenAI Responses rejects requests below 16 output tokens.  Claude
+        # models can spend that entire allowance on an internal thinking block
+        # before emitting the requested visible ``OK`` text, which creates a
+        # false ``no_visible_text`` admission failure.  Keep the probe tiny but
+        # give Anthropic a bounded visible-text margin.
+        preflight_output_tokens = (
+            256 if str(self.provider or "").strip().lower() == "anthropic" else 16
+        )
         result = await self.complete(
             "Reply with exactly OK.",
             timeout=max(5.0, min(60.0, float(timeout or 30.0))),
-            # OpenAI Responses currently enforces a minimum of 16 output
-            # tokens.  Keep the cross-provider probe at that common floor so a
-            # healthy backup route is not rejected by its own preflight.
-            max_tokens=16,
+            max_tokens=preflight_output_tokens,
             retry_attempts=min(2, self.retry_attempts),
             task_type="provider_preflight",
             project_id="system",
