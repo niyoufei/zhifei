@@ -36,7 +36,8 @@ def _record(
     digest = hashlib.sha256(source_bytes).hexdigest()
     source = uploads / f"{digest}_{filename}"
     source.write_bytes(source_bytes)
-    extract = extracts / f"{digest}.txt"
+    extract_text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    extract = extracts / f"{digest}_{extract_text_sha256}.txt"
     extract.write_text(text, encoding="utf-8")
     page_count = int(extra.get("pages") or 1)
     if "\f" in text:
@@ -83,9 +84,7 @@ def _record(
             for page_text in page_texts
         ],
         "extract_saved_as": str(extract),
-        "extract_text_sha256": hashlib.sha256(
-            text.encode("utf-8")
-        ).hexdigest(),
+        "extract_text_sha256": extract_text_sha256,
         **extra,
     }
 

@@ -380,6 +380,7 @@ def build_drawing_index(
             continue
         if (
             not _is_within(source_path, workspace_root / "uploads")
+            or source_path.is_symlink()
             or not source_path.is_file()
             or not source_path.name.startswith(f"{sha}_")
         ):
@@ -387,8 +388,9 @@ def build_drawing_index(
             continue
         if (
             not _is_within(extract_file, workspace_root / "extracts")
+            or extract_file.is_symlink()
             or not extract_file.is_file()
-            or extract_file.name != f"{sha}.txt"
+            or extract_file.name != f"{sha}_{expected_extract_sha256}.txt"
         ):
             _reject(fname, "extract_path_outside_workspace_or_not_full_sha")
             continue

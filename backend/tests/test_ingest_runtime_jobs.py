@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend.app.routers import ingest as ingest_router
+from backend.zhifei_autoplan.drawing_index import build_drawing_index
 from backend.zhifei_autoplan.ocr_runtime import OcrResult
 
 
@@ -91,6 +92,39 @@ def test_full_sha_cache_skips_second_parse(monkeypatch, tmp_path: Path) -> None:
         (workspace / "audit" / "ingest.jsonl").read_text(encoding="utf-8").splitlines()[0]
     )
     assert audit["extract_text_sha256"] == saved["extract_text_sha256"]
+
+
+def test_ingest_extract_identity_is_accepted_by_drawing_index(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    result = asyncio.run(
+        ingest_router._handle_upload(
+            [_Upload("钢梁安装构件位置与节点做法。".encode(), "钢梁图.txt")],
+            project_id="p1",
+            source_hint="drawing",
+        )
+    )
+    saved = result["saved"][0]
+
+    assert Path(saved["extract_saved_as"]).name == (
+        f"{saved['sha256']}_{saved['extract_text_sha256']}.txt"
+    )
+
+    drawing_index = build_drawing_index(
+        "示例项目",
+        ["钢梁安装施工工艺"],
+        project_id="p1",
+        workspace_dir=workspace,
+    )
+
+    assert drawing_index["integrity_rejections"] == []
+    assert drawing_index["indexed_drawing_count"] == 1
+    assert drawing_index["drawings"][0]["sha256"] == saved["sha256"]
+    assert drawing_index["drawings"][0]["extract_saved_as"] == saved[
+        "extract_saved_as"
+    ]
 
 
 def test_upload_rejects_existing_full_sha_path_with_wrong_bytes(
