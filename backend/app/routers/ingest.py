@@ -66,7 +66,9 @@ PARSE_CACHE_DIR = Path(
 INGEST_SPOOL_DIR = Path(
     os.environ.get("ZF_AUTOPLAN_INGEST_SPOOL_DIR", "backend/data/autoplan/ingest_spool")
 )
-PARSER_VERSION = "2026.08.runtime-v5-source-aware-ocr-cache"
+PARSER_VERSION = "2026.08.runtime-v6-bounded-ocr-proof"
+OCR_PAGE_PROOF_VERSION = "ocr-page-proof-v2"
+OCR_FAILURE_RECEIPT_VERSION = "ocr-failure-receipt-v1"
 OCR_POLICY_ORDINARY = "ordinary_bounded"
 OCR_POLICY_DRAWING = "drawing_full_page"
 OCR_POLICY_STANDARD = "standard_full_page"
@@ -507,7 +509,7 @@ def _full_page_ocr_result_proof(
         "ocr_page_statuses": list(statuses),
         "ocr_page_image_sha256": list(image_sha256),
         "ocr_page_text_sha256": text_sha256,
-        "ocr_page_proof_version": "ocr-page-proof-v1",
+        "ocr_page_proof_version": OCR_PAGE_PROOF_VERSION,
         "ocr_source_pages": source_pages,
         "ocr_error": None,
         "ocr_blank_pages": [
@@ -516,6 +518,112 @@ def _full_page_ocr_result_proof(
             if status == "blank"
         ],
     }
+
+
+def _bounded_ocr_diagnostics(
+    result: Any,
+    declared_pages: int | None,
+) -> dict[str, Any]:
+    """Return persisted OCR diagnostics without page text or raw stderr."""
+
+    declared = _valid_positive_page_count(declared_pages)
+    statuses_raw = getattr(result, "page_statuses", ()) if result is not None else ()
+    statuses = [
+        str(status or "").strip().lower()
+        for status in statuses_raw
+        if str(status or "").strip()
+    ][: max(1, min(1000, declared or 1000))]
+    status_counts: dict[str, int] = {}
+    for status in statuses:
+        status_counts[status] = status_counts.get(status, 0) + 1
+    provided = getattr(result, "diagnostics", None) if result is not None else None
+    provided_map = provided if isinstance(provided, dict) else {}
+
+    def _bounded_pages(key: str, fallback_status: str) -> list[int]:
+        values = provided_map.get(key)
+        if isinstance(values, (list, tuple)):
+            pages = []
+            for value in values[:1000]:
+                try:
+                    page = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if page >= 1 and (declared is None or page <= declared):
+                    pages.append(page)
+            return sorted(set(pages))
+        return [
+            index
+            for index, status in enumerate(statuses, start=1)
+            if status == fallback_status
+        ]
+
+    raw_error = str(getattr(result, "error", None) or "")
+    error_prefix = raw_error.split(":", 1)[0].strip().lower()
+    error_code_map = {
+        "": "none",
+        "page_ocr_incomplete": "page_ocr_incomplete",
+        "pdf_not_found": "pdf_not_found",
+        "tesseract_not_installed": "tesseract_not_installed",
+        "ocr_deps_missing": "ocr_dependencies_unavailable",
+        "pdf_open_failed": "pdf_open_failed",
+    }
+    error_code = str(
+        provided_map.get("error_code")
+        or error_code_map.get(error_prefix, "ocr_runtime_failed")
+    )[:80]
+    machine_code = str(
+        provided_map.get("machine_code")
+        or (
+            "OCR_COMPLETE"
+            if error_code == "none"
+            else "OCR_PAGE_PROOF_INCOMPLETE"
+        )
+    )[:80]
+    return {
+        "schema_version": "ocr-diagnostics-v1",
+        "machine_code": machine_code,
+        "error_code": error_code,
+        "engine": str(getattr(result, "engine", "tesseract") or "tesseract")[:40],
+        "lang": str(getattr(result, "lang", "") or "")[:80],
+        "declared_pages": declared,
+        "source_pages": _valid_positive_page_count(
+            getattr(result, "source_pages", None) if result is not None else None
+        ),
+        "attempted_pages": len(statuses),
+        "status_counts": dict(sorted(status_counts.items())),
+        "unreadable_pages": _bounded_pages("unreadable_pages", "unreadable"),
+        "failed_pages": _bounded_pages("failed_pages", "failed"),
+        "timeout_pages": _bounded_pages("timeout_pages", "timeout"),
+        "recovered_pages": _bounded_pages("recovered_pages", "recovered"),
+    }
+
+
+def _ocr_failure_receipt(
+    *,
+    code: str,
+    source_sha256: str,
+    ocr_policy: str,
+    diagnostics: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Bind a rejected source to bounded, non-content OCR diagnostics."""
+
+    payload = {
+        "schema_version": OCR_FAILURE_RECEIPT_VERSION,
+        "code": str(code),
+        "source_sha256": str(source_sha256).strip().lower(),
+        "parser_version": PARSER_VERSION,
+        "ocr_policy": str(ocr_policy),
+        "diagnostics": dict(diagnostics or {}),
+    }
+    payload["receipt_digest"] = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return payload
 
 
 def _full_page_pdf_parse_proof_valid(
@@ -573,7 +681,7 @@ def _parse_cache_policy_valid(
     extract_page_sha256 = base.get("ocr_extract_page_sha256")
     blank_pages = base.get("ocr_blank_pages")
     if (
-        base.get("ocr_page_proof_version") != "ocr-page-proof-v1"
+        base.get("ocr_page_proof_version") != OCR_PAGE_PROOF_VERSION
         or _valid_positive_page_count(base.get("ocr_source_pages"))
         != declared_pages
         or base.get("ocr_error") not in {None, ""}
@@ -1096,12 +1204,13 @@ async def _try_ocr(
                     result_pages,
                     page_text_count,
                 )
-                return None
+                return res
             if _full_page_ocr_result_proof(res, declared_pages) is None:
                 logger.warning(
                     "full-page OCR rejected because per-page proof is incomplete"
                 )
-                return None
+                return res
+            return res
         return res if res and (res.text or res.page_texts) else None
 
     if ext in {"png", "jpg", "jpeg"}:
@@ -1337,6 +1446,13 @@ async def _handle_upload(
                 )
                 if ocr_result:
                     if ext == "pdf" and hasattr(ocr_result, "page_texts"):
+                        if _ocr_cache_policy(
+                            normalized_hint
+                        ) in OCR_POLICIES_FULL_PAGE:
+                            parsed["ocr_diagnostics"] = _bounded_ocr_diagnostics(
+                                ocr_result,
+                                _valid_positive_page_count(parsed.get("pages")),
+                            )
                         page_texts = tuple(getattr(ocr_result, "page_texts", ()))
                         merged, mapped = _merge_pdf_ocr_pages(
                             parsed.get("extract_text"),
@@ -1395,6 +1511,19 @@ async def _handle_upload(
                     uf.filename,
                     type(exc).__name__,
                 )
+                if (
+                    ext == "pdf"
+                    and _ocr_cache_policy(normalized_hint)
+                    in OCR_POLICIES_FULL_PAGE
+                ):
+                    parsed["ocr_diagnostics"] = {
+                        **_bounded_ocr_diagnostics(
+                            None,
+                            _valid_positive_page_count(parsed.get("pages")),
+                        ),
+                        "machine_code": "OCR_RUNTIME_EXCEPTION",
+                        "error_code": "ocr_runtime_exception",
+                    }
             await asyncio.to_thread(
                 _save_parse_cache,
                 digest,
@@ -1416,17 +1545,32 @@ async def _handle_upload(
                 expected_policy=full_page_policy,
             )
         ):
+            rejection_code = (
+                "STANDARD_FULL_PAGE_OCR_REQUIRED"
+                if full_page_policy == OCR_POLICY_STANDARD
+                else "DRAWING_FULL_PAGE_OCR_REQUIRED"
+            )
+            diagnostics = (
+                parsed.get("ocr_diagnostics")
+                if isinstance(parsed.get("ocr_diagnostics"), dict)
+                else _bounded_ocr_diagnostics(
+                    None,
+                    _valid_positive_page_count(parsed.get("pages")),
+                )
+            )
             rejected.append(
                 {
                     "filename": uf.filename,
-                    "code": (
-                        "STANDARD_FULL_PAGE_OCR_REQUIRED"
-                        if full_page_policy == OCR_POLICY_STANDARD
-                        else "DRAWING_FULL_PAGE_OCR_REQUIRED"
-                    ),
+                    "code": rejection_code,
                     "sha256": digest,
                     "file_id": digest,
                     "saved_as": str(out_path),
+                    "ocr_failure_receipt": _ocr_failure_receipt(
+                        code=rejection_code,
+                        source_sha256=digest,
+                        ocr_policy=full_page_policy,
+                        diagnostics=diagnostics,
+                    ),
                 }
             )
             continue

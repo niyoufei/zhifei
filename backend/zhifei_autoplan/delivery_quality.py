@@ -10,6 +10,9 @@ from backend.zhifei_autoplan.project_fact_ledger import (
     FORMAL_REQUIRED_FIELDS,
     validate_project_fact_ledger,
 )
+from backend.zhifei_autoplan.project_parameter_evidence import (
+    validate_project_parameter_fact_against_current_evidence,
+)
 
 _SAFE_CONSISTENCY_RE = re.compile(
     r"(DECISION\s*:\s*PASS|未发现(?:实质性|明显|前后)?冲突|"
@@ -310,6 +313,14 @@ def _formal_fact_source_errors(
                 or item_source_sha256s != receipt_source_sha256s
             ):
                 errors.append("evidence_set_source_identity_mismatch")
+            current_evidence_validation = (
+                validate_project_parameter_fact_against_current_evidence(
+                    fact,
+                    expected_project_id=expected_project_id,
+                )
+            )
+            if current_evidence_validation.get("ok") is not True:
+                errors.extend(current_evidence_validation.get("errors") or [])
             if not _evidence_digest_valid(evidence):
                 errors.append("evidence_digest_invalid")
             return errors
@@ -736,6 +747,14 @@ def _formal_project_parameter_check(
         else {}
     )
     structured_quality_validation = _process_quality_bundle_check(quality_fact)
+    quality_fact_evidence = (
+        quality_fact.get("evidence")
+        if isinstance(quality_fact.get("evidence"), dict)
+        else {}
+    )
+    quality_evidence_set_receipt_digest = str(
+        quality_fact_evidence.get("evidence_set_receipt_digest") or ""
+    ).strip().lower()
     for field in required_fields:
         fact = facts.get(field) if isinstance(facts.get(field), dict) else {}
         receipt = resolved_by_field.get(field, {})
@@ -846,6 +865,10 @@ def _formal_project_parameter_check(
         "ledger_validation_ok": ledger_validation.get("ok") is True,
         "project_identity_bound": bool(ledger_project_id),
         "project_id": ledger_project_id or None,
+        "project_fact_ledger_digest": str(ledger.get("ledger_digest") or "")
+        .strip()
+        .lower(),
+        "quality_evidence_set_receipt_digest": quality_evidence_set_receipt_digest,
         "ledger_validation_errors": list(ledger_validation.get("errors") or []),
         "receipt_digest_bound": digest_bound,
         "required_contract_ok": required_contract_ok,

@@ -12,8 +12,11 @@ from unittest.mock import MagicMock, patch
 
 from backend.zhifei_autoplan.evidence import (
     best_drawing_hit,
+    build_ingest_evidence_set_receipt,
     format_hit_locator,
+    resolve_trusted_ingest_record,
     search_ingested_docs,
+    validate_ingest_evidence_set_receipt,
 )
 
 
@@ -167,6 +170,96 @@ class TestSearchIngestedDocs:
         extract_path.unlink()
         extract_path.symlink_to(symlink_target)
         assert search_ingested_docs("压实系数", audit_path=audit_file) == []
+
+    def test_newest_disabled_or_untrusted_row_cannot_resurrect_old_evidence(
+        self,
+        tmp_path,
+    ):
+        audit_file, records = _write_trusted_audit(
+            tmp_path,
+            [{"filename": "围墙图.pdf", "text": "围墙压实系数不小于0.97。"}],
+        )
+        original = records[0]
+
+        disabled = {**original, "enabled": False}
+        with audit_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(disabled, ensure_ascii=False) + "\n")
+        assert search_ingested_docs("压实系数", audit_path=audit_file) == []
+
+        renamed_audit, renamed_records = _write_trusted_audit(
+            tmp_path / "renamed",
+            [{"filename": "围墙图.pdf", "text": "围墙压实系数不小于0.97。"}],
+        )
+        renamed = {**renamed_records[0], "filename": "已改名围墙图.pdf"}
+        with renamed_audit.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(renamed, ensure_ascii=False) + "\n")
+        assert search_ingested_docs("压实系数", audit_path=renamed_audit) == []
+
+    def test_search_rejects_symlinked_audit_and_traversal_filename(self, tmp_path):
+        audit_file, records = _write_trusted_audit(
+            tmp_path,
+            [{"filename": "围墙图.pdf", "text": "围墙压实系数不小于0.97。"}],
+        )
+        traversal = {**records[0], "filename": "../围墙图.pdf"}
+        trusted = resolve_trusted_ingest_record(
+            traversal,
+            workspace_root=audit_file.parent.parent,
+        )
+        assert trusted == {"ok": False, "reason": "audit_filename_invalid"}
+
+        external = tmp_path / "external-ingest.jsonl"
+        audit_file.replace(external)
+        audit_file.symlink_to(external)
+        assert search_ingested_docs("压实系数", audit_path=audit_file) == []
+
+    def test_receipt_latest_row_is_scoped_by_project(self, tmp_path):
+        audit_file, records = _write_trusted_audit(
+            tmp_path,
+            [{"filename": "围墙图.pdf", "text": "围墙压实系数不小于0.97。"}],
+        )
+        workspace = audit_file.parent.parent
+        trusted_p1 = resolve_trusted_ingest_record(
+            records[0],
+            workspace_root=workspace,
+        )
+        receipt = build_ingest_evidence_set_receipt(
+            project_id="P1",
+            audit_path=audit_file,
+            trusted_records=[trusted_p1],
+        )
+        cross_project_row = {**records[0], "project_id": "P2"}
+        with audit_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(cross_project_row, ensure_ascii=False) + "\n")
+
+        assert validate_ingest_evidence_set_receipt(
+            receipt,
+            expected_project_id="P1",
+        )["ok"] is True
+        trusted_p2 = resolve_trusted_ingest_record(
+            cross_project_row,
+            workspace_root=workspace,
+        )
+        wrong_scope_receipt = build_ingest_evidence_set_receipt(
+            project_id="P1",
+            audit_path=audit_file,
+            trusted_records=[trusted_p2],
+        )
+        assert wrong_scope_receipt["records"] == []
+
+        with audit_file.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {**records[0], "enabled": False},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        validation = validate_ingest_evidence_set_receipt(
+            receipt,
+            expected_project_id="P1",
+        )
+        assert validation["ok"] is False
+        assert "audit_record_disabled" in validation["errors"]
 
     def test_limit_parameter(self, tmp_path):
         """limit 参数限制结果数量"""

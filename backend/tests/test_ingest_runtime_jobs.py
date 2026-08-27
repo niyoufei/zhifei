@@ -26,6 +26,7 @@ from backend.zhifei_autoplan.project_parameter_evidence import (
     build_project_parameter_evidence,
     validate_project_parameter_evidence,
 )
+from backend.zhifei_autoplan.standard_index import build_standard_index
 
 
 class _Upload:
@@ -137,6 +138,58 @@ def test_ingest_extract_identity_is_accepted_by_drawing_index(
     assert drawing_index["drawings"][0]["sha256"] == saved["sha256"]
     assert drawing_index["drawings"][0]["extract_saved_as"] == saved[
         "extract_saved_as"
+    ]
+
+
+def test_ingest_extract_identity_is_shared_with_standard_index_and_revalidated(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    result = asyncio.run(
+        ingest_router._handle_upload(
+            [
+                _Upload(
+                    (
+                        "GB/T 50326-2017 建设工程项目管理规范。"
+                        "钢筋绑扎施工工艺应分段验收并保留记录。"
+                    ).encode(),
+                    "GB_T_50326-2017_建设工程项目管理规范.txt",
+                )
+            ],
+            project_id="p-standard",
+            source_hint="standard",
+        )
+    )
+    saved = result["saved"][0]
+
+    standard_index = build_standard_index(
+        "示例项目",
+        ["钢筋绑扎施工工艺"],
+        project_id="p-standard",
+        workspace_dir=workspace,
+    )
+
+    assert standard_index["integrity_rejections"] == []
+    assert standard_index["indexed_standard_count"] == 1
+    assert standard_index["standards"][0]["sha256"] == saved["sha256"]
+    assert standard_index["standards"][0]["source_integrity_status"] == "verified"
+
+    extract_path = Path(saved["extract_saved_as"])
+    extract_path.write_bytes(extract_path.read_bytes() + b"tampered")
+    rejected = build_standard_index(
+        "示例项目",
+        ["钢筋绑扎施工工艺"],
+        project_id="p-standard",
+        workspace_dir=workspace,
+    )
+
+    assert rejected["indexed_standard_count"] == 0
+    assert rejected["integrity_rejections"] == [
+        {
+            "filename": "GB_T_50326-2017_建设工程项目管理规范.txt",
+            "code": "extract_text_sha256_mismatch",
+        }
     ]
 
 
@@ -434,6 +487,71 @@ def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
     assert "evidence_set_receipt_invalid" in tamper_reasons["quality_threshold"]
 
     wall_extract.write_bytes(original_extract)
+    same_source_ledger = copy.deepcopy(ledger)
+    same_source_fact = same_source_ledger["facts"]["quality_threshold"]
+    same_source_item = same_source_fact["value"]["items"][0]
+    false_offset = same_source_item["page_start_offset"] + 1
+    same_source_item["offset"] = false_offset
+    same_source_item["end"] = false_offset + 1
+    same_source_item["page_match_start"] = 1
+    same_source_item["page_match_end"] = 2
+    same_source_item["locator"] = (
+        f"{same_source_item['locator'].split('@', 1)[0]}@{false_offset}"
+    )
+    same_source_item["page_text_sha256"] = "a" * 64
+    same_source_item["match_text_sha256"] = "b" * 64
+    same_source_evidence = same_source_fact["evidence"]
+    same_source_evidence["source_sha256"] = _digest(same_source_fact["value"])
+    same_source_evidence["evidence_digest"] = _digest(
+        {
+            key: value
+            for key, value in same_source_evidence.items()
+            if key != "evidence_digest"
+        }
+    )
+    same_source_report = copy.deepcopy(parameter_evidence)
+    same_source_report["quality_threshold"] = copy.deepcopy(same_source_fact)
+    same_source_report["quality_threshold_bundle_digest"] = same_source_evidence[
+        "source_sha256"
+    ]
+    same_source_report_validation = validate_project_parameter_evidence(
+        same_source_report
+    )
+    assert same_source_report_validation["ok"] is False
+    assert "quality_bundle_current_bytes_mismatch" in same_source_report_validation[
+        "errors"
+    ]
+    same_source_ledger["ledger_digest"] = _digest(
+        {
+            key: value
+            for key, value in same_source_ledger.items()
+            if key != "ledger_digest"
+        }
+    )
+    same_source_parameters = copy.deepcopy(parameters)
+    same_source_parameters["project_fact_ledger_digest"] = same_source_ledger[
+        "ledger_digest"
+    ]
+    same_source_gate = _delivery_gate(
+        ledger=same_source_ledger,
+        parameters=same_source_parameters,
+        sections=_formal_sections(same_source_ledger, drawing_locator),
+        cross_index=cross_index,
+    )
+    assert same_source_gate["delivery_allowed"] is False
+    same_source_formal = next(
+        check
+        for check in same_source_gate["checks"]
+        if check["name"] == "formal_project_parameters"
+    )
+    same_source_reasons = {
+        row["field"]: row["reasons"]
+        for row in same_source_formal["source_evidence_errors"]
+    }
+    assert "quality_bundle_current_bytes_mismatch" in same_source_reasons[
+        "quality_threshold"
+    ]
+
     forged_ledger = copy.deepcopy(ledger)
     quality_fact = forged_ledger["facts"]["quality_threshold"]
     forged_item = quality_fact["value"]["items"][0]
@@ -475,6 +593,62 @@ def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
     assert "evidence_set_source_identity_mismatch" in forged_reasons[
         "quality_threshold"
     ]
+
+    audit_rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    revised_wall_row = next(
+        row
+        for row in reversed(audit_rows)
+        if row.get("sha256") == drawings["saved"][0]["sha256"]
+    )
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {**revised_wall_row, "audit_revision_note": "metadata-only-v2"},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    revised_evidence = build_project_parameter_evidence(
+        project_id=project_id,
+        tender={},
+        audit_path=audit_path,
+    )
+    assert revised_evidence["ready"] is True
+    assert revised_evidence["evidence_set_receipt_digest"] != parameter_evidence[
+        "evidence_set_receipt_digest"
+    ]
+    revised_ledger = build_project_fact_ledger_from_inputs(
+        payload={
+            "project_id": project_id,
+            "approved_project_fact_resolutions": approved,
+        },
+        tender={},
+        boq_wbs_cpm={},
+        project_parameter_evidence=revised_evidence,
+    )
+    revised_parameters = probe_missing_parameters(
+        topic="围墙项目",
+        outline=["围墙施工工艺"],
+        requirements=[],
+        tender={},
+        boq={},
+        enterprise_profile={},
+        project_fact_ledger=revised_ledger,
+    )
+    revised_parameters["project_fact_ledger_digest"] = revised_ledger[
+        "ledger_digest"
+    ]
+    revised_gate = _delivery_gate(
+        ledger=revised_ledger,
+        parameters=revised_parameters,
+        sections=_formal_sections(revised_ledger, drawing_locator),
+        cross_index=cross_index,
+    )
+    assert revised_gate["delivery_allowed"] is True, revised_gate
+    assert revised_gate["decision_digest"] != gate["decision_digest"]
 
     assert clarification["saved"][0]["extract_text_sha256"]
 
@@ -637,10 +811,10 @@ def test_parse_cache_keeps_legacy_inline_text_compatible(monkeypatch, tmp_path: 
     assert ingest_router._load_parse_cache(digest) == parsed
 
 
-def test_parse_cache_does_not_reuse_runtime_v3_ocr_cache(monkeypatch, tmp_path: Path) -> None:
+def test_parse_cache_does_not_reuse_runtime_v5_ocr_cache(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "cache")
     digest = hashlib.sha256(b"drawing-cache-source").hexdigest()
-    old_version = "2026.08.runtime-v3-page-ocr"
+    old_version = "2026.08.runtime-v5-source-aware-ocr-cache"
     old_version_digest = hashlib.sha256(old_version.encode("utf-8")).hexdigest()[:12]
     old_path = ingest_router.PARSE_CACHE_DIR / f"{digest}.{old_version_digest}.json"
     old_path.parent.mkdir(parents=True)
@@ -726,7 +900,7 @@ def test_drawing_cache_requires_ocr_for_every_declared_page(
                 hashlib.sha256(f"第{page}页图纸 OCR".encode()).hexdigest()
                 for page in range(1, 28)
             ],
-            "ocr_page_proof_version": "ocr-page-proof-v1",
+            "ocr_page_proof_version": ingest_router.OCR_PAGE_PROOF_VERSION,
             "ocr_error": None,
             "ocr_blank_pages": [],
         },
@@ -820,7 +994,7 @@ def test_standard_cache_is_full_page_and_isolated_from_drawing(
                 hashlib.sha256(f"第{page}页".encode()).hexdigest()
                 for page in range(1, 5)
             ],
-            "ocr_page_proof_version": "ocr-page-proof-v1",
+            "ocr_page_proof_version": ingest_router.OCR_PAGE_PROOF_VERSION,
             "ocr_error": None,
             "ocr_blank_pages": [],
         },
@@ -1092,7 +1266,7 @@ def test_handle_upload_standard_uses_full_page_ocr_and_standard_tag_only(
     assert saved["ocr_pages"] == 3
     assert saved["ocr_page_text_count"] == 3
     assert saved["ocr_page_mapping"] == "source_page_all"
-    assert saved["ocr_page_proof_version"] == "ocr-page-proof-v1"
+    assert saved["ocr_page_proof_version"] == ingest_router.OCR_PAGE_PROOF_VERSION
     assert saved["ocr_source_pages"] == 3
     assert saved["ocr_page_statuses"] == ["text", "blank", "text"]
     assert saved["ocr_blank_pages"] == [2]
@@ -1159,7 +1333,36 @@ def test_handle_upload_rejects_failed_full_page_ocr_proof(
 
     assert exc_info.value.status_code == 422
     assert exc_info.value.detail["code"] == "ALL_FILES_REJECTED"
-    assert exc_info.value.detail["rejected"][0]["code"] == expected_code
+    rejected = exc_info.value.detail["rejected"][0]
+    assert rejected["code"] == expected_code
+    receipt = rejected["ocr_failure_receipt"]
+    assert receipt["schema_version"] == ingest_router.OCR_FAILURE_RECEIPT_VERSION
+    assert receipt["code"] == expected_code
+    assert receipt["source_sha256"] == hashlib.sha256(
+        b"failed-full-page-pdf"
+    ).hexdigest()
+    assert receipt["ocr_policy"] == ingest_router._ocr_cache_policy(source_hint)
+    assert receipt["diagnostics"] == {
+        "schema_version": "ocr-diagnostics-v1",
+        "machine_code": "OCR_PAGE_PROOF_INCOMPLETE",
+        "error_code": "page_ocr_incomplete",
+        "engine": "tesseract",
+        "lang": "chi_sim+eng",
+        "declared_pages": 2,
+        "source_pages": 2,
+        "attempted_pages": 2,
+        "status_counts": {"failed": 1, "text": 1},
+        "unreadable_pages": [],
+        "failed_pages": [1],
+        "timeout_pages": [],
+        "recovered_pages": [],
+    }
+    assert len(receipt["receipt_digest"]) == 64
+    assert "第二页" not in json.dumps(receipt, ensure_ascii=False)
+    assert not ingest_router._parse_cache_path(
+        receipt["source_sha256"],
+        source_hint,
+    ).exists()
 
 
 def test_parse_cache_keeps_small_extracted_text_inline(monkeypatch, tmp_path: Path) -> None:

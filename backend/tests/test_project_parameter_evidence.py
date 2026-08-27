@@ -110,13 +110,11 @@ def test_builds_six_process_bound_quality_items_with_reversible_locators(
             pages=1,
             source_hint="drawing_standard",
         ),
-        # This historical row has the wrong project id.  It is admitted only
-        # because the current tender matrix carries its exact full SHA.
         _record(
             filename="答疑.pdf",
             sha256=answer_sha,
             extract_path=answer,
-            project_id="legacy-wrong-scope",
+            project_id="P1",
             pages=2,
             source_hint="tender_qa",
             tags=["tender", "qa"],
@@ -164,6 +162,84 @@ def test_builds_six_process_bound_quality_items_with_reversible_locators(
         assert f"#p{item['page']}_{item['document_sha256']}@" in item["locator"]
         assert len(item["page_text_sha256"]) == 64
         assert item["status"] == "verified"
+
+
+def test_cross_project_tender_sha_does_not_authorize_parameter_evidence(
+    tmp_path: Path,
+) -> None:
+    answer = tmp_path / "answer.txt"
+    answer.write_text(
+        "问题：基础和垫层强度？回复：基础 C30 垫层C20。"
+        "地面涂膜防水厚度按照多少计入？回复：1.8mm厚。",
+        encoding="utf-8",
+    )
+    answer_sha = hashlib.sha256(b"answer-source").hexdigest()
+    audit = tmp_path / "audit" / "ingest.jsonl"
+    _write_audit(
+        audit,
+        [
+            _record(
+                filename="答疑.pdf",
+                sha256=answer_sha,
+                extract_path=answer,
+                project_id="legacy-wrong-scope",
+                pages=1,
+                source_hint="tender_qa",
+                tags=["tender", "qa"],
+            )
+        ],
+    )
+    tender = {
+        "items": [
+            {
+                "source_spans": [
+                    {
+                        "file_name": "答疑.pdf",
+                        "document_sha256": answer_sha,
+                        "source_sha256": answer_sha,
+                    }
+                ]
+            }
+        ]
+    }
+
+    result = build_project_parameter_evidence(
+        project_id="P1",
+        tender=tender,
+        audit_path=audit,
+    )
+
+    assert result["ready"] is False
+    assert result["status"] == "HOLD_PROJECT_PARAMETER_EVIDENCE_MISSING"
+    assert result["source_count"] == 0
+
+
+def test_newer_same_bytes_in_other_project_do_not_shadow_current_project(
+    tmp_path: Path,
+) -> None:
+    wall = tmp_path / "wall.txt"
+    wall.write_text("压实系数不小于0.97。", encoding="utf-8")
+    current = _record(
+        filename="围墙.pdf",
+        sha256=_sha("same-wall"),
+        extract_path=wall,
+        project_id="P1",
+        pages=1,
+        source_hint="drawing_standard",
+    )
+    audit = tmp_path / "audit" / "ingest.jsonl"
+    _write_audit(audit, [current, {**current, "project_id": "P2"}])
+
+    result = build_project_parameter_evidence(
+        project_id="P1",
+        tender={},
+        audit_path=audit,
+    )
+
+    assert result["ready"] is True
+    assert result["source_count"] == 1
+    assert result["matched_item_count"] == 1
+    assert validate_project_parameter_evidence(result)["ok"] is True
 
 
 def test_conflicting_process_metric_values_hold_without_selecting_a_fact(

@@ -294,7 +294,10 @@ def test_drawing_pdf_ocr_rejects_short_page_text_sequence(
         )
     )
 
-    assert result is None
+    assert isinstance(result, ocr_runtime.OcrResult)
+    assert result.pages == 3
+    assert len(result.page_texts) == 2
+    assert ingest_router._full_page_ocr_result_proof(result, 3) is None
 
 
 def test_drawing_pdf_ocr_rejects_failed_page_even_when_page_count_matches(
@@ -333,7 +336,10 @@ def test_drawing_pdf_ocr_rejects_failed_page_even_when_page_count_matches(
         )
     )
 
-    assert result is None
+    assert isinstance(result, ocr_runtime.OcrResult)
+    assert result.error == "page_ocr_incomplete"
+    assert result.page_statuses == ("failed", "text")
+    assert ingest_router._full_page_ocr_result_proof(result, 2) is None
 
 
 @pytest.mark.parametrize("declared_pages", [None, 0, True])

@@ -54,7 +54,15 @@ def resolve_trusted_ingest_record(
     sha256 = str(rec.get("sha256") or "").strip().lower()
     file_id = str(rec.get("file_id") or "").strip().lower()
     extract_sha256 = str(rec.get("extract_text_sha256") or "").strip().lower()
-    filename = Path(str(rec.get("filename") or "")).name
+    raw_filename = str(rec.get("filename") or "").strip()
+    filename = Path(raw_filename).name
+    if (
+        not raw_filename
+        or raw_filename != filename
+        or "/" in raw_filename
+        or "\\" in raw_filename
+    ):
+        return {"ok": False, "reason": "audit_filename_invalid"}
     if (
         _FULL_SHA256_RE.fullmatch(sha256) is None
         or _FULL_SHA256_RE.fullmatch(file_id) is None
@@ -146,8 +154,13 @@ def build_ingest_evidence_set_receipt(
     workspace_root = path.parent.parent.resolve(strict=False)
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
+    expected_project_id = str(project_id or "").strip()
     for trusted in trusted_records:
-        if trusted.get("ok") is not True:
+        if (
+            trusted.get("ok") is not True
+            or str(trusted.get("project_id") or "").strip()
+            != expected_project_id
+        ):
             continue
         source_sha256 = str(trusted.get("source_sha256") or "").strip().lower()
         if source_sha256 in seen:
@@ -173,7 +186,7 @@ def build_ingest_evidence_set_receipt(
     records.sort(key=lambda row: (row["source_sha256"], row["filename"]))
     core = {
         "schema_version": INGEST_EVIDENCE_SET_RECEIPT_SCHEMA,
-        "project_id": str(project_id or "").strip(),
+        "project_id": expected_project_id,
         "workspace_root": str(workspace_root),
         "audit_path": str(path),
         "records": records,
@@ -217,9 +230,12 @@ def validate_ingest_evidence_set_receipt(
         or audit_path.is_symlink()
         or not audit_path.is_file()
         or not _is_within(audit_path, workspace_root / "audit")
+        or audit_path.parent.resolve(strict=False)
+        != (workspace_root / "audit").resolve(strict=False)
+        or audit_path.name != "ingest.jsonl"
     ):
         errors.append("receipt_audit_path_invalid")
-        current_rows: dict[str, dict[str, Any]] = {}
+        current_rows: dict[tuple[str, str], dict[str, Any]] = {}
     else:
         current_rows = {}
         try:
@@ -237,8 +253,10 @@ def validate_ingest_evidence_set_receipt(
             if not isinstance(row, dict):
                 continue
             sha256 = str(row.get("sha256") or "").strip().lower()
-            if sha256 and sha256 not in current_rows:
-                current_rows[sha256] = row
+            row_project_id = str(row.get("project_id") or "").strip()
+            content_id = (row_project_id, sha256)
+            if sha256 and content_id not in current_rows:
+                current_rows[content_id] = row
 
     seen: set[str] = set()
     for raw in records:
@@ -250,7 +268,7 @@ def validate_ingest_evidence_set_receipt(
             errors.append("receipt_record_duplicate")
             continue
         seen.add(source_sha256)
-        current = current_rows.get(source_sha256)
+        current = current_rows.get((project_id, source_sha256))
         if not isinstance(current, dict):
             errors.append("receipt_audit_row_missing")
             continue
@@ -260,6 +278,9 @@ def validate_ingest_evidence_set_receipt(
         )
         if trusted.get("ok") is not True:
             errors.append(str(trusted.get("reason") or "receipt_record_untrusted"))
+            continue
+        if str(trusted.get("project_id") or "").strip() != project_id:
+            errors.append("receipt_record_project_mismatch")
             continue
         expected = {
             "audit_row_digest": trusted["audit_row_digest"],
@@ -504,7 +525,12 @@ def search_ingested_docs(
         if audit_path is not None and str(audit_path).strip()
         else Path("backend/data/audit/ingest.jsonl")
     )
-    if not resolved_audit_path.exists():
+    if (
+        resolved_audit_path.is_symlink()
+        or not resolved_audit_path.is_file()
+        or resolved_audit_path.name != "ingest.jsonl"
+        or resolved_audit_path.parent.name != "audit"
+    ):
         return []
     uniq = _tokenize_query(query)
     if not uniq:
@@ -516,9 +542,21 @@ def search_ingested_docs(
         mtime_ns = 0
     workspace_root = resolved_audit_path.parent.parent.resolve(strict=False)
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
+    seen_content_ids: set[tuple[str, str]] = set()
     for rec in _load_audit_records(str(resolved_audit_path), mtime_ns):
+        record_project_id = str(rec.get("project_id") or "").strip()
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
+        source_sha256 = str(rec.get("sha256") or "").strip().lower()
+        if _FULL_SHA256_RE.fullmatch(source_sha256) is None:
+            continue
+        content_id = (record_project_id, source_sha256)
+        if content_id in seen_content_ids:
+            continue
+        # Audit rows are newest-first.  Occupy the content identity before
+        # status, tag, and byte validation so a stale row cannot resurrect
+        # evidence disabled or superseded by the newest row.
+        seen_content_ids.add(content_id)
         if not _tags_match(
             effective_record_tags(rec),
             require_tags=require_tags,

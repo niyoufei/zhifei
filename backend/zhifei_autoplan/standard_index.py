@@ -16,7 +16,10 @@ from backend.zhifei_autoplan.compliance_runtime import (
     _compliance_root,
     _load_official_registry,
 )
-from backend.zhifei_autoplan.evidence import format_hit_locator
+from backend.zhifei_autoplan.evidence import (
+    format_hit_locator,
+    resolve_trusted_ingest_record,
+)
 from backend.zhifei_autoplan.ingest_tags import effective_record_tags
 
 _HAN_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
@@ -137,22 +140,6 @@ def _declared_page_count(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value if value > 0 else None
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-    except (OSError, ValueError):
-        return False
-    return True
 
 
 def _normalized_identity_name(value: Any) -> str:
@@ -698,54 +685,19 @@ def build_standard_index(
         if not filename:
             continue
 
-        record_workspace_raw = str(record.get("workspace_dir") or "").strip()
-        record_workspace = Path(record_workspace_raw)
-        source_path = Path(str(record.get("saved_as") or ""))
-        extract_path = Path(str(record.get("extract_saved_as") or ""))
-        expected_extract_sha256 = str(
-            record.get("extract_text_sha256") or ""
-        ).strip().lower()
-        if (
-            not record_workspace_raw
-            or record_workspace.resolve(strict=False) != workspace_root
-        ):
-            _reject(filename, "audit_workspace_mismatch")
+        trusted = resolve_trusted_ingest_record(
+            record,
+            workspace_root=workspace_root,
+            read_text=True,
+        )
+        if trusted.get("ok") is not True:
+            _reject(
+                filename,
+                str(trusted.get("reason") or "evidence_file_unreadable"),
+            )
             continue
-        if (
-            not _is_within(source_path, workspace_root / "uploads")
-            or source_path.is_symlink()
-            or not source_path.is_file()
-            or source_path.name != f"{sha256}_{Path(filename).name}"
-        ):
-            _reject(filename, "source_path_outside_workspace_or_not_full_sha")
-            continue
-        if (
-            not _is_within(extract_path, workspace_root / "extracts")
-            or extract_path.is_symlink()
-            or not extract_path.is_file()
-            or extract_path.name
-            != f"{sha256}_{expected_extract_sha256}.txt"
-        ):
-            _reject(filename, "extract_path_outside_workspace_or_not_full_sha")
-            continue
-        try:
-            if _file_sha256(source_path) != sha256:
-                _reject(filename, "source_bytes_sha256_mismatch")
-                continue
-            if (
-                not _FULL_SHA256_RE.fullmatch(expected_extract_sha256)
-                or _file_sha256(extract_path) != expected_extract_sha256
-            ):
-                _reject(filename, "extract_text_sha256_mismatch")
-                continue
-        except OSError:
-            _reject(filename, "evidence_file_unreadable")
-            continue
-        try:
-            extract_text = extract_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            _reject(filename, "extract_text_unreadable")
-            continue
+        expected_extract_sha256 = str(trusted["extract_text_sha256"])
+        extract_text = str(trusted.get("extract_text") or "")
         declared_pages = _declared_page_count(record.get("pages"))
         standard_pdf = (
             str(record.get("doc_type") or "").strip().lower() == "pdf"

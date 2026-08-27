@@ -82,66 +82,15 @@ def _audit_path(value: str | Path | None) -> Path:
     )
 
 
-def _tender_source_sha256s(tender: Mapping[str, Any] | None) -> set[str]:
-    root = tender if isinstance(tender, Mapping) else {}
-    document_sha256s: set[str] = set()
-
-    def _remember(value: Any) -> None:
-        digest = str(value or "").strip().lower()
-        if _FULL_SHA256_RE.fullmatch(digest):
-            document_sha256s.add(digest)
-
-    for item in root.get("items") if isinstance(root.get("items"), list) else []:
-        if not isinstance(item, Mapping):
-            continue
-        spans = item.get("source_spans") if isinstance(item.get("source_spans"), list) else []
-        for span in spans:
-            if isinstance(span, Mapping):
-                _remember(
-                    span.get("document_sha256") or span.get("source_sha256")
-                )
-
-    extraction_meta = (
-        root.get("extraction_meta")
-        if isinstance(root.get("extraction_meta"), Mapping)
-        else {}
-    )
-    project_facts = (
-        extraction_meta.get("project_facts")
-        if isinstance(extraction_meta.get("project_facts"), Mapping)
-        else {}
-    )
-    for fact in project_facts.values():
-        if not isinstance(fact, Mapping):
-            continue
-        evidence = fact.get("evidence") if isinstance(fact.get("evidence"), Mapping) else {}
-        _remember(
-            evidence.get("document_sha256") or evidence.get("source_sha256")
-        )
-    return document_sha256s
-
-
-def _source_is_in_scope(
-    record: Mapping[str, Any],
-    *,
-    project_id: str,
-    tender_document_sha256s: set[str],
-) -> bool:
-    if str(record.get("project_id") or "").strip() == project_id:
-        return True
-    sha256 = str(record.get("sha256") or record.get("file_id") or "").strip().lower()
-    return sha256 in tender_document_sha256s
-
-
 def _source_records(
     *,
     project_id: str,
     tender: Mapping[str, Any] | None,
     audit_path: Path,
 ) -> list[dict[str, Any]]:
-    if not project_id or not audit_path.is_file():
+    del tender  # Every claim-grade audit row must be bound to this project.
+    if not project_id or audit_path.is_symlink() or not audit_path.is_file():
         return []
-    tender_document_sha256s = _tender_source_sha256s(tender)
     workspace_root = audit_path.parent.parent.resolve(strict=False)
     try:
         lines = audit_path.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -158,6 +107,8 @@ def _source_records(
             continue
         sha256 = str(record.get("sha256") or "").strip().lower()
         file_id = str(record.get("file_id") or "").strip().lower()
+        if str(record.get("project_id") or "").strip() != project_id:
+            continue
         if (
             _FULL_SHA256_RE.fullmatch(sha256) is None
             or _FULL_SHA256_RE.fullmatch(file_id) is None
@@ -167,12 +118,6 @@ def _source_records(
             continue
         seen.add(sha256)
         if record.get("enabled") is False or record.get("usable") is False:
-            continue
-        if not _source_is_in_scope(
-            record,
-            project_id=project_id,
-            tender_document_sha256s=tender_document_sha256s,
-        ):
             continue
         tags = set(effective_record_tags(record))
         if not tags.intersection({"drawing", "tender", "qa"}) or "logo" in tags:
@@ -604,6 +549,88 @@ def build_project_parameter_evidence(
     }
 
 
+def validate_project_parameter_fact_against_current_evidence(
+    fact: Mapping[str, Any] | None,
+    *,
+    expected_project_id: str,
+) -> dict[str, Any]:
+    """Rebuild a process-bound fact from the receipt's current trusted bytes."""
+
+    value = dict(fact or {})
+    evidence = (
+        value.get("evidence")
+        if isinstance(value.get("evidence"), Mapping)
+        else {}
+    )
+    receipt = (
+        evidence.get("evidence_set_receipt")
+        if isinstance(evidence.get("evidence_set_receipt"), Mapping)
+        else {}
+    )
+    errors: list[str] = []
+    receipt_validation = validate_ingest_evidence_set_receipt(
+        receipt,
+        expected_project_id=expected_project_id,
+    )
+    if receipt_validation.get("ok") is not True:
+        errors.append("evidence_set_receipt_invalid")
+        return {
+            "ok": False,
+            "errors": errors,
+            "receipt_validation": receipt_validation,
+        }
+
+    rebuilt = build_project_parameter_evidence(
+        project_id=expected_project_id,
+        tender={},
+        audit_path=str(receipt.get("audit_path") or ""),
+    )
+    rebuilt_fact = (
+        rebuilt.get("quality_threshold")
+        if isinstance(rebuilt.get("quality_threshold"), Mapping)
+        else {}
+    )
+    rebuilt_evidence = (
+        rebuilt_fact.get("evidence")
+        if isinstance(rebuilt_fact.get("evidence"), Mapping)
+        else {}
+    )
+    claimed_receipt_digest = str(
+        evidence.get("evidence_set_receipt_digest") or ""
+    ).strip().lower()
+    rebuilt_receipt_digest = str(
+        rebuilt.get("evidence_set_receipt_digest") or ""
+    ).strip().lower()
+    if rebuilt.get("ready") is not True or not rebuilt_fact:
+        errors.append("quality_bundle_current_evidence_unavailable")
+    if _sha256(value.get("value")) != _sha256(rebuilt_fact.get("value")):
+        errors.append("quality_bundle_current_bytes_mismatch")
+    if (
+        claimed_receipt_digest
+        != str(receipt.get("receipt_digest") or "").strip().lower()
+        or claimed_receipt_digest != rebuilt_receipt_digest
+        or dict(receipt)
+        != dict(rebuilt.get("evidence_set_receipt") or {})
+    ):
+        errors.append("evidence_set_receipt_current_mismatch")
+    claimed_bundle_digest = str(evidence.get("source_sha256") or "").strip().lower()
+    if (
+        claimed_bundle_digest
+        != str(rebuilt.get("quality_threshold_bundle_digest") or "").strip().lower()
+        or claimed_bundle_digest
+        != str(rebuilt_evidence.get("source_sha256") or "").strip().lower()
+    ):
+        errors.append("quality_bundle_digest_current_mismatch")
+    return {
+        "ok": not errors,
+        "errors": list(dict.fromkeys(errors)),
+        "receipt_validation": receipt_validation,
+        "rebuilt_status": rebuilt.get("status"),
+        "rebuilt_bundle_digest": rebuilt.get("quality_threshold_bundle_digest"),
+        "rebuilt_receipt_digest": rebuilt_receipt_digest,
+    }
+
+
 def validate_project_parameter_evidence(value: Any) -> dict[str, Any]:
     """Validate the report contract before it may enter the fact ledger."""
 
@@ -717,10 +744,19 @@ def validate_project_parameter_evidence(value: Any) -> dict[str, Any]:
         or dict(fact_receipt) != dict(receipt)
     ):
         errors.append("evidence_set_receipt_binding_mismatch")
+    current_evidence_validation = (
+        validate_project_parameter_fact_against_current_evidence(
+            fact if isinstance(fact, Mapping) else {},
+            expected_project_id=str(report.get("project_id") or "").strip(),
+        )
+    )
+    if current_evidence_validation.get("ok") is not True:
+        errors.extend(current_evidence_validation.get("errors") or [])
     return {
         "ok": not errors,
         "errors": list(dict.fromkeys(errors)),
         "claimed_digest": claimed_digest,
         "computed_digest": computed_digest,
         "evidence_set_receipt_validation": receipt_validation,
+        "current_evidence_validation": current_evidence_validation,
     }
