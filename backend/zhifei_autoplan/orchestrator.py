@@ -382,6 +382,9 @@ def _build_consistency_review_prompt(
         scope_instruction = (
             "仅复核所选章节自身及所选章节之间的一致性；"
             "不得因为其他招标章节未提供而扣分或判定全文缺失。"
+            "明确标注为“经验值”“待确认”或“须复核”的参数属于非交付验证占位，"
+            "只能列为警告，不能仅因尚未确认而判定 BLOCK；"
+            "仅当已确认值互相矛盾、强制规范不可信或章节内部存在实质性安全冲突时判定 BLOCK。"
         )
     else:
         scope_instruction = "对所提供的完整招标目录正文执行全文一致性复核。"
@@ -395,6 +398,34 @@ def _build_consistency_review_prompt(
         "\n\n"
         + "\n\n".join(consistency_material)
     )[:24000]
+
+
+def _build_consistency_material(
+    sections: List[Dict[str, Any]],
+    *,
+    delivery_scope: str,
+) -> List[str]:
+    """Build a bounded, fair review sample instead of reading only each head."""
+
+    rows = [row for row in sections if isinstance(row, dict)]
+    if not rows:
+        return []
+    total_budget = 21000
+    per_section_budget = max(1500, total_budget // len(rows))
+    material: List[str] = []
+    for row in rows:
+        title = str(row.get("title") or "").strip()
+        content = str(row.get("content") or "").strip()
+        if len(content) > per_section_budget:
+            head_budget = int(per_section_budget * 0.7)
+            tail_budget = per_section_budget - head_budget
+            content = (
+                content[:head_budget]
+                + "\n\n[中段因审校上下文预算省略]\n\n"
+                + content[-tail_budget:]
+            )
+        material.append(f"## {title}\n{content}")
+    return material
 
 
 def _build_weights_and_penalties(tender: Dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -3160,13 +3191,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             row for row in review_results if not bool(row.get("ok"))
         ]
 
-        consistency_material = []
-        for sec in sections:
-            if not isinstance(sec, dict):
-                continue
-            title = str(sec.get("title") or "").strip()
-            content = str(sec.get("content") or "").strip()
-            consistency_material.append(f"## {title}\n{content[:900]}")
+        consistency_material = _build_consistency_material(
+            sections,
+            delivery_scope=delivery_scope,
+        )
         consistency_prompt = _build_consistency_review_prompt(
             consistency_material,
             delivery_scope=delivery_scope,

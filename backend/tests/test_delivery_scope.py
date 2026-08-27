@@ -10,6 +10,7 @@ from backend.app.routers.actions_bridge import (
 )
 from backend.zhifei_autoplan.orchestrator import (
     _build_chapter_validation_quality_gate,
+    _build_consistency_material,
     _build_consistency_review_prompt,
     _normalize_delivery_scope,
     _validate_strict_outline_for_scope,
@@ -179,8 +180,24 @@ def test_chapter_validation_consistency_review_is_scope_aware_and_machine_readab
     )
 
     assert "不得因为其他招标章节未提供而扣分" in prompt
+    assert "只能列为警告" in prompt
     assert "DECISION: PASS" in prompt
     assert "DECISION: BLOCK" in prompt
+
+
+def test_consistency_review_material_preserves_chapter_head_and_tail() -> None:
+    content = "头部依据" + ("中" * 24000) + "尾部结论"
+
+    material = _build_consistency_material(
+        [{"title": "第一章", "content": content}],
+        delivery_scope="chapter_validation",
+    )
+
+    assert len(material) == 1
+    assert "头部依据" in material[0]
+    assert "尾部结论" in material[0]
+    assert "中段因审校上下文预算省略" in material[0]
+    assert len(material[0]) < len(content)
 
 
 def test_chapter_validation_quality_gate_fails_low_section_or_model_review() -> None:
