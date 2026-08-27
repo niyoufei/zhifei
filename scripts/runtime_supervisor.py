@@ -46,6 +46,8 @@ STABLE_RESET_SECONDS = 120.0
 DEFAULT_HEALTH_INTERVAL_SECONDS = 3.0
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 45.0
 DEFAULT_STOP_GRACE_SECONDS = 12.0
+START_CONFIRM_TIMEOUT_SECONDS = 60.0
+START_CHILD_REAP_TIMEOUT_SECONDS = 5.0
 DEFAULT_EVENT_LOG_BYTES = 5 * 1024 * 1024
 DEFAULT_EVENT_LOG_ARCHIVES = 3
 STATE_FILE_NAME = "supervisor.json"
@@ -2347,7 +2349,7 @@ def start_command(args: argparse.Namespace) -> int:
         close_fds=True,
         start_new_session=True,
     )
-    deadline = time.monotonic() + 15.0
+    deadline = time.monotonic() + START_CONFIRM_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if child.poll() is not None:
             raise SupervisorError(
@@ -2376,6 +2378,17 @@ def start_command(args: argparse.Namespace) -> int:
             return 0
         time.sleep(0.1)
     child.terminate()
+    try:
+        child.wait(timeout=START_CHILD_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        try:
+            child.wait(timeout=START_CHILD_REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise SupervisorError(
+                "SUPERVISOR_START_CLEANUP_FAILED",
+                "监管器启动超时且候选进程无法确认停止",
+            ) from exc
     raise SupervisorError(
         "SUPERVISOR_START_TIMEOUT", "监管器启动状态确认超时，请查看事件日志"
     )

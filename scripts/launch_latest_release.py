@@ -55,6 +55,7 @@ RUNNING_IDENTITY_FIELDS = (
     "runtime_digest",
 )
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+SUPERVISOR_START_COMMAND_TIMEOUT_SECONDS = 120.0
 
 
 class LaunchError(RuntimeError):
@@ -474,7 +475,16 @@ def launch_latest(
         }:
             raise LaunchError("LAUNCH_STALE_STATE_BLOCKED", "监管状态矛盾或熔断，禁止自动重启")
         _assert_current_unchanged(snapshot)
-        start_result = runner(build_start_argv(spec), spec.release_dir, 20.0)
+        # The start wrapper and the detached supervisor both reverse-verify the
+        # sealed runtime before the first state write.  A full runtime digest
+        # takes longer than the generic command budget on real installations.
+        # Keep this timeout above the supervisor's bounded confirmation window
+        # so the wrapper, rather than subprocess.run, always owns cleanup.
+        start_result = runner(
+            build_start_argv(spec),
+            spec.release_dir,
+            SUPERVISOR_START_COMMAND_TIMEOUT_SECONDS,
+        )
         start_payload = _parse_command_payload(start_result, accepted_codes={0})
         if str(start_payload.get("release_id") or "") != spec.identity.release_id:
             raise LaunchError("LAUNCH_START_IDENTITY_MISMATCH", "监管器启动回执身份不匹配")

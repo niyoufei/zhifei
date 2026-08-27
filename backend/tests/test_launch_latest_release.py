@@ -151,12 +151,14 @@ def test_not_running_starts_once_verifies_health_then_opens(
 ) -> None:
     record, base = sealed_release
     commands: list[list[str]] = []
+    command_timeouts: list[tuple[str, float]] = []
     status_calls = 0
 
     def runner(argv, cwd, timeout):
         nonlocal status_calls
         command = list(argv)
         commands.append(command)
+        command_timeouts.append((command[2], timeout))
         assert cwd == Path(record["release_dir"])
         assert timeout > 0
         if command[2] == "start":
@@ -200,6 +202,9 @@ def test_not_running_starts_once_verifies_health_then_opens(
     assert result["status"] == "healthy"
     assert result["start_calls"] == 1
     assert [command[2] for command in commands].count("start") == 1
+    assert next(
+        timeout for command, timeout in command_timeouts if command == "start"
+    ) == launcher.SUPERVISOR_START_COMMAND_TIMEOUT_SECONDS
     assert "stop" not in [command[2] for command in commands]
     start = next(command for command in commands if command[2] == "start")
     assert start == launcher.build_start_argv(

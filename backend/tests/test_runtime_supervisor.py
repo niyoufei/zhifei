@@ -8,11 +8,13 @@ import stat
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from scripts import runtime_supervisor as supervisor
+from scripts import launch_latest_release as launcher
 from scripts import launch_latest_release_bootstrap as bootstrap
 
 
@@ -164,6 +166,71 @@ def _health_body(config: supervisor.SupervisorConfig, **overrides: Any) -> bytes
     payload: dict[str, Any] = {"ok": True, **config.identity.as_dict()}
     payload.update(overrides)
     return json.dumps(payload).encode("utf-8")
+
+
+def test_start_timeout_reaps_detached_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+
+    class _Candidate:
+        pid = 7311
+
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def terminate():
+            calls.append("terminate")
+
+        @staticmethod
+        def kill():
+            calls.append("kill")
+
+        @staticmethod
+        def wait(timeout=None):
+            calls.append(("wait", timeout))
+            if calls.count(("wait", supervisor.START_CHILD_REAP_TIMEOUT_SECONDS)) == 1:
+                raise subprocess.TimeoutExpired("candidate", timeout)
+            return 0
+
+    config = SimpleNamespace(
+        validate=lambda: None,
+        release_dir=tmp_path.resolve(),
+        python_executable=Path("/fixture/python"),
+        backend_port=18010,
+        ui_port=18501,
+        identity=SimpleNamespace(
+            system_id="docgen-system",
+            release_id="release-fixture1234567890abcdef",
+            manifest_digest="a" * 64,
+            source_digest="b" * 64,
+            runtime_digest="c" * 64,
+        ),
+        state_dir=(tmp_path / "state").resolve(),
+        log_dir=(tmp_path / "logs").resolve(),
+        env_file=None,
+    )
+    ticks = iter((0.0, supervisor.START_CONFIRM_TIMEOUT_SECONDS + 1.0))
+    monkeypatch.setattr(supervisor, "_config_from_args", lambda _args: config)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *args, **kwargs: _Candidate())
+    monkeypatch.setattr(supervisor.time, "monotonic", lambda: next(ticks))
+
+    with pytest.raises(supervisor.SupervisorError) as caught:
+        supervisor.start_command(SimpleNamespace())
+
+    assert caught.value.code == "SUPERVISOR_START_TIMEOUT"
+    assert calls == [
+        "terminate",
+        ("wait", supervisor.START_CHILD_REAP_TIMEOUT_SECONDS),
+        "kill",
+        ("wait", supervisor.START_CHILD_REAP_TIMEOUT_SECONDS),
+    ]
+    assert (
+        supervisor.START_CONFIRM_TIMEOUT_SECONDS
+        < launcher.SUPERVISOR_START_COMMAND_TIMEOUT_SECONDS
+    )
 
 
 def _rewrite_manifest(
