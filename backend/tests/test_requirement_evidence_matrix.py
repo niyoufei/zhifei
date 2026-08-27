@@ -4,6 +4,7 @@ from backend.zhifei_autoplan.requirement_evidence_matrix import (
     build_requirement_evidence_plan,
     finalize_requirement_evidence_matrix,
     requirement_prompt_lines_for_chapter,
+    scope_requirement_evidence_plan_to_chapters,
     validate_chapter_requirement_evidence,
     validate_requirement_evidence_matrix,
     validate_requirement_evidence_plan_readiness,
@@ -70,6 +71,70 @@ def test_plan_sanitizes_snippets_and_assigns_accountability():
     assert f"【证据:{locator}】" in prompt
     assert "须形成材料进场" not in prompt
     assert validate_requirement_evidence_plan_readiness(plan)["ok"] is True
+
+
+def test_chapter_validation_scope_drops_unselected_and_document_controls():
+    contract = _agent_contract()
+    contract["chapters"].append(
+        {"chapter_id": "CH-002", "title": "安全生产", "agents": {}}
+    )
+    full_plan = build_requirement_evidence_plan(
+        tender={},
+        chapter_requirements={
+            "质量管理与验收": ["必须形成质量验收闭环"],
+            "安全生产": ["必须形成安全巡检闭环"],
+        },
+        global_requirements=["总页数不超过50页。"],
+        agent_contract=contract,
+    )
+
+    scoped = scope_requirement_evidence_plan_to_chapters(
+        full_plan,
+        ["质量管理与验收"],
+    )
+
+    assert validate_requirement_evidence_matrix(scoped)["ok"] is True
+    assert scoped["summary"]["scope"] == "chapter_validation"
+    assert scoped["summary"]["unmapped_count"] == 0
+    assert [row["target_chapters"] for row in scoped["rows"]] == [
+        ["质量管理与验收"]
+    ]
+    assert all(
+        row.get("verification_mode") != "document_control"
+        for row in scoped["rows"]
+    )
+
+
+def test_chapter_validation_scopes_after_full_outline_ownership_mapping():
+    full_contract = {
+        "chapters": [
+            {"chapter_id": "CH-001", "title": "质量管理与验收", "agents": {}},
+            {"chapter_id": "CH-002", "title": "安全消防措施", "agents": {}},
+        ]
+    }
+    full_plan = build_requirement_evidence_plan(
+        tender={
+            "items": [
+                {
+                    "dimension": "安全等级",
+                    "keywords": ["消防巡检"],
+                    "mandatory": True,
+                }
+            ]
+        },
+        chapter_requirements={},
+        global_requirements=[],
+        agent_contract=full_contract,
+    )
+
+    assert full_plan["rows"][0]["target_chapters"] == ["安全消防措施"]
+    scoped = scope_requirement_evidence_plan_to_chapters(
+        full_plan,
+        ["质量管理与验收"],
+    )
+
+    assert scoped["rows"] == []
+    assert validate_requirement_evidence_plan_readiness(scoped)["ok"] is True
 
 
 def test_prompt_uses_basename_and_never_leaks_local_source_path():

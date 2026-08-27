@@ -1384,6 +1384,119 @@ class TestRunAutoplan:
         assert mock_dependencies["writer"].write.await_count == 1
         assert saved == ["质量管理"]
 
+    @pytest.mark.asyncio
+    async def test_valid_resume_copies_section_into_new_checkpoint_namespace(
+        self, mock_dependencies
+    ):
+        events = []
+        resumed = {
+            "title": "工程概况",
+            "content": "已核验的原任务章节正文，检查频次为1次/日。",
+        }
+        saved = []
+        loaded = []
+        mock_dependencies["docs"].return_value = [
+            {
+                "sha256": "d" * 64,
+                "offset": 12,
+                "snippet": "当前招标文件中的现场组织约束",
+            }
+        ]
+
+        def _load_after_dynamic_context(**kwargs):
+            # The chapter's real KG/document retrieval must finish before a
+            # persisted section is considered for reuse.
+            assert mock_dependencies["kg"].called
+            assert mock_dependencies["docs"].called
+            loaded.append(kwargs)
+            return resumed
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.load_section_checkpoint",
+            side_effect=_load_after_dynamic_context,
+        ) as load_checkpoint, patch(
+            "backend.zhifei_autoplan.orchestrator.save_section_checkpoint",
+            side_effect=lambda **kwargs: saved.append(kwargs)
+            or {"saved_chapter_count": 1, "status": "running"},
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.finalize_generation_checkpoint",
+            return_value={"saved_chapter_count": 1, "status": "draft_complete"},
+        ):
+            result = await run_autoplan(
+                {
+                    "outline": ["工程概况"],
+                    "project_id": "P-CONTEXT-RESUME",
+                    "variant_id": 6,
+                    "quality_strict": False,
+                    "requirement_evidence_hard_gate": False,
+                    "auto_remediate": False,
+                    "generate_images": False,
+                    "dry_run": False,
+                    "_checkpoint_namespace": "new-job",
+                    "_resume_checkpoint_namespace": "old-job",
+                    "_progress_callback": events.append,
+                }
+            )
+
+        assert mock_dependencies["writer"].write.await_count == 0
+        assert load_checkpoint.call_args.kwargs["namespace"] == "old-job"
+        assert load_checkpoint.call_args.kwargs["scope"] == "variant-6"
+        assert len(loaded[0]["chapter_context_digest"]) == 64
+        assert loaded[0]["binding"]["delivery_scope"] == "document"
+        assert saved[0]["namespace"] == "new-job"
+        assert saved[0]["scope"] == "variant-6"
+        assert (
+            saved[0]["chapter_context_digest"]
+            == loaded[0]["chapter_context_digest"]
+        )
+        assert saved[0]["result"]["content"] == resumed["content"]
+        assert "chapter_resumed" in [event.get("event") for event in events]
+        assert result["sections"][0]["content"] == resumed["content"]
+
+    @pytest.mark.asyncio
+    async def test_every_checkpoint_finalize_uses_worker_write_guard(
+        self,
+        mock_dependencies,
+    ):
+        guarded_callbacks = []
+
+        def _guard(callback, **kwargs):
+            guarded_callbacks.append((callback, kwargs.get("status")))
+            return callback(**kwargs)
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.load_section_checkpoint",
+            return_value=None,
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.save_section_checkpoint",
+            return_value={"saved_chapter_count": 1, "status": "partial"},
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.finalize_generation_checkpoint",
+            side_effect=lambda **kwargs: {
+                "saved_chapter_count": 1,
+                "status": kwargs["status"],
+            },
+        ) as finalize_checkpoint:
+            await run_autoplan(
+                {
+                    "outline": ["工程概况"],
+                    "quality_strict": False,
+                    "requirement_evidence_hard_gate": False,
+                    "auto_remediate": False,
+                    "generate_images": False,
+                    "dry_run": False,
+                    "_checkpoint_namespace": "lease-guard-job",
+                    "_checkpoint_write_guard": _guard,
+                }
+            )
+
+        guarded_finalize_statuses = [
+            status
+            for callback, status in guarded_callbacks
+            if callback is finalize_checkpoint
+        ]
+        assert guarded_finalize_statuses == ["draft_complete", "complete"]
+
 
 # =============================================================================
 # Tests for _pick_agent_role (internal function via run_autoplan)

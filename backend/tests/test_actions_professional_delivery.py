@@ -19,6 +19,9 @@ async def test_professional_delivery_promotes_rendered_word_and_preserves_source
     source_docs = [tmp_path / "source-v1.docx", tmp_path / "source-v2.docx"]
     for path in source_docs:
         path.write_bytes(b"source")
+    compare_docs = [tmp_path / "compare-v1.docx", tmp_path / "compare-v2.docx"]
+    for path in compare_docs:
+        path.write_bytes(b"compare")
 
     rendered_calls: list[int] = []
 
@@ -77,7 +80,10 @@ async def test_professional_delivery_promotes_rendered_word_and_preserves_source
     outputs = {
         "json": str(source_json),
         "docx": [str(path) for path in source_docs],
-        "compare_docx": [str(tmp_path / "compare.docx")],
+        "compare_docx": [str(path) for path in compare_docs],
+        "focus_xlsx": [None, None],
+        "score_overview_xlsx": [None, None],
+        "expert_review_docx": [None, None],
     }
 
     delivered = await actions_bridge._render_professional_outputs_for_job(
@@ -95,6 +101,7 @@ async def test_professional_delivery_promotes_rendered_word_and_preserves_source
     ]
     assert delivered["delivery_profile"] == "sonnet5_professional_word"
     delivery_receipt = json.loads(Path(delivered["delivery_receipt"]).read_text(encoding="utf-8"))
+    assert delivery_receipt["schema"] == "zhifei.delivery_receipt.v2"
     assert delivery_receipt["status"] == "pass"
     assert delivery_receipt["variant_count"] == 2
     assert len(delivered["delivery_decision_digest"]) == 64
@@ -175,6 +182,7 @@ def test_professional_render_failure_preserves_sources_without_exposing_final(
     assert "docx" not in recovery
     assert recovery["compare_docx"] == [str(compare)]
     assert recovery["delivery_profile"] == "professional_render_incomplete"
+    assert recovery["delivery_ready"] is False
     assert recovery["professional_render_status"]["status"] == "failed"
     assert recovery["professional_render_status"]["source_preserved"] is True
     assert secret not in json.dumps(recovery, ensure_ascii=False)

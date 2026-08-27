@@ -480,6 +480,38 @@ class TestRuntimeReconciliation:
             assert reconciled == []
             assert job_store.get_job(job_id)["status"] == "queued"
 
+    def test_dispatched_running_job_is_reaped_after_lease_heartbeat_expires(
+        self,
+        tmp_path,
+    ):
+        from backend.zhifei_autoplan import job_store
+
+        with patch.object(job_store, "JOB_DIR", tmp_path / "jobs"):
+            job_id = job_store.create_job({"action": "generate"})
+            lease = job_store.acquire_job_lease(
+                job_id,
+                owner_instance_id="hung-worker",
+            )
+            assert lease is not None
+            job_store.merge_job(
+                job_id,
+                expected_attempt_id=str(lease["attempt_id"]),
+                expected_owner_instance_id=str(lease["owner_instance_id"]),
+                progress={"heartbeat_at": 100.0},
+            )
+
+            reconciled = job_store.reconcile_stale_jobs(
+                stale_after_seconds=60,
+                now=200.0,
+                protected_job_ids={job_id},
+            )
+
+            record = job_store.get_job(job_id)
+            assert reconciled == [job_id]
+            assert record["status"] == "interrupted_recoverable"
+            assert record["attempt_id"] is None
+            assert record["last_attempt_id"] == lease["attempt_id"]
+
     def test_merge_job_preserves_nested_progress(self, tmp_path):
         from backend.zhifei_autoplan import job_store
 
@@ -584,6 +616,7 @@ class TestRuntimeReconciliation:
                 binding=binding,
                 chapter_index=0,
                 chapter_title="一",
+                chapter_context_digest="c" * 64,
                 result={"title": "一", "content": "正文"},
             )
             job_store.update_job(
@@ -633,6 +666,7 @@ class TestRuntimeReconciliation:
                 binding=binding,
                 chapter_index=0,
                 chapter_title="一",
+                chapter_context_digest="c" * 64,
                 result={"title": "一", "content": "正文"},
             )
             generation_checkpoint.finalize_generation_checkpoint(
@@ -685,6 +719,126 @@ class TestRuntimeReconciliation:
         assert normalized_100["status"] == "failed"
         assert normalized_100["progress"]["percent"] == 99
         assert normalized_100["progress"]["checkpoint"]["status"] == "failed_empty"
+
+    def test_startup_v2_failed_checkpoint_fails_closed_and_scan_continues(self, tmp_path):
+        from backend.zhifei_autoplan import generation_checkpoint, job_store
+
+        job_root = tmp_path / "jobs"
+        checkpoint_root = tmp_path / "checkpoints"
+        binding = generation_checkpoint.build_generation_binding(
+            topic="升级兼容性测试",
+            project_id="p-v2",
+            project_type="房建",
+            outline=["一"],
+            style={},
+            chapter_pages={},
+            variant_id=1,
+            project_fact_digest="a" * 64,
+            requirement_plan_digest="b" * 64,
+            provider_routes=[],
+        )
+        with patch.object(job_store, "JOB_DIR", job_root), patch.object(
+            generation_checkpoint,
+            "CHECKPOINT_DIR",
+            checkpoint_root,
+        ):
+            # This healthy record is deliberately older.  The newer v2 record is
+            # scanned first, proving that its incompatibility does not abort the
+            # remaining startup reconciliation pass.
+            healthy_id = job_store.create_job({"action": "generate"})
+            job_store.update_job(
+                healthy_id,
+                status="failed",
+                progress={"percent": 100, "checkpoint": {"status": "failed_empty"}},
+                result={"checkpoint_status": "failed_empty"},
+            )
+
+            legacy_id = job_store.create_job({"action": "generate"})
+            generation_checkpoint.save_section_checkpoint(
+                namespace=legacy_id,
+                scope="variant-1",
+                binding=binding,
+                chapter_index=0,
+                chapter_title="一",
+                chapter_context_digest="c" * 64,
+                result={"title": "一", "content": "旧版正文"},
+            )
+            checkpoint_path = checkpoint_root / legacy_id / "variant-1.json"
+            legacy_record = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            legacy_record["schema_version"] = "generation-checkpoint-v2"
+            core = {
+                key: value
+                for key, value in legacy_record.items()
+                if key != "integrity_digest"
+            }
+            legacy_record["integrity_digest"] = generation_checkpoint._digest(core)
+            checkpoint_path.write_text(
+                json.dumps(legacy_record, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            legacy_bytes = checkpoint_path.read_bytes()
+            job_store.update_job(
+                legacy_id,
+                status="failed",
+                error={
+                    "code": "REQUIREMENT_EVIDENCE_BLOCKED",
+                    "message": "旧任务质量门失败。",
+                    "action": "恢复任务。",
+                },
+                progress={
+                    "percent": 100,
+                    "phase": "quality_review",
+                    "checkpoint": {"status": "draft_complete"},
+                },
+                result={"checkpoint_status": "draft_complete"},
+            )
+
+            reconciled = job_store.reconcile_legacy_failed_jobs()
+            incompatible = job_store.get_job(legacy_id)
+            healthy = job_store.get_job(healthy_id)
+
+            assert checkpoint_path.read_bytes() == legacy_bytes
+            with pytest.raises(
+                generation_checkpoint.CheckpointIntegrityError,
+                match="checkpoint_schema_mismatch",
+            ):
+                generation_checkpoint.load_generation_checkpoint(
+                    namespace=legacy_id,
+                    scope="variant-1",
+                    binding=binding,
+                )
+
+        assert set(reconciled) == {legacy_id, healthy_id}
+        assert incompatible is not None
+        assert incompatible["status"] == "failed"
+        assert incompatible["progress"]["percent"] == 99
+        assert incompatible["progress"]["stage"] == "checkpoint_schema_incompatible"
+        assert incompatible["progress"]["checkpoint"] == {
+            "status": "failure_seal_failed",
+            "saved_chapter_count": 0,
+            "scopes": [],
+            "error_code": "CHECKPOINT_SCHEMA_INCOMPATIBLE",
+            "error_type": "CheckpointIntegrityError",
+            "reason_code": "checkpoint_schema_mismatch",
+            "reuse_allowed": False,
+            "migration_attempted": False,
+            "schema_compatible": False,
+        }
+        assert incompatible["error"]["code"] == "REQUIREMENT_EVIDENCE_BLOCKED"
+        assert incompatible["error"]["checkpoint_seal_failure"]["code"] == (
+            "CHECKPOINT_SCHEMA_INCOMPATIBLE"
+        )
+        assert incompatible["result"] == {
+            "checkpoint_status": "failure_seal_failed",
+            "section_count": 0,
+            "checkpoint_error_code": "CHECKPOINT_SCHEMA_INCOMPATIBLE",
+            "checkpoint_reuse_allowed": False,
+            "recoverable": False,
+            "delivery_ready": False,
+        }
+        assert healthy is not None
+        assert healthy["progress"]["percent"] == 99
+        assert healthy["progress"]["checkpoint"]["status"] == "failed_empty"
 
 
 class TestGetJob:

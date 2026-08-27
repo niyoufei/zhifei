@@ -115,6 +115,26 @@ def test_apply_server_provider_routing_uses_cost_guard_text_chain_profile(monkey
     assert prepared["provider_chain"][1]["slot"] == "text_main"
 
 
+def test_chapter_validation_does_not_admit_unused_document_renderer(monkeypatch) -> None:
+    monkeypatch.setenv("ZF_LLM_MAIN_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+
+    prepared = apply_server_provider_routing(
+        {
+            "topic": "章节真实模型验证",
+            "delivery_scope": "chapter_validation",
+        }
+    )
+
+    assert prepared["delivery_scope"] == "chapter_validation"
+    assert prepared["_provider_admission_extra_slots"] == []
+    assert prepared["_provider_admission_required_roles"] == [
+        "text_draft",
+        "text_review",
+    ]
+    assert "document_render" not in prepared["_provider_admission_required_roles"]
+
+
 def test_apply_server_provider_routing_allows_dry_run_without_text_slots(monkeypatch) -> None:
     for key in (
         "OPENAI_API_KEY_TEXT_MAIN",

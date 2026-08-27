@@ -284,6 +284,8 @@ def test_ingest_worker_persists_file_level_status_elapsed_pages_and_cache(monkey
         _total: int,
         entry: dict[str, Any],
         _options: dict[str, Any],
+        _attempt_id: str,
+        _owner_instance_id: str,
     ) -> dict[str, Any]:
         elapsed = round(index / 100, 3)
         return {
@@ -303,7 +305,29 @@ def test_ingest_worker_persists_file_level_status_elapsed_pages_and_cache(monkey
             "cache_hits": 1 if index == 2 else 0,
         }
 
+    monkeypatch.setattr(
+        ingest_router,
+        "acquire_job_lease",
+        lambda _job_id: {
+            "attempt_id": "a" * 32,
+            "owner_instance_id": "test-worker",
+        },
+    )
+    monkeypatch.setattr(ingest_router, "job_lease_active", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        ingest_router,
+        "run_with_job_lease",
+        lambda _job_id, *, callback, callback_args=(), callback_kwargs=None, **_kwargs: callback(
+            *callback_args,
+            **dict(callback_kwargs or {}),
+        ),
+    )
     monkeypatch.setattr(ingest_router, "merge_job", _merge)
+    monkeypatch.setattr(
+        ingest_router,
+        "transition_job",
+        lambda _job_id, **fields: _merge(_job_id, **fields),
+    )
     monkeypatch.setattr(ingest_router, "append_runtime_event", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(ingest_router, "get_job", lambda _job_id: {"status": "running"})
     monkeypatch.setattr(ingest_router, "_process_spooled_entry", _process)
@@ -362,6 +386,8 @@ def test_ingest_worker_heartbeats_while_file_is_still_processing(monkeypatch, tm
         _total: int,
         entry: dict[str, Any],
         _options: dict[str, Any],
+        _attempt_id: str,
+        _owner_instance_id: str,
     ) -> dict[str, Any]:
         return {
             "index": index,
@@ -374,11 +400,31 @@ def test_ingest_worker_heartbeats_while_file_is_still_processing(monkeypatch, tm
         }
 
     monkeypatch.setattr(ingest_router.concurrent.futures, "wait", _wait)
+    monkeypatch.setattr(
+        ingest_router,
+        "acquire_job_lease",
+        lambda _job_id: {
+            "attempt_id": "a" * 32,
+            "owner_instance_id": "test-worker",
+        },
+    )
+    monkeypatch.setattr(ingest_router, "job_lease_active", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        ingest_router,
+        "run_with_job_lease",
+        lambda _job_id, *, callback, callback_args=(), callback_kwargs=None, **_kwargs: callback(
+            *callback_args,
+            **dict(callback_kwargs or {}),
+        ),
+    )
     monkeypatch.setattr(ingest_router, "merge_job", lambda _job_id, **fields: fields)
+    monkeypatch.setattr(ingest_router, "transition_job", lambda _job_id, **fields: fields)
     monkeypatch.setattr(
         ingest_router,
         "heartbeat_job",
-        lambda _job_id, **fields: heartbeats.append(fields),
+        lambda _job_id, **fields: (
+            heartbeats.append(fields) or {"status": "running"}
+        ),
     )
     monkeypatch.setattr(ingest_router, "append_runtime_event", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(ingest_router, "get_job", lambda _job_id: {"status": "running"})

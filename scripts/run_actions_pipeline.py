@@ -282,6 +282,12 @@ def main() -> int:
     ap.add_argument("--outline", action="append", default=[], help="Override outline for this run (repeatable)")
     ap.add_argument("--requirements", action="append", default=[], help="Extra requirements (repeatable)")
     ap.add_argument("--variants", type=int, default=1, help="Number of variants")
+    ap.add_argument(
+        "--delivery-scope",
+        choices=["document", "chapter_validation"],
+        default="document",
+        help="Formal document delivery or bounded real-model chapter validation",
+    )
     ap.add_argument("--quality-strict", action="store_true", default=True, help="Enable strict quality checks")
     ap.add_argument("--no-quality-strict", dest="quality_strict", action="store_false", help="Disable strict quality checks")
     ap.add_argument("--auto-remediate", action="store_true", default=True, help="Enable auto remediation")
@@ -363,6 +369,7 @@ def main() -> int:
         "outline": outline,
         "requirements": args.requirements,
         "variants": max(1, int(args.variants or 1)),
+        "delivery_scope": args.delivery_scope,
         "quality_strict": bool(args.quality_strict),
         "auto_remediate": bool(args.auto_remediate),
         "remediate_mode": args.remediate_mode,
@@ -404,8 +411,26 @@ def main() -> int:
 
     print("[7/8] read result")
     rr = _get_json(base, "/actions/result", args.actions_key, params={"job_id": job_id, "variant": 1, "include_sections": False})
+    if args.delivery_scope == "chapter_validation":
+        if (
+            str(rr.get("delivery_scope") or "") != "chapter_validation"
+            or rr.get("delivery_ready") is not False
+        ):
+            print("[FAIL] chapter validation result attempted delivery promotion", file=sys.stderr)
+            return 11
+        print("[OK] chapter validation completed without formal delivery promotion")
     qc = rr.get("quality_checks") or {}
     _print_quality(qc)
+    formal_delivery_ready = (
+        args.delivery_scope == "document" and rr.get("delivery_ready") is True
+    )
+    if (
+        args.delivery_scope == "document"
+        and not args.dry_run
+        and not formal_delivery_ready
+    ):
+        print("[FAIL] formal document result is not sealed for delivery", file=sys.stderr)
+        return 11
 
     if args.download:
         print("[8/8] download artifacts")
@@ -413,37 +438,38 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         # json
         _download(base, args.actions_key, job_id, "json", 1, out_dir / f"autoplan_{job_id}.json")
-        # docx + compare_docx
         variants = int(args.variants or 1)
-        for v in range(1, variants + 1):
-            _download(base, args.actions_key, job_id, "docx", v, out_dir / f"autoplan_{job_id}_v{v}.docx")
-            _download(base, args.actions_key, job_id, "compare_docx", v, out_dir / f"autoplan_{job_id}_compare_v{v}.docx")
-            try:
-                _download(base, args.actions_key, job_id, "focus_xlsx", v, out_dir / f"autoplan_{job_id}_focus_v{v}.xlsx")
-            except Exception:
-                pass
-            try:
-                _download(
-                    base,
-                    args.actions_key,
-                    job_id,
-                    "score_overview_xlsx",
-                    v,
-                    out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx",
-                )
-            except Exception:
-                pass
-            try:
-                _download(
-                    base,
-                    args.actions_key,
-                    job_id,
-                    "expert_review_docx",
-                    v,
-                    out_dir / f"autoplan_{job_id}_专家复核提要版_v{v}.docx",
-                )
-            except Exception:
-                pass
+        if formal_delivery_ready:
+            # Formal artifacts are unavailable by design for chapter validation.
+            for v in range(1, variants + 1):
+                _download(base, args.actions_key, job_id, "docx", v, out_dir / f"autoplan_{job_id}_v{v}.docx")
+                _download(base, args.actions_key, job_id, "compare_docx", v, out_dir / f"autoplan_{job_id}_compare_v{v}.docx")
+                try:
+                    _download(base, args.actions_key, job_id, "focus_xlsx", v, out_dir / f"autoplan_{job_id}_focus_v{v}.xlsx")
+                except Exception:
+                    pass
+                try:
+                    _download(
+                        base,
+                        args.actions_key,
+                        job_id,
+                        "score_overview_xlsx",
+                        v,
+                        out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx",
+                    )
+                except Exception:
+                    pass
+                try:
+                    _download(
+                        base,
+                        args.actions_key,
+                        job_id,
+                        "expert_review_docx",
+                        v,
+                        out_dir / f"autoplan_{job_id}_专家复核提要版_v{v}.docx",
+                    )
+                except Exception:
+                    pass
         print(f"saved_to={out_dir}")
         for v in range(1, variants + 1):
             p1 = out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx"
@@ -467,6 +493,17 @@ def main() -> int:
         "standard_evidence",
         "boq_focus_item_typed_evidence",
     ]
+    if args.delivery_scope == "chapter_validation":
+        hard_keys = [
+            "structure",
+            "officialese",
+            "risk_triplet",
+            "logic_template_adherence",
+            "quantitative",
+            "required_topics_detail",
+            "evidence_traceability",
+            "standard_evidence",
+        ]
     hard_fail = []
     for k in hard_keys:
         item = qc.get(k) or {}

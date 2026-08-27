@@ -485,6 +485,62 @@ def build_requirement_evidence_plan(
     return {**core, "matrix_digest": _digest(core)}
 
 
+def scope_requirement_evidence_plan_to_chapters(
+    plan: Dict[str, Any],
+    chapters: Sequence[Any],
+) -> Dict[str, Any]:
+    """Create a digest-valid evidence plan for a bounded chapter validation.
+
+    Document controls and requirements mapped only to unselected chapters are
+    deliberately excluded.  The original tender plan remains unchanged and is
+    still required for formal document delivery.
+    """
+
+    allowed = set(_dedupe(chapters))
+    scoped_rows: List[Dict[str, Any]] = []
+    for raw in plan.get("rows") or []:
+        if not isinstance(raw, dict):
+            continue
+        if _clean(raw.get("verification_mode")) == "document_control":
+            continue
+        targets = [
+            title
+            for title in _dedupe(raw.get("target_chapters") or [])
+            if title in allowed
+        ]
+        if not targets:
+            continue
+        row = dict(raw)
+        row["target_chapters"] = targets
+        if not _row_needs_review(row):
+            row["planning_status"] = "PLANNED"
+        scoped_rows.append(row)
+
+    core = {
+        "schema": SCHEMA,
+        "evidence_gate_version": EVIDENCE_GATE_VERSION,
+        "phase": "planned",
+        "rows": scoped_rows,
+        "summary": {
+            "requirement_count": len(scoped_rows),
+            "mandatory_count": sum(1 for row in scoped_rows if row.get("mandatory")),
+            "needs_review_count": sum(
+                1 for row in scoped_rows if _row_needs_review(row)
+            ),
+            "prompt_eligible_count": sum(
+                1 for row in scoped_rows if row.get("prompt_eligible") is not False
+            ),
+            "source_bound_count": sum(
+                1 for row in scoped_rows if row.get("source_evidence")
+            ),
+            "unmapped_count": 0,
+            "scope": "chapter_validation",
+            "scoped_chapters": sorted(allowed),
+        },
+    }
+    return {**core, "matrix_digest": _digest(core)}
+
+
 def validate_requirement_evidence_matrix(matrix: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     if matrix.get("schema") != SCHEMA:

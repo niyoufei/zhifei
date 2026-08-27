@@ -16,7 +16,7 @@ from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pypdf import PdfReader
@@ -24,9 +24,23 @@ from pypdf import PdfReader
 from backend.zhifei_autoplan.case_library_service import CASE_LIBRARY_SCOPE
 from backend.zhifei_autoplan.image_library import IMAGE_LIBRARY_SCOPE, normalize_text_list
 from backend.zhifei_autoplan.project_types import normalize_project_type
-from backend.zhifei_autoplan.job_store import create_job, get_job, heartbeat_job, merge_job
+from backend.zhifei_autoplan.job_store import (
+    JobLeaseLostError,
+    acquire_job_lease,
+    create_job,
+    get_job,
+    heartbeat_job,
+    job_lease_active,
+    merge_job,
+    run_with_job_lease,
+    transition_job,
+)
 from backend.zhifei_autoplan.local_job_queue import submit_local_job
 from backend.zhifei_autoplan.runtime_events import append_runtime_event
+from backend.zhifei_autoplan.ingest_tags import (
+    classify_document_tags,
+    normalize_source_hint,
+)
 
 try:
     from backend.zhifei_autoplan.local_adapter_shim import normalize_input as _local_adapter_normalize_input
@@ -57,6 +71,17 @@ except (TypeError, ValueError):
     INGEST_WORKERS = 2
 _PARSE_EXECUTOR: concurrent.futures.ProcessPoolExecutor | None = None
 _PARSE_EXECUTOR_LOCK = threading.Lock()
+
+
+def _guarded_write(
+    write_guard: Callable[..., Any] | None,
+    callback: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    if callable(write_guard):
+        return write_guard(callback, *args, **kwargs)
+    return callback(*args, **kwargs)
 
 
 def _parse_executor() -> concurrent.futures.ProcessPoolExecutor:
@@ -140,6 +165,8 @@ def _ext(name: str) -> str:
 def _resolve_workspace_context(
     session_id: str | None = None,
     workspace_dir: str | None = None,
+    *,
+    write_guard: Callable[..., Any] | None = None,
 ) -> Dict[str, str]:
     if workspace_dir:
         root = Path(workspace_dir)
@@ -148,7 +175,7 @@ def _resolve_workspace_context(
         root = Path("backend/data/workspaces") / (safe_session or "default")
     else:
         root = Path("backend/data")
-    root.mkdir(parents=True, exist_ok=True)
+    _guarded_write(write_guard, root.mkdir, parents=True, exist_ok=True)
     return {"session_id": str(session_id or ""), "workspace_dir": str(root)}
 
 
@@ -180,7 +207,11 @@ def _attach_local_adapter_ingest_result(result: Dict[str, Any], project_id: str 
     return result
 
 
-def workspace_paths(workspace_dir: str | Path) -> Dict[str, Path]:
+def workspace_paths(
+    workspace_dir: str | Path,
+    *,
+    write_guard: Callable[..., Any] | None = None,
+) -> Dict[str, Path]:
     root = Path(workspace_dir)
     paths = {
         "uploads": root / "uploads",
@@ -190,9 +221,14 @@ def workspace_paths(workspace_dir: str | Path) -> Dict[str, Path]:
     }
     for key, path in paths.items():
         if key == "ingest_audit":
-            path.parent.mkdir(parents=True, exist_ok=True)
+            _guarded_write(
+                write_guard,
+                path.parent.mkdir,
+                parents=True,
+                exist_ok=True,
+            )
         else:
-            path.mkdir(parents=True, exist_ok=True)
+            _guarded_write(write_guard, path.mkdir, parents=True, exist_ok=True)
     return paths
 
 
@@ -387,8 +423,19 @@ def _load_parse_cache(digest: str) -> Dict[str, Any] | None:
     return result
 
 
-def _save_parse_cache(digest: str, parsed: Dict[str, Any]) -> None:
-    PARSE_CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+def _save_parse_cache(
+    digest: str,
+    parsed: Dict[str, Any],
+    *,
+    write_guard: Callable[..., Any] | None = None,
+) -> None:
+    _guarded_write(
+        write_guard,
+        PARSE_CACHE_DIR.mkdir,
+        parents=True,
+        exist_ok=True,
+        mode=0o700,
+    )
     path = _parse_cache_path(digest)
     text_path = _parse_cache_text_path(digest)
     temp_suffix = f".{os.getpid()}.{threading.get_ident()}.tmp"
@@ -416,11 +463,6 @@ def _save_parse_cache(digest: str, parsed: Dict[str, Any]) -> None:
     try:
         if extracted_text_bytes is not None:
             temp_text.write_bytes(extracted_text_bytes)
-            temp_text.replace(text_path)
-            try:
-                text_path.chmod(0o600)
-            except OSError:
-                pass
             payload["extract_text_sidecar"] = {
                 "filename": text_path.name,
                 "bytes": len(extracted_text_bytes),
@@ -428,11 +470,21 @@ def _save_parse_cache(digest: str, parsed: Dict[str, Any]) -> None:
                 "sha256": hashlib.sha256(extracted_text_bytes).hexdigest(),
             }
         temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        temp.replace(path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+
+        def _publish_cache() -> None:
+            if extracted_text_bytes is not None:
+                temp_text.replace(text_path)
+                try:
+                    text_path.chmod(0o600)
+                except OSError:
+                    pass
+            temp.replace(path)
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+
+        _guarded_write(write_guard, _publish_cache)
     finally:
         temp.unlink(missing_ok=True)
         temp_text.unlink(missing_ok=True)
@@ -468,55 +520,54 @@ async def _persist_upload_file(
     uf: UploadFile,
     *,
     target_dir: Path,
+    write_guard: Callable[..., Any] | None = None,
 ) -> tuple[Path | None, str | None, int]:
     filename = Path(str(uf.filename or "upload.bin")).name or "upload.bin"
     temp_name = f".upload_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')}_{filename}"
     temp_path = target_dir / temp_name
     digest = hashlib.sha256()
     total_bytes = 0
+    _guarded_write(write_guard, lambda: None)
     try:
         await uf.seek(0)
     except Exception:
         pass
-    with temp_path.open("wb") as fh:
-        while True:
-            chunk = await uf.read(1024 * 1024)
-            if not chunk:
-                break
-            total_bytes += len(chunk)
-            if total_bytes > MAX_UPLOAD_BYTES:
-                fh.close()
-                temp_path.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=413,
-                    detail={
-                        "code": "UPLOAD_TOO_LARGE",
-                        "filename": filename,
-                        "max_bytes": MAX_UPLOAD_BYTES,
-                    },
-                )
-            digest.update(chunk)
-            fh.write(chunk)
     try:
-        await uf.seek(0)
-    except Exception:
-        pass
-    if total_bytes <= 0:
+        with temp_path.open("wb") as fh:
+            while True:
+                chunk = await uf.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail={
+                            "code": "UPLOAD_TOO_LARGE",
+                            "filename": filename,
+                            "max_bytes": MAX_UPLOAD_BYTES,
+                        },
+                    )
+                digest.update(chunk)
+                fh.write(chunk)
         try:
-            temp_path.unlink(missing_ok=True)
+            await uf.seek(0)
         except Exception:
             pass
-        return None, None, 0
-    digest_hex = digest.hexdigest()
-    out_path = target_dir / f"{digest_hex[:8]}_{filename}"
-    if out_path.exists():
+        if total_bytes <= 0:
+            return None, None, 0
+        digest_hex = digest.hexdigest()
+        out_path = target_dir / f"{digest_hex[:8]}_{filename}"
+        if out_path.exists():
+            temp_path.unlink(missing_ok=True)
+        else:
+            _guarded_write(write_guard, temp_path.replace, out_path)
+        return out_path, digest_hex, total_bytes
+    finally:
         try:
             temp_path.unlink(missing_ok=True)
-        except Exception:
+        except OSError:
             pass
-    else:
-        temp_path.replace(out_path)
-    return out_path, digest_hex, total_bytes
 
 
 def _meta_to_text(parsed_type: str | None, parsed_meta: Any) -> str:
@@ -559,27 +610,7 @@ def _meta_to_text(parsed_type: str | None, parsed_meta: Any) -> str:
 
 
 def _normalize_source_hint(source_hint: str | None) -> str:
-    raw = str(source_hint or "").strip().lower()
-    if not raw:
-        return ""
-    aliases = {
-        "tender": "tender_qa",
-        "qa": "tender_qa",
-        "answer": "tender_qa",
-        "答疑": "tender_qa",
-        "招标": "tender_qa",
-        "boq": "boq",
-        "quantity": "boq",
-        "drawing": "drawing_standard",
-        "cad": "drawing_standard",
-        "standard": "drawing_standard",
-        "图纸": "drawing_standard",
-        "标准": "drawing_standard",
-        "photo": "site_photo",
-        "site_photo": "site_photo",
-        "现场照片": "site_photo",
-    }
-    return aliases.get(raw, raw)
+    return normalize_source_hint(source_hint)
 
 
 def _normalize_library_scope(library_scope: str | None, source_hint: str | None = None) -> str:
@@ -615,47 +646,12 @@ def _normalize_bool(value: Any, default: bool = True) -> bool:
 
 
 def _classify_tags(filename: str | None, ext: str, parsed_type: str | None, source_hint: str | None = None) -> list[str]:
-    name = (filename or "").lower()
-    tags = []
-    hint = _normalize_source_hint(source_hint)
-    is_site_photo = hint == "site_photo"
-
-    if hint == "tender_qa":
-        tags.extend(["tender", "qa"])
-    elif hint == "boq":
-        tags.append("boq")
-    elif hint == "drawing_standard":
-        # Keep file-name/extension heuristics for precise split between drawing vs standard.
-        # Do not force both tags on every file in this mixed upload group.
-        pass
-    elif hint == "site_photo":
-        tags.append("site_photo")
-
-    if any(k in name for k in ("logo", "标志", "标识", "徽标")):
-        tags.append("logo")
-    if (not is_site_photo) and any(k in name for k in ("图", "图纸", "施工图", "平面", "剖面", "大样", "节点", "cad", "dwg", "dxf")):
-        tags.append("drawing")
-    if any(k in name for k in ("清单", "工程量清单", "boq")):
-        tags.append("boq")
-    if any(k in name for k in ("招标", "招標", "tender")):
-        tags.append("tender")
-    if any(k in name for k in ("企业标准", "工法", "作业指导", "标准化", "技术标准", "标准图集", "管理标准")):
-        tags.append("standard")
-    if (not is_site_photo) and (ext in {"dxf", "dwg"} or parsed_type in {"cad", "dwg"}):
-        if "drawing" not in tags:
-            tags.append("drawing")
-    if (not is_site_photo) and ext in {"png", "jpg", "jpeg"} and "drawing" not in tags:
-        # 纯图片无法判断用途，默认打上 drawing，便于后续人工筛选
-        tags.append("drawing")
-    dedup: list[str] = []
-    seen: set[str] = set()
-    for t in tags:
-        tt = str(t).strip()
-        if not tt or tt in seen:
-            continue
-        seen.add(tt)
-        dedup.append(tt)
-    return dedup
+    return classify_document_tags(
+        filename,
+        ext,
+        parsed_type,
+        source_hint=source_hint,
+    )
 
 
 def _make_preview_image(src_path: Path, dst_path: Path, max_width: int = 1400) -> str | None:
@@ -760,21 +756,36 @@ async def _handle_upload(
     caption: str | None = None,
     description: str | None = None,
     usable: bool | str | None = True,
+    _write_guard: Callable[..., Any] | None = None,
 ):
     if not files:
         raise HTTPException(status_code=400, detail="no files uploaded")
 
-    workspace = _resolve_workspace_context(session_id=session_id, workspace_dir=workspace_dir)
-    ws_paths = workspace_paths(workspace["workspace_dir"])
+    workspace_kwargs: dict[str, Any] = {
+        "session_id": session_id,
+        "workspace_dir": workspace_dir,
+    }
+    if callable(_write_guard):
+        workspace_kwargs["write_guard"] = _write_guard
+    workspace = _resolve_workspace_context(**workspace_kwargs)
+    paths_kwargs: dict[str, Any] = {}
+    if callable(_write_guard):
+        paths_kwargs["write_guard"] = _write_guard
+    ws_paths = workspace_paths(workspace["workspace_dir"], **paths_kwargs)
     day = datetime.now(timezone.utc).strftime("%Y%m%d")
     target_dir = ws_paths["uploads"] / day
-    target_dir.mkdir(parents=True, exist_ok=True)
+    _guarded_write(_write_guard, target_dir.mkdir, parents=True, exist_ok=True)
     extract_dir = ws_paths["extracts"]
     preview_dir = ws_paths["previews"]
     audit_file = ws_paths["ingest_audit"]
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    preview_dir.mkdir(parents=True, exist_ok=True)
-    audit_file.parent.mkdir(parents=True, exist_ok=True)
+    _guarded_write(_write_guard, extract_dir.mkdir, parents=True, exist_ok=True)
+    _guarded_write(_write_guard, preview_dir.mkdir, parents=True, exist_ok=True)
+    _guarded_write(
+        _write_guard,
+        audit_file.parent.mkdir,
+        parents=True,
+        exist_ok=True,
+    )
 
     records = []
     rejected: list[dict[str, Any]] = []
@@ -803,7 +814,11 @@ async def _handle_upload(
         if normalized_library_scope == IMAGE_LIBRARY_SCOPE and ext not in {"png", "jpg", "jpeg", "webp", "gif"}:
             raise HTTPException(status_code=400, detail="image library upload requires image files")
 
-        out_path, digest, total_bytes = await _persist_upload_file(uf, target_dir=target_dir)
+        out_path, digest, total_bytes = await _persist_upload_file(
+            uf,
+            target_dir=target_dir,
+            write_guard=_write_guard,
+        )
         if not out_path or not digest or total_bytes <= 0:
             rejected.append({"filename": uf.filename, "code": "EMPTY_FILE"})
             continue
@@ -811,7 +826,7 @@ async def _handle_upload(
         prior_path = seen_digests.get(digest)
         if prior_path is not None:
             if out_path != prior_path:
-                out_path.unlink(missing_ok=True)
+                _guarded_write(_write_guard, out_path.unlink, missing_ok=True)
             rejected.append(
                 {
                     "filename": uf.filename,
@@ -888,6 +903,7 @@ async def _handle_upload(
                     "parsed_type": parsed_type,
                     "parsed_meta": parsed_meta,
                 },
+                write_guard=_write_guard,
             )
 
         meaningful_text = str(parsed.get("extract_text") or "").strip()
@@ -909,6 +925,7 @@ async def _handle_upload(
         preview_path = None
         preview_cache_hit = False
         preview_warning: dict[str, Any] | None = None
+        preview_temp: Path | None = None
         try:
             preview_name = f"{digest[:8]}_preview.png"
             preview_out = preview_dir / preview_name
@@ -916,15 +933,33 @@ async def _handle_upload(
                 preview_path = str(preview_out)
                 preview_cache_hit = True
             elif ext in {"png", "jpg", "jpeg"}:
-                preview_path = await asyncio.to_thread(_make_preview_image, out_path, preview_out)
+                preview_temp = preview_dir / (
+                    f".{digest[:8]}.{os.getpid()}.{threading.get_ident()}.preview.tmp"
+                )
+                rendered = await asyncio.to_thread(
+                    _make_preview_image,
+                    out_path,
+                    preview_temp,
+                )
+                if rendered:
+                    _guarded_write(_write_guard, preview_temp.replace, preview_out)
+                    preview_path = str(preview_out)
             elif ext == "pdf":
-                preview_path = await _run_isolated_process(
+                preview_temp = preview_dir / (
+                    f".{digest[:8]}.{os.getpid()}.{threading.get_ident()}.preview.tmp"
+                )
+                rendered = await _run_isolated_process(
                     _make_preview_pdf_first_page,
                     out_path,
-                    preview_out,
+                    preview_temp,
                     2.0,
                     timeout=PARSE_TIMEOUT_SECONDS,
                 )
+                if rendered:
+                    _guarded_write(_write_guard, preview_temp.replace, preview_out)
+                    preview_path = str(preview_out)
+        except JobLeaseLostError:
+            raise
         except BrokenProcessPool:
             preview_warning = {
                 "code": "PDF_PREVIEW_WORKER_CRASHED",
@@ -949,6 +984,9 @@ async def _handle_upload(
                 "filename": str(uf.filename or ""),
             }
             preview_path = None
+        finally:
+            if preview_temp is not None:
+                preview_temp.unlink(missing_ok=True)
         if ext == "pdf" and not preview_path and preview_warning is None:
             preview_warning = {
                 "code": "PDF_PREVIEW_UNAVAILABLE",
@@ -962,7 +1000,18 @@ async def _handle_upload(
         extract_path = None
         if parsed.get("extract_text") is not None:
             extract_path = extract_dir / f"{digest[:8]}.txt"
-            await asyncio.to_thread(extract_path.write_text, parsed["extract_text"], encoding="utf-8")
+            extract_temp = extract_dir / (
+                f".{digest[:8]}.{os.getpid()}.{threading.get_ident()}.extract.tmp"
+            )
+            try:
+                await asyncio.to_thread(
+                    extract_temp.write_text,
+                    parsed["extract_text"],
+                    encoding="utf-8",
+                )
+                _guarded_write(_write_guard, extract_temp.replace, extract_path)
+            finally:
+                extract_temp.unlink(missing_ok=True)
             parsed.pop("extract_text", None)
 
         rec = {
@@ -999,8 +1048,12 @@ async def _handle_upload(
             "tags": _classify_tags(uf.filename, ext, parsed_type, normalized_hint),
         }
         records.append(rec)
-        with audit_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+        def _append_audit_record() -> None:
+            with audit_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+        _guarded_write(_write_guard, _append_audit_record)
 
     if not records:
         if rejected and all(item.get("code") == "EMPTY_FILE" for item in rejected):
@@ -1057,14 +1110,62 @@ def _process_spooled_entry(
     total: int,
     entry: dict[str, Any],
     options: dict[str, Any],
+    lease_attempt_id: str,
+    lease_owner_instance_id: str,
 ) -> dict[str, Any]:
+    def _running_lease_active() -> bool:
+        return job_lease_active(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+            allowed_statuses={"running"},
+        )
+
+    def _running_write_guard(
+        callback: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return run_with_job_lease(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+            allowed_statuses={"running"},
+            callback=callback,
+            callback_args=tuple(args),
+            callback_kwargs=dict(kwargs),
+        )
+
+    def _append_active_event(event: str, **fields: Any) -> bool:
+        try:
+            run_with_job_lease(
+                job_id,
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+                callback=append_runtime_event,
+                callback_args=(job_id, event),
+                callback_kwargs=fields,
+                allowed_statuses={"running"},
+            )
+            return True
+        except JobLeaseLostError:
+            return False
+
     current = get_job(job_id) or {}
-    if str(current.get("status") or "").strip().lower() == "cancelled":
+    if (
+        str(current.get("status") or "").strip().lower()
+        in {"cancel_requested", "cancelled"}
+        or not _running_lease_active()
+    ):
         return {"cancelled": True, "index": index}
     filename = str(entry.get("filename") or "upload.bin")
     started = time.monotonic()
-    merge_job(
+    started_record = transition_job(
         job_id,
+        allowed_from={"running"},
+        status="running",
+        expected_attempt_id=lease_attempt_id,
+        expected_owner_instance_id=lease_owner_instance_id,
         progress={
             "phase": "ingest",
             "stage": "ingest",
@@ -1072,16 +1173,22 @@ def _process_spooled_entry(
             "current_file": filename,
         },
     )
-    append_runtime_event(
-        job_id,
+    if started_record is None:
+        return {"cancelled": True, "index": index}
+    if not _append_active_event(
         "ingest_file_started",
         filename=filename,
         file_index=index,
         files_total=total,
-    )
+    ):
+        return {"cancelled": True, "index": index}
     upload = _SpoolUpload(Path(str(entry["path"])), filename)
     try:
-        result = asyncio.run(_handle_upload([upload], **options))
+        worker_options = dict(options)
+        worker_options["_write_guard"] = _running_write_guard
+        result = asyncio.run(_handle_upload([upload], **worker_options))
+        if not _running_lease_active():
+            return {"cancelled": True, "index": index}
         rows = result.get("accepted") if isinstance(result.get("accepted"), list) else result.get("saved") or []
         elapsed_seconds = round(time.monotonic() - started, 3)
         outcome = {
@@ -1101,24 +1208,26 @@ def _process_spooled_entry(
             "warnings": [item for item in (result.get("warnings") or []) if isinstance(item, dict)],
             "cache_hits": int(result.get("cache_hits") or 0),
         }
-        append_runtime_event(
-            job_id,
+        if not _append_active_event(
             "ingest_file_finished",
             filename=filename,
             ok=True,
             cache_hit=bool(result.get("cache_hits")),
             elapsed_seconds=elapsed_seconds,
-        )
+        ):
+            return {"cancelled": True, "index": index}
         for warning in outcome["warnings"]:
-            append_runtime_event(
-                job_id,
+            if not _append_active_event(
                 "ingest_warning",
                 filename=filename,
                 code=str(warning.get("code") or "INGEST_WARNING"),
                 message=str(warning.get("message") or "")[:500],
-            )
+            ):
+                return {"cancelled": True, "index": index}
         return outcome
     except HTTPException as exc:
+        if not _running_lease_active():
+            return {"cancelled": True, "index": index}
         detail = exc.detail if isinstance(exc.detail, dict) else {
             "code": "FILE_PARSE_FAILED",
             "message": str(exc.detail),
@@ -1129,14 +1238,14 @@ def _process_spooled_entry(
             rejected = [{"filename": filename, "code": str(detail.get("code") or "FILE_PARSE_FAILED")}]
         elapsed_seconds = round(time.monotonic() - started, 3)
         rejected = [{**item, "elapsed_seconds": elapsed_seconds} for item in rejected]
-        append_runtime_event(
-            job_id,
+        if not _append_active_event(
             "ingest_file_finished",
             filename=filename,
             ok=False,
             code=detail.get("code"),
             elapsed_seconds=elapsed_seconds,
-        )
+        ):
+            return {"cancelled": True, "index": index}
         return {
             "index": index,
             "filename": filename,
@@ -1147,15 +1256,17 @@ def _process_spooled_entry(
             "cache_hits": 0,
         }
     except Exception as exc:
+        if not _running_lease_active():
+            return {"cancelled": True, "index": index}
         elapsed_seconds = round(time.monotonic() - started, 3)
-        append_runtime_event(
-            job_id,
+        if not _append_active_event(
             "ingest_file_finished",
             filename=filename,
             ok=False,
             error_type=type(exc).__name__,
             elapsed_seconds=elapsed_seconds,
-        )
+        ):
+            return {"cancelled": True, "index": index}
         return {
             "index": index,
             "filename": filename,
@@ -1182,6 +1293,83 @@ def _run_ingest_job(
     options: dict[str, Any],
     initial_rejected: list[dict[str, Any]],
 ) -> None:
+    lease_record = acquire_job_lease(job_id)
+    if lease_record is None:
+        return
+    lease_attempt_id = str(lease_record.get("attempt_id") or "")
+    lease_owner_instance_id = str(lease_record.get("owner_instance_id") or "")
+    if not lease_attempt_id or not lease_owner_instance_id:
+        raise RuntimeError("job_lease_acquisition_invalid")
+
+    def _lease_active() -> bool:
+        return job_lease_active(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+        )
+
+    def _status() -> str:
+        return str((get_job(job_id) or {}).get("status") or "").strip().lower()
+
+    def _cancel_requested() -> bool:
+        return _status() in {"cancel_requested", "cancelled"} or not _lease_active()
+
+    def _append_active_event(event: str, **fields: Any) -> bool:
+        try:
+            run_with_job_lease(
+                job_id,
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+                callback=append_runtime_event,
+                callback_args=(job_id, event),
+                callback_kwargs=fields,
+                allowed_statuses={"running"},
+            )
+            return True
+        except JobLeaseLostError:
+            return False
+
+    def _merge_active(**fields: Any) -> dict[str, Any]:
+        updated = transition_job(
+            job_id,
+            allowed_from={"running"},
+            status="running",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            **fields,
+        )
+        if updated is None:
+            raise JobLeaseLostError("job_lease_lost")
+        return updated
+
+    def _mark_cancelled(*, completed: int = 0) -> None:
+        if not _lease_active():
+            return
+        prior_progress = (get_job(job_id) or {}).get("progress") or {}
+        transitioned = transition_job(
+            job_id,
+            allowed_from={"running", "cancel_requested"},
+            status="cancelled",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            revoke_lease=True,
+            error={
+                "code": "INGEST_CANCELLED",
+                "message": "用户已取消资料导入。",
+                "action": "已完成解析与缓存予以保留；如需继续请显式重新导入。",
+            },
+            progress={
+                "percent": min(99, int(prior_progress.get("percent") or 0)),
+                "phase": "ingest",
+                "stage": "cancelled",
+                "work_state": "idle",
+                "current_file": None,
+                "detail": "资料导入已取消。",
+            },
+        )
+        if transitioned is not None:
+            append_runtime_event(job_id, "ingest_cancelled", completed=completed)
+
     accepted: list[dict[str, Any]] = []
     rejected = list(initial_rejected)
     warnings: list[dict[str, Any]] = []
@@ -1212,25 +1400,27 @@ def _run_ingest_job(
         if isinstance(item, dict)
     )
     mandatory = _normalize_source_hint(options.get("source_hint")) in {"tender_qa", "boq"}
-    merge_job(
-        job_id,
-        status="running",
-        progress={
-            "phase": "ingest",
-            "stage": "ingest",
-            "work_state": "processing_file",
-            "percent": 0,
-            "files": {
-                "completed": 0,
-                "accepted": 0,
-                "rejected": len(rejected),
-                "total": total + len(initial_rejected),
-                "items": file_items,
-            },
-        },
-    )
-    append_runtime_event(job_id, "ingest_started", files_total=total)
     try:
+        if _cancel_requested():
+            _mark_cancelled(completed=0)
+            return
+        _merge_active(
+            progress={
+                "phase": "ingest",
+                "stage": "ingest",
+                "work_state": "processing_file",
+                "percent": 0,
+                "files": {
+                    "completed": 0,
+                    "accepted": 0,
+                    "rejected": len(rejected),
+                    "total": total + len(initial_rejected),
+                    "items": file_items,
+                },
+            },
+        )
+        if not _append_active_event("ingest_started", files_total=total):
+            return
         completed = 0
         max_workers = min(INGEST_WORKERS, max(1, total))
         with concurrent.futures.ThreadPoolExecutor(
@@ -1242,6 +1432,8 @@ def _run_ingest_job(
             active_files: dict[int, str] = {}
 
             def _submit_next() -> bool:
+                if _cancel_requested():
+                    return False
                 try:
                     index, entry = next(entry_iter)
                 except StopIteration:
@@ -1257,6 +1449,8 @@ def _run_ingest_job(
                     total,
                     entry,
                     options,
+                    lease_attempt_id,
+                    lease_owner_instance_id,
                 )
                 inflight[future] = index
                 return True
@@ -1264,14 +1458,25 @@ def _run_ingest_job(
             for _ in range(max_workers):
                 _submit_next()
 
+            stop_processing = False
             while inflight:
+                if _cancel_requested():
+                    _mark_cancelled(completed=completed)
+                    for pending in inflight:
+                        pending.cancel()
+                    break
                 finished, _pending = concurrent.futures.wait(
                     tuple(inflight),
                     timeout=INGEST_HEARTBEAT_SECONDS,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
                 if not finished:
-                    heartbeat_job(
+                    if _cancel_requested():
+                        _mark_cancelled(completed=completed)
+                        for pending in inflight:
+                            pending.cancel()
+                        break
+                    heartbeat = heartbeat_job(
                         job_id,
                         activity=f"{len(active_files)} 个文件正在解析",
                         progress_updates={
@@ -1280,7 +1485,12 @@ def _run_ingest_job(
                             "work_state": "processing_file",
                             "current_file": list(active_files.values()),
                         },
+                        expected_attempt_id=lease_attempt_id,
+                        expected_owner_instance_id=lease_owner_instance_id,
+                        allowed_statuses={"running"},
                     )
+                    if heartbeat is None:
+                        raise JobLeaseLostError("job_lease_lost")
                     continue
                 for future in finished:
                     index = inflight.pop(future)
@@ -1292,6 +1502,11 @@ def _run_ingest_job(
                     item["cache_hit"] = bool(outcome.get("cache_hits"))
                     if outcome.get("cancelled"):
                         item["status"] = "cancelled"
+                        _mark_cancelled(completed=completed)
+                        for pending in inflight:
+                            pending.cancel()
+                        stop_processing = True
+                        break
                     else:
                         accepted_rows = outcome.get("accepted") or []
                         rejected_rows = outcome.get("rejected") or []
@@ -1311,8 +1526,7 @@ def _run_ingest_job(
                     cache_hits += int(outcome.get("cache_hits") or 0)
                     completed += 1
                     _submit_next()
-                    merge_job(
-                        job_id,
+                    _merge_active(
                         progress={
                             "percent": int((completed / max(1, total)) * 95),
                             "current_file": list(active_files.values()),
@@ -1326,8 +1540,12 @@ def _run_ingest_job(
                             "cache_hits": cache_hits,
                         },
                     )
-        if str((get_job(job_id) or {}).get("status") or "").strip().lower() == "cancelled":
-            append_runtime_event(job_id, "ingest_cancelled", completed=completed)
+                if stop_processing:
+                    break
+        if not _lease_active():
+            return
+        if _status() == "cancel_requested":
+            _mark_cancelled(completed=completed)
             return
 
         result = {
@@ -1344,14 +1562,26 @@ def _run_ingest_job(
                 "message": "强制资料存在未解析文件，已阻止进入生成。" if mandatory else "所有文件均未完成解析。",
                 "action": "修复或转换失败文件后重新导入。",
             }
-            merge_job(
+            failed = transition_job(
                 job_id,
+                allowed_from={"running"},
                 status="failed",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
                 error=error,
                 result=result,
                 progress={"work_state": "idle", "current_file": None, "detail": error["message"]},
             )
-            append_runtime_event(job_id, "ingest_failed", code=error["code"], rejected=len(rejected))
+            if failed is not None:
+                append_runtime_event(
+                    job_id,
+                    "ingest_failed",
+                    code=error["code"],
+                    rejected=len(rejected),
+                )
+            elif _status() == "cancel_requested":
+                _mark_cancelled(completed=completed)
             return
         if rejected:
             warnings.append(
@@ -1361,9 +1591,13 @@ def _run_ingest_job(
                 }
             )
             result["warnings"] = warnings
-        merge_job(
+        succeeded = transition_job(
             job_id,
+            allowed_from={"running"},
             status="succeeded",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            revoke_lease=True,
             result=result,
             error=None,
             progress={
@@ -1376,13 +1610,53 @@ def _run_ingest_job(
                 "warnings": warnings,
             },
         )
-        append_runtime_event(
-            job_id,
-            "ingest_succeeded",
-            accepted=len(accepted),
-            rejected=len(rejected),
-            cache_hits=cache_hits,
-        )
+        if succeeded is not None:
+            append_runtime_event(
+                job_id,
+                "ingest_succeeded",
+                accepted=len(accepted),
+                rejected=len(rejected),
+                cache_hits=cache_hits,
+            )
+        elif _status() == "cancel_requested":
+            _mark_cancelled(completed=completed)
+    except JobLeaseLostError:
+        if _status() == "cancel_requested":
+            _mark_cancelled(completed=locals().get("completed", 0))
+        return
+    except Exception as exc:
+        if _cancel_requested():
+            _mark_cancelled(completed=locals().get("completed", 0))
+        else:
+            failed = transition_job(
+                job_id,
+                allowed_from={"running"},
+                status="failed",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
+                error={
+                    "code": "INGEST_WORKER_FAILED",
+                    "message": "资料导入工作进程异常终止。",
+                    "action": "检查失败文件与后台日志后显式重试导入。",
+                    "error_type": type(exc).__name__,
+                },
+                progress={
+                    "phase": "ingest",
+                    "stage": "failed",
+                    "work_state": "idle",
+                    "current_file": None,
+                },
+            )
+            if failed is not None:
+                append_runtime_event(
+                    job_id,
+                    "ingest_failed",
+                    code="INGEST_WORKER_FAILED",
+                    error_type=type(exc).__name__,
+                )
+            elif _status() == "cancel_requested":
+                _mark_cancelled(completed=locals().get("completed", 0))
     finally:
         spool_dir = INGEST_SPOOL_DIR / job_id
         if spool_dir.exists():

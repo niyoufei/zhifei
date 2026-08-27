@@ -23,3 +23,9 @@ def test_drawing_standard_hint_keeps_drawing_by_filename() -> None:
 def test_drawing_standard_hint_keeps_standard_by_filename() -> None:
     tags = _classify_tags("企业标准-模板工程.pdf", "pdf", None, source_hint="drawing_standard")
     assert "standard" in tags
+    assert "drawing" not in tags
+
+
+def test_drawing_standard_hint_defaults_unambiguous_pdf_to_drawing() -> None:
+    tags = _classify_tags("1 挤奶厅.pdf", "pdf", None, source_hint="drawing_standard")
+    assert "drawing" in tags

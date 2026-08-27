@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import re
@@ -11,17 +12,21 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
 
 from backend.zhifei_autoplan.job_store import (
+    JobLeaseLostError,
+    acquire_job_lease,
     create_job,
     get_job,
     heartbeat_job,
+    job_lease_active,
     merge_job,
+    run_with_job_lease,
     transition_job,
     update_job,
 )
@@ -65,7 +70,10 @@ from backend.zhifei_autoplan.utils.llm_client import LLMClient
 from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
 from backend.zhifei_autoplan.model_reliability import classify_provider_error
 from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
-from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
+from backend.zhifei_autoplan.delivery_receipt import (
+    build_delivery_receipt,
+    canonical_delivery_receipt_digest,
+)
 from backend.zhifei_autoplan.requirement_evidence_matrix import (
     finalize_requirement_evidence_matrix,
     validate_chapter_requirement_evidence,
@@ -100,11 +108,12 @@ from backend.zhifei_autoplan.section_drafts import (
 from backend.zhifei_autoplan.review_revision import (
     artifact_manifest,
     canonical_digest,
+    commit_revision_promotion,
     create_revision_snapshot,
-    finalize_revision_snapshot,
     issue_set_digest,
     list_revision_snapshots,
     load_revision_snapshot,
+    prepare_revision_promotion,
     result_version,
     stable_issue_id,
     variant_version,
@@ -305,6 +314,38 @@ def _public_provider_state(value: Any) -> Dict[str, Any]:
     return scrubbed if isinstance(scrubbed, dict) else {}
 
 
+_DELIVERY_BLOCKER_GUIDANCE: Dict[str, tuple[str, str]] = {
+    "DELIVERY_CONTENT_QUALITY_BLOCKED": (
+        "独立内容质量审核未通过。",
+        "请按内容审核阻断项修订章节后从检查点恢复。",
+    ),
+    "DELIVERY_PLAN_CONSISTENCY_BLOCKED": (
+        "工期、资源峰值或关键线路的一致性校验未通过。",
+        "请统一计划参数与关键线路口径后从检查点恢复。",
+    ),
+    "DELIVERY_STANDARD_EVIDENCE_BLOCKED": (
+        "存在未核验、过期或冲突的规范引用。",
+        "请修正规范引用与核验依据后从检查点恢复。",
+    ),
+    "DELIVERY_REQUIREMENT_EVIDENCE_BLOCKED": (
+        "招标要求尚未全部形成可反查证据闭环。",
+        "请补齐要求标记和来源定位后从检查点恢复。",
+    ),
+    "DELIVERY_CROSS_INDEX_BLOCKED": (
+        "重点清单项未全部形成章节与依据闭环。",
+        "请补齐重点清单项的章节、图纸或规范定位后从检查点恢复。",
+    ),
+    "DELIVERY_CROSS_INDEX_UNAVAILABLE": (
+        "重点清单项交叉索引构建失败，系统已按失败关闭。",
+        "请修复交叉索引构建错误后从检查点恢复。",
+    ),
+    "DELIVERY_MODEL_REVIEW_BLOCKED": (
+        "关键章节精修或全文一致性终审未给出明确无冲突结论。",
+        "请完成模型复核或修订冲突章节后从检查点恢复。",
+    ),
+}
+
+
 def _public_runtime_error(error: Any) -> Dict[str, Any]:
     """Return a stable, bounded error object without repr/prompt leakage."""
 
@@ -405,6 +446,24 @@ def _public_runtime_error(error: Any) -> Dict[str, Any]:
             }
     validation_guidance = (
         (
+            "CHAPTER_VALIDATION_QUALITY_BLOCKED",
+            "CHAPTER_VALIDATION_QUALITY_BLOCKED",
+            "章节真实模型验证质量门未通过。",
+            "请按章节质量阻断项修订后，以相同交付范围从检查点恢复。",
+        ),
+        (
+            "严格正式交付目录与招标目录不一致",
+            "TENDER_OUTLINE_MISMATCH",
+            "正式交付目录与招标目录不完全一致，系统未调用模型。",
+            "请使用完整招标目录，或将小范围实跑明确设为 chapter_validation。",
+        ),
+        (
+            "章节验证目录包含招标目录外章节",
+            "CHAPTER_VALIDATION_OUTLINE_INVALID",
+            "章节验证请求包含招标目录外章节，系统未调用模型。",
+            "请仅选择招标目录中的章节进行验证。",
+        ),
+        (
             "招标文件/澄清答疑存在同优先级版式冲突",
             "TENDER_STYLE_CONFLICT",
             "招标版式要求存在同优先级冲突，系统未自行裁决。",
@@ -461,12 +520,31 @@ def _public_runtime_error(error: Any) -> Dict[str, Any]:
     )
     for marker, code, message, action in validation_guidance:
         if marker in raw:
-            return {
+            result = {
                 "code": code,
                 "message": message,
                 "action": action,
                 "error_type": type(error).__name__ if isinstance(error, BaseException) else None,
             }
+            if code == "DELIVERY_QUALITY_BLOCKED":
+                blocker_codes = [
+                    value
+                    for value in re.findall(r"DELIVERY_[A-Z_]+", raw)
+                    if value in _DELIVERY_BLOCKER_GUIDANCE
+                ]
+                if blocker_codes:
+                    result["failures"] = [
+                        {
+                            "error": blocker_code,
+                            "code": blocker_code,
+                            "message": _DELIVERY_BLOCKER_GUIDANCE[blocker_code][0],
+                            "action": _DELIVERY_BLOCKER_GUIDANCE[blocker_code][1],
+                            "retryable": False,
+                            "severity": "error",
+                        }
+                        for blocker_code in dict.fromkeys(blocker_codes)
+                    ]
+            return result
     if isinstance(error, ValueError):
         return {
             "code": "VALIDATION_FAILED",
@@ -593,6 +671,7 @@ class ActionsGenerateRequest(BaseModel):
     project_id: str | None = None
     project_type: str | None = None
     generation_mode: str | None = None
+    delivery_scope: Literal["document", "chapter_validation"] = "document"
     outline: List[str] = []
     requirements: List[str] = []
     global_instruction: str | None = None
@@ -940,12 +1019,22 @@ def _parse_variant_pair(raw: Any) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
-def _delivery_progress_for_run(*, dry_run: bool) -> Dict[str, str]:
+def _delivery_progress_for_run(
+    *,
+    dry_run: bool,
+    delivery_scope: str = "document",
+) -> Dict[str, str]:
     if dry_run:
         return {
             "stage": "dry_run_done",
             "phase": "dry_run_done",
             "detail": "dry-run 预览已完成；未生成专业终稿或正式交付回执",
+        }
+    if str(delivery_scope or "document") == "chapter_validation":
+        return {
+            "stage": "chapter_validation_done",
+            "phase": "chapter_validation_done",
+            "detail": "章节真实模型验证已完成；未生成或冒充正式交付文件",
         }
     return {
         "stage": "done",
@@ -1003,6 +1092,102 @@ def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
     if explicit_template_id:
         return [{"variant_id": int(vid), "logic_template_id": explicit_template_id} for vid in variant_ids]
     return [{"variant_id": int(vid)} for vid in variant_ids]
+
+
+def _build_resume_variant_plan(payload: dict, source_job: dict) -> List[Dict[str, Any]]:
+    """Reuse the source job's immutable variant identities for checkpoint recovery."""
+
+    source_payload = (
+        source_job.get("payload") if isinstance(source_job.get("payload"), dict) else {}
+    )
+    requested_project_id = str(payload.get("project_id") or "").strip()
+    source_project_id = str(source_payload.get("project_id") or "").strip()
+    if (
+        not requested_project_id
+        or not source_project_id
+        or requested_project_id != source_project_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_PROJECT_SCOPE_MISMATCH",
+                "message": "恢复请求与原任务的项目身份不一致，不能复用方案或检查点。",
+            },
+        )
+    requested_scope = str(payload.get("delivery_scope") or "document").strip().lower()
+    source_scope = str(source_payload.get("delivery_scope") or "document").strip().lower()
+    if requested_scope != source_scope:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_DELIVERY_SCOPE_MISMATCH",
+                "message": "恢复请求不能跨正式交付与章节验证范围复用检查点。",
+            },
+        )
+    source_plan = source_payload.get("_variant_plan")
+    normalized: List[Dict[str, Any]] = []
+    seen_variant_ids: set[int] = set()
+    source_plan_invalid = not isinstance(source_plan, list) or not 1 <= len(source_plan) <= 5
+    if isinstance(source_plan, list):
+        for item in source_plan:
+            if not isinstance(item, dict):
+                source_plan_invalid = True
+                continue
+            try:
+                variant_id = int(item.get("variant_id") or 0)
+            except (TypeError, ValueError):
+                variant_id = 0
+            if variant_id <= 0:
+                source_plan_invalid = True
+                continue
+            if variant_id in seen_variant_ids:
+                source_plan_invalid = True
+                continue
+            seen_variant_ids.add(variant_id)
+            row: Dict[str, Any] = {"variant_id": variant_id}
+            template_id = _normalize_logic_template_id(item.get("logic_template_id"))
+            if template_id:
+                row["logic_template_id"] = template_id
+            normalized.append(row)
+    if source_plan_invalid or not normalized:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_VARIANT_IDENTITY_INVALID",
+                "message": "原任务的方案身份缺失、重复或超出安全范围，不能复用检查点。",
+            },
+        )
+
+    requested_templates = _normalize_selected_templates(payload.get("selected_templates"))
+    source_templates = [
+        str(item.get("logic_template_id") or "") for item in normalized
+    ]
+    if requested_templates and requested_templates != source_templates:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_VARIANT_TEMPLATE_MISMATCH",
+                "message": "恢复请求的模板集合与原任务不一致。",
+            },
+        )
+    try:
+        requested_count = int(payload.get("variants") or 1)
+    except (TypeError, ValueError):
+        requested_count = 1
+    if requested_templates:
+        requested_count = len(requested_templates)
+    if max(1, min(5, requested_count)) != len(normalized):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_VARIANT_COUNT_MISMATCH",
+                "message": "恢复请求的方案数量与原任务不一致。",
+            },
+        )
+    if not requested_templates and all(source_templates):
+        payload["selected_templates"] = source_templates
+    payload["variants"] = len(normalized)
+    return normalized
 
 
 def _page_target_value(v: Any) -> int | None:
@@ -1352,10 +1537,100 @@ def _set_output_variant_path(result: dict[str, Any], key: str, variant: int, val
     result[key] = values
 
 
+def _output_variant_value(result: dict[str, Any], key: str, variant: int) -> Any:
+    value = result.get(key)
+    if not isinstance(value, list):
+        return value
+    index = variant - 1
+    return value[index] if 0 <= index < len(value) else None
+
+
+def _professional_artifact_lists(
+    result: dict[str, Any],
+    *,
+    variant_count: int,
+) -> tuple[list[str], list[str], list[str]]:
+    sources = result.get("source_docx")
+    professional = result.get("professional_docx")
+    receipts = result.get("professional_render_receipt")
+    if not all(isinstance(value, list) for value in (sources, professional, receipts)):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DELIVERY_ARTIFACT_SET_INVALID",
+                "message": "正式交付制品集合不完整，不能执行受控重渲染。",
+            },
+        )
+    source_paths = [str(value or "") for value in sources]
+    professional_paths = [str(value or "") for value in professional]
+    receipt_paths = [str(value or "") for value in receipts]
+    if (
+        len(source_paths) != variant_count
+        or len(professional_paths) != variant_count
+        or len(receipt_paths) != variant_count
+        or not all(source_paths + professional_paths + receipt_paths)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DELIVERY_ARTIFACT_SET_INVALID",
+                "message": "正式交付制品数量或路径不一致，不能执行受控重渲染。",
+            },
+        )
+    return source_paths, professional_paths, receipt_paths
+
+
+def _reseal_professional_variant(
+    *,
+    job_id: str,
+    result: dict[str, Any],
+    variant: int,
+    variant_count: int,
+    rendered: dict[str, Any],
+) -> dict[str, Any]:
+    source_paths, _, _ = _professional_artifact_lists(
+        result,
+        variant_count=variant_count,
+    )
+    candidate = copy.deepcopy(result)
+    _set_output_variant_path(candidate, "professional_docx", variant, str(rendered["professional_docx"]))
+    _set_output_variant_path(candidate, "professional_json", variant, str(rendered["professional_json"]))
+    _set_output_variant_path(
+        candidate,
+        "professional_render_receipt",
+        variant,
+        str(rendered["professional_render_receipt"]),
+    )
+    professional_paths = [str(value) for value in candidate["professional_docx"]]
+    receipt_paths = [str(value) for value in candidate["professional_render_receipt"]]
+    receipt_path = (
+        Path(str(rendered["professional_docx"])).parent
+        / f"delivery_receipt_{job_id}_rerender_{uuid.uuid4().hex}.json"
+    )
+    sealed = build_delivery_receipt(
+        job_id=job_id,
+        source_docx=source_paths,
+        professional_docx=professional_paths,
+        professional_json=candidate.get("professional_json"),
+        professional_receipts=receipt_paths,
+        compare_docx=candidate.get("compare_docx"),
+        focus_xlsx=candidate.get("focus_xlsx"),
+        score_overview_xlsx=candidate.get("score_overview_xlsx"),
+        expert_review_docx=candidate.get("expert_review_docx"),
+        receipt_path=receipt_path,
+    )
+    candidate["docx"] = list(professional_paths)
+    candidate["delivery_profile"] = "sonnet5_professional_word"
+    candidate["delivery_receipt"] = str(sealed["receipt"])
+    candidate["delivery_decision_digest"] = str(sealed["decision_digest"])
+    return candidate
+
+
 async def _render_professional_outputs_for_job(
     *,
     job_id: str,
     outputs: dict[str, Any],
+    artifact_namespace: str | None = None,
     progress_callback: Any | None = None,
     execution_runtime: ExecutionControlRuntime | None = None,
     slot_override: ProviderSlot | None = None,
@@ -1395,6 +1670,8 @@ async def _render_professional_outputs_for_job(
             "variant": variant,
             "result": render_source,
         }
+        if artifact_namespace:
+            render_kwargs["artifact_namespace"] = artifact_namespace
         if execution_runtime is not None:
             render_kwargs["execution_runtime"] = execution_runtime
         if slot_override is not None:
@@ -1412,12 +1689,28 @@ async def _render_professional_outputs_for_job(
     delivery["professional_render_receipt"] = professional_receipts
     delivery["docx"] = list(professional_docx)
     delivery["delivery_profile"] = "sonnet5_professional_word"
-    sealed_delivery = build_delivery_receipt(
-        job_id=job_id,
-        source_docx=source_docx,
-        professional_docx=professional_docx,
-        professional_receipts=professional_receipts,
-    )
+    delivery_receipt_kwargs: dict[str, Any] = {
+        "job_id": job_id,
+        "source_docx": source_docx,
+        "professional_docx": professional_docx,
+        "professional_json": professional_json,
+        "professional_receipts": professional_receipts,
+        "compare_docx": delivery.get("compare_docx"),
+        "focus_xlsx": delivery.get("focus_xlsx"),
+        "score_overview_xlsx": delivery.get("score_overview_xlsx"),
+        "expert_review_docx": delivery.get("expert_review_docx"),
+    }
+    if artifact_namespace:
+        safe_namespace = re.sub(
+            r"[^A-Za-z0-9_.-]+",
+            "_",
+            str(artifact_namespace),
+        ).strip("._") or "candidate"
+        delivery_receipt_kwargs["receipt_path"] = (
+            Path(professional_docx[0]).parent
+            / f"delivery_receipt_{safe_namespace}_{uuid.uuid4().hex}.json"
+        )
+    sealed_delivery = build_delivery_receipt(**delivery_receipt_kwargs)
     delivery["delivery_receipt"] = str(sealed_delivery["receipt"])
     delivery["delivery_decision_digest"] = str(sealed_delivery["decision_digest"])
     return delivery
@@ -1595,6 +1888,7 @@ def _professional_render_failure_result(
         )
 
     delivery["delivery_profile"] = "professional_render_incomplete"
+    delivery["delivery_ready"] = False
     delivery["professional_render_status"] = {
         "status": "failed",
         "retryable": bool(error_info.get("retryable")),
@@ -1748,18 +2042,24 @@ def _rebuild_postprocessed_artifacts(
 
         # Cross-index rebuild (depends on latest qc + final section text).
         try:
-            from backend.zhifei_autoplan.cross_index import build_cross_index
+            from backend.zhifei_autoplan.cross_index import (
+                build_cross_index,
+                validate_cross_index_contract,
+            )
 
             drawing_index = v.get("drawing_index") if isinstance(v.get("drawing_index"), dict) else None
             standard_index = v.get("standard_index") if isinstance(v.get("standard_index"), dict) else None
-            v["cross_index"] = build_cross_index(
-                boq=boq,
-                sections=sections,
-                boq_focus=boq_focus,
-                drawing_index=drawing_index,
-                standard_index=standard_index,
-                quality_checks=qc,
-                project_id=pid,
+            v["cross_index"] = validate_cross_index_contract(
+                build_cross_index(
+                    boq=boq,
+                    sections=sections,
+                    boq_focus=boq_focus,
+                    drawing_index=drawing_index,
+                    standard_index=standard_index,
+                    quality_checks=qc,
+                    project_id=pid,
+                ),
+                expected_names=(boq_focus or {}).get("must_cover_keywords") or [],
             )
         except Exception as exc:
             postprocess_errors.append(
@@ -1934,6 +2234,166 @@ def _rebuild_postprocessed_artifacts(
         )
 
 
+def _strict_formal_generation(payload: dict[str, Any]) -> bool:
+    return (
+        str(payload.get("delivery_scope") or "document").strip().lower()
+        == "document"
+        and not bool(payload.get("dry_run"))
+        and bool(payload.get("quality_strict", True))
+    )
+
+
+def _finalize_variant_derivatives(
+    results: list[dict[str, Any]],
+    *,
+    payload: dict[str, Any],
+    allow_diversity_autofix: bool = True,
+    force_rebuild: bool = False,
+    fail_closed: bool | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any] | None:
+    """Recompute cross-variant diversity and every derivative before export.
+
+    Formal strict generation must never continue to persistence when diversity
+    calculation, deterministic remediation, or derivative rebuilding fails.
+    Validation and dry-run scopes keep this diagnostic best-effort behavior but
+    remain non-deliverable.
+    """
+
+    if not results or (len(results) < 2 and not force_rebuild):
+        return None
+    enforce = _strict_formal_generation(payload) if fail_closed is None else bool(fail_closed)
+    try:
+        params = load_params()
+        overrides = payload.get("params_override")
+        if isinstance(overrides, dict) and overrides:
+            for key, value in overrides.items():
+                if isinstance(value, dict) and isinstance(params.get(key), dict):
+                    merged = dict(params.get(key) or {})
+                    merged.update(value)
+                    params[key] = merged
+                else:
+                    params[key] = value
+
+        report: dict[str, Any] | None = None
+        if len(results) >= 2:
+            from backend.zhifei_autoplan.diversity_autofix import (
+                apply_diversity_autofix,
+            )
+            from backend.zhifei_autoplan.variant_similarity import (
+                compute_variant_similarity,
+            )
+
+            div_cfg = (
+                params.get("variant_diversity")
+                if isinstance(params.get("variant_diversity"), dict)
+                else {}
+            )
+
+            def _run_report() -> dict[str, Any]:
+                return compute_variant_similarity(
+                    results,
+                    chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
+                    overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
+                    min_chars=int(div_cfg.get("min_chars") or 800),
+                    ignore_title_keywords=(
+                        div_cfg.get("ignore_title_keywords")
+                        if isinstance(div_cfg.get("ignore_title_keywords"), list)
+                        else None
+                    ),
+                    relaxed_title_keywords=(
+                        div_cfg.get("relaxed_title_keywords")
+                        if isinstance(div_cfg.get("relaxed_title_keywords"), list)
+                        else None
+                    ),
+                    relaxed_chapter_threshold=(
+                        float(div_cfg.get("relaxed_chapter_threshold"))
+                        if div_cfg.get("relaxed_chapter_threshold") is not None
+                        else None
+                    ),
+                )
+
+            report = _run_report()
+            max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
+            max_rounds = max(0, max_rounds) if allow_diversity_autofix else 0
+            rounds = 0
+            while (
+                rounds < max_rounds
+                and report.get("ok") is False
+                and report.get("flagged")
+            ):
+                changed_any = False
+                for finding in (report.get("flagged") or [])[:24]:
+                    title = str(finding.get("title") or "").strip()
+                    pair = str(finding.get("pair") or "").strip()
+                    pair_indexes = _parse_variant_pair(pair)
+                    if not pair_indexes or not title:
+                        continue
+                    target_index = max(pair_indexes)
+                    if target_index <= 1 or target_index > len(results):
+                        continue
+                    sections = results[target_index - 1].get("sections")
+                    if not isinstance(sections, list):
+                        continue
+                    for section in sections:
+                        if not isinstance(section, dict):
+                            continue
+                        if str(section.get("title") or "").strip() != title:
+                            continue
+                        if apply_diversity_autofix(
+                            section,
+                            params=params,
+                            evidence_hint=pair,
+                        ):
+                            changed_any = True
+                        break
+                if not changed_any:
+                    break
+                report = _run_report()
+                rounds += 1
+
+        if callable(progress_callback):
+            progress_callback()
+        _rebuild_postprocessed_artifacts(
+            results,
+            payload=payload,
+            report=report,
+            params=params,
+            fail_closed=enforce,
+        )
+        if enforce and isinstance(report, dict) and report.get("ok") is False:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "VARIANT_DIVERSITY_BLOCKED",
+                        "message": "多方案差异性校验仍未通过，已在正式文件生成前停止。",
+                        "flagged_count": int(report.get("flagged_count") or 0),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return report
+    except Exception as exc:
+        if not enforce:
+            return None
+        try:
+            parsed = json.loads(str(exc))
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("code"):
+            raise
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "code": "POSTPROCESS_REBUILD_FAILED",
+                    "message": "正式交付派生报告重建失败，已在文件生成前停止。",
+                    "error_type": type(exc).__name__,
+                },
+                ensure_ascii=False,
+            )
+        ) from exc
+
+
 def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
     job = get_job(job_id)
     if not job:
@@ -1958,6 +2418,510 @@ def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
     if not variants:
         raise HTTPException(status_code=404, detail="empty result variants")
     return job, result, data, variants
+
+
+def _require_variant_number(value: Any, variant_count: int) -> int:
+    try:
+        variant = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VARIANT_OUT_OF_RANGE", "message": "方案序号无效。"},
+        ) from exc
+    if variant < 1 or variant > int(variant_count):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VARIANT_OUT_OF_RANGE",
+                "message": f"方案序号必须位于 1..{int(variant_count)}。",
+            },
+        )
+    return variant
+
+
+def _artifact_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _same_artifact_path(left: Any, right: Any) -> bool:
+    try:
+        return Path(str(left)).resolve() == Path(str(right)).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _promotion_audit_state(job: dict, result: dict) -> tuple[bool, str]:
+    """Fail closed while a CAS-winning review promotion is not audit-committed."""
+
+    raw_path = result.get("promotion_audit_receipt")
+    if raw_path is None or not str(raw_path).strip():
+        return True, "promotion_audit_not_applicable"
+    audit_path = Path(str(raw_path))
+    if not audit_path.is_file():
+        return False, "promotion_audit_missing"
+    try:
+        raw_audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "promotion_audit_invalid"
+    if not isinstance(raw_audit, dict):
+        return False, "promotion_audit_invalid"
+    expected_job_id = str(job.get("job_id") or "").strip()
+    revision_id = str(raw_audit.get("revision_id") or "").strip()
+    if (
+        raw_audit.get("schema_version") != "review-revision-v1"
+        or not str(raw_audit.get("snapshot_digest") or "").strip()
+        or not expected_job_id
+        or str(raw_audit.get("job_id") or "").strip() != expected_job_id
+        or not revision_id
+    ):
+        return False, "promotion_audit_invalid"
+    try:
+        sealed_audit = load_revision_snapshot(
+            job_id=expected_job_id,
+            revision_id=revision_id,
+        )
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        return False, "promotion_audit_invalid"
+    if not _same_artifact_path(sealed_audit.get("path"), audit_path):
+        return False, "promotion_audit_path_mismatch"
+    promotion = sealed_audit.get("promotion")
+    if not isinstance(promotion, dict):
+        return False, "promotion_audit_invalid"
+    state = str(promotion.get("state") or "").strip().lower()
+    if state == "candidate_prepared":
+        return False, "promotion_audit_pending"
+    if state != "committed":
+        return False, "promotion_audit_invalid"
+    try:
+        promoted_revision = int(promotion.get("promoted_job_revision") or 0)
+        current_revision = int(job.get("revision") or 0)
+    except (TypeError, ValueError):
+        return False, "promotion_audit_invalid"
+    if (
+        promoted_revision <= 0
+        or current_revision < promoted_revision
+        or str(promotion.get("promoted_job_status") or "").strip().lower()
+        not in {"done", "succeeded"}
+        or not str(promotion.get("candidate_artifact_digest") or "").strip()
+    ):
+        return False, "promotion_audit_invalid"
+    return True, "promotion_audit_committed"
+
+
+def _formal_delivery_state(
+    job: dict,
+    result: dict,
+    variants: list,
+) -> tuple[bool, str]:
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    if bool(payload.get("dry_run")):
+        return False, "dry_run"
+    if (
+        "delivery_scope" not in payload
+        or not str(payload.get("delivery_scope") or "").strip()
+    ):
+        return False, "delivery_scope_missing"
+    payload_scope = str(payload.get("delivery_scope") or "").strip().lower()
+    if payload_scope != "document":
+        return False, payload_scope or "unknown_scope"
+    status = str(job.get("status") or "").strip().lower()
+    if status not in {"done", "succeeded"}:
+        return False, "job_not_succeeded"
+    if not variants or any(not isinstance(row, dict) for row in variants):
+        return False, "variant_record_invalid"
+    if any(
+        "delivery_scope" not in row
+        or not str(row.get("delivery_scope") or "").strip()
+        for row in variants
+    ):
+        return False, "variant_scope_missing"
+    record_scopes = {
+        str(row.get("delivery_scope") or "").strip().lower()
+        for row in variants
+        if isinstance(row, dict)
+    }
+    if record_scopes != {"document"}:
+        return False, "variant_scope_mismatch"
+    if any(row.get("delivery_ready") is not True for row in variants):
+        return False, "delivery_not_ready"
+    if not isinstance(result, dict):
+        return False, "delivery_result_invalid"
+    if str(result.get("delivery_profile") or "").strip() != "sonnet5_professional_word":
+        return False, "delivery_profile_mismatch"
+    if result.get("delivery_ready") is False:
+        return False, "outer_delivery_not_ready"
+    audit_ready, audit_reason = _promotion_audit_state(job, result)
+    if not audit_ready:
+        return False, audit_reason
+
+    variant_count = len(variants)
+    required_list_keys = (
+        "source_docx",
+        "docx",
+        "professional_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "compare_docx",
+    )
+    optional_list_keys = (
+        "focus_xlsx",
+        "score_overview_xlsx",
+        "expert_review_docx",
+    )
+    artifact_lists: dict[str, list[str | None]] = {}
+    for key in required_list_keys + optional_list_keys:
+        values = result.get(key)
+        if not isinstance(values, list) or len(values) != variant_count:
+            return False, "delivery_artifact_set_incomplete"
+        normalized = [str(value or "").strip() or None for value in values]
+        if key in required_list_keys and not all(normalized):
+            return False, "delivery_artifact_set_incomplete"
+        identities: set[Path] = set()
+        for value in normalized:
+            if value is None:
+                continue
+            try:
+                identity = Path(value).resolve()
+            except (OSError, RuntimeError, ValueError):
+                return False, "delivery_artifact_path_invalid"
+            if identity in identities:
+                return False, "delivery_artifact_variant_reuse"
+            identities.add(identity)
+        artifact_lists[key] = normalized
+
+    for docx, professional in zip(
+        artifact_lists["docx"], artifact_lists["professional_docx"]
+    ):
+        if not _same_artifact_path(docx, professional):
+            return False, "public_professional_path_mismatch"
+        docx_path = Path(docx)
+        professional_path = Path(professional)
+        if not docx_path.is_file() or not professional_path.is_file():
+            return False, "delivery_artifact_missing"
+        try:
+            if _artifact_sha256(docx_path) != _artifact_sha256(professional_path):
+                return False, "public_professional_hash_mismatch"
+        except OSError:
+            return False, "delivery_artifact_unreadable"
+
+    for key in (
+        "source_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "compare_docx",
+    ):
+        if any(path is None or not Path(path).is_file() for path in artifact_lists[key]):
+            return False, "delivery_artifact_missing"
+    for key in optional_list_keys:
+        if any(
+            path is not None and not Path(path).is_file()
+            for path in artifact_lists[key]
+        ):
+            return False, "delivery_artifact_missing"
+
+    receipt_path = Path(str(result.get("delivery_receipt") or ""))
+    decision_digest = str(result.get("delivery_decision_digest") or "").strip()
+    if not decision_digest or not receipt_path.is_file():
+        return False, "delivery_receipt_missing"
+    try:
+        task_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "delivery_receipt_invalid"
+    if not isinstance(task_receipt, dict):
+        return False, "delivery_receipt_invalid"
+    try:
+        receipt_variant_count = int(task_receipt.get("variant_count") or 0)
+    except (TypeError, ValueError):
+        return False, "delivery_receipt_invalid"
+    recorded_digest = str(task_receipt.get("decision_digest") or "").strip()
+    computed_digest = canonical_delivery_receipt_digest(task_receipt)
+    if not recorded_digest or recorded_digest != computed_digest or decision_digest != computed_digest:
+        return False, "delivery_receipt_digest_mismatch"
+    if (
+        task_receipt.get("schema") != "zhifei.delivery_receipt.v2"
+        or task_receipt.get("status") != "pass"
+        or task_receipt.get("delivery_profile") != "sonnet5_professional_word"
+        or receipt_variant_count != variant_count
+    ):
+        return False, "delivery_receipt_invalid"
+    expected_job_id = str(job.get("job_id") or "").strip()
+    if expected_job_id and str(task_receipt.get("job_id") or "") != expected_job_id:
+        return False, "delivery_receipt_job_mismatch"
+    receipt_variants = task_receipt.get("variants")
+    if not isinstance(receipt_variants, list) or len(receipt_variants) != variant_count:
+        return False, "delivery_receipt_variant_mismatch"
+
+    receipt_bindings = (
+        ("source_docx", "source_docx", False),
+        ("professional_docx", "professional_docx", False),
+        ("professional_json", "professional_json", False),
+        ("professional_render_receipt", "professional_render_receipt", False),
+        ("compare_docx", "compare_docx", False),
+        ("focus_xlsx", "focus_xlsx", True),
+        ("score_overview_xlsx", "score_overview_xlsx", True),
+        ("expert_review_docx", "expert_review_docx", True),
+    )
+    for index, row in enumerate(receipt_variants, start=1):
+        if not isinstance(row, dict):
+            return False, "delivery_receipt_variant_mismatch"
+        try:
+            receipt_variant = int(row.get("variant") or 0)
+        except (TypeError, ValueError):
+            return False, "delivery_receipt_variant_mismatch"
+        if receipt_variant != index:
+            return False, "delivery_receipt_variant_mismatch"
+        for result_key, receipt_key, optional in receipt_bindings:
+            if receipt_key not in row:
+                return False, "delivery_receipt_artifact_invalid"
+            artifact = row.get(receipt_key)
+            expected_path = artifact_lists[result_key][index - 1]
+            if optional and expected_path is None:
+                if artifact is not None:
+                    return False, "delivery_receipt_artifact_mismatch"
+                continue
+            if not isinstance(artifact, dict):
+                return False, "delivery_receipt_artifact_invalid"
+            if expected_path is None:
+                return False, "delivery_receipt_artifact_invalid"
+            if not _same_artifact_path(artifact.get("path"), expected_path):
+                return False, "delivery_receipt_artifact_mismatch"
+            path = Path(expected_path)
+            try:
+                actual_sha256 = _artifact_sha256(path)
+            except OSError:
+                return False, "delivery_artifact_unreadable"
+            if str(artifact.get("sha256") or "") != actual_sha256:
+                return False, "delivery_receipt_hash_mismatch"
+    return True, "formal_document_ready"
+
+
+def _public_job_files(job: dict, result: dict, variants: list) -> dict[str, Any]:
+    formal_ready, reason = _formal_delivery_state(job, result, variants)
+    public = {
+        "json": result.get("json"),
+        "delivery_profile": result.get("delivery_profile"),
+        "delivery_ready": formal_ready,
+    }
+    formal_keys = (
+        "docx",
+        "professional_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "compare_docx",
+        "delivery_receipt",
+        "delivery_decision_digest",
+        "focus_xlsx",
+        "score_overview_xlsx",
+        "expert_review_docx",
+    )
+    if formal_ready:
+        public.update({key: result.get(key) for key in formal_keys if result.get(key)})
+    elif any(result.get(key) for key in formal_keys):
+        public["artifact_leak_blocked"] = True
+        public["non_delivery_reason"] = reason
+    return public
+
+
+def _require_formal_document_mutation(
+    job: dict,
+    result: dict,
+    variants: list,
+) -> None:
+    formal_ready, reason = _formal_delivery_state(job, result, variants)
+    if not formal_ready:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "NON_DELIVERABLE_MUTATION_FORBIDDEN",
+                "message": "非正式交付任务仅允许只读复核，不能晋升、回滚或渲染正式交付文件。",
+                "reason": reason,
+            },
+        )
+
+
+def _capture_promotion_revision(job: dict) -> tuple[str, int]:
+    status = str(job.get("status") or "").strip().lower()
+    try:
+        revision = int(job.get("revision") or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    if status not in {"done", "succeeded"} or revision <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_PROMOTION",
+                "message": "任务版本状态无效，候选结果未晋升。",
+            },
+        )
+    return status, revision
+
+
+def _promote_job_result_cas(
+    *,
+    job_id: str,
+    initial_status: str,
+    initial_revision: int,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    transitioned = transition_job(
+        job_id,
+        allowed_from={initial_status},
+        status=initial_status,
+        expected_revision=initial_revision,
+        result=result,
+        error=None,
+    )
+    if transitioned is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_PROMOTION",
+                "message": "任务在候选文件生成期间已被其他操作更新；候选结果未晋升。",
+            },
+        )
+    return transitioned
+
+
+def _promote_review_candidate_two_phase(
+    *,
+    job_id: str,
+    revision_id: str,
+    initial_status: str,
+    initial_revision: int,
+    result: dict[str, Any],
+    promotion: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Prepare audit evidence, CAS the job, then commit the audit receipt.
+
+    A prepare failure cannot mutate the live job.  A stale CAS leaves the
+    snapshot explicitly in ``candidate_prepared`` state.  If the final audit
+    commit fails after a successful CAS, the promoted job points back to the
+    still-sealed prepared receipt so recovery can commit it idempotently.
+    """
+
+    candidate_digest = str(promotion.get("candidate_artifact_digest") or "").strip()
+    if not candidate_digest:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PROMOTION_AUDIT_PREPARE_FAILED",
+                "message": "候选制品摘要缺失，旧任务结果保持不变。",
+            },
+        )
+    prepared_payload = dict(promotion)
+    prepared_payload.update(
+        {
+            "expected_job_revision": int(initial_revision),
+            "expected_job_status": str(initial_status),
+            "expected_promoted_job_revision": int(initial_revision) + 1,
+            "recovery": {
+                "operation": "commit_prepared_promotion_after_job_cas_verification",
+                "candidate_artifact_digest": candidate_digest,
+                "expected_promoted_job_revision": int(initial_revision) + 1,
+            },
+        }
+    )
+    try:
+        prepared = prepare_revision_promotion(
+            job_id=job_id,
+            revision_id=revision_id,
+            promotion=prepared_payload,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PROMOTION_AUDIT_PREPARE_FAILED",
+                "message": "候选晋升凭证封印失败，旧任务结果保持不变。",
+                "revision_id": revision_id,
+            },
+        ) from exc
+
+    result["promotion_audit_receipt"] = str(prepared["path"])
+    transitioned = _promote_job_result_cas(
+        job_id=job_id,
+        initial_status=initial_status,
+        initial_revision=initial_revision,
+        result=result,
+    )
+    try:
+        committed = commit_revision_promotion(
+            job_id=job_id,
+            revision_id=revision_id,
+            candidate_artifact_digest=candidate_digest,
+            promoted_job_revision=int(transitioned.get("revision") or 0),
+            promoted_job_status=str(transitioned.get("status") or ""),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PROMOTION_AUDIT_COMMIT_PENDING",
+                "message": "任务已完成原子晋升，但审计凭证仍处于 candidate_prepared；可按凭证摘要安全续提 committed。",
+                "revision_id": revision_id,
+                "promotion_state": "candidate_prepared",
+                "job_promotion_committed": True,
+                "promoted_job_revision": int(transitioned.get("revision") or 0),
+                "candidate_artifact_digest": candidate_digest,
+                "promotion_audit_receipt": str(prepared["path"]),
+            },
+        ) from exc
+    return transitioned, committed
+
+
+def _validate_rollback_snapshot(
+    *,
+    revision: dict[str, Any],
+    current_job: dict[str, Any],
+    current_result: dict[str, Any],
+    current_variants: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    def _invalid(reason: str) -> HTTPException:
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "ROLLBACK_SNAPSHOT_INVALID",
+                "message": "回滚快照未通过身份与正式交付校验，未创建安全快照或候选文件。",
+                "reason": reason,
+            },
+        )
+
+    if revision.get("schema_version") != "review-revision-v1":
+        raise _invalid("schema_mismatch")
+    if not str(revision.get("snapshot_digest") or "").strip():
+        raise _invalid("snapshot_seal_missing")
+    restored = revision.get("variants")
+    if not isinstance(restored, list) or any(not isinstance(row, dict) for row in restored):
+        raise _invalid("variant_record_invalid")
+    try:
+        revision_variant_count = int(revision.get("variant_count") or 0)
+    except (TypeError, ValueError):
+        raise _invalid("variant_count_mismatch")
+    if revision_variant_count != len(restored) or len(restored) != len(current_variants):
+        raise _invalid("variant_count_mismatch")
+
+    current_ids = [str(row.get("variant_id") or "").strip() for row in current_variants]
+    restored_ids = [str(row.get("variant_id") or "").strip() for row in restored]
+    if (
+        not all(current_ids)
+        or not all(restored_ids)
+        or len(set(current_ids)) != len(current_ids)
+        or restored_ids != current_ids
+    ):
+        raise _invalid("variant_identity_mismatch")
+
+    formal_ready, reason = _formal_delivery_state(
+        current_job,
+        current_result,
+        restored,
+    )
+    if not formal_ready:
+        raise _invalid(f"restored_{reason}")
+    return copy.deepcopy(restored)
 
 
 def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> list[dict]:
@@ -2963,23 +3927,26 @@ async def actions_professional_render(
 
     _auth_actions_key(x_actions_key)
     job_id = str(req.job_id or "").strip()
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
-    if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
-        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
-    result = dict(job.get("result") or {})
-    variant = max(1, int(req.variant or 1))
+    job, stored_result, _, variants = _load_done_job_variants(job_id)
+    _require_formal_document_mutation(job, stored_result, variants)
+    initial_status, initial_revision = _capture_promotion_revision(job)
+    result = dict(stored_result)
+    variant = _require_variant_number(req.variant, len(variants))
+    _professional_artifact_lists(result, variant_count=len(variants))
     render_source = dict(result)
     source_docx = result.get("source_docx")
     if isinstance(source_docx, list) and source_docx:
         render_source["docx"] = list(source_docx)
+    candidate_namespace = (
+        f"{job_id}-rerender-v{variant}-{uuid.uuid4().hex}"
+    )
     try:
         admitted_slot = await _admit_current_server_route_for_existing_evidence()
         rendered = await render_professional_document(
             job_id=job_id,
             variant=variant,
             result=render_source,
+            artifact_namespace=candidate_namespace,
             slot_override=admitted_slot,
         )
     except ProfessionalRenderError as exc:
@@ -2996,20 +3963,30 @@ async def actions_professional_render(
             detail=_public_runtime_error(exc),
         ) from exc
 
-    if not isinstance(result.get("source_docx"), list):
-        existing_docx = result.get("docx")
-        result["source_docx"] = list(existing_docx) if isinstance(existing_docx, list) else []
-    _set_output_variant_path(result, "professional_docx", variant, rendered["professional_docx"])
-    _set_output_variant_path(result, "professional_json", variant, rendered["professional_json"])
-    _set_output_variant_path(
-        result,
-        "professional_render_receipt",
-        variant,
-        rendered["professional_render_receipt"],
+    try:
+        candidate_result = _reseal_professional_variant(
+            job_id=job_id,
+            result=result,
+            variant=variant,
+            variant_count=len(variants),
+            rendered=rendered,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DELIVERY_RECEIPT_RESEAL_FAILED",
+                "message": "专业 Word 已生成，但任务级交付封印重建失败，旧交付结果保持不变。",
+            },
+        ) from exc
+    _promote_job_result_cas(
+        job_id=job_id,
+        initial_status=initial_status,
+        initial_revision=initial_revision,
+        result=candidate_result,
     )
-    _set_output_variant_path(result, "docx", variant, rendered["professional_docx"])
-    result["delivery_profile"] = "sonnet5_professional_word"
-    update_job(job_id, status="done", result=result, error=None)
     return {
         "ok": True,
         "job_id": job_id,
@@ -3046,6 +4023,13 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
                 status_code=409,
                 detail="only failed, cancelled or interrupted jobs can be resumed",
             )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_REQUIRES_ASYNC_JOB",
+                "message": "检查点恢复仅支持异步任务入口，请使用 generate_async。",
+            },
+        )
     payload = _apply_server_provider_routing_or_503(payload)
     provider_admission_run = (
         new_provider_admission_run_coordinator(payload)
@@ -3078,85 +4062,23 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
         *[_run_direct_variant(i, item) for i, item in enumerate(variant_plan)]
     )
     results = [item for item in ordered_results if isinstance(item, dict)]
-    # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort; does not change outline.
-    if len(results) >= 2:
-        try:
-            from backend.zhifei_autoplan.variant_similarity import compute_variant_similarity
-            from backend.zhifei_autoplan.diversity_autofix import apply_diversity_autofix
-
-            params = load_params()
-            overrides = payload.get("params_override")
-            if isinstance(overrides, dict) and overrides:
-                for k, v in overrides.items():
-                    if isinstance(v, dict) and isinstance(params.get(k), dict):
-                        merged = dict(params.get(k) or {})
-                        merged.update(v)
-                        params[k] = merged
-                    else:
-                        params[k] = v
-            div_cfg = params.get("variant_diversity") if isinstance(params.get("variant_diversity"), dict) else {}
-            def _run_report():
-                return compute_variant_similarity(
-                    results,
-                    chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
-                    overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
-                    min_chars=int(div_cfg.get("min_chars") or 800),
-                    ignore_title_keywords=(div_cfg.get("ignore_title_keywords") if isinstance(div_cfg.get("ignore_title_keywords"), list) else None),
-                    relaxed_title_keywords=(div_cfg.get("relaxed_title_keywords") if isinstance(div_cfg.get("relaxed_title_keywords"), list) else None),
-                    relaxed_chapter_threshold=(float(div_cfg.get("relaxed_chapter_threshold")) if div_cfg.get("relaxed_chapter_threshold") is not None else None),
-                )
-
-            report = _run_report()
-
-            # Auto-fix: reshape only flagged chapters (do not change tender outline).
-            # This is deterministic and avoids "换词" by switching to A/B/C/D/E structural blocks.
-            max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
-            if max_rounds < 0:
-                max_rounds = 0
-            rounds = 0
-            while rounds < max_rounds and report.get("ok") is False and report.get("flagged"):
-                changed_any = False
-                for f in (report.get("flagged") or [])[:24]:
-                    title = str(f.get("title") or "").strip()
-                    pair = str(f.get("pair") or "").strip()
-                    pair_indexes = _parse_variant_pair(pair)
-                    if not pair_indexes or not title:
-                        continue
-                    a, b = pair_indexes
-                    # Rewrite the later variant in the max-sim pair.
-                    target_idx = max(a, b)
-                    if target_idx <= 1 or target_idx > len(results):
-                        continue
-                    target = results[target_idx - 1]
-                    secs = target.get("sections") if isinstance(target, dict) else None
-                    if not isinstance(secs, list):
-                        continue
-                    for sec in secs:
-                        if not isinstance(sec, dict):
-                            continue
-                        if str(sec.get("title") or "").strip() != title:
-                            continue
-                        if apply_diversity_autofix(sec, params=params, evidence_hint=str(pair)):
-                            changed_any = True
-                        break
-                if not changed_any:
-                    break
-                # Recompute report after patching
-                report = _run_report()
-                rounds += 1
-
-            _rebuild_postprocessed_artifacts(results, payload=payload, report=report, params=params)
-        except Exception:
-            pass
+    _finalize_variant_derivatives(results, payload=payload)
     is_dry_run = bool(payload.get("dry_run"))
+    is_chapter_validation = (
+        str(payload.get("delivery_scope") or "document") == "chapter_validation"
+    )
     outputs = _save_outputs(
         "actions_generated",
         results,
-        preview_only=is_dry_run,
+        preview_only=is_dry_run or is_chapter_validation,
     )
     if is_dry_run:
         outputs["delivery_profile"] = "dry_run_preview_no_provider_calls"
         outputs["delivery_ready"] = False
+    elif is_chapter_validation:
+        outputs["delivery_profile"] = "chapter_validation_real_model_no_delivery"
+        outputs["delivery_ready"] = False
+        outputs["validation_scope"] = "chapter_validation"
     else:
         outputs = await _render_professional_outputs_for_job(
             job_id=f"direct-{uuid.uuid4().hex}",
@@ -3178,28 +4100,130 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
     heartbeat_stop = threading.Event()
     heartbeat_thread: threading.Thread | None = None
     try:
-        local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
-        local_payload["_job_id"] = _job_id
-        provider_admission_run = (
-            new_provider_admission_run_coordinator(local_payload)
-            if bool(local_payload.get("_provider_admission_required"))
-            else None
-        )
+        lease_record = acquire_job_lease(_job_id)
+        if lease_record is None:
+            return
+        lease_attempt_id = str(lease_record.get("attempt_id") or "")
+        lease_owner_instance_id = str(lease_record.get("owner_instance_id") or "")
+        if not lease_attempt_id or not lease_owner_instance_id:
+            raise RuntimeError("job_lease_acquisition_invalid")
+
+        def _lease_active() -> bool:
+            return job_lease_active(
+                _job_id,
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+            )
 
         def _is_cancelled() -> bool:
             j = get_job(_job_id) or {}
-            return str(j.get("status") or "").strip().lower() in {
+            status = str(j.get("status") or "").strip().lower()
+            if status in {
                 "cancel_requested",
                 "cancelled",
-            }
+            }:
+                return True
+            return not _lease_active()
+
+        def _lease_side_effect(callback: Any, *args: Any, **kwargs: Any) -> Any:
+            return run_with_job_lease(
+                _job_id,
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+                callback=callback,
+                callback_args=tuple(args),
+                callback_kwargs=dict(kwargs),
+            )
+
+        def _append_active_event(event: str, **fields: Any) -> bool:
+            try:
+                _lease_side_effect(
+                    append_runtime_event,
+                    _job_id,
+                    event,
+                    **fields,
+                )
+                return True
+            except JobLeaseLostError:
+                return False
 
         def _mark_cancelled(result: Dict[str, Any] | None = None) -> None:
+            if not _lease_active():
+                return
             prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
+            checkpoint_projection: Dict[str, Any]
+            seal_failed = False
+            try:
+                from backend.zhifei_autoplan.generation_checkpoint import (
+                    mark_checkpoint_namespace_interrupted,
+                )
+
+                checkpoints = _lease_side_effect(
+                    mark_checkpoint_namespace_interrupted,
+                    _job_id,
+                )
+                saved_chapter_count = sum(
+                    int(item.get("saved_chapter_count") or 0)
+                    for item in checkpoints
+                    if isinstance(item, dict)
+                )
+                chapters_total = sum(
+                    int(item.get("chapters_total") or 0)
+                    for item in checkpoints
+                    if isinstance(item, dict)
+                )
+                checkpoint_projection = {
+                    "status": (
+                        "interrupted_recoverable"
+                        if checkpoints
+                        else "interrupted_empty"
+                    ),
+                    "saved_chapter_count": saved_chapter_count,
+                    "scopes": checkpoints,
+                }
+            except JobLeaseLostError:
+                return
+            except Exception as seal_error:
+                seal_failed = True
+                saved_chapter_count = 0
+                chapters_total = int(prior_progress.get("chapters_total") or 0)
+                checkpoint_projection = {
+                    "status": "interruption_seal_failed",
+                    "saved_chapter_count": 0,
+                    "error_code": "CHECKPOINT_INTERRUPTION_SEAL_FAILED",
+                    "error_type": type(seal_error).__name__,
+                }
+
+            prior_chapters = (
+                prior_progress.get("chapters")
+                if isinstance(prior_progress.get("chapters"), dict)
+                else {}
+            )
+            chapters_total = max(
+                chapters_total,
+                int(prior_chapters.get("total") or 0),
+            )
+            chapters_started = max(
+                saved_chapter_count,
+                int(prior_chapters.get("started") or 0),
+            )
             values: Dict[str, Any] = {
                 "error": {
-                    "code": "JOB_CANCELLED",
-                    "message": "用户已取消任务。",
-                    "action": "可从已保存的可信检查点显式恢复。",
+                    "code": (
+                        "JOB_CANCELLED_CHECKPOINT_SEAL_FAILED"
+                        if seal_failed
+                        else "JOB_CANCELLED"
+                    ),
+                    "message": (
+                        "用户已取消任务，但检查点封存失败；该故障已显式记录。"
+                        if seal_failed
+                        else "用户已取消任务。"
+                    ),
+                    "action": (
+                        "先检查检查点存储与权限，再决定是否从先前可信断点恢复。"
+                        if seal_failed
+                        else "可从已保存的可信检查点显式恢复。"
+                    ),
                 },
                 "progress": {
                     "percent": int(prior_progress.get("percent") or 0),
@@ -3207,37 +4231,41 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     "phase": str(prior_progress.get("phase") or "generation"),
                     "work_state": "idle",
                     "detail": "用户已取消；未完成章节已停止，已完成章节保留为可信断点。",
+                    "chapters_total": chapters_total,
+                    "chapters_done": saved_chapter_count,
+                    "chapters_succeeded": saved_chapter_count,
+                    "chapters_failed": int(prior_chapters.get("failed") or 0),
+                    "chapters": {
+                        "started": chapters_started,
+                        "succeeded": saved_chapter_count,
+                        "failed": int(prior_chapters.get("failed") or 0),
+                        "total": chapters_total,
+                    },
+                    "checkpoint": checkpoint_projection,
                 },
             }
             if isinstance(result, dict):
                 values["result"] = result
             transitioned = transition_job(
                 _job_id,
-                allowed_from={"queued", "running", "cancel_requested", "cancelled"},
+                allowed_from={"running", "cancel_requested"},
                 status="cancelled",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
                 **values,
             )
             if transitioned is None:
                 return
-            try:
-                from backend.zhifei_autoplan.generation_checkpoint import (
-                    mark_checkpoint_namespace_interrupted,
-                )
-
-                checkpoints = mark_checkpoint_namespace_interrupted(_job_id)
-                if checkpoints:
-                    merge_job(
-                        _job_id,
-                        progress={
-                            "checkpoint": {
-                                "status": "interrupted_recoverable",
-                                "scopes": checkpoints,
-                            }
-                        },
-                    )
-            except Exception:
-                pass
             append_runtime_event(_job_id, "job_cancelled")
+
+        local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
+        local_payload["_job_id"] = _job_id
+        provider_admission_run = (
+            new_provider_admission_run_coordinator(local_payload)
+            if bool(local_payload.get("_provider_admission_required"))
+            else None
+        )
 
         execution_runtime, execution_policy = _prepare_execution_control(
             local_payload,
@@ -3299,6 +4327,9 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
 
         def _heartbeat_loop() -> None:
             while not heartbeat_stop.is_set():
+                if not _lease_active():
+                    heartbeat_stop.set()
+                    return
                 activity, runtime = _activity_snapshot()
                 heartbeat_job(
                     _job_id,
@@ -3314,11 +4345,15 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                         },
                     },
                     agent_runtime_updates=runtime,
+                    expected_attempt_id=lease_attempt_id,
+                    expected_owner_instance_id=lease_owner_instance_id,
                 )
                 heartbeat_stop.wait(5.0)
 
         def _variant_progress_callback(variant_id: int):
             def _callback(event: Dict[str, Any]) -> None:
+                if not _lease_active():
+                    return
                 event_name = str(event.get("event") or "").strip()
                 chapter_idx = int(event.get("chapter_index") or 0)
                 chapter_title = str(event.get("chapter_title") or "").strip()
@@ -3475,8 +4510,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 if all_total > 0:
                     progress_updates["percent"] = min(75, 15 + int((succeeded / all_total) * 60))
                 activity, runtime = _activity_snapshot()
-                append_runtime_event(
-                    _job_id,
+                _append_active_event(
                     event_name or "generation_progress",
                     variant_id=variant_id,
                     chapter_index=chapter_idx,
@@ -3502,14 +4536,18 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     activity=activity,
                     progress_updates=progress_updates,
                     agent_runtime_updates=runtime,
+                    expected_attempt_id=lease_attempt_id,
+                    expected_owner_instance_id=lease_owner_instance_id,
                 )
 
             return _callback
 
         def _update_progress(percent: int, stage: str, detail: str = "") -> None:
             p = max(0, min(100, int(percent)))
-            merge_job(
+            updated = merge_job(
                 _job_id,
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
                 progress={
                     "percent": p,
                     "stage": str(stage or ""),
@@ -3521,23 +4559,23 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 },
                 agent_runtime=agent_runtime,
             )
+            if updated is None:
+                raise JobLeaseLostError("job_lease_lost")
 
         agent_runtime["execution_control"] = execution_runtime.snapshot()
 
         if _is_cancelled():
             _mark_cancelled()
             return
-        started = transition_job(
+        started = merge_job(
             _job_id,
-            allowed_from={"queued"},
-            status="running",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
             agent_runtime=agent_runtime,
         )
         if started is None:
-            if _is_cancelled():
-                _mark_cancelled()
             return
-        append_runtime_event(_job_id, "job_started", execution_policy=execution_policy)
+        _append_active_event("job_started", execution_policy=execution_policy)
         heartbeat_thread = threading.Thread(
             target=_heartbeat_loop,
             name=f"autoplan-heartbeat-{_job_id[:8]}",
@@ -3636,6 +4674,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     local_payload.get("resume_from_job_id") or ""
                 ).strip()
                 lp["_cancel_callback"] = _is_cancelled
+                lp["_checkpoint_write_guard"] = _lease_side_effect
                 lp["_execution_runtime"] = execution_runtime
                 if provider_admission_run is not None:
                     lp["_provider_admission_run_coordinator"] = provider_admission_run
@@ -3669,82 +4708,26 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
         if _is_cancelled():
             _mark_cancelled()
             return
-        # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort.
-        if len(results) >= 2:
-            try:
-                from backend.zhifei_autoplan.variant_similarity import compute_variant_similarity
-                from backend.zhifei_autoplan.diversity_autofix import apply_diversity_autofix
-
-                params = load_params()
-                overrides = local_payload.get("params_override")
-                if isinstance(overrides, dict) and overrides:
-                    for k, v in overrides.items():
-                        if isinstance(v, dict) and isinstance(params.get(k), dict):
-                            merged = dict(params.get(k) or {})
-                            merged.update(v)
-                            params[k] = merged
-                        else:
-                            params[k] = v
-                div_cfg = params.get("variant_diversity") if isinstance(params.get("variant_diversity"), dict) else {}
-                def _run_report():
-                    return compute_variant_similarity(
-                        results,
-                        chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
-                        overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
-                        min_chars=int(div_cfg.get("min_chars") or 800),
-                        ignore_title_keywords=(div_cfg.get("ignore_title_keywords") if isinstance(div_cfg.get("ignore_title_keywords"), list) else None),
-                        relaxed_title_keywords=(div_cfg.get("relaxed_title_keywords") if isinstance(div_cfg.get("relaxed_title_keywords"), list) else None),
-                        relaxed_chapter_threshold=(float(div_cfg.get("relaxed_chapter_threshold")) if div_cfg.get("relaxed_chapter_threshold") is not None else None),
-                    )
-
-                report = _run_report()
-
-                # Auto-fix: deterministic reshape for flagged chapters (do not change tender outline).
-                max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
-                if max_rounds < 0:
-                    max_rounds = 0
-                rounds = 0
-                while rounds < max_rounds and report.get("ok") is False and report.get("flagged"):
-                    changed_any = False
-                    for f in (report.get("flagged") or [])[:24]:
-                        title = str(f.get("title") or "").strip()
-                        pair = str(f.get("pair") or "").strip()
-                        pair_indexes = _parse_variant_pair(pair)
-                        if not pair_indexes or not title:
-                            continue
-                        a, b = pair_indexes
-                        target_idx = max(a, b)
-                        if target_idx <= 1 or target_idx > len(results):
-                            continue
-                        target = results[target_idx - 1]
-                        secs = target.get("sections") if isinstance(target, dict) else None
-                        if not isinstance(secs, list):
-                            continue
-                        for sec in secs:
-                            if not isinstance(sec, dict):
-                                continue
-                            if str(sec.get("title") or "").strip() != title:
-                                continue
-                            if apply_diversity_autofix(sec, params=params, evidence_hint=str(pair)):
-                                changed_any = True
-                            break
-                    if not changed_any:
-                        break
-                    report = _run_report()
-                    rounds += 1
-                _update_progress(86, "cross_variant_check", "正在执行跨方案一致性与差异性审计")
-                _rebuild_postprocessed_artifacts(results, payload=local_payload, report=report, params=params)
-            except Exception:
-                pass
+        _finalize_variant_derivatives(
+            results,
+            payload=local_payload,
+            progress_callback=lambda: _update_progress(
+                86,
+                "cross_variant_check",
+                "正在执行跨方案一致性与差异性审计",
+            ),
+        )
         if _is_cancelled():
             _mark_cancelled()
             return
         _update_progress(91, "exporting_source", "正在生成可追溯中间稿与质控附件")
         is_dry_run = bool(local_payload.get("dry_run"))
+        delivery_scope = str(local_payload.get("delivery_scope") or "document")
+        is_chapter_validation = delivery_scope == "chapter_validation"
         outputs = _save_outputs(
             f"actions_{_job_id}",
             results,
-            preview_only=is_dry_run,
+            preview_only=is_dry_run or is_chapter_validation,
         )
         if _is_cancelled():
             _mark_cancelled(outputs)
@@ -3763,6 +4746,12 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 "dry_run_finalizing",
                 "正在封装 dry-run 预览；不会生成专业终稿或正式交付回执",
             )
+        elif is_chapter_validation:
+            _update_progress(
+                93,
+                "chapter_validation_finalizing",
+                "正在封装章节真实模型验证结果；不会生成正式交付文件",
+            )
         else:
             _update_progress(
                 93,
@@ -3773,6 +4762,10 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             if is_dry_run:
                 outputs["delivery_profile"] = "dry_run_preview_no_provider_calls"
                 outputs["delivery_ready"] = False
+            elif is_chapter_validation:
+                outputs["delivery_profile"] = "chapter_validation_real_model_no_delivery"
+                outputs["delivery_ready"] = False
+                outputs["validation_scope"] = "chapter_validation"
             else:
                 outputs = asyncio.run(
                     _render_professional_outputs_for_job(
@@ -3786,12 +4779,18 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     )
                 )
         except Exception as render_error:
+            if _is_cancelled():
+                _mark_cancelled()
+                return
             agent_runtime["execution_control"] = execution_runtime.snapshot()
             recovery, error_info = _professional_render_failure_result(
                 outputs,
                 render_error,
             )
-            failed_checkpoint = _seal_failed_run_checkpoints(_job_id)
+            failed_checkpoint = _lease_side_effect(
+                _seal_failed_run_checkpoints,
+                _job_id,
+            )
             if failed_checkpoint is not None:
                 saved_chapter_count = int(
                     failed_checkpoint.get("saved_chapter_count") or 0
@@ -3811,10 +4810,13 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 f"{error_info.get('user_message') or '外部模型连接失败。'} "
                 "已保全中间稿与质控附件；未将中间稿冒充专业终稿。"
             )
-            transition_job(
+            failed_transition = transition_job(
                 _job_id,
                 allowed_from={"running"},
                 status="failed",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
                 error={
                     "code": str(error_info.get("code") or "PROFESSIONAL_RENDER_FAILED"),
                     "message": detail,
@@ -3835,23 +4837,30 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     ),
                 },
             )
-            append_runtime_event(
-                _job_id,
-                "job_failed",
-                code=str(error_info.get("code") or "PROFESSIONAL_RENDER_FAILED"),
-                phase="professional_rendering",
-            )
+            if failed_transition is not None:
+                append_runtime_event(
+                    _job_id,
+                    "job_failed",
+                    code=str(error_info.get("code") or "PROFESSIONAL_RENDER_FAILED"),
+                    phase="professional_rendering",
+                )
             return
         agent_runtime["execution_control"] = execution_runtime.snapshot()
         if _is_cancelled():
             _mark_cancelled(outputs)
             return
-        completion = _delivery_progress_for_run(dry_run=is_dry_run)
+        completion = _delivery_progress_for_run(
+            dry_run=is_dry_run,
+            delivery_scope=delivery_scope,
+        )
         _update_progress(100, completion["stage"], completion["detail"])
-        transition_job(
+        succeeded_transition = transition_job(
             _job_id,
             allowed_from={"running"},
             status="succeeded",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            revoke_lease=True,
             result=outputs,
             agent_runtime=agent_runtime,
             progress={
@@ -3862,43 +4871,38 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 "detail": completion["detail"],
             },
         )
-        append_runtime_event(
-            _job_id,
-            "job_succeeded",
-            phase=completion["phase"],
-            dry_run=is_dry_run,
-        )
+        if succeeded_transition is not None:
+            append_runtime_event(
+                _job_id,
+                "job_succeeded",
+                phase=completion["phase"],
+                dry_run=is_dry_run,
+                delivery_scope=delivery_scope,
+            )
     except Exception as e:
         error_text = str(e)
         cancel_probe = locals().get("_is_cancelled")
         was_cancelled = bool(cancel_probe()) if callable(cancel_probe) else False
         if was_cancelled or "cancelled_by_user" in error_text:
-            prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
-            transition_job(
-                _job_id,
-                allowed_from={"queued", "running", "cancel_requested", "cancelled"},
-                status="cancelled",
-                error={
-                    "code": "JOB_CANCELLED",
-                    "message": "用户已取消任务。",
-                    "action": "可从已保存的可信检查点显式恢复。",
-                },
-                progress={
-                    "percent": int(prior_progress.get("percent") or 0),
-                    "stage": "cancelled",
-                    "phase": str(prior_progress.get("phase") or "generation"),
-                    "work_state": "idle",
-                    "detail": "用户已取消；未完成章节已停止，已完成章节保留为可信断点。",
-                },
-            )
-            append_runtime_event(_job_id, "job_cancelled")
+            cancel_handler = locals().get("_mark_cancelled")
+            if callable(cancel_handler):
+                cancel_handler()
         else:
             prior_job = get_job(_job_id) or {}
             public_error, failure_progress, recovery_result = _runtime_failure_transition(
                 e,
                 prior_job,
             )
-            failed_checkpoint = _seal_failed_run_checkpoints(_job_id)
+            failed_checkpoint = None
+            lease_side_effect = locals().get("_lease_side_effect")
+            if callable(lease_side_effect):
+                try:
+                    failed_checkpoint = lease_side_effect(
+                        _seal_failed_run_checkpoints,
+                        _job_id,
+                    )
+                except JobLeaseLostError:
+                    failed_checkpoint = None
             if failed_checkpoint is not None:
                 failure_progress["checkpoint"] = failed_checkpoint
                 saved_chapter_count = int(
@@ -3923,19 +4927,27 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             }
             if recovery_result is not None:
                 failure_fields["result"] = recovery_result
-            transition_job(
-                _job_id,
-                allowed_from={"queued", "running"},
-                status="failed",
-                **failure_fields,
-            )
-            append_runtime_event(
-                _job_id,
-                "job_failed",
-                code=public_error.get("code"),
-                phase=str(failure_progress.get("phase") or "generation"),
-                failures=public_error.get("failures"),
-            )
+            active_attempt_id = str(locals().get("lease_attempt_id") or "")
+            active_owner_id = str(locals().get("lease_owner_instance_id") or "")
+            failed_transition = None
+            if active_attempt_id and active_owner_id:
+                failed_transition = transition_job(
+                    _job_id,
+                    allowed_from={"running"},
+                    status="failed",
+                    expected_attempt_id=active_attempt_id,
+                    expected_owner_instance_id=active_owner_id,
+                    revoke_lease=True,
+                    **failure_fields,
+                )
+            if failed_transition is not None:
+                append_runtime_event(
+                    _job_id,
+                    "job_failed",
+                    code=public_error.get("code"),
+                    phase=str(failure_progress.get("phase") or "generation"),
+                    failures=public_error.get("failures"),
+                )
     finally:
         heartbeat_stop.set()
         if heartbeat_thread is not None and heartbeat_thread.is_alive():
@@ -3950,6 +4962,7 @@ async def actions_generate_async(
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
     _assert_mandatory_generation_sources(payload)
+    resume_source_job: Dict[str, Any] | None = None
     resume_from_job_id = str(payload.get("resume_from_job_id") or "").strip()
     if resume_from_job_id:
         if not re.fullmatch(r"[a-f0-9]{32}", resume_from_job_id):
@@ -3966,8 +4979,13 @@ async def actions_generate_async(
                 status_code=409,
                 detail="only failed, cancelled or interrupted jobs can be resumed",
             )
+        resume_source_job = source_job
     payload = _apply_server_provider_routing_or_503(payload)
-    variant_plan = _build_variant_plan(payload)
+    variant_plan = (
+        _build_resume_variant_plan(payload, resume_source_job)
+        if resume_source_job is not None
+        else _build_variant_plan(payload)
+    )
     payload["_variant_plan"] = variant_plan
     payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
     payload["variants"] = len(variant_plan) if variant_plan else int(payload.get("variants") or 1)
@@ -4048,8 +5066,8 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
     }
     result = job.get("result") or {}
     if isinstance(result, dict):
-        out["files"] = result
         json_path = result.get("json")
+        variants = []
         if json_path and Path(json_path).exists():
             try:
                 data = json.loads(Path(json_path).read_text(encoding="utf-8"))
@@ -4064,7 +5082,8 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
                     if isinstance(ma, dict):
                         out["multi_agent"] = ma
             except Exception:
-                pass
+                variants = []
+        out["files"] = _public_job_files(job, result, variants)
     return {"ok": True, "job": out}
 
 
@@ -4103,15 +5122,15 @@ async def actions_review_issues(
 ):
     _auth_actions_key(x_actions_key)
     _, _, _, variants = _load_done_job_variants(job_id)
-    v = max(1, int(variant or 1))
-    rec = variants[v - 1] if v <= len(variants) else variants[0]
-    idx = (v - 1) if v <= len(variants) else 0
+    v = _require_variant_number(variant, len(variants))
+    rec = variants[v - 1]
+    idx = v - 1
     items = _review_items_for_variant(rec)
     versions = _review_versions(variants, idx)
     return {
         "ok": True,
         "job_id": job_id,
-        "variant": int(v if v <= len(variants) else 1),
+        "variant": v,
         "count": len(items),
         "items": items,
         **versions,
@@ -4128,9 +5147,11 @@ async def actions_review_apply(
     if not job_id:
         raise HTTPException(status_code=400, detail="job_id required")
     job, current_result, _, variants = _load_done_job_variants(job_id)
+    _require_formal_document_mutation(job, current_result, variants)
+    initial_status, initial_revision = _capture_promotion_revision(job)
 
-    v = max(1, int(req.variant or 1))
-    idx = (v - 1) if v <= len(variants) else 0
+    v = _require_variant_number(req.variant, len(variants))
+    idx = v - 1
     if not isinstance(variants[idx], dict):
         raise HTTPException(status_code=400, detail="invalid variant record")
 
@@ -4308,9 +5329,15 @@ async def actions_review_apply(
         if isinstance(sec, dict):
             sec["content"] = strip_nonconcrete_language(str(sec.get("content") or ""))
 
-    # Rebuild receipts/QC/cross-index after round 1. This is the first full-document recheck.
-    _rebuild_postprocessed_artifacts(
-        [target], payload=payload_obj, report=None, params=params, fail_closed=True
+    # Rebuild the complete candidate set after round 1.  Cross-variant
+    # diversity is a document-level invariant; a one-variant rebuild could
+    # otherwise promote a reviewed chapter that duplicates another方案.
+    _finalize_variant_derivatives(
+        candidate_variants,
+        payload=payload_obj,
+        allow_diversity_autofix=False,
+        force_rebuild=True,
+        fail_closed=True,
     )
 
     round_2_recheck_count = 0
@@ -4351,10 +5378,14 @@ async def actions_review_apply(
             for sec in sections:
                 if isinstance(sec, dict):
                     sec["content"] = strip_nonconcrete_language(str(sec.get("content") or ""))
-            # A second rebuild is mandatory after AI round 2 so all derivative
-            # reports, evidence tables and exported files describe final text.
-            _rebuild_postprocessed_artifacts(
-                [target], payload=payload_obj, report=None, params=params, fail_closed=True
+            # A second full-set rebuild is mandatory after AI round 2 so every
+            # derivative and the diversity gate describe the final candidate.
+            _finalize_variant_derivatives(
+                candidate_variants,
+                payload=payload_obj,
+                allow_diversity_autofix=False,
+                force_rebuild=True,
+                fail_closed=True,
             )
 
     final_review_items = _review_items_for_variant(target)
@@ -4400,7 +5431,8 @@ async def actions_review_apply(
     candidate_suffix = revision["revision_id"].lower()
     out = _save_outputs(f"actions_{job_id}_{candidate_suffix}", candidate_variants)
     render_kwargs: dict[str, Any] = {
-        "job_id": f"{job_id}-{candidate_suffix}",
+        "job_id": job_id,
+        "artifact_namespace": f"{job_id}-{candidate_suffix}",
         "outputs": out,
     }
     if review_admission is not None:
@@ -4409,19 +5441,22 @@ async def actions_review_apply(
         )
     out = await _render_professional_outputs_for_job(**render_kwargs)
     candidate_artifacts = artifact_manifest(out)
-    finalize_revision_snapshot(
+    candidate_artifact_digest = canonical_digest(candidate_artifacts)
+    _promote_review_candidate_two_phase(
         job_id=job_id,
         revision_id=revision["revision_id"],
+        initial_status=initial_status,
+        initial_revision=initial_revision,
+        result=out,
         promotion={
             "actor": str(req.actor or "webui").strip() or "webui",
             "candidate_result_version": candidate_version,
             "candidate_variant_version": variant_version(target),
             "candidate_issue_digest": issue_set_digest(final_review_items),
-            "candidate_artifact_digest": canonical_digest(candidate_artifacts),
+            "candidate_artifact_digest": candidate_artifact_digest,
             "artifacts": candidate_artifacts,
         },
     )
-    update_job(job_id, status="done", result=out, error=None)
 
     return {
         "ok": True,
@@ -4439,7 +5474,7 @@ async def actions_review_apply(
         "result_version": candidate_version,
         "variant_version": variant_version(target),
         "issue_digest": issue_set_digest(final_review_items),
-        "candidate_artifact_digest": canonical_digest(candidate_artifacts),
+        "candidate_artifact_digest": candidate_artifact_digest,
         "files": out,
     }
 
@@ -4464,7 +5499,13 @@ async def actions_review_rollback(
     revision_id = str(req.revision_id or "").strip()
     if not job_id or not revision_id:
         raise HTTPException(status_code=400, detail="job_id and revision_id required")
-    _, current_result, _, current_variants = _load_done_job_variants(job_id)
+    current_job, current_result, _, current_variants = _load_done_job_variants(job_id)
+    _require_formal_document_mutation(
+        current_job,
+        current_result,
+        current_variants,
+    )
+    initial_status, initial_revision = _capture_promotion_revision(current_job)
     _require_review_preconditions(
         variants=current_variants,
         idx=0,
@@ -4477,6 +5518,12 @@ async def actions_review_rollback(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=f"invalid revision: {exc}")
 
+    restored_variants = _validate_rollback_snapshot(
+        revision=revision,
+        current_job=current_job,
+        current_result=current_result,
+        current_variants=current_variants,
+    )
     safety = create_revision_snapshot(
         job_id=job_id,
         variants=copy.deepcopy(current_variants),
@@ -4487,35 +5534,38 @@ async def actions_review_rollback(
             "restore_revision_id": revision_id,
         },
     )
-    restored_variants = copy.deepcopy(revision["variants"])
     restored_version = result_version(restored_variants)
     candidate_suffix = f"rollback-{revision_id.lower()}-{safety['revision_id'].lower()}"
     out = _save_outputs(f"actions_{job_id}_{candidate_suffix}", restored_variants)
     out = await _render_professional_outputs_for_job(
-        job_id=f"{job_id}-{candidate_suffix}",
+        job_id=job_id,
+        artifact_namespace=f"{job_id}-{candidate_suffix}",
         outputs=out,
     )
     rollback_artifacts = artifact_manifest(out)
-    finalize_revision_snapshot(
+    rollback_artifact_digest = canonical_digest(rollback_artifacts)
+    _promote_review_candidate_two_phase(
         job_id=job_id,
         revision_id=safety["revision_id"],
+        initial_status=initial_status,
+        initial_revision=initial_revision,
+        result=out,
         promotion={
             "actor": str(req.actor or "webui").strip() or "webui",
             "operation": "rollback",
             "restored_revision_id": revision_id,
             "candidate_result_version": restored_version,
-            "candidate_artifact_digest": canonical_digest(rollback_artifacts),
+            "candidate_artifact_digest": rollback_artifact_digest,
             "artifacts": rollback_artifacts,
         },
     )
-    update_job(job_id, status="done", result=out, error=None)
     return {
         "ok": True,
         "job_id": job_id,
         "restored_revision_id": revision_id,
         "safety_revision_id": safety["revision_id"],
         "result_version": restored_version,
-        "candidate_artifact_digest": canonical_digest(rollback_artifacts),
+        "candidate_artifact_digest": rollback_artifact_digest,
         "files": out,
     }
 
@@ -4542,38 +5592,80 @@ async def actions_result(
     variants = data.get("variants") or []
     if not variants:
         raise HTTPException(status_code=404, detail="empty result")
-    v = max(1, int(variant or 1))
-    rec = variants[v - 1] if v <= len(variants) else variants[0]
+    v = _require_variant_number(variant, len(variants))
+    rec = variants[v - 1]
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    if (
+        "delivery_scope" not in payload
+        or not str(payload.get("delivery_scope") or "").strip()
+        or "delivery_scope" not in rec
+        or not str(rec.get("delivery_scope") or "").strip()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DELIVERY_SCOPE_RESULT_MISSING",
+                "message": "任务请求或结果记录缺少显式交付范围，系统已失败关闭。",
+            },
+        )
+    payload_scope = str(payload.get("delivery_scope") or "").strip().lower()
+    record_scope = str(rec.get("delivery_scope") or "").strip().lower()
+    if payload_scope != record_scope:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DELIVERY_SCOPE_RESULT_MISMATCH",
+                "message": "任务请求与结果记录的交付范围不一致。",
+            },
+        )
+    formal_ready, non_delivery_reason = _formal_delivery_state(job, result, variants)
+    formal_artifact_keys = (
+        "docx",
+        "compare_docx",
+        "focus_xlsx",
+        "score_overview_xlsx",
+        "expert_review_docx",
+        "professional_docx",
+        "professional_render_receipt",
+        "delivery_receipt",
+    )
+    if not formal_ready and any(result.get(key) for key in formal_artifact_keys):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "NON_DELIVERABLE_ARTIFACT_LEAK_BLOCKED",
+                "message": "非正式交付结果包含正式文件引用，系统已阻断暴露。",
+                "reason": non_delivery_reason,
+            },
+        )
+    files = {"json": json_path}
+    if formal_ready:
+        files.update(
+            {
+                "docx": _output_variant_value(result, "docx", v),
+                "compare_docx": _output_variant_value(result, "compare_docx", v),
+                "focus_xlsx": _output_variant_value(result, "focus_xlsx", v),
+                "score_overview_xlsx": _output_variant_value(result, "score_overview_xlsx", v),
+                "expert_review_docx": _output_variant_value(result, "expert_review_docx", v),
+                "professional_docx": _output_variant_value(result, "professional_docx", v),
+                "professional_render_receipt": _output_variant_value(
+                    result,
+                    "professional_render_receipt",
+                    v,
+                ),
+                "delivery_receipt": result.get("delivery_receipt"),
+            }
+        )
     response = {
         "ok": True,
         "variant_id": rec.get("variant_id") or v,
         "topic": rec.get("topic"),
         "outline": rec.get("outline"),
+        "delivery_scope": record_scope,
+        "delivery_ready": formal_ready,
         "boq_focus": rec.get("boq_focus"),
         "quality_checks": rec.get("quality_checks"),
-        "files": {
-            "json": json_path,
-            "docx": (result.get("docx") or [None])[v - 1] if isinstance(result.get("docx"), list) else result.get("docx"),
-            "compare_docx": (result.get("compare_docx") or [None])[v - 1]
-            if isinstance(result.get("compare_docx"), list)
-            else result.get("compare_docx"),
-            "focus_xlsx": (result.get("focus_xlsx") or [None])[v - 1]
-            if isinstance(result.get("focus_xlsx"), list)
-            else result.get("focus_xlsx"),
-            "score_overview_xlsx": (result.get("score_overview_xlsx") or [None])[v - 1]
-            if isinstance(result.get("score_overview_xlsx"), list)
-            else result.get("score_overview_xlsx"),
-            "expert_review_docx": (result.get("expert_review_docx") or [None])[v - 1]
-            if isinstance(result.get("expert_review_docx"), list)
-            else result.get("expert_review_docx"),
-            "professional_docx": (result.get("professional_docx") or [None])[v - 1]
-            if isinstance(result.get("professional_docx"), list)
-            else result.get("professional_docx"),
-            "professional_render_receipt": (result.get("professional_render_receipt") or [None])[v - 1]
-            if isinstance(result.get("professional_render_receipt"), list)
-            else result.get("professional_render_receipt"),
-            "delivery_receipt": result.get("delivery_receipt"),
-        },
+        "files": files,
     }
     if include_sections:
         trimmed = []
@@ -4595,25 +5687,41 @@ async def actions_download(
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
-    if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
-        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
-    result = job.get("result") or {}
-    path = result.get(kind)
-    if kind in (
+    allowed_kinds = {
+        "json",
         "docx",
         "professional_docx",
         "professional_json",
         "professional_render_receipt",
         "compare_docx",
+        "delivery_receipt",
         "focus_xlsx",
         "score_overview_xlsx",
         "expert_review_docx",
-    ) and isinstance(path, list):
-        v = max(1, int(variant or 1))
-        path = path[v - 1] if v <= len(path) else None
+    }
+    if kind not in allowed_kinds:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "DOWNLOAD_KIND_INVALID", "message": "下载类型不在允许清单中。"},
+        )
+    job, result, _, variants = _load_done_job_variants(job_id)
+    v = _require_variant_number(variant, len(variants))
+    if kind != "json":
+        _require_formal_document_mutation(job, result, variants)
+    path = (
+        _output_variant_value(result, kind, v)
+        if kind in {
+            "docx",
+            "professional_docx",
+            "professional_json",
+            "professional_render_receipt",
+            "compare_docx",
+            "focus_xlsx",
+            "score_overview_xlsx",
+            "expert_review_docx",
+        }
+        else result.get(kind)
+    )
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail="file not found")
     if kind in {"json", "professional_json", "professional_render_receipt", "delivery_receipt"}:
@@ -4624,23 +5732,23 @@ async def actions_download(
             filename = f"autoplan_{job_id}_delivery_receipt.json"
         else:
             suffix = "_professional" if kind == "professional_json" else "_professional_receipt"
-            filename = f"autoplan_{job_id}{suffix}_v{max(1, int(variant or 1))}.json"
+            filename = f"autoplan_{job_id}{suffix}_v{v}.json"
     elif kind == "focus_xlsx":
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        filename = f"autoplan_{job_id}_focus_v{max(1, int(variant or 1))}.xlsx"
+        filename = f"autoplan_{job_id}_focus_v{v}.xlsx"
     elif kind == "score_overview_xlsx":
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        filename = f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{max(1, int(variant or 1))}.xlsx"
+        filename = f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx"
     elif kind == "expert_review_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = f"autoplan_{job_id}_专家复核提要版_v{max(1, int(variant or 1))}.docx"
+        filename = f"autoplan_{job_id}_专家复核提要版_v{v}.docx"
     elif kind == "professional_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = f"autoplan_{job_id}_Sonnet5专业精修版_v{max(1, int(variant or 1))}.docx"
+        filename = f"autoplan_{job_id}_Sonnet5专业精修版_v{v}.docx"
     elif kind == "compare_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = f"autoplan_{job_id}_compare_v{max(1, int(variant or 1))}.docx"
+        filename = f"autoplan_{job_id}_compare_v{v}.docx"
     else:
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = f"autoplan_{job_id}_v{max(1, int(variant or 1))}.docx"
+        filename = f"autoplan_{job_id}_v{v}.docx"
     return FileResponse(str(path), media_type=media_type, filename=filename)

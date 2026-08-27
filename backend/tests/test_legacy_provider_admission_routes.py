@@ -115,8 +115,16 @@ def legacy_route_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dic
         "load_boq_data",
         lambda **_kwargs: {"items": [{"code": "001"}], "source": "parsed-boq"},
     )
-    monkeypatch.setattr(legacy, "export_autoplan_docx", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(legacy, "export_autoplan_compare_docx", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        legacy,
+        "export_autoplan_docx",
+        lambda _variant, path: Path(path).write_bytes(b"docx"),
+    )
+    monkeypatch.setattr(
+        legacy,
+        "export_autoplan_compare_docx",
+        lambda _variant, path: Path(path).write_bytes(b"compare-docx"),
+    )
     monkeypatch.setattr(
         legacy,
         "_local_adapter_gate_results",
@@ -186,18 +194,71 @@ def legacy_route_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dic
         record = jobs.get(job_id)
         return dict(record) if record is not None else None
 
+    def acquire_job_lease(job_id: str) -> dict[str, Any] | None:
+        record = jobs.get(job_id)
+        if record is None or record["status"] not in {"queued", "cancel_requested"}:
+            return None
+        record["attempt_id"] = f"attempt-{job_id}"
+        record["owner_instance_id"] = "legacy-test-worker"
+        if record["status"] == "queued":
+            record["status"] = "running"
+        return dict(record)
+
+    def job_lease_active(
+        job_id: str,
+        *,
+        attempt_id: str,
+        owner_instance_id: str,
+        **_kwargs: Any,
+    ) -> bool:
+        record = jobs.get(job_id) or {}
+        return (
+            record.get("status") in {"running", "cancel_requested"}
+            and record.get("attempt_id") == attempt_id
+            and record.get("owner_instance_id") == owner_instance_id
+        )
+
+    def run_with_job_lease(
+        job_id: str,
+        *,
+        attempt_id: str,
+        owner_instance_id: str,
+        callback: Callable[..., Any],
+        callback_args: tuple[Any, ...] = (),
+        callback_kwargs: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> Any:
+        assert job_lease_active(
+            job_id,
+            attempt_id=attempt_id,
+            owner_instance_id=owner_instance_id,
+        )
+        return callback(*callback_args, **dict(callback_kwargs or {}))
+
     def transition_job(
         job_id: str,
         *,
         allowed_from: set[str],
         status: str,
+        expected_attempt_id: str | None = None,
+        expected_owner_instance_id: str | None = None,
+        revoke_lease: bool = False,
         **updates: Any,
     ) -> dict[str, Any] | None:
         record = jobs.get(job_id)
         if record is None or record["status"] not in allowed_from:
             return None
+        if expected_attempt_id is not None and not job_lease_active(
+            job_id,
+            attempt_id=expected_attempt_id,
+            owner_instance_id=str(expected_owner_instance_id or ""),
+        ):
+            return None
         record.update(updates)
         record["status"] = status
+        if revoke_lease:
+            record["attempt_id"] = None
+            record["owner_instance_id"] = None
         return dict(record)
 
     def submit_isolated_job(job_id: str, target: Callable[..., Any], *args: Any) -> None:
@@ -227,6 +288,9 @@ def legacy_route_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dic
     monkeypatch.setattr(legacy, "run_autoplan", fake_run_autoplan)
     monkeypatch.setattr(legacy, "create_job", create_job)
     monkeypatch.setattr(legacy, "get_job", get_job)
+    monkeypatch.setattr(legacy, "acquire_job_lease", acquire_job_lease)
+    monkeypatch.setattr(legacy, "job_lease_active", job_lease_active)
+    monkeypatch.setattr(legacy, "run_with_job_lease", run_with_job_lease)
     monkeypatch.setattr(legacy, "transition_job", transition_job)
     monkeypatch.setattr(legacy, "heartbeat_job", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(legacy, "append_runtime_event", lambda *_args, **_kwargs: None)

@@ -34,11 +34,15 @@ import json
 from backend.zhifei_autoplan.exporter import export_autoplan_docx_from_file, export_autoplan_docx, export_autoplan_compare_docx
 from fastapi.responses import FileResponse
 from backend.zhifei_autoplan.job_store import (
+    JobLeaseLostError,
+    acquire_job_lease,
     create_job,
     get_job,
     heartbeat_job,
+    job_lease_active,
     list_jobs,
     cleanup_jobs,
+    run_with_job_lease,
     transition_job,
 )
 from backend.zhifei_autoplan.local_job_queue import submit_isolated_job
@@ -678,37 +682,150 @@ def run_legacy_generation_job(job_id: str, payload: dict) -> None:
     heartbeat_stop = threading.Event()
     heartbeat_thread: threading.Thread | None = None
 
+    lease_record = acquire_job_lease(job_id)
+    if lease_record is None:
+        return
+    lease_attempt_id = str(lease_record.get("attempt_id") or "")
+    lease_owner_instance_id = str(lease_record.get("owner_instance_id") or "")
+    if not lease_attempt_id or not lease_owner_instance_id:
+        raise RuntimeError("job_lease_acquisition_invalid")
+
+    def _lease_active() -> bool:
+        return job_lease_active(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+        )
+
     def _status() -> str:
         return str((get_job(job_id) or {}).get("status") or "").strip().lower()
 
     def _cancel_requested() -> bool:
-        return _status() in {"cancel_requested", "cancelled"}
+        return _status() in {"cancel_requested", "cancelled"} or not _lease_active()
+
+    def _lease_side_effect(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        return run_with_job_lease(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+            callback=callback,
+            callback_args=tuple(args),
+            callback_kwargs=dict(kwargs),
+        )
+
+    def _running_side_effect(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        return run_with_job_lease(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+            allowed_statuses={"running"},
+            callback=callback,
+            callback_args=tuple(args),
+            callback_kwargs=dict(kwargs),
+        )
+
+    def _append_active_event(event: str, **fields: Any) -> bool:
+        try:
+            _running_side_effect(append_runtime_event, job_id, event, **fields)
+            return True
+        except JobLeaseLostError:
+            return False
+
+    def _mark_cancelled() -> None:
+        if not _lease_active():
+            return
+        prior_progress = (get_job(job_id) or {}).get("progress") or {}
+        try:
+            from backend.zhifei_autoplan.generation_checkpoint import (
+                mark_checkpoint_namespace_interrupted,
+            )
+
+            scopes = _lease_side_effect(mark_checkpoint_namespace_interrupted, job_id)
+            checkpoint_projection = {
+                "status": (
+                    "interrupted_recoverable" if scopes else "interrupted_empty"
+                ),
+                "saved_chapter_count": sum(
+                    int(item.get("saved_chapter_count") or 0)
+                    for item in scopes
+                    if isinstance(item, dict)
+                ),
+                "scopes": scopes,
+            }
+            seal_failed = False
+        except JobLeaseLostError:
+            return
+        except Exception as seal_error:
+            checkpoint_projection = {
+                "status": "interruption_seal_failed",
+                "saved_chapter_count": 0,
+                "error_code": "CHECKPOINT_INTERRUPTION_SEAL_FAILED",
+                "error_type": type(seal_error).__name__,
+            }
+            seal_failed = True
+        transitioned = transition_job(
+            job_id,
+            allowed_from={"running", "cancel_requested"},
+            status="cancelled",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            revoke_lease=True,
+            error={
+                "code": (
+                    "JOB_CANCELLED_CHECKPOINT_SEAL_FAILED"
+                    if seal_failed
+                    else "JOB_CANCELLED"
+                ),
+                "message": (
+                    "用户已取消任务，但检查点封存失败；该故障已显式记录。"
+                    if seal_failed
+                    else "用户已取消任务。"
+                ),
+                "action": (
+                    "先检查检查点存储与权限，再决定是否从先前可信断点恢复。"
+                    if seal_failed
+                    else "可从已保存的可信检查点显式恢复。"
+                ),
+            },
+            progress={
+                "percent": min(99, int(prior_progress.get("percent") or 0)),
+                "phase": "generation",
+                "work_state": "idle",
+                "checkpoint": checkpoint_projection,
+            },
+        )
+        if transitioned is not None:
+            append_runtime_event(job_id, "legacy_job_cancelled")
 
     def _heartbeat() -> None:
         while not heartbeat_stop.wait(5.0):
-            heartbeat_job(
+            updated = heartbeat_job(
                 job_id,
                 activity="兼容任务正在隔离生成",
                 progress_updates={"phase": "generation", "work_state": "processing"},
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                allowed_statuses={"running"},
             )
+            if updated is None:
+                heartbeat_stop.set()
+                return
 
     try:
         if _cancel_requested():
-            transition_job(
-                job_id,
-                allowed_from={"queued", "cancel_requested", "cancelled"},
-                status="cancelled",
-            )
+            _mark_cancelled()
             return
         started = transition_job(
             job_id,
-            allowed_from={"queued"},
+            allowed_from={"running"},
             status="running",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
             progress={"phase": "generation", "work_state": "processing", "percent": 1},
         )
         if started is None:
             return
-        append_runtime_event(job_id, "legacy_job_started")
+        _append_active_event("legacy_job_started")
         heartbeat_thread = threading.Thread(
             target=_heartbeat,
             name=f"legacy-autoplan-heartbeat-{job_id[:8]}",
@@ -724,7 +841,8 @@ def run_legacy_generation_job(job_id: str, payload: dict) -> None:
         variants = int(local_payload.get("variants") or 1)
         variant_ids = local_payload.get("_variant_ids")
         if not isinstance(variant_ids, list) or not variant_ids:
-            variant_ids = reserve_variant_ids(
+            variant_ids = _running_side_effect(
+                reserve_variant_ids,
                 project_id=str(local_payload.get("project_id") or "").strip() or None,
                 count=max(1, variants),
                 explicit_variant_id=local_payload.get("variant_id"),
@@ -734,98 +852,122 @@ def run_legacy_generation_job(job_id: str, payload: dict) -> None:
         results = []
         for variant_id in variant_ids:
             if _cancel_requested():
-                transition_job(
-                    job_id,
-                    allowed_from={"running", "cancel_requested", "cancelled"},
-                    status="cancelled",
-                )
+                _mark_cancelled()
                 return
             local_payload["variant_id"] = int(variant_id)
             local_payload["_job_id"] = job_id
             local_payload["_checkpoint_namespace"] = job_id
+            local_payload["_cancel_callback"] = _cancel_requested
+            local_payload["_checkpoint_write_guard"] = _lease_side_effect
             if provider_admission_run is not None:
                 local_payload["_provider_admission_run_coordinator"] = provider_admission_run
-            results.append(asyncio.run(run_autoplan(local_payload)))
+            result = asyncio.run(run_autoplan(local_payload))
+            if _cancel_requested():
+                _mark_cancelled()
+                return
+            results.append(result)
         if _cancel_requested():
-            transition_job(
-                job_id,
-                allowed_from={"running", "cancel_requested"},
-                status="cancelled",
-                error={
-                    "code": "JOB_CANCELLED",
-                    "message": "用户已取消任务。",
-                    "action": "可从已保存的可信检查点显式恢复。",
-                },
-                progress={
-                    "phase": "generation",
-                    "work_state": "idle",
-                    "percent": min(
-                        99,
-                        int(((get_job(job_id) or {}).get("progress") or {}).get("percent") or 0),
-                    ),
-                },
-            )
+            _mark_cancelled()
             return
         gate = _local_adapter_gate_results(results)
         if not gate["export_allowed"]:
-            transition_job(
+            failed = transition_job(
                 job_id,
                 allowed_from={"running"},
                 status="failed",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
                 result=_local_adapter_block(gate["issues"]),
                 error=_local_adapter_job_error(gate["issues"]),
                 progress={"work_state": "idle", "percent": 99},
             )
+            if failed is not None:
+                append_runtime_event(job_id, "legacy_job_failed", code="LOCAL_ADAPTER_BLOCKED")
+            elif _status() == "cancel_requested":
+                _mark_cancelled()
             return
         results = gate["results"]
+
         output_dir = Path("build")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        out_json = output_dir / f"autoplan_{job_id}.json"
-        out_json.write_text(
-            json.dumps(
-                {"variants": sanitize_output_payload(results)},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        docx_files: list[str] = []
-        compare_files: list[str] = []
-        for index, variant in enumerate(results, start=1):
-            out_docx = output_dir / f"autoplan_{job_id}_v{index}.docx"
-            export_autoplan_docx(variant, str(out_docx))
-            docx_files.append(str(out_docx))
-            out_compare = output_dir / f"autoplan_{job_id}_compare_v{index}.docx"
-            export_autoplan_compare_docx(variant, str(out_compare))
-            compare_files.append(str(out_compare))
+        _running_side_effect(output_dir.mkdir, parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=f"zhifei-autoplan-{job_id}-",
+            dir=str(output_dir),
+        ) as staging_dir_value:
+            staging_dir = Path(staging_dir_value)
+            staged_json = staging_dir / f"autoplan_{job_id}.json"
+            staged_json.write_text(
+                json.dumps(
+                    {"variants": sanitize_output_payload(results)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            staged_docx: list[Path] = []
+            staged_compare: list[Path] = []
+            for index, variant in enumerate(results, start=1):
+                staged_variant = staging_dir / f"autoplan_{job_id}_v{index}.docx"
+                export_autoplan_docx(variant, str(staged_variant))
+                staged_docx.append(staged_variant)
+                staged_comparison = (
+                    staging_dir / f"autoplan_{job_id}_compare_v{index}.docx"
+                )
+                export_autoplan_compare_docx(variant, str(staged_comparison))
+                staged_compare.append(staged_comparison)
+
+            final_json = output_dir / staged_json.name
+            final_docx = [output_dir / path.name for path in staged_docx]
+            final_compare = [output_dir / path.name for path in staged_compare]
+
+            def _publish_outputs() -> None:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                staged_json.replace(final_json)
+                for staged_path, final_path in zip(staged_docx, final_docx):
+                    staged_path.replace(final_path)
+                for staged_path, final_path in zip(staged_compare, final_compare):
+                    staged_path.replace(final_path)
+
+            # Rendering happens outside the global job-store lock.  Only the
+            # short, same-filesystem publish is fenced against cancellation or
+            # reconciliation, so a stale worker can never expose its outputs.
+            _running_side_effect(_publish_outputs)
+            output_files = {
+                "json": str(final_json),
+                "docx": [str(path) for path in final_docx],
+                "compare_docx": [str(path) for path in final_compare],
+            }
         transition = transition_job(
             job_id,
             allowed_from={"running"},
             status="succeeded",
-            result={"json": str(out_json), "docx": docx_files, "compare_docx": compare_files},
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            revoke_lease=True,
+            result=output_files,
             error=None,
             progress={"phase": "done", "work_state": "idle", "percent": 100},
         )
         if transition is not None:
             append_runtime_event(job_id, "legacy_job_succeeded")
+        elif _status() == "cancel_requested":
+            _mark_cancelled()
+    except JobLeaseLostError:
+        if _status() == "cancel_requested":
+            _mark_cancelled()
+        return
     except Exception as exc:
         if _cancel_requested():
-            transition_job(
-                job_id,
-                allowed_from={"queued", "running", "cancel_requested"},
-                status="cancelled",
-                error={
-                    "code": "JOB_CANCELLED",
-                    "message": "用户已取消任务。",
-                    "action": "可从已保存的可信检查点显式恢复。",
-                },
-                progress={"phase": "generation", "work_state": "idle"},
-            )
+            _mark_cancelled()
         else:
-            transition_job(
+            failed = transition_job(
                 job_id,
-                allowed_from={"queued", "running"},
+                allowed_from={"running"},
                 status="failed",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
                 error=_stable_job_error(
                     exc,
                     provider=str(payload.get("provider") or ""),
@@ -833,7 +975,10 @@ def run_legacy_generation_job(job_id: str, payload: dict) -> None:
                 ),
                 progress={"phase": "generation", "work_state": "idle", "percent": 99},
             )
-            append_runtime_event(job_id, "legacy_job_failed", error_type=type(exc).__name__)
+            if failed is not None:
+                append_runtime_event(job_id, "legacy_job_failed", error_type=type(exc).__name__)
+            elif _status() == "cancel_requested":
+                _mark_cancelled()
     finally:
         heartbeat_stop.set()
         if heartbeat_thread is not None and heartbeat_thread.is_alive():

@@ -29,6 +29,10 @@ DEFAULT_PROCESS_ORDER = [
 # only the derived schedule excludes values outside this defensive envelope.
 MAX_SCHEDULE_QUANTITY = 1_000_000_000_000.0
 MAX_ACTIVITY_DURATION_DAYS = 36_500.0
+# A BoQ-only CPM is an estimate, not an awarded contract fact. Durations above
+# ten years remain visible for diagnostics but must not enter immutable project
+# facts or prompts as an agreed construction period.
+MAX_DERIVED_SCHEDULE_FACT_DAYS = 3_650.0
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -281,6 +285,8 @@ def build_boq_wbs_cpm(
                 "total_quantity": 0.0,
                 "total_price": 0.0,
                 "estimated_duration_days": 0.0,
+                "schedule_fact_eligible": False,
+                "schedule_fact_reasons": ["boq_items_empty"],
             },
         }
 
@@ -302,6 +308,12 @@ def build_boq_wbs_cpm(
         if nm:
             critical_names.append(nm)
 
+    schedule_fact_reasons: List[str] = []
+    if duration_days <= 0:
+        schedule_fact_reasons.append("derived_duration_missing")
+    elif duration_days > MAX_DERIVED_SCHEDULE_FACT_DAYS:
+        schedule_fact_reasons.append("derived_duration_implausible")
+
     summary = {
         "process_count": int(len(wbs_rows)),
         "total_quantity": round(total_quantity, 3),
@@ -311,6 +323,8 @@ def build_boq_wbs_cpm(
         "critical_interval_days": _f(cpm.get("critical_interval_days"), 0.0),
         "critical_path_names": critical_names,
         "excluded_quantity_count": excluded_quantity_count,
+        "schedule_fact_eligible": not schedule_fact_reasons,
+        "schedule_fact_reasons": schedule_fact_reasons,
     }
 
     # Add a simple deterministic WBS tree path for downstream exports.
@@ -318,20 +332,28 @@ def build_boq_wbs_cpm(
         row["wbs_id"] = f"1.{i + 1}"
         row["wbs_path"] = f"施工组织设计/{row.get('process')}"
 
+    warnings = []
+    if excluded_quantity_count:
+        warnings.append(
+            {
+                "code": "BOQ_QUANTITY_OUTLIER_EXCLUDED",
+                "count": excluded_quantity_count,
+            }
+        )
+    if "derived_duration_implausible" in schedule_fact_reasons:
+        warnings.append(
+            {
+                "code": "BOQ_DERIVED_SCHEDULE_IMPLAUSIBLE",
+                "estimated_duration_days": round(duration_days, 3),
+                "fact_limit_days": MAX_DERIVED_SCHEDULE_FACT_DAYS,
+            }
+        )
+
     return {
         "ok": True,
         "wbs": wbs_rows,
         "activities": activities,
         "cpm": cpm,
         "summary": summary,
-        "schedule_input_warnings": (
-            [
-                {
-                    "code": "BOQ_QUANTITY_OUTLIER_EXCLUDED",
-                    "count": excluded_quantity_count,
-                }
-            ]
-            if excluded_quantity_count
-            else []
-        ),
+        "schedule_input_warnings": warnings,
     }

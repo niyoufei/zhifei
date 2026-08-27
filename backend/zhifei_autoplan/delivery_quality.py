@@ -107,21 +107,43 @@ def build_delivery_quality_gate(
         )
 
     cross = dict(cross_index or {})
+    cross_contract_fields = {
+        "ok",
+        "focus_count",
+        "mentioned_count",
+        "closed_ok_count",
+        "missing_drawing_locator_count",
+        "missing_standard_locator_count",
+        "focus_items",
+    }
     focus_count = int(cross.get("focus_count") or 0)
     mentioned_count = int(cross.get("mentioned_count") or 0)
     closed_count = int(cross.get("closed_ok_count") or 0)
     missing_drawing = int(cross.get("missing_drawing_locator_count") or 0)
     missing_standard = int(cross.get("missing_standard_locator_count") or 0)
-    cross_ok = focus_count == 0 or (
+    focus_rows = cross.get("focus_items")
+    cross_available = (
+        bool(cross)
+        and not bool(cross.get("build_failed"))
+        and cross_contract_fields.issubset(cross)
+        and isinstance(focus_rows, list)
+        and len(focus_rows) == focus_count
+        and (focus_count == 0 or cross.get("ok") is True)
+        and 0 <= closed_count <= mentioned_count <= focus_count
+        and 0 <= missing_drawing <= mentioned_count
+        and 0 <= missing_standard <= mentioned_count
+    )
+    cross_ok = cross_available and (focus_count == 0 or (
         mentioned_count >= focus_count
         and closed_count >= focus_count
         and missing_drawing == 0
         and missing_standard == 0
-    )
+    ))
     checks.append(
         {
             "name": "boq_cross_index_closure",
             "pass": cross_ok,
+            "available": cross_available,
             "focus_count": focus_count,
             "mentioned_count": mentioned_count,
             "closed_ok_count": closed_count,
@@ -130,10 +152,20 @@ def build_delivery_quality_gate(
         }
     )
     if not cross_ok:
+        blocker_code = (
+            "DELIVERY_CROSS_INDEX_UNAVAILABLE"
+            if not cross_available
+            else "DELIVERY_CROSS_INDEX_BLOCKED"
+        )
+        blocker_message = (
+            "重点清单项交叉索引构建失败，严格交付已按失败关闭。"
+            if not cross_available
+            else "重点清单项未全部绑定章节、图纸/规范定位并形成量化闭环。"
+        )
         blockers.append(
             _issue(
-                "DELIVERY_CROSS_INDEX_BLOCKED",
-                "重点清单项未全部绑定章节、图纸/规范定位并形成量化闭环。",
+                blocker_code,
+                blocker_message,
                 source="cross_index",
                 details=checks[-1],
             )

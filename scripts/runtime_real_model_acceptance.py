@@ -29,6 +29,7 @@ from backend.zhifei_autoplan.execution_control import (
     ExecutionControlRuntime,
 )
 from backend.zhifei_autoplan.generation_checkpoint import (
+    build_chapter_context_digest,
     build_generation_binding,
     finalize_generation_checkpoint,
     save_section_checkpoint,
@@ -191,6 +192,7 @@ async def _run_acceptance(output_dir: Path, *, hard_deadline_seconds: int) -> di
         project_fact_digest="synthetic-no-real-project-data",
         requirement_plan_digest="bounded-two-short-chapters",
         provider_routes=public_routes,
+        delivery_scope="chapter_validation",
         provider_admission_digest=str(
             admission_internal.get("admission_digest") or ""
         ),
@@ -292,6 +294,12 @@ async def _run_acceptance(output_dir: Path, *, hard_deadline_seconds: int) -> di
                     binding=binding,
                     chapter_index=chapter_index,
                     chapter_title=title,
+                    chapter_context_digest=build_chapter_context_digest(
+                        chapter_index=chapter_index,
+                        chapter_title=title,
+                        delivery_scope="chapter_validation",
+                        writer_context={"runtime_acceptance_prompt": prompt},
+                    ),
                     result=chapter_result,
                     root=checkpoint_root,
                 )

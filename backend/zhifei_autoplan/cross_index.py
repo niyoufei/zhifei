@@ -3,6 +3,16 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
+from backend.zhifei_autoplan.boq_focus_policy import (
+    MAX_BOQ_FOCUS_ITEMS,
+    boq_focus_name_in_text,
+    boq_focus_name_key,
+    find_boq_focus_name_spans,
+    normalize_boq_focus_items,
+    normalize_boq_focus_name,
+    select_boq_focus_names,
+)
+
 
 _EVIDENCE_RE = re.compile(r"【证据:(?P<loc>[^】]{3,160})】")
 _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]+")
@@ -19,7 +29,12 @@ def _to_float(v: Any) -> float | None:
 
 
 def _pick_best_boq_item(items: List[Dict[str, Any]], name: str) -> Dict[str, Any] | None:
-    cands = [it for it in (items or []) if str(it.get("name") or "").strip() == name]
+    target_key = boq_focus_name_key(name)
+    cands = [
+        it
+        for it in (items or [])
+        if boq_focus_name_key(it.get("name")) == target_key
+    ]
     if not cands:
         return None
 
@@ -39,13 +54,16 @@ def _index_boq_stats(boq: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Di
     - categories_by_name: {name: [category labels...]}
     """
     stats = boq.get("stats") if isinstance(boq.get("stats"), dict) else {}
-    metrics_by_name: Dict[str, Dict[str, Any]] = {}
-    cats: Dict[str, set[str]] = {}
+    metrics_by_key: Dict[str, Dict[str, Any]] = {}
+    cats_by_key: Dict[str, set[str]] = {}
+    display_by_key: Dict[str, str] = {}
 
     def _merge_metrics(name: str, it: Dict[str, Any]):
-        if not name:
+        key = boq_focus_name_key(name)
+        if not key:
             return
-        m = metrics_by_name.setdefault(name, {})
+        display_by_key.setdefault(key, normalize_boq_focus_name(name))
+        m = metrics_by_key.setdefault(key, {})
         for k in ("boq_code", "quantity", "unit", "unit_price", "total_price"):
             if m.get(k) is None and it.get(k) is not None:
                 m[k] = it.get(k)
@@ -57,10 +75,12 @@ def _index_boq_stats(boq: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Di
         for it in arr:
             if not isinstance(it, dict):
                 continue
-            name = str(it.get("name") or "").strip()
-            if not name:
+            name = normalize_boq_focus_name(it.get("name"))
+            key_name = boq_focus_name_key(name)
+            if not name or not key_name:
                 continue
-            cats.setdefault(name, set()).add(label)
+            display_by_key.setdefault(key_name, name)
+            cats_by_key.setdefault(key_name, set()).add(label)
             _merge_metrics(name, it)
 
     _add_cat("top_quantity_items", "工程量大")
@@ -71,10 +91,24 @@ def _index_boq_stats(boq: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Di
     _add_cat("hazardous_material_items", "危险品材料")
     _add_cat("ppe_items", "劳保用品")
 
-    categories_by_name: Dict[str, List[str]] = {}
-    for name, s in cats.items():
-        categories_by_name[name] = sorted(s)
+    metrics_by_name = {
+        display_by_key[key]: value for key, value in metrics_by_key.items()
+    }
+    categories_by_name: Dict[str, List[str]] = {
+        display_by_key[key]: sorted(values)
+        for key, values in cats_by_key.items()
+    }
     return metrics_by_name, categories_by_name
+
+
+def _lookup_normalized_name(mapping: Dict[str, Any], name: str, default: Any) -> Any:
+    """Resolve data indexed by a human-readable BoQ name using its stable key."""
+
+    target_key = boq_focus_name_key(name)
+    for candidate, value in mapping.items():
+        if boq_focus_name_key(candidate) == target_key:
+            return value
+    return default
 
 
 def _index_chapter_locators(index_obj: Dict[str, Any] | None) -> Dict[str, str]:
@@ -126,7 +160,7 @@ def _chapter_relevance_score(name: str, process_name: str | None, categories: Li
     t = str(chapter_title or "").strip()
     low_t = t.lower()
     score = 0
-    if name and name in t:
+    if name and boq_focus_name_in_text(name, t):
         score += 48
     if process_name and process_name in t:
         score += 72
@@ -224,11 +258,12 @@ def _pick_locator_by_known_filenames(locs: List[str], known: set[str]) -> str | 
 def _extract_evidence_locators_near(text: str, needle: str, window: int = 520, max_locs: int = 4) -> List[str]:
     if not text or not needle:
         return []
-    pos = text.find(needle)
-    if pos < 0:
+    spans = find_boq_focus_name_spans(needle, text, limit=1)
+    if not spans:
         return []
+    pos, match_end = spans[0]
     start = max(0, pos - window)
-    end = min(len(text), pos + len(needle) + window)
+    end = min(len(text), match_end + window)
     snippet = text[start:end]
     locs: List[str] = []
     for m in _EVIDENCE_RE.finditer(snippet):
@@ -240,6 +275,61 @@ def _extract_evidence_locators_near(text: str, needle: str, window: int = 520, m
         if len(locs) >= max_locs:
             break
     return locs
+
+
+def validate_cross_index_contract(
+    value: Any,
+    *,
+    expected_names: List[Any] | None,
+) -> Dict[str, Any]:
+    """Validate cross-index identity and bounded counters before delivery use."""
+
+    expected = normalize_boq_focus_items(
+        expected_names or [],
+        limit=MAX_BOQ_FOCUS_ITEMS,
+    )
+    if not isinstance(value, dict):
+        raise ValueError("cross_index_not_object")
+    required = {
+        "focus_count",
+        "mentioned_count",
+        "closed_ok_count",
+        "missing_drawing_locator_count",
+        "missing_standard_locator_count",
+        "focus_items",
+    }
+    if not required.issubset(value):
+        raise ValueError("cross_index_schema_incomplete")
+    if bool(value.get("build_failed")):
+        raise ValueError("cross_index_build_failed")
+
+    rows = value.get("focus_items")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("cross_index_focus_items_invalid")
+    try:
+        focus_count = int(value.get("focus_count"))
+        mentioned_count = int(value.get("mentioned_count"))
+        closed_count = int(value.get("closed_ok_count"))
+        missing_drawing = int(value.get("missing_drawing_locator_count"))
+        missing_standard = int(value.get("missing_standard_locator_count"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cross_index_counter_invalid") from exc
+
+    if focus_count != len(expected) or len(rows) != len(expected):
+        raise ValueError("cross_index_focus_count_mismatch")
+    if expected and value.get("ok") is not True:
+        raise ValueError("cross_index_not_ok")
+    row_keys = [boq_focus_name_key(row.get("name")) for row in rows]
+    expected_keys = [boq_focus_name_key(name) for name in expected]
+    if row_keys != expected_keys:
+        raise ValueError("cross_index_focus_identity_mismatch")
+    if not (
+        0 <= closed_count <= mentioned_count <= focus_count
+        and 0 <= missing_drawing <= mentioned_count
+        and 0 <= missing_standard <= mentioned_count
+    ):
+        raise ValueError("cross_index_counter_out_of_range")
+    return value
 
 
 def _pick_best_mention_section(
@@ -261,7 +351,7 @@ def _pick_best_mention_section(
     for sec in sections or []:
         title = str(sec.get("title") or "").strip()
         text = str(sec.get("content") or "")
-        if not name or (name not in text):
+        if not name or not boq_focus_name_in_text(name, text):
             continue
         near_locs = _extract_evidence_locators_near(text, name, window=620, max_locs=6)
         rel = _chapter_relevance_score(name, process_name, categories, title)
@@ -301,18 +391,16 @@ def build_cross_index(
 
     focus_names = []
     if isinstance(boq_focus, dict):
-        focus_names = [str(x).strip() for x in (boq_focus.get("must_cover_keywords") or []) if str(x).strip()]
+        focus_names = normalize_boq_focus_items(
+            boq_focus.get("must_cover_keywords") or [],
+            limit=MAX_BOQ_FOCUS_ITEMS,
+        )
     if not focus_names:
         # Fallback to stats-derived order if focus list is not available.
-        focus_names = list(categories_by_name.keys())
-    # Stable unique
-    seen = set()
-    uniq_focus = []
-    for n in focus_names:
-        if n not in seen:
-            seen.add(n)
-            uniq_focus.append(n)
-    focus_names = uniq_focus[:24]
+        focus_names = select_boq_focus_names(
+            boq.get("stats") if isinstance(boq.get("stats"), dict) else {},
+            limit=MAX_BOQ_FOCUS_ITEMS,
+        )
 
     closure_map: Dict[str, Dict[str, Any]] = {}
     try:
@@ -321,9 +409,9 @@ def build_cross_index(
             for it in items:
                 if not isinstance(it, dict):
                     continue
-                name = str(it.get("item") or "").strip()
+                name = normalize_boq_focus_name(it.get("item"))
                 if name:
-                    closure_map[name] = it
+                    closure_map[boq_focus_name_key(name)] = it
     except Exception:
         closure_map = {}
 
@@ -369,8 +457,8 @@ def build_cross_index(
 
     for name in focus_names:
         # Metrics + categories
-        m = dict(metrics_by_name.get(name) or {})
-        cats = categories_by_name.get(name) or []
+        m = dict(_lookup_normalized_name(metrics_by_name, name, {}) or {})
+        cats = list(_lookup_normalized_name(categories_by_name, name, []) or [])
 
         # Process name (from BoQ items list)
         proc_name = None
@@ -384,7 +472,7 @@ def build_cross_index(
             proc_name = None
 
         # Closure + best chapter
-        closure_item = closure_map.get(name) or {}
+        closure_item = closure_map.get(boq_focus_name_key(name)) or {}
         reason = str(closure_item.get("reason") or "")
         hit_sections = closure_item.get("hit_sections") if isinstance(closure_item.get("hit_sections"), list) else []
         best_hit = (

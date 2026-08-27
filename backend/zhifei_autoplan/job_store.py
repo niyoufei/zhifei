@@ -11,7 +11,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Any, Iterable, Iterator, Optional
+from typing import Callable, Dict, Any, Iterable, Iterator, Optional, TypeVar
 
 
 JOB_DIR = Path(os.environ.get("ZF_AUTOPLAN_JOB_DIR", "backend/data/autoplan/jobs"))
@@ -45,6 +45,44 @@ TERMINAL_STATUSES = {
     "cancelled",
     "interrupted_recoverable",
 }
+LEASE_ACTIVE_STATUSES = {"running", "cancel_requested"}
+_LeaseResult = TypeVar("_LeaseResult")
+
+
+class JobLeaseLostError(RuntimeError):
+    """Raised before a stale worker can mutate durable job evidence."""
+
+
+def _lease_matches(
+    record: Dict[str, Any],
+    *,
+    attempt_id: str | None,
+    owner_instance_id: str | None,
+    allowed_statuses: Iterable[str] = LEASE_ACTIVE_STATUSES,
+) -> bool:
+    expected_attempt = str(attempt_id or "").strip()
+    expected_owner = str(owner_instance_id or "").strip()
+    if not expected_attempt or not expected_owner:
+        return False
+    statuses = {str(value or "").strip().lower() for value in allowed_statuses}
+    return (
+        str(record.get("status") or "").strip().lower() in statuses
+        and str(record.get("attempt_id") or "").strip() == expected_attempt
+        and str(record.get("owner_instance_id") or "").strip() == expected_owner
+    )
+
+
+def _revoke_lease(record: Dict[str, Any], *, reason: str) -> None:
+    attempt_id = str(record.get("attempt_id") or "").strip()
+    owner_instance_id = str(record.get("owner_instance_id") or "").strip()
+    if attempt_id:
+        record["last_attempt_id"] = attempt_id
+    if owner_instance_id:
+        record["last_owner_instance_id"] = owner_instance_id
+    record["attempt_id"] = None
+    record["owner_instance_id"] = None
+    record["lease_revoked_at"] = time.time()
+    record["lease_revoke_reason"] = str(reason or "state_transition")[:120]
 
 
 def _valid_job_id(job_id: Any) -> str | None:
@@ -141,11 +179,113 @@ def create_job(payload: Dict[str, Any], user_id: int | None = None) -> str:
         "result": {},
         "error": None,
         "revision": 1,
-        "attempt_id": uuid.uuid4().hex,
-        "owner_instance_id": _INSTANCE_ID,
+        # Queued work has no execution authority.  A worker must atomically
+        # acquire a fresh, unpredictable fencing token before doing any work.
+        "attempt_id": None,
+        "owner_instance_id": None,
     }
     _write_job(rec)
     return job_id
+
+
+def acquire_job_lease(
+    job_id: str,
+    *,
+    owner_instance_id: str | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Atomically claim queued work and mint a new worker fencing token.
+
+    A queued cancellation is also claimable so the worker can seal any
+    checkpoint namespace and acknowledge cancellation without starting model
+    work.  Existing running work is never re-leased implicitly.
+    """
+
+    valid_job_id = _valid_job_id(job_id)
+    if valid_job_id is None:
+        raise ValueError("invalid job_id")
+    owner = str(owner_instance_id or _INSTANCE_ID).strip()
+    if not owner:
+        raise ValueError("missing owner_instance_id")
+    with _exclusive_store_lock():
+        rec = _read_job_unlocked(valid_job_id)
+        if rec is None:
+            return None
+        current = str(rec.get("status") or "").strip().lower()
+        if current not in {"queued", "cancel_requested"}:
+            return None
+        # A cancellation requested from an active worker retains that worker's
+        # authority until it acknowledges the cancellation.  A duplicate queue
+        # item must never mint a replacement token and create two live owners.
+        if str(rec.get("attempt_id") or "").strip() or str(
+            rec.get("owner_instance_id") or ""
+        ).strip():
+            return None
+        rec["attempt_id"] = uuid.uuid4().hex
+        rec["owner_instance_id"] = owner
+        rec["lease_acquired_at"] = time.time()
+        rec.pop("lease_revoked_at", None)
+        rec.pop("lease_revoke_reason", None)
+        if current == "queued":
+            rec["status"] = "running"
+        _bump_revision(rec)
+        _write_job_unlocked(rec)
+        return rec
+
+
+def job_lease_active(
+    job_id: str,
+    *,
+    attempt_id: str,
+    owner_instance_id: str,
+    allowed_statuses: Iterable[str] = LEASE_ACTIVE_STATUSES,
+) -> bool:
+    valid_job_id = _valid_job_id(job_id)
+    if valid_job_id is None:
+        return False
+    with _exclusive_store_lock():
+        rec = _read_job_unlocked(valid_job_id)
+        return bool(
+            rec
+            and _lease_matches(
+                rec,
+                attempt_id=attempt_id,
+                owner_instance_id=owner_instance_id,
+                allowed_statuses=allowed_statuses,
+            )
+        )
+
+
+def run_with_job_lease(
+    job_id: str,
+    *,
+    attempt_id: str,
+    owner_instance_id: str,
+    callback: Callable[..., _LeaseResult],
+    callback_args: tuple[Any, ...] = (),
+    callback_kwargs: Dict[str, Any] | None = None,
+    allowed_statuses: Iterable[str] = LEASE_ACTIVE_STATUSES,
+) -> _LeaseResult:
+    """Run one durable side effect while holding the verified lease fence.
+
+    Holding the job-store lock across the callback makes checkpoint/event
+    writes mutually exclusive with reconciliation revocation: either the write
+    completes first and reconciliation seals it, or revocation wins and the
+    stale write never starts.
+    """
+
+    valid_job_id = _valid_job_id(job_id)
+    if valid_job_id is None:
+        raise JobLeaseLostError("invalid_job_id")
+    with _exclusive_store_lock():
+        rec = _read_job_unlocked(valid_job_id)
+        if not rec or not _lease_matches(
+            rec,
+            attempt_id=attempt_id,
+            owner_instance_id=owner_instance_id,
+            allowed_statuses=allowed_statuses,
+        ):
+            raise JobLeaseLostError("job_lease_lost")
+        return callback(*(callback_args or ()), **dict(callback_kwargs or {}))
 
 
 def update_job(job_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
@@ -162,7 +302,13 @@ def update_job(job_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
         return rec
 
 
-def merge_job(job_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
+def merge_job(
+    job_id: str,
+    *,
+    expected_attempt_id: str | None = None,
+    expected_owner_instance_id: str | None = None,
+    **kwargs: Any,
+) -> Optional[Dict[str, Any]]:
     """Merge nested runtime fields without erasing prior progress evidence."""
 
     valid_job_id = _valid_job_id(job_id)
@@ -172,6 +318,13 @@ def merge_job(job_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
         rec = _read_job_unlocked(valid_job_id)
         if rec is None:
             return None
+        if expected_attempt_id is not None or expected_owner_instance_id is not None:
+            if not _lease_matches(
+                rec,
+                attempt_id=expected_attempt_id,
+                owner_instance_id=expected_owner_instance_id,
+            ):
+                return None
         _merge_fields(rec, kwargs)
         _bump_revision(rec)
         _write_job_unlocked(rec)
@@ -184,6 +337,9 @@ def transition_job(
     allowed_from: Iterable[str],
     status: str,
     expected_revision: int | None = None,
+    expected_attempt_id: str | None = None,
+    expected_owner_instance_id: str | None = None,
+    revoke_lease: bool = False,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
     """Atomically apply an allowed transition without resurrecting a record."""
@@ -204,8 +360,17 @@ def transition_job(
             return None
         if expected_revision is not None and int(rec.get("revision") or 0) != int(expected_revision):
             return None
+        if expected_attempt_id is not None or expected_owner_instance_id is not None:
+            if not _lease_matches(
+                rec,
+                attempt_id=expected_attempt_id,
+                owner_instance_id=expected_owner_instance_id,
+            ):
+                return None
         _merge_fields(rec, kwargs)
         rec["status"] = target
+        if revoke_lease:
+            _revoke_lease(rec, reason=f"transition:{target}")
         _bump_revision(rec)
         _write_job_unlocked(rec)
         return rec
@@ -217,6 +382,9 @@ def heartbeat_job(
     activity: str | None = None,
     progress_updates: Dict[str, Any] | None = None,
     agent_runtime_updates: Dict[str, Any] | None = None,
+    expected_attempt_id: str | None = None,
+    expected_owner_instance_id: str | None = None,
+    allowed_statuses: Iterable[str] = LEASE_ACTIVE_STATUSES,
 ) -> Optional[Dict[str, Any]]:
     """Merge a liveness heartbeat without reviving a terminal job.
 
@@ -232,6 +400,14 @@ def heartbeat_job(
         rec = _read_job_unlocked(valid_job_id)
         if not rec:
             return None
+        if expected_attempt_id is not None or expected_owner_instance_id is not None:
+            if not _lease_matches(
+                rec,
+                attempt_id=expected_attempt_id,
+                owner_instance_id=expected_owner_instance_id,
+                allowed_statuses=allowed_statuses,
+            ):
+                return None
         if str(rec.get("status") or "").strip().lower() not in ACTIVE_STATUSES:
             return rec
 
@@ -275,7 +451,12 @@ def reconcile_stale_jobs(
         if status not in ACTIVE_STATUSES:
             continue
         job_id = str(rec.get("job_id") or "")
-        if job_id in protected:
+        # A locally dispatched item that has not acquired a lease may still be
+        # waiting behind another FIFO job, so protect that queued work.  Once a
+        # worker owns a lease, however, dispatch membership must not suppress
+        # stale-heartbeat recovery: a hung running/cancelling process remains
+        # in the dispatch set until its callback returns.
+        if job_id in protected and not str(rec.get("attempt_id") or "").strip():
             continue
         progress = rec.get("progress") if isinstance(rec.get("progress"), dict) else {}
         try:
@@ -303,6 +484,23 @@ def reconcile_stale_jobs(
                 "message": "服务重启或工作进程中断；已保留可信检查点，未自动重放模型调用。",
                 "action": "核对检查点后由用户显式恢复任务。",
             }
+        # Revoke the execution fence before touching checkpoint files.  A
+        # lease-aware worker can no longer race a later checkpoint/final write
+        # once this transition succeeds.
+        transition = transition_job(
+            job_id,
+            allowed_from=ACTIVE_STATUSES,
+            status="interrupted_recoverable",
+            revoke_lease=True,
+            error=public_error,
+            progress={
+                "phase": str(progress.get("phase") or progress.get("stage") or "unknown"),
+                "work_state": "idle",
+                "detail": "任务心跳已过期，已转为可恢复中断状态。",
+            },
+        )
+        if transition is None:
+            continue
         checkpoint_projection: dict[str, Any] | None = None
         try:
             from backend.zhifei_autoplan.generation_checkpoint import (
@@ -318,26 +516,15 @@ def reconcile_stale_jobs(
                     ),
                     "scopes": scopes,
                 }
-        except Exception:
-            checkpoint_projection = None
-        transition = transition_job(
-            job_id,
-            allowed_from=ACTIVE_STATUSES,
-            status="interrupted_recoverable",
-            error=public_error,
-            progress={
-                "phase": str(progress.get("phase") or progress.get("stage") or "unknown"),
-                "work_state": "idle",
-                "detail": "任务心跳已过期，已转为可恢复中断状态。",
-                **(
-                    {"checkpoint": checkpoint_projection}
-                    if checkpoint_projection is not None
-                    else {}
-                ),
-            },
-        )
-        if transition is None:
-            continue
+        except Exception as checkpoint_error:
+            checkpoint_projection = {
+                "status": "interruption_seal_failed",
+                "saved_chapter_count": 0,
+                "error_code": "CHECKPOINT_INTERRUPTION_SEAL_FAILED",
+                "error_type": type(checkpoint_error).__name__,
+            }
+        if checkpoint_projection is not None:
+            merge_job(job_id, progress={"checkpoint": checkpoint_projection})
         if is_ingest:
             shutil.rmtree(INGEST_SPOOL_DIR / job_id, ignore_errors=True)
         reconciled.append(job_id)
@@ -408,6 +595,116 @@ def _legacy_public_error(value: Any) -> dict[str, Any]:
     }
 
 
+def _failed_job_public_error(job: Dict[str, Any]) -> dict[str, Any]:
+    existing_error = job.get("error")
+    if isinstance(existing_error, dict) and str(existing_error.get("code") or "").strip():
+        public_error = {
+            "code": str(existing_error.get("code") or "LEGACY_JOB_FAILED")[:80],
+            "message": str(existing_error.get("message") or "历史任务执行失败。")[:500],
+            "action": str(
+                existing_error.get("action") or "核对保存的检查点后显式恢复任务。"
+            )[:500],
+        }
+        if isinstance(existing_error.get("failures"), list):
+            public_error["failures"] = list(existing_error.get("failures") or [])[:50]
+        return public_error
+    return _legacy_public_error(existing_error)
+
+
+def _legacy_checkpoint_seal_failure(
+    job_id: str,
+    job: Dict[str, Any],
+    exc: BaseException,
+) -> Optional[Dict[str, Any]]:
+    """Persist fail-closed evidence for one legacy checkpoint seal failure."""
+
+    reason_code = str(
+        getattr(exc, "reason_code", "") or "checkpoint_seal_failed"
+    ).strip()
+    schema_incompatible = reason_code == "checkpoint_schema_mismatch"
+    error_code = (
+        "CHECKPOINT_SCHEMA_INCOMPATIBLE"
+        if schema_incompatible
+        else "CHECKPOINT_FAILURE_SEAL_FAILED"
+    )
+    stage = (
+        "checkpoint_schema_incompatible"
+        if schema_incompatible
+        else "checkpoint_failure_seal_failed"
+    )
+    action = (
+        "旧版检查点已拒绝复用且不会迁移；请从原始输入重新发起任务。"
+        if schema_incompatible
+        else "检查检查点存储后从原始输入重新发起任务；不要复用未封存的章节。"
+    )
+    detail = (
+        "历史检查点版本与当前运行版本不兼容，已保持原文件不变并拒绝复用。"
+        if schema_incompatible
+        else "历史检查点终态封存失败，已按不可恢复证据处理。"
+    )
+    seal_failure = {
+        "code": error_code,
+        "reason_code": reason_code,
+        "error_type": type(exc).__name__,
+        "reuse_allowed": False,
+        "migration_attempted": False,
+    }
+    if schema_incompatible:
+        seal_failure["schema_compatible"] = False
+    checkpoint_projection = {
+        "status": "failure_seal_failed",
+        "saved_chapter_count": 0,
+        "scopes": [],
+        "error_code": error_code,
+        "error_type": type(exc).__name__,
+        "reason_code": reason_code,
+        "reuse_allowed": False,
+        "migration_attempted": False,
+    }
+    if schema_incompatible:
+        checkpoint_projection["schema_compatible"] = False
+
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    try:
+        percent = min(99, max(0, int(progress.get("percent") or 0)))
+    except (TypeError, ValueError):
+        percent = 0
+    phase = str(progress.get("phase") or "generation")
+    public_error = _failed_job_public_error(job)
+    public_error["action"] = action
+    public_error["checkpoint_seal_failure"] = seal_failure
+    return merge_job(
+        job_id,
+        error=public_error,
+        progress={
+            "percent": percent,
+            "phase": phase,
+            "stage": stage,
+            "work_state": "idle",
+            "chapters": {
+                "started": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "total": 0,
+            },
+            "chapters_done": 0,
+            "chapters_succeeded": 0,
+            "chapters_failed": 0,
+            "chapters_total": 0,
+            "checkpoint": checkpoint_projection,
+            "detail": detail,
+        },
+        result={
+            "section_count": 0,
+            "checkpoint_status": "failure_seal_failed",
+            "checkpoint_error_code": error_code,
+            "checkpoint_reuse_allowed": False,
+            "recoverable": False,
+            "delivery_ready": False,
+        },
+    )
+
+
 def reconcile_failed_job_evidence(job_id: str) -> Dict[str, Any]:
     """Normalize one historical failed job without modifying saved sections."""
 
@@ -420,22 +717,18 @@ def reconcile_failed_job_evidence(job_id: str) -> Dict[str, Any]:
         mark_failed_checkpoint_namespace,
     )
 
-    checkpoints = mark_failed_checkpoint_namespace(job_id)
+    try:
+        checkpoints = mark_failed_checkpoint_namespace(job_id)
+    except Exception as exc:
+        failed = _legacy_checkpoint_seal_failure(job_id, job, exc)
+        if failed is None:
+            raise ValueError("job disappeared during checkpoint reconciliation") from exc
+        return failed
     succeeded = sum(int(item.get("saved_chapter_count") or 0) for item in checkpoints)
     total = sum(int(item.get("chapters_total") or 0) for item in checkpoints)
     failed = max(0, total - succeeded)
     progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
-    existing_error = job.get("error")
-    if isinstance(existing_error, dict) and str(existing_error.get("code") or "").strip():
-        public_error = {
-            "code": str(existing_error.get("code") or "LEGACY_JOB_FAILED")[:80],
-            "message": str(existing_error.get("message") or "历史任务执行失败。")[:500],
-            "action": str(existing_error.get("action") or "核对保存的检查点后显式恢复任务。")[:500],
-        }
-        if isinstance(existing_error.get("failures"), list):
-            public_error["failures"] = list(existing_error.get("failures") or [])[:50]
-    else:
-        public_error = _legacy_public_error(existing_error)
+    public_error = _failed_job_public_error(job)
     percent = int(progress.get("percent") or 0)
     if total > 0:
         percent = min(99, 15 + int((succeeded / total) * 60))
@@ -508,8 +801,17 @@ def reconcile_legacy_failed_jobs(*, limit: int = 100_000) -> list[str]:
         job_id = str(job.get("job_id") or "")
         if _valid_job_id(job_id) is None:
             continue
-        reconcile_failed_job_evidence(job_id)
-        reconciled.append(job_id)
+        try:
+            repaired = reconcile_failed_job_evidence(job_id)
+        except Exception as exc:
+            # Startup repair is per-job.  A malformed namespace or a concurrent
+            # record disappearance must never prevent the API from starting.
+            try:
+                repaired = _legacy_checkpoint_seal_failure(job_id, job, exc)
+            except Exception:
+                repaired = None
+        if repaired is not None:
+            reconciled.append(job_id)
     return reconciled
 
 

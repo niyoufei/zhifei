@@ -122,3 +122,44 @@ def test_digest_detects_tampering():
     )
     ledger["facts"]["project_code"]["value"] = "P-999"
     assert validate_project_fact_ledger(ledger)["errors"] == ["ledger_digest_mismatch"]
+
+
+def test_implausible_boq_schedule_is_not_promoted_to_project_facts():
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={"topic": "示例项目"},
+        tender={},
+        boq_wbs_cpm={
+            "summary": {
+                "estimated_duration_days": 27907.648,
+                "resource_peak": 569,
+                "critical_interval_days": 1,
+                "critical_path_names": ["土方回填"],
+                "schedule_fact_eligible": False,
+                "schedule_fact_reasons": ["derived_duration_implausible"],
+            }
+        },
+    )
+
+    assert "planned_duration_days" not in ledger["facts"]
+    assert "resource_peak" not in ledger["facts"]
+    assert "critical_path_names" not in ledger["facts"]
+
+
+def test_eligible_boq_schedule_remains_available_as_lower_priority_fact():
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={},
+        tender={},
+        boq_wbs_cpm={
+            "summary": {
+                "estimated_duration_days": 180,
+                "resource_peak": 42,
+                "critical_interval_days": 3,
+                "critical_path_names": ["土方开挖", "结构施工"],
+                "schedule_fact_eligible": True,
+                "schedule_fact_reasons": [],
+            }
+        },
+    )
+
+    assert ledger["facts"]["planned_duration_days"]["value"] == 180
+    assert ledger["facts"]["planned_duration_days"]["source_type"] == "boq"

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from backend.zhifei_autoplan.cross_index import build_cross_index
+import pytest
+
+from backend.zhifei_autoplan.cross_index import (
+    build_cross_index,
+    validate_cross_index_contract,
+)
 
 
 def test_build_cross_index_happy_path():
@@ -142,6 +147,200 @@ def test_build_cross_index_fallback_to_stats_when_focus_missing():
     assert out["ok"] is True
     assert out["focus_count"] == 1
     assert out["focus_items"][0]["name"] == "模板"
+
+
+def test_build_cross_index_normalizes_wrapped_boq_names_across_sources():
+    boq = {
+        "items": [
+            {
+                "boq_code": "030304",
+                "name": "预制钢筋混凝土\n管桩",
+                "quantity": 20.0,
+                "unit": "根",
+                "process": {"name": "管桩施工"},
+            }
+        ],
+        "stats": {
+            "top_quantity_items": [
+                {
+                    "boq_code": "030304",
+                    "name": "预制钢筋混凝土 管桩",
+                    "quantity": 20.0,
+                    "unit": "根",
+                }
+            ]
+        },
+    }
+    title = "管桩施工工艺"
+    quality_checks = {
+        "boq_focus_item_closure": {
+            "items": [
+                {
+                    "item": "预制钢筋混凝土管桩",
+                    "ok": True,
+                    "reason": "ok",
+                    "hit_sections": [
+                        {
+                            "title": title,
+                            "ok": True,
+                            "triplet_count": 2,
+                            "hit_keys": ["频次", "阈值"],
+                            "has_units": True,
+                            "evidence_count": 1,
+                            "mentions_checked": 1,
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    locator = "桩基图.pdf#p3_12345678@45"
+
+    out = build_cross_index(
+        boq=boq,
+        sections=[
+            {
+                "title": title,
+                "content": (
+                    "预制钢筋混凝土管桩：风险→控制→验证；"
+                    "频次1次/班，阈值95%。【证据:桩基图.pdf#p3_12345678@45】"
+                ),
+            }
+        ],
+        boq_focus={
+            "must_cover_keywords": [
+                "预制钢筋混凝土\n管桩",
+                "预制钢筋混凝土 管桩",
+            ]
+        },
+        drawing_index={
+            "chapter_bindings": [{"chapter": title, "locator": locator}]
+        },
+        standard_index={},
+        quality_checks=quality_checks,
+    )
+
+    assert out["focus_count"] == 1
+    assert out["focus_items"][0]["name"] == "预制钢筋混凝土管桩"
+    assert "工程量大" in out["focus_items"][0]["categories"]
+    assert out["focus_items"][0]["closure"]["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "mutation,reason",
+    [
+        (lambda value: None, "not_object"),
+        (lambda value: {}, "schema_incomplete"),
+        (lambda value: {**value, "ok": False}, "not_ok"),
+        (
+            lambda value: {
+                **value,
+                "focus_items": [{**value["focus_items"][0], "name": "错项"}],
+            },
+            "identity_mismatch",
+        ),
+        (lambda value: {**value, "mentioned_count": 2}, "counter_out_of_range"),
+    ],
+)
+def test_cross_index_contract_fails_closed_on_invalid_result(mutation, reason):
+    valid = {
+        "ok": True,
+        "focus_count": 1,
+        "mentioned_count": 1,
+        "closed_ok_count": 1,
+        "missing_drawing_locator_count": 0,
+        "missing_standard_locator_count": 0,
+        "focus_items": [{"name": "钢筋"}],
+    }
+
+    with pytest.raises(ValueError, match=reason):
+        validate_cross_index_contract(
+            mutation(valid),
+            expected_names=["钢筋"],
+        )
+
+
+def test_cross_index_contract_accepts_explicit_empty_focus_result():
+    result = {
+        "ok": False,
+        "focus_count": 0,
+        "mentioned_count": 0,
+        "closed_ok_count": 0,
+        "missing_drawing_locator_count": 0,
+        "missing_standard_locator_count": 0,
+        "focus_items": [],
+    }
+
+    assert validate_cross_index_contract(result, expected_names=[]) is result
+
+
+def test_cross_index_fallback_never_drops_hazard_only_focus():
+    out = build_cross_index(
+        boq={
+            "items": [{"name": "氧气瓶", "quantity": 2, "unit": "瓶"}],
+            "stats": {"hazardous_material_items": [{"name": "氧气瓶"}]},
+        },
+        sections=[{"title": "安全管理", "content": "氧气瓶分类储运。"}],
+        boq_focus=None,
+        drawing_index={},
+        standard_index={},
+        quality_checks={},
+    )
+
+    assert out["focus_count"] == 1
+    assert out["focus_items"][0]["name"] == "氧气瓶"
+    assert "危险品材料" in out["focus_items"][0]["categories"]
+
+
+def test_cross_index_merges_canonical_aliases_across_stats_categories():
+    out = build_cross_index(
+        boq={
+            "items": [{"name": "预制钢筋混凝土管桩", "quantity": 10, "unit": "根"}],
+            "stats": {
+                "top_quantity_items": [
+                    {"name": "预制钢筋混凝土\n管桩", "quantity": 10, "unit": "根"}
+                ],
+                "top_total_price_items": [
+                    {"name": "预制钢筋混凝土 管桩", "total_price": 500000}
+                ],
+            },
+        },
+        sections=[{"title": "桩基工程", "content": "预制钢筋混凝土管桩施工。"}],
+        boq_focus={"must_cover_keywords": ["预制钢筋混凝土管桩"]},
+        drawing_index={},
+        standard_index={},
+        quality_checks={},
+    )
+
+    row = out["focus_items"][0]
+    assert row["total_price"] == 500000
+    assert set(row["categories"]) == {"工程量大", "单体造价高"}
+
+
+def test_cross_index_locator_search_uses_nfkc_equivalent_span():
+    locator = "桩基图.pdf#p3_12345678@45"
+    out = build_cross_index(
+        boq={
+            "items": [{"name": "管桩(DN100)", "quantity": 1, "unit": "根"}],
+            "stats": {"top_quantity_items": [{"name": "管桩(DN100)"}]},
+        },
+        sections=[
+            {
+                "title": "桩基工程",
+                "content": f"管桩（DN100）闭环。【证据:{locator}】",
+            }
+        ],
+        boq_focus={"must_cover_keywords": ["管桩(DN100)"]},
+        drawing_index={
+            "drawings": [{"filename": "桩基图.pdf", "sha256": "a" * 64}],
+            "chapter_bindings": [],
+        },
+        standard_index={},
+        quality_checks={},
+    )
+
+    assert out["focus_items"][0]["evidence_locators_near"] == [locator]
+    assert out["focus_items"][0]["drawing_locator"] == locator
 
 
 def test_build_cross_index_prefers_precise_process_chapter():

@@ -57,6 +57,7 @@ def test_boq_schedule_excludes_outlier_without_losing_valid_quantity() -> None:
     assert result["summary"]["excluded_quantity_count"] == 1
     assert result["summary"]["total_quantity"] == 120.0
     assert result["summary"]["estimated_duration_days"] == 12.0
+    assert result["summary"]["schedule_fact_eligible"] is True
     assert result["schedule_input_warnings"] == [
         {"code": "BOQ_QUANTITY_OUTLIER_EXCLUDED", "count": 1}
     ]
@@ -81,3 +82,20 @@ def test_generation_view_sanitizes_prompt_stats_without_rewriting_source() -> No
     assert safe["stats"]["total_quantity"] == 20.0
     assert safe["stats"]["top_quantity_items"][0]["name"] == "正常项"
     assert safe["runtime_validation"]["excluded_quantity_count"] == 1
+
+
+def test_implausible_boq_duration_is_diagnostic_not_an_immutable_fact() -> None:
+    result = build_boq_wbs_cpm(
+        {"items": [{"name": "通用项目", "quantity": 4000, "resources": []}]},
+        enterprise_profile={
+            "productivity": {"通用施工工序": {"value": 1, "unit": "项/天"}}
+        },
+    )
+
+    assert result["summary"]["estimated_duration_days"] == 4000.0
+    assert result["summary"]["schedule_fact_eligible"] is False
+    assert "derived_duration_implausible" in result["summary"]["schedule_fact_reasons"]
+    assert any(
+        row["code"] == "BOQ_DERIVED_SCHEDULE_IMPLAUSIBLE"
+        for row in result["schedule_input_warnings"]
+    )

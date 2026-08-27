@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from backend.zhifei_autoplan.evidence import best_ingested_hit
 from backend.zhifei_autoplan.drawing_semantic import summarize_spatial_anchors, pick_chapter_anchor
+from backend.zhifei_autoplan.ingest_tags import effective_record_tags
 
 
 _HAN_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
@@ -71,6 +72,7 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
         lines = audit_path.read_text(encoding="utf-8", errors="ignore").splitlines()[::-1]
     except Exception:
         lines = []
+    seen_content_ids: set[str] = set()
     for ln in lines:
         if len(drawings) >= 40:
             break
@@ -80,13 +82,22 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
             continue
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
-        tags = rec.get("tags") or []
+        sha = str(rec.get("sha256") or "").strip()
+        file_id = str(rec.get("file_id") or "").strip()
+        content_id = sha or file_id
+        if not content_id or content_id in seen_content_ids:
+            continue
+        # Audit is newest-first.  Occupy the identity before status/tag checks
+        # so an older active row cannot resurrect content disabled later.
+        seen_content_ids.add(content_id)
+        if rec.get("enabled") is False or rec.get("usable") is False:
+            continue
+        tags = effective_record_tags(rec)
         if "drawing" not in tags:
             continue
         if "logo" in tags:
             continue
         fname = str(rec.get("filename") or "").strip()
-        sha = str(rec.get("sha256") or "")
         if not fname or not sha:
             continue
         extract_path = str(rec.get("extract_saved_as") or "")
@@ -134,7 +145,7 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
     bindings: List[Dict[str, Any]] = []
     for title in key_chapters[:24]:
         hit = best_ingested_hit(
-            f"{topic} {title} 图纸",
+            title,
             limit=10,
             prefer_filename_keywords=["图", "图纸", "施工图", "平面", "剖面", "大样", "节点"],
             project_id=pid,
@@ -143,15 +154,28 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
         )
         if not hit or not hit.get("locator"):
             continue
+        hit_filename = str(hit.get("filename") or "").strip()
+        hit_sha = str(hit.get("sha256") or "").strip()
+        matching_drawings = [
+            drawing
+            for drawing in drawings
+            if str(drawing.get("filename") or "").strip() == hit_filename
+            and str(drawing.get("sha256") or "").strip() == hit_sha
+        ]
+        anchor = pick_chapter_anchor(title, matching_drawings)
         bindings.append(
             {
                 "chapter": title,
                 "locator": hit.get("locator"),
-                "filename": hit.get("filename"),
+                "filename": hit_filename,
+                "sha256": hit_sha,
                 "page": hit.get("page"),
                 "offset": hit.get("offset"),
                 "snippet": hit.get("snippet"),
-                **pick_chapter_anchor(title, drawings),
+                "binding_basis": "chapter_specific_extract_hit",
+                "spatial_anchor": anchor.get("spatial_anchor"),
+                "dimension_anchor": anchor.get("dimension_anchor"),
+                "topology": anchor.get("topology") if isinstance(anchor.get("topology"), dict) else {},
             }
         )
 
@@ -160,4 +184,9 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
         "project_id": pid,
         "drawings": drawings[:30],
         "chapter_bindings": bindings[:24],
+        "chapter_binding_status": (
+            "bound"
+            if bindings
+            else ("no_chapter_specific_evidence" if drawings else "no_drawings")
+        ),
     }

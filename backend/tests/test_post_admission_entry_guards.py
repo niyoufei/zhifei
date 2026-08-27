@@ -360,6 +360,16 @@ async def test_review_apply_two_ai_rounds_share_one_fresh_admission_and_render_s
         "_load_done_job_variants",
         lambda _job_id: (job, {}, {"variants": [target]}, [target]),
     )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_require_formal_document_mutation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_capture_promotion_revision",
+        lambda _job: ("succeeded", 7),
+    )
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
     monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
 
@@ -444,12 +454,6 @@ async def test_review_apply_two_ai_rounds_share_one_fresh_admission_and_render_s
         "create_revision_snapshot",
         review_revision.create_revision_snapshot,
     )
-    monkeypatch.setattr(
-        actions_bridge,
-        "finalize_revision_snapshot",
-        review_revision.finalize_revision_snapshot,
-    )
-
     slot_coordinator_calls: list[Any] = []
     original_admitted_slot = actions_bridge._admitted_document_render_slot
 
@@ -468,8 +472,9 @@ async def test_review_apply_two_ai_rounds_share_one_fresh_admission_and_render_s
     promotions: list[dict[str, Any]] = []
     monkeypatch.setattr(
         actions_bridge,
-        "update_job",
-        lambda *_args, **kwargs: promotions.append(kwargs),
+        "_promote_review_candidate_two_phase",
+        lambda **kwargs: promotions.append(kwargs)
+        or ({"status": "succeeded", "revision": 8}, {"promotion": {"state": "committed"}}),
     )
 
     versions = actions_bridge._review_versions([target], 0)
@@ -552,6 +557,16 @@ async def test_review_apply_admission_failure_is_stable_503_before_any_llm(
         actions_bridge,
         "_load_done_job_variants",
         lambda _job_id: ({"payload": {}}, {}, {"variants": [target]}, [target]),
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_require_formal_document_mutation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_capture_promotion_revision",
+        lambda _job: ("succeeded", 7),
     )
     monkeypatch.setattr(
         actions_bridge,

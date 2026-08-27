@@ -7,7 +7,14 @@ import pytest
 from scripts import run_actions_pipeline
 
 
-def _run_main(monkeypatch: pytest.MonkeyPatch, *, status: str, generate_images: bool) -> tuple[int, dict]:
+def _run_main(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: str,
+    generate_images: bool,
+    dry_run: bool = False,
+    download: bool = False,
+) -> tuple[int, dict]:
     generation_payload: dict = {}
 
     def _post_json(base, path, actions_key, payload, **kwargs):
@@ -19,7 +26,11 @@ def _run_main(monkeypatch: pytest.MonkeyPatch, *, status: str, generate_images: 
         if path == "/actions/job_status":
             return {"job": {"status": status}}
         if path == "/actions/result":
-            return {"quality_checks": {}}
+            return {
+                "quality_checks": {},
+                "delivery_scope": "document",
+                "delivery_ready": not dry_run,
+            }
         raise AssertionError(f"unexpected path: {path}")
 
     argv = [
@@ -28,13 +39,16 @@ def _run_main(monkeypatch: pytest.MonkeyPatch, *, status: str, generate_images: 
         "合成验收项目",
         "--actions-key",
         "local-actions-key",
-        "--no-download",
         "--no-gate",
         "--timeout-sec",
         "1",
         "--poll-sec",
         "0",
     ]
+    if not download:
+        argv.append("--no-download")
+    if dry_run:
+        argv.append("--dry-run")
     if generate_images:
         argv.append("--generate-images")
 
@@ -64,6 +78,27 @@ def test_main_keeps_legacy_done_and_supports_image_opt_in(monkeypatch):
 
     assert result == 0
     assert payload["generate_images"] is True
+
+
+def test_dry_run_downloads_json_only(monkeypatch):
+    downloads: list[str] = []
+    monkeypatch.setattr(
+        run_actions_pipeline,
+        "_download",
+        lambda _base, _key, _job, kind, _variant, _path: downloads.append(kind),
+    )
+
+    result, payload = _run_main(
+        monkeypatch,
+        status="succeeded",
+        generate_images=False,
+        dry_run=True,
+        download=True,
+    )
+
+    assert result == 0
+    assert payload["dry_run"] is True
+    assert downloads == ["json"]
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled", "interrupted_recoverable"])

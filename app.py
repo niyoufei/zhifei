@@ -2524,6 +2524,11 @@ def _render_downloads(base_url: str, actions_key: str) -> None:
     job_id = result.get("job_id", "")
     variants = int(result.get("variants") or 1)
     st.write(f"job_id: `{job_id}`")
+    if result.get("delivery_scope") == "chapter_validation":
+        st.info(
+            "章节真实模型验证已完成。本结果仅用于核验模型、章节、检查点和质量数据，"
+            "不生成或冒充正式 DOCX/PDF 交付文件。"
+        )
     delivery_receipt = result.get("delivery_receipt")
     if isinstance(delivery_receipt, dict):
         decision_digest = str(delivery_receipt.get("decision_digest") or "")
@@ -2763,6 +2768,15 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
     data = json.loads(raw_json.decode("utf-8", errors="ignore"))
     variants_data = data.get("variants") or []
     variants_n = max(1, len(variants_data))
+    variant_scopes = {
+        str(row.get("delivery_scope") or "document").strip().lower()
+        for row in variants_data
+        if isinstance(row, dict)
+    }
+    if len(variant_scopes) > 1:
+        raise RuntimeError("同一任务包含不一致的交付范围")
+    delivery_scope = next(iter(variant_scopes), "document")
+    is_chapter_validation = delivery_scope == "chapter_validation"
 
     artifacts: dict[int, dict[str, bytes]] = {}
     quality_map: dict[int, dict[str, Any]] = {}
@@ -2770,27 +2784,65 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
     insight_map: dict[int, dict[str, Any]] = {}
     from backend.zhifei_autoplan.review_insights import build_review_insight
 
-    delivery_receipt_bytes = _download_bytes(
-        base_url,
-        actions_key,
-        job_id,
-        "delivery_receipt",
-        1,
-        timeout=120,
-    )
-    delivery_receipt = json.loads(delivery_receipt_bytes.decode("utf-8"))
-    if not isinstance(delivery_receipt, dict):
-        raise RuntimeError("任务级交付凭证格式无效")
-    decision_digest = str(delivery_receipt.get("decision_digest") or "")
-    if (
-        str(delivery_receipt.get("status") or "").lower() != "pass"
-        or str(delivery_receipt.get("job_id") or "") != str(job_id)
-        or int(delivery_receipt.get("variant_count") or 0) != variants_n
-        or len(decision_digest) != 64
-    ):
-        raise RuntimeError("任务级交付凭证未通过一致性校验")
+    delivery_receipt = None
+    decision_digest = ""
+    if not is_chapter_validation:
+        delivery_receipt_bytes = _download_bytes(
+            base_url,
+            actions_key,
+            job_id,
+            "delivery_receipt",
+            1,
+            timeout=120,
+        )
+        delivery_receipt = json.loads(delivery_receipt_bytes.decode("utf-8"))
+        if not isinstance(delivery_receipt, dict):
+            raise RuntimeError("任务级交付凭证格式无效")
+        decision_digest = str(delivery_receipt.get("decision_digest") or "")
+        if (
+            str(delivery_receipt.get("status") or "").lower() != "pass"
+            or str(delivery_receipt.get("job_id") or "") != str(job_id)
+            or int(delivery_receipt.get("variant_count") or 0) != variants_n
+            or len(decision_digest) != 64
+        ):
+            raise RuntimeError("任务级交付凭证未通过一致性校验")
 
     for v in range(1, variants_n + 1):
+        if is_chapter_validation:
+            artifacts[v] = {}
+            rec = variants_data[v - 1] if v <= len(variants_data) else {}
+            qc = rec.get("quality_checks") or {}
+            mode_policy = rec.get("mode_policy") if isinstance(rec.get("mode_policy"), dict) else {}
+            agent_contract_checks = rec.get("agent_contract_checks") if isinstance(rec.get("agent_contract_checks"), dict) else {}
+            score_mapping = rec.get("score_mapping") if isinstance(rec.get("score_mapping"), dict) else {}
+            runtime_map[v] = {
+                "generation_mode": rec.get("generation_mode"),
+                "delivery_scope": "chapter_validation",
+                "delivery_ready": False,
+                "planned_total_pages": mode_policy.get("planned_total_pages"),
+                "pipeline_stages": rec.get("pipeline_stages") if isinstance(rec.get("pipeline_stages"), list) else [],
+                "agent_contract_ok": agent_contract_checks.get("ok"),
+                "agent_contract_error_count": agent_contract_checks.get("error_count"),
+                "score_high_risk_count": ((score_mapping.get("summary") or {}).get("high_risk_item_count") if isinstance(score_mapping, dict) else None),
+            }
+            quality_map[v] = {
+                "structure": (qc.get("structure") or {}).get("ok"),
+                "officialese": (qc.get("officialese") or {}).get("ok"),
+                "risk_triplet": (qc.get("risk_triplet") or {}).get("ok"),
+                "qse_closed_loop": (qc.get("qse_closed_loop") or {}).get("ok"),
+                "logic_template_adherence": (qc.get("logic_template_adherence") or {}).get("ok"),
+                "chapter_blueprint_adherence": (qc.get("chapter_blueprint_adherence") or {}).get("ok"),
+                "variant_diversity": (qc.get("variant_diversity") or {}).get("ok"),
+                "quantitative": (qc.get("quantitative") or {}).get("ok"),
+                "required_topics_detail": (qc.get("required_topics_detail") or {}).get("ok"),
+                "evidence_traceability": (qc.get("evidence_traceability") or {}).get("ok"),
+                "drawing_evidence": (qc.get("drawing_evidence") or {}).get("ok"),
+                "standard_evidence": (qc.get("standard_evidence") or {}).get("ok"),
+                "boq_focus_item_typed_evidence": (qc.get("boq_focus_item_typed_evidence") or {}).get("ok"),
+                "consistency": (qc.get("consistency") or {}).get("ok"),
+            }
+            insight_map[v] = build_review_insight(rec if isinstance(rec, dict) else {})
+            continue
         artifacts[v] = {}
         artifacts[v]["docx"] = _download_bytes(base_url, actions_key, job_id, "docx", v, timeout=600)
         artifacts[v]["compare_docx"] = _download_bytes(base_url, actions_key, job_id, "compare_docx", v, timeout=600)
@@ -2883,6 +2935,7 @@ def _collect_job_result(base_url: str, actions_key: str, job_id: str) -> dict[st
         "insight_by_variant": insight_map,
         "delivery_receipt": delivery_receipt,
         "delivery_decision_digest": decision_digest,
+        "delivery_scope": delivery_scope,
         "result_json": raw_json,
     }
 

@@ -4,6 +4,14 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from backend.zhifei_autoplan.evidence import best_ingested_hit
+from backend.zhifei_autoplan.boq_focus_policy import (
+    MAX_BOQ_FOCUS_ITEMS,
+    boq_focus_name_in_text,
+    boq_focus_name_key,
+    find_boq_focus_name_spans,
+    normalize_boq_focus_items,
+    normalize_boq_focus_name,
+)
 from backend.zhifei_autoplan.params_runtime import get_quant_defaults, get_boq_focus_card_defaults
 
 
@@ -34,7 +42,8 @@ _EVIDENCE_SRC_RE = re.compile(r"【证据:(?P<src>[^】]{2,200})】")
 def _parse_focus_lines(lines: List[str]) -> Dict[str, Dict[str, str]]:
     """
     Parse `boq_focus["lines"]` which contains mixed headers and "- item / 工程量=... / 单价=... / 合价=..."
-    Returns a map: name -> {qty, unit_price, total_price, raw}
+    Returns a map keyed by the canonical item name so line-wrapped/NFKC
+    variants still attach their quantities to the right generated card.
     """
     out: Dict[str, Dict[str, str]] = {}
     for ln in lines or []:
@@ -44,10 +53,11 @@ def _parse_focus_lines(lines: List[str]) -> Dict[str, Dict[str, str]]:
         body = s[2:].strip()
         m = _FOCUS_ITEM_LINE_RE.match(s)
         if m:
-            name = (m.group("name") or "").strip()
-            if not name:
+            name = normalize_boq_focus_name(m.group("name"))
+            key = boq_focus_name_key(name)
+            if not name or not key:
                 continue
-            out[name] = {
+            out[key] = {
                 "name": name,
                 "qty": (m.group("qty") or "").strip(),
                 "unit_price": (m.group("unit_price") or "").strip(),
@@ -56,9 +66,10 @@ def _parse_focus_lines(lines: List[str]) -> Dict[str, Dict[str, str]]:
             }
             continue
         # Fallback: name is left part
-        name = body.split(" / ", 1)[0].strip()
-        if name:
-            out.setdefault(name, {"name": name, "raw": body})
+        name = normalize_boq_focus_name(body.split(" / ", 1)[0])
+        key = boq_focus_name_key(name)
+        if name and key:
+            out.setdefault(key, {"name": name, "raw": body})
     return out
 
 
@@ -111,24 +122,14 @@ def _item_is_closed_in_text(name: str, text: str, window: int = 420, max_mention
     Determine whether an item is already "closed" in a section without duplicating cards.
     Scan multiple mentions because the first mention may be outside the control-card block.
     """
-    sname = str(name or "").strip()
-    if not sname or sname not in (text or ""):
-        return False
-    idx = 0
-    checked = 0
-    while True:
-        pos = (text or "").find(sname, idx)
-        if pos < 0:
-            break
-        checked += 1
+    source_text = text or ""
+    spans = find_boq_focus_name_spans(name, source_text, limit=max_mentions)
+    for pos, match_end in spans:
         start = max(0, pos - window)
-        end = min(len(text or ""), pos + len(sname) + window)
-        snippet = (text or "")[start:end]
+        end = min(len(source_text), match_end + window)
+        snippet = source_text[start:end]
         if _has_closed_loop_triplet(snippet) and _has_quant_metrics(snippet) and ("【证据:" in snippet):
             return True
-        if checked >= max(1, int(max_mentions or 0)):
-            break
-        idx = pos + max(1, len(sname))
     return False
 
 
@@ -146,35 +147,18 @@ def _item_is_closed_with_typed_evidence(
     - if drawings exist: require at least 1 drawing evidence source near the item
     - if standards exist: require at least 1 standard evidence source near the item
     """
-    sname = str(name or "").strip()
-    if not sname or sname not in (text or ""):
-        return False
+    source_text = text or ""
     dset = {str(x).strip() for x in (drawing_names or []) if str(x).strip()}
     sset = {str(x).strip() for x in (standard_names or []) if str(x).strip()}
-    idx = 0
-    checked = 0
-    while True:
-        pos = (text or "").find(sname, idx)
-        if pos < 0:
-            break
-        checked += 1
+    for pos, match_end in find_boq_focus_name_spans(name, source_text, limit=10):
         start = max(0, pos - window)
-        end = min(len(text or ""), pos + len(sname) + window)
-        snippet = (text or "")[start:end]
+        end = min(len(source_text), match_end + window)
+        snippet = source_text[start:end]
         if not (_has_closed_loop_triplet(snippet) and _has_quant_metrics(snippet) and ("【证据:" in snippet)):
-            if checked >= 10:
-                break
-            idx = pos + max(1, len(sname))
             continue
         if dset and (not _evidence_has_any(snippet, dset)):
-            if checked >= 10:
-                break
-            idx = pos + max(1, len(sname))
             continue
         if sset and (not _evidence_has_any(snippet, sset)):
-            if checked >= 10:
-                break
-            idx = pos + max(1, len(sname))
             continue
         return True
     return False
@@ -235,18 +219,18 @@ def _pick_section_for_item(
     3) Token match in title (heuristic), optionally boosted by evidence snippet tokens
     4) Host fallback
     """
-    sname = str(name or "").strip()
+    sname = normalize_boq_focus_name(name)
     if not sections:
         return 0
 
     for i, sec in enumerate(sections):
         title = str(sec.get("title") or "")
-        if sname and sname in title:
+        if sname and boq_focus_name_in_text(sname, title):
             return i
 
     for i, sec in enumerate(sections):
         text = str(sec.get("content") or "")
-        if sname and sname in text:
+        if sname and boq_focus_name_in_text(sname, text):
             return i
 
     tokens = _tokenize_item_name(sname)
@@ -371,13 +355,27 @@ def _build_focus_card(
             verify_parts.append("材料超耗≤2%(周统计)+盘点差异=0(周盘点)")
         verify = "+".join(verify_parts[:4])
 
-    rline = f"风险：{risk}；控制：{control}；验证：{verify}。【证据:{evidence_src}】"
+    operational_fields = (
+        f"；频次={quant['频次']}；阈值={quant['阈值']}；责任岗位=质量员+施工员"
+        "；记录=《重点项过程检查台账》；偏差处置4h内复验关闭"
+    )
+    rline = (
+        f"风险：{risk}；控制：{control}；验证：{verify}"
+        f"{operational_fields}。【证据:{evidence_src}】"
+    )
+    trace_line = (
+        "风险：批次、构件或验收记录无法反查；"
+        "控制：进场、施工、验收三阶段使用同一清单编码并逐批核对；"
+        "验证：编码一致率=100%且抽查合格率≥98%"
+        f"{operational_fields}。【证据:{evidence_src}】"
+    )
     parts = [f"- {head}", f"  {qline}"]
     if dwg_line:
         parts.append(f"  {dwg_line}")
     if std_line:
         parts.append(f"  {std_line}")
     parts.append(f"  风险→控制→验证：{rline}")
+    parts.append(f"  风险→控制→验证：{trace_line}")
     return "\n".join(parts)
 
 
@@ -386,20 +384,21 @@ def _find_focus_card_span(text: str, item_name: str) -> Tuple[int, int, int] | N
     Locate a focus card block for an item in a section.
     Returns (block_start, block_end, first_line_end).
     """
-    name = str(item_name or "").strip()
-    if not name:
+    name_key = boq_focus_name_key(item_name)
+    if not name_key:
         return None
-    pattern = re.compile(rf"(?m)^-\\s*清单项：\\s*{re.escape(name)}(?:[；\\s]|$)")
-    m = pattern.search(text or "")
-    if not m:
-        return None
-    start = m.start()
-    nxt = re.search(r"(?m)^-\\s*清单项：", (text or "")[m.end() :])
-    end = (m.end() + nxt.start()) if nxt else len(text or "")
-    line_end = (text or "").find("\n", start)
-    if line_end < 0:
-        line_end = len(text or "")
-    return start, end, line_end
+    source_text = text or ""
+    starts = list(re.finditer(r"(?m)^-\s*清单项\s*[：:]\s*", source_text))
+    for index, match in enumerate(starts):
+        newline = re.search(r"\r?\n", source_text[match.end() :])
+        line_end = match.end() + newline.start() if newline else len(source_text)
+        header = source_text[match.end() : line_end]
+        header_name = re.split(r"[；;]", header, maxsplit=1)[0]
+        if boq_focus_name_key(header_name) != name_key:
+            continue
+        block_end = starts[index + 1].start() if index + 1 < len(starts) else len(source_text)
+        return match.start(), block_end, line_end
+    return None
 
 
 def ensure_boq_focus_item_cards(
@@ -419,7 +418,10 @@ def ensure_boq_focus_item_cards(
     if not sections or not isinstance(boq_focus, dict):
         return False, []
 
-    focus_items = [str(x).strip() for x in (boq_focus.get("must_cover_keywords") or []) if str(x).strip()]
+    focus_items = normalize_boq_focus_items(
+        boq_focus.get("must_cover_keywords") or [],
+        limit=MAX_BOQ_FOCUS_ITEMS,
+    )
     if not focus_items:
         return False, []
 
@@ -437,9 +439,10 @@ def ensure_boq_focus_item_cards(
         for it in arr:
             if not isinstance(it, dict):
                 continue
-            n = str(it.get("name") or "").strip()
-            if n:
-                out.add(n)
+            n = normalize_boq_focus_name(it.get("name"))
+            key = boq_focus_name_key(n)
+            if key:
+                out.add(key)
         return out
 
     # Categories used to expand risk triplets for focus cards.
@@ -449,21 +452,22 @@ def ensure_boq_focus_item_cards(
             "材料需求量大": _name_set((stats or {}).get("top_material_demand_items") or []),
             "单体造价高": _name_set((stats or {}).get("top_total_price_items") or []),
             "材料单价高": _name_set((stats or {}).get("top_unit_price_items") or []),
-            "特殊材料": set([str(x).strip() for x in (boq_focus.get("special_materials") or []) if str(x).strip()]),
-            "危险品材料": set([str(x).strip() for x in (boq_focus.get("hazardous_materials") or []) if str(x).strip()]),
-            "劳保用品": set([str(x).strip() for x in (boq_focus.get("ppe_items") or []) if str(x).strip()]),
+            "特殊材料": {boq_focus_name_key(x) for x in (boq_focus.get("special_materials") or []) if boq_focus_name_key(x)},
+            "危险品材料": {boq_focus_name_key(x) for x in (boq_focus.get("hazardous_materials") or []) if boq_focus_name_key(x)},
+            "劳保用品": {boq_focus_name_key(x) for x in (boq_focus.get("ppe_items") or []) if boq_focus_name_key(x)},
         }
     except Exception:
         cat_sets = {}
 
     def _cats_for(name: str) -> List[str]:
-        sname = str(name or "").strip()
+        sname = normalize_boq_focus_name(name)
         if not sname:
             return []
         out: List[str] = []
+        name_key = boq_focus_name_key(sname)
         for k, s in (cat_sets or {}).items():
             try:
-                if sname in (s or set()):
+                if name_key in (s or set()):
                     out.append(k)
             except Exception:
                 continue
@@ -494,16 +498,18 @@ def ensure_boq_focus_item_cards(
             standard_names = []
 
     def _process_hint_for_item(name: str) -> str:
-        sname = str(name or "").strip()
+        sname = normalize_boq_focus_name(name)
         if not sname:
             return ""
         for rec in items[:2000]:
             if not isinstance(rec, dict):
                 continue
-            iname = str(rec.get("name") or "").strip()
+            iname = normalize_boq_focus_name(rec.get("name"))
             if not iname:
                 continue
-            if iname == sname or (sname in iname) or (iname in sname):
+            iname_key = boq_focus_name_key(iname)
+            sname_key = boq_focus_name_key(sname)
+            if iname_key == sname_key or (sname_key in iname_key) or (iname_key in sname_key):
                 proc = rec.get("process") if isinstance(rec.get("process"), dict) else {}
                 pname = str((proc or {}).get("name") or "").strip()
                 if pname:
@@ -515,7 +521,7 @@ def ensure_boq_focus_item_cards(
 
     host_idx = _pick_host_section_index(sections)
     blocks_by_idx: Dict[int, List[str]] = {}
-    for name in focus_items[:12]:
+    for name in focus_items:
         process_hint = _process_hint_for_item(name)
         cats = _cats_for(name)
         dwg_loc = None
@@ -591,7 +597,7 @@ def ensure_boq_focus_item_cards(
         if already_ok:
             continue
 
-        it = details.get(name) or {"name": name}
+        it = details.get(boq_focus_name_key(name)) or {"name": name}
         item_hit = None
         item_ev = evidence_src
         try:

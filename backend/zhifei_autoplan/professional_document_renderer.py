@@ -459,6 +459,7 @@ async def render_professional_document(
     job_id: str,
     variant: int,
     result: dict[str, Any],
+    artifact_namespace: str | None = None,
     slot_override: ProviderSlot | None = None,
     provider_override: Any | None = None,
     execution_runtime: ExecutionControlRuntime | None = None,
@@ -531,7 +532,8 @@ async def render_professional_document(
     professional_variant["model_routing"] = model_routing
 
     output_dir = source_docx.parent
-    stem = f"autoplan_{job_id}_professional_v{variant}"
+    output_identity = str(artifact_namespace or job_id).strip() or str(job_id)
+    stem = f"autoplan_{output_identity}_professional_v{variant}"
     professional_json = output_dir / f"{stem}.json"
     professional_docx = output_dir / f"{stem}.docx"
     receipt_path = output_dir / f"{stem}.receipt.json"

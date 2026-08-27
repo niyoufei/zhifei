@@ -20,11 +20,14 @@ from backend.zhifei_autoplan.quality_check import (
     _check_template_style,
     _check_required_topics,
     _check_required_topics_detail,
+    _check_boq_focus_item_closure,
+    _check_boq_focus_item_typed_evidence,
     apply_remediation,
     ensure_local_export_mandatory_content,
     run_quality_checks,
     strip_nonconcrete_language,
 )
+from backend.zhifei_autoplan.boq_focus_enforcer import ensure_boq_focus_item_cards
 
 
 # ========== _normalize_text ==========
@@ -602,6 +605,26 @@ class TestStripNonconcreteLanguage:
 
 # ========== run_quality_checks ==========
 class TestRunQualityChecks:
+    def test_attaches_independent_content_review_and_delivery_gate(self):
+        sections = [
+            {
+                "title": "安全管理",
+                "content": (
+                    "项目部每日检查临边防护，安全员按检查表逐项验收并留存记录。"
+                    "风险:护栏松动→控制:班前紧固并设置警戒区→验证:每日复测1次且偏差当天关闭。"
+                    "【证据:安全检查记录.pdf#p1_ab12cd34@100】"
+                ),
+            }
+        ]
+
+        result = run_quality_checks(None, ["安全管理"], sections, strict=True)
+
+        assert "score" in result
+        assert "quality_gate" in result
+        assert "independent_content_review" in result
+        assert result["score"] == result["independent_content_review"]["score"]
+        assert result["quality_gate"] == result["independent_content_review"]["quality_gate"]
+
     def test_empty_inputs(self):
         result = run_quality_checks(None, [], [])
         assert "structure" in result
@@ -762,6 +785,66 @@ class TestEdgeCases:
 
 
 class TestStrictQualityGate:
+    def test_boq_closure_checks_the_thirteenth_focus_item(self):
+        first_twelve = [f"重点项{i}" for i in range(1, 13)]
+        all_thirteen = [*first_twelve, "重点项13"]
+        sections = [{"title": "主要施工方案", "content": "施工方案内容。"}]
+        ensure_boq_focus_item_cards(
+            sections,
+            {"must_cover_keywords": first_twelve, "lines": []},
+            evidence_src="清单.pdf#p1_abcd1234@10",
+        )
+
+        result = _check_boq_focus_item_closure(
+            {"must_cover_keywords": all_thirteen},
+            sections,
+        )
+
+        assert len(result["items"]) == 13
+        assert result["items"][-1]["item"] == "重点项13"
+        assert result["items"][-1]["reason"] == "not_mentioned"
+        assert result["ok"] is False
+
+    def test_boq_closure_matches_nfkc_and_whitespace_variants(self):
+        sections = [{"title": "主要施工方案", "content": "施工方案内容。"}]
+        ensure_boq_focus_item_cards(
+            sections,
+            {"must_cover_keywords": ["铝 方通吊顶（顶棚四）"], "lines": []},
+            evidence_src="清单.pdf#p1_abcd1234@10",
+        )
+
+        result = _check_boq_focus_item_closure(
+            {"must_cover_keywords": ["铝方通吊顶(顶棚四)"]},
+            sections,
+        )
+
+        assert result["ok"] is True
+        assert result["items"][0]["reason"] == "ok"
+        assert result["items"][0]["hit_sections"][0]["mentions_checked"] >= 1
+
+    def test_boq_typed_evidence_matches_nfkc_and_whitespace_variants(self):
+        sections = [
+            {
+                "title": "装饰工程",
+                "content": (
+                    "铝 方通吊顶（顶棚四）按定位施工。"
+                    "【证据:装饰施工图.pdf#p2_abcd1234@20】"
+                    "【证据:吊顶标准.pdf#p3_dcba4321@30】"
+                ),
+            }
+        ]
+
+        result = _check_boq_focus_item_typed_evidence(
+            {"must_cover_keywords": ["铝方通吊顶(顶棚四)"]},
+            sections,
+            drawing_names=["装饰施工图.pdf"],
+            standard_names=["吊顶标准.pdf"],
+        )
+
+        assert result["ok"] is True
+        assert result["items"][0]["hit_sections"][0]["has_drawing_evidence"] is True
+        assert result["items"][0]["hit_sections"][0]["has_standard_evidence"] is True
+
     def test_strict_mode_risk_triplet_and_quantitative(self):
         sections = [
             {

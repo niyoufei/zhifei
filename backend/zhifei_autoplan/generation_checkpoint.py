@@ -30,7 +30,8 @@ CHECKPOINT_DIR = Path(
         "backend/data/autoplan/checkpoints",
     )
 )
-SCHEMA_VERSION = "generation-checkpoint-v2"
+SCHEMA_VERSION = "generation-checkpoint-v3"
+CHAPTER_CONTEXT_SCHEMA_VERSION = "chapter-context-v1"
 _LOCK = threading.RLock()
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SECRET_FRAGMENTS = ("api_key", "apikey", "token", "secret", "password", "credential")
@@ -42,10 +43,45 @@ _RAW_PROMPT_KEYS = {
     "shared_context_prompt",
     "dynamic_prompt",
 }
+_EPHEMERAL_CONTEXT_KEYS = {
+    "accessed_at",
+    "created_at",
+    "ctime",
+    "updated_at",
+    "generated_at",
+    "indexed_at",
+    "last_modified_at",
+    "loaded_at",
+    "mtime",
+    "observed_at",
+    "refreshed_at",
+    "retrieved_at",
+    "saved_at",
+    "timestamp",
+    "time_stamp",
+    "request_started_at",
+    "request_finished_at",
+}
+_CONTEXT_SECRET_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "credential",
+    "access_token",
+    "refresh_token",
+    "bearer_token",
+    "auth_token",
+)
 
 
 class CheckpointIntegrityError(RuntimeError):
     """Raised when persisted checkpoint bytes cannot be trusted."""
+
+    def __init__(self, reason_code: Any):
+        normalized = str(reason_code or "checkpoint_integrity_error").strip()
+        self.reason_code = normalized or "checkpoint_integrity_error"
+        super().__init__(self.reason_code)
 
 
 def _json_safe(value: Any, *, key: str = "") -> Any:
@@ -79,6 +115,84 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _projected_digest(value: Any) -> str:
+    """Digest a value that has already passed the chapter-context sanitizer."""
+
+    canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _chapter_context_safe(value: Any, *, key: str = "") -> Any:
+    """Return a stable, credential-free projection of writer prompt material.
+
+    Dynamic retrieval records may carry observation timestamps or provider
+    credentials that must never influence checkpoint reuse (or be persisted).
+    Project schedule durations remain meaningful and are deliberately kept;
+    only wall-clock metadata and credential-shaped fields are removed.
+    """
+
+    lowered = str(key or "").strip().lower()
+    if lowered in _EPHEMERAL_CONTEXT_KEYS or lowered.endswith("_timestamp"):
+        return None
+    if any(fragment in lowered for fragment in _CONTEXT_SECRET_FRAGMENTS):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        projected: dict[str, Any] = {}
+        for raw_key, raw_value in sorted(
+            value.items(), key=lambda item: str(item[0])
+        ):
+            safe_key = str(raw_key)
+            key_lowered = safe_key.strip().lower()
+            if key_lowered in _EPHEMERAL_CONTEXT_KEYS or key_lowered.endswith(
+                "_timestamp"
+            ):
+                continue
+            if any(
+                fragment in key_lowered
+                for fragment in _CONTEXT_SECRET_FRAGMENTS
+            ):
+                continue
+            projected[safe_key] = _chapter_context_safe(raw_value, key=safe_key)
+        return projected
+    if isinstance(value, (list, tuple)):
+        return [_chapter_context_safe(item) for item in value]
+    if isinstance(value, set):
+        projected = [_chapter_context_safe(item) for item in value]
+        return sorted(projected, key=_canonical_json)
+    return str(value)
+
+
+def build_chapter_context_digest(
+    *,
+    chapter_index: int,
+    chapter_title: Any,
+    delivery_scope: Any,
+    writer_context: Mapping[str, Any],
+) -> str:
+    """Digest the exact per-chapter material available to ``SectionWriter``.
+
+    The digest is intentionally separate from the generation binding: drift in
+    one chapter's retrieval context rejects only that chapter checkpoint while
+    chapters with unchanged context remain reusable.
+    """
+
+    core = {
+        "schema_version": CHAPTER_CONTEXT_SCHEMA_VERSION,
+        "chapter_index": int(chapter_index),
+        "chapter_title": str(chapter_title or "").strip(),
+        "delivery_scope": str(delivery_scope or "document").strip().lower(),
+        "writer_context": _chapter_context_safe(dict(writer_context)),
+    }
+    return _projected_digest(core)
+
+
 def _validate_name(value: Any, *, field: str) -> str:
     name = str(value or "").strip()
     if not _SAFE_NAME.fullmatch(name):
@@ -110,6 +224,7 @@ def build_generation_binding(
     project_fact_digest: Any,
     requirement_plan_digest: Any,
     provider_routes: Any,
+    delivery_scope: Any = "document",
     provider_admission_digest: Any = None,
     prompt_contract: Any = None,
 ) -> dict[str, Any]:
@@ -135,6 +250,7 @@ def build_generation_binding(
         "style": _json_safe(style if isinstance(style, Mapping) else {}),
         "chapter_pages": _json_safe(chapter_pages if isinstance(chapter_pages, Mapping) else {}),
         "variant_id": str(variant_id or "").strip() or None,
+        "delivery_scope": str(delivery_scope or "document").strip().lower(),
         "project_fact_digest": str(project_fact_digest or "").strip() or None,
         "requirement_plan_digest": str(requirement_plan_digest or "").strip() or None,
         "provider_admission_digest": str(provider_admission_digest or "").strip() or None,
@@ -228,6 +344,7 @@ def load_section_checkpoint(
     binding: Mapping[str, Any],
     chapter_index: int,
     chapter_title: str,
+    chapter_context_digest: Any,
     root: Path | str | None = None,
 ) -> dict[str, Any] | None:
     record = load_generation_checkpoint(
@@ -246,6 +363,14 @@ def load_section_checkpoint(
         raise CheckpointIntegrityError("checkpoint_section_index_mismatch")
     if str(section.get("chapter_title") or "") != str(chapter_title or ""):
         return None
+    expected_context_digest = str(chapter_context_digest or "").strip()
+    if not expected_context_digest:
+        return None
+    if (
+        str(section.get("chapter_context_digest") or "").strip()
+        != expected_context_digest
+    ):
+        return None
     claimed = str(section.get("section_digest") or "")
     core = {k: v for k, v in section.items() if k != "section_digest"}
     if not claimed or claimed != _digest(core):
@@ -261,6 +386,7 @@ def save_section_checkpoint(
     binding: Mapping[str, Any],
     chapter_index: int,
     chapter_title: str,
+    chapter_context_digest: Any,
     result: Mapping[str, Any],
     root: Path | str | None = None,
 ) -> dict[str, Any]:
@@ -270,11 +396,15 @@ def save_section_checkpoint(
         expected = str(binding.get("binding_digest") or "").strip()
         if not expected:
             raise ValueError("checkpoint binding digest is required")
+        context_digest = str(chapter_context_digest or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", context_digest):
+            raise ValueError("checkpoint chapter context digest is required")
         if record is None or str(record.get("binding_digest") or "") != expected:
             record = _empty_record(binding)
         section_core = {
             "chapter_index": int(chapter_index),
             "chapter_title": str(chapter_title or ""),
+            "chapter_context_digest": context_digest,
             "saved_at": time.time(),
             "result": _json_safe(dict(result)),
         }
@@ -392,10 +522,16 @@ def mark_failed_checkpoint_namespace(
     if not target.exists():
         return summaries
     with _LOCK:
+        # Verify the entire namespace before mutating any scope.  In particular,
+        # a retained v2 record must fail closed without being rewritten as v3 or
+        # leaving a mixed namespace only partly sealed.
+        verified: list[tuple[Path, dict[str, Any]]] = []
         for path in sorted(target.glob("*.json")):
             record = _read_verified(path)
             if record is None:
                 continue
+            verified.append((path, record))
+        for path, record in verified:
             sections = record.get("sections") if isinstance(record.get("sections"), Mapping) else {}
             record["status"] = "failed_partial" if sections else "failed_empty"
             record["updated_at"] = time.time()

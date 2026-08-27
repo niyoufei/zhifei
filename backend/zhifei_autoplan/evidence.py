@@ -7,6 +7,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Any, List, Iterable
 
+from backend.zhifei_autoplan.ingest_tags import effective_record_tags
+
 
 def _tokenize_query(query: str) -> list[str]:
     tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]+", query or "")
@@ -111,7 +113,11 @@ def search_ingested_docs(
     for rec in _load_audit_records(str(audit_path), mtime_ns):
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
-        if not _tags_match(rec.get("tags"), require_tags=require_tags, exclude_tags=exclude_tags):
+        if not _tags_match(
+            effective_record_tags(rec),
+            require_tags=require_tags,
+            exclude_tags=exclude_tags,
+        ):
             continue
         p = Path(rec.get("extract_saved_as") or "")
         if not p.exists() or not p.is_file():
@@ -234,7 +240,7 @@ def list_ingested_filenames_by_tag(
     for rec in _load_audit_records(str(audit_path), mtime_ns):
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
-        tags = rec.get("tags") if isinstance(rec.get("tags"), list) else []
+        tags = effective_record_tags(rec)
         tags_set = {str(x).strip() for x in tags if str(x).strip()}
         if t not in tags_set:
             continue

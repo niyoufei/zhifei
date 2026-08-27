@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 from backend.zhifei_autoplan.content_quality import build_independent_content_review
+from backend.zhifei_autoplan.boq_focus_policy import (
+    MAX_BOQ_FOCUS_ITEMS,
+    boq_focus_name_in_text,
+    find_boq_focus_name_spans,
+    normalize_boq_focus_items,
+)
 
 
 def _normalize_text(s: str) -> str:
@@ -830,12 +836,15 @@ def _check_consistency(sections: List[Dict[str, Any]]):
 
 
 def _check_boq_focus_coverage(boq_focus: Dict[str, Any], all_text: str):
-    keywords = (boq_focus or {}).get("must_cover_keywords") or []
+    keywords = normalize_boq_focus_items(
+        (boq_focus or {}).get("must_cover_keywords") or [],
+        limit=MAX_BOQ_FOCUS_ITEMS,
+    )
     if not keywords:
         return {"ok": True, "missing": [], "covered": []}
-    covered = [k for k in keywords if k in all_text]
-    missing = [k for k in keywords if k not in all_text]
-    ok = len(covered) >= max(1, min(5, len(keywords) // 3 or 1))
+    covered = [k for k in keywords if boq_focus_name_in_text(k, all_text)]
+    missing = [k for k in keywords if not boq_focus_name_in_text(k, all_text)]
+    ok = not missing
     return {"ok": ok, "missing": missing[:20], "covered": covered[:20]}
 
 
@@ -863,33 +872,32 @@ def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict
     - 三元组必须包含：频次、阈值、责任、记录、偏差处置时限
     - 至少 1 个证据标记
     """
-    items = (boq_focus or {}).get("must_cover_keywords") or []
-    items = [str(x).strip() for x in items if str(x).strip()]
+    items = normalize_boq_focus_items(
+        (boq_focus or {}).get("must_cover_keywords") or [],
+        limit=MAX_BOQ_FOCUS_ITEMS,
+    )
     if not items:
         return {"ok": True, "items": []}
 
     results = []
-    for name in items[:12]:
+    for name in items:
         hit_sections = []
         for sec in sections:
             title = sec.get("title") or ""
             text = sec.get("content") or ""
-            if name not in text:
+            mention_spans = find_boq_focus_name_spans(name, text)
+            if not mention_spans:
                 continue
 
             # Stronger: check within a local window around the item mention
             window = 520
             best = {"triplet_count": 0, "hit_keys": [], "has_units": False, "evidence_count": 0}
             ok = False
-            idx = 0
             checked = 0
-            while True:
-                pos = text.find(name, idx)
-                if pos < 0:
-                    break
+            for pos, match_end in mention_spans:
                 checked += 1
                 start = max(0, pos - window)
-                end = min(len(text), pos + len(name) + window)
+                end = min(len(text), match_end + window)
                 snippet = text[start:end]
                 triplets = _extract_risk_triplets(snippet)
                 full_triplets = 0
@@ -952,8 +960,6 @@ def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict
                         "has_units": has_units,
                         "evidence_count": evidence_cnt,
                     }
-                idx = pos + max(1, len(name))
-
             hit_sections.append(
                 {
                     "title": title,
@@ -982,7 +988,7 @@ def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict
                     "hit_sections": hit_sections[:5],
                 }
             )
-    ok = all(r.get("ok") for r in results[: max(1, min(5, len(results)))])
+    ok = all(r.get("ok") for r in results)
     return {"ok": ok, "items": results}
 
 
@@ -998,8 +1004,10 @@ def _check_boq_focus_item_typed_evidence(
     - if drawings exist: at least 1 drawing locator should be present near the focus item mention
     - if enterprise standards exist: at least 1 standard locator should be present near the focus item mention
     """
-    items = (boq_focus or {}).get("must_cover_keywords") or []
-    items = [str(x).strip() for x in items if str(x).strip()]
+    items = normalize_boq_focus_items(
+        (boq_focus or {}).get("must_cover_keywords") or [],
+        limit=MAX_BOQ_FOCUS_ITEMS,
+    )
     drawing_names = [str(x).strip() for x in (drawing_names or []) if str(x).strip()]
     standard_names = [str(x).strip() for x in (standard_names or []) if str(x).strip()]
     has_drawings = bool(drawing_names)
@@ -1009,27 +1017,24 @@ def _check_boq_focus_item_typed_evidence(
 
     results = []
     window = 520
-    for name in items[:12]:
+    for name in items:
         hit_sections = []
         ok_any = False
         for sec in sections:
             title = sec.get("title") or ""
             text = sec.get("content") or ""
-            if name not in text:
+            mention_spans = find_boq_focus_name_spans(name, text, limit=10)
+            if not mention_spans:
                 continue
             # Check within a local window around *each* item mention to keep evidence relevant.
             # The first mention may be outside the focus-card block, so we scan multiple occurrences.
-            idx = 0
             checked = 0
             best = {"has_dwg": False, "has_std": False}
             ok = False
-            while True:
-                pos = text.find(name, idx)
-                if pos < 0:
-                    break
+            for pos, match_end in mention_spans:
                 checked += 1
                 start = max(0, pos - window)
-                end = min(len(text), pos + len(name) + window)
+                end = min(len(text), match_end + window)
                 snippet = text[start:end]
                 has_dwg = _has_drawing_evidence(snippet, drawing_names) if has_drawings else True
                 has_std = _has_standard_evidence(snippet, standard_names) if has_standards else True
@@ -1039,9 +1044,6 @@ def _check_boq_focus_item_typed_evidence(
                     break
                 if (int(bool(has_dwg)) + int(bool(has_std))) > (int(best["has_dwg"]) + int(best["has_std"])):
                     best = {"has_dwg": bool(has_dwg), "has_std": bool(has_std)}
-                if checked >= 10:
-                    break
-                idx = pos + max(1, len(name))
             if ok:
                 ok_any = True
             hit_sections.append(
@@ -1064,7 +1066,7 @@ def _check_boq_focus_item_typed_evidence(
                     "hit_sections": hit_sections[:5],
                 }
             )
-    ok = all(r.get("ok") for r in results[: max(1, min(5, len(results)))])
+    ok = all(r.get("ok") for r in results)
     return {"ok": ok, "has_drawings": has_drawings, "has_standards": has_standards, "items": results}
 
 
@@ -2714,7 +2716,7 @@ def run_quality_checks(
         dedup[key] = rec
     remediation = list(dedup.values())
 
-    return {
+    result = {
         "structure": {
             "ok": len(missing_titles) == 0,
             "missing_titles": missing_titles,

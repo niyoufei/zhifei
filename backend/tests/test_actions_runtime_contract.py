@@ -64,6 +64,453 @@ def test_public_runtime_error_preserves_execution_budget_exhaustion() -> None:
     assert "模型健康" not in result["action"]
 
 
+def test_public_runtime_error_preserves_delivery_blocker_codes() -> None:
+    result = actions_bridge._public_runtime_error(
+        ValueError(
+            "最终专业交付质量门未通过，已停止交付："
+            "DELIVERY_MODEL_REVIEW_BLOCKED、DELIVERY_PLAN_CONSISTENCY_BLOCKED"
+        )
+    )
+
+    assert result["code"] == "DELIVERY_QUALITY_BLOCKED"
+    assert [row["code"] for row in result["failures"]] == [
+        "DELIVERY_MODEL_REVIEW_BLOCKED",
+        "DELIVERY_PLAN_CONSISTENCY_BLOCKED",
+    ]
+    assert all(row["retryable"] is False for row in result["failures"])
+    assert "provider_error" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_public_runtime_error_deduplicates_known_delivery_codes_without_leaking_unknowns() -> None:
+    result = actions_bridge._public_runtime_error(
+        ValueError(
+            "最终专业交付质量门未通过，已停止交付："
+            "DELIVERY_CONTENT_QUALITY_BLOCKED、DELIVERY_NOT_PUBLIC、"
+            "DELIVERY_CONTENT_QUALITY_BLOCKED"
+        )
+    )
+
+    assert [row["code"] for row in result["failures"]] == [
+        "DELIVERY_CONTENT_QUALITY_BLOCKED"
+    ]
+    assert "DELIVERY_NOT_PUBLIC" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_chapter_validation_cannot_be_promoted_by_review_mutations() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        actions_bridge._require_formal_document_mutation(
+            {"payload": {"delivery_scope": "chapter_validation"}},
+            {},
+            [{"delivery_scope": "chapter_validation"}],
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "NON_DELIVERABLE_MUTATION_FORBIDDEN"
+
+
+def test_dry_run_cannot_be_promoted_by_review_mutations() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        actions_bridge._require_formal_document_mutation(
+            {"payload": {"delivery_scope": "document", "dry_run": True}},
+            {},
+            [{"delivery_scope": "document", "delivery_ready": False}],
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["reason"] == "dry_run"
+
+
+@pytest.mark.parametrize("variant", [0, -1, 2])
+def test_variant_number_rejects_out_of_range_identity(variant) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        actions_bridge._require_variant_number(variant, 1)
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "VARIANT_OUT_OF_RANGE"
+
+
+@pytest.mark.asyncio
+async def test_chapter_validation_result_exposes_json_only(tmp_path, monkeypatch) -> None:
+    result_json = tmp_path / "result.json"
+    result_json.write_text(
+        json.dumps(
+            {
+                "variants": [
+                    {
+                        "variant_id": 6,
+                        "topic": "章节验证",
+                        "outline": ["第一章"],
+                        "delivery_scope": "chapter_validation",
+                        "delivery_ready": False,
+                        "quality_checks": {},
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "get_job",
+        lambda _job_id: {
+            "status": "succeeded",
+            "payload": {"delivery_scope": "chapter_validation"},
+            "result": {"json": str(result_json)},
+        },
+    )
+
+    response = await actions_bridge.actions_result(
+        "a" * 32,
+        x_actions_key="zf-webui-key",
+    )
+
+    assert response["delivery_scope"] == "chapter_validation"
+    assert response["delivery_ready"] is False
+    assert response["files"] == {"json": str(result_json)}
+
+    with pytest.raises(HTTPException) as exc_info:
+        await actions_bridge.actions_result(
+            "a" * 32,
+            variant=2,
+            x_actions_key="zf-webui-key",
+        )
+    assert exc_info.value.detail["code"] == "VARIANT_OUT_OF_RANGE"
+
+
+@pytest.mark.asyncio
+async def test_chapter_validation_professional_render_stops_before_provider(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_json = tmp_path / "validation.json"
+    result_json.write_text(
+        json.dumps(
+            {"variants": [{"delivery_scope": "chapter_validation"}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "get_job",
+        lambda _job_id: {
+            "status": "succeeded",
+            "payload": {"delivery_scope": "chapter_validation"},
+            "result": {"json": str(result_json)},
+        },
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_admit_current_server_route_for_existing_evidence",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("provider admission must not run")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await actions_bridge.actions_professional_render(
+            actions_bridge.ActionsProfessionalRenderRequest(job_id="a" * 32),
+            x_actions_key="zf-webui-key",
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "NON_DELIVERABLE_MUTATION_FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_non_deliverable_job_status_hides_and_flags_formal_artifact_leak(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result_json = tmp_path / "validation.json"
+    result_json.write_text(
+        json.dumps(
+            {
+                "variants": [
+                    {
+                        "delivery_scope": "chapter_validation",
+                        "delivery_ready": False,
+                        "quality_checks": {},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    leaked_docx = tmp_path / "must-not-leak.docx"
+    leaked_docx.write_bytes(b"leak")
+    job = {
+        "job_id": "a" * 32,
+        "status": "succeeded",
+        "payload": {"delivery_scope": "chapter_validation"},
+        "result": {"json": str(result_json), "docx": [str(leaked_docx)]},
+    }
+    monkeypatch.setattr(actions_bridge, "get_job", lambda _job_id: job)
+
+    status = await actions_bridge.actions_job_status(
+        "a" * 32,
+        x_actions_key="zf-webui-key",
+    )
+
+    files = status["job"]["files"]
+    assert "docx" not in files
+    assert files["artifact_leak_blocked"] is True
+
+    with pytest.raises(HTTPException) as exc_info:
+        await actions_bridge.actions_download(
+            "a" * 32,
+            kind="docx",
+            x_actions_key="zf-webui-key",
+        )
+    assert exc_info.value.detail["code"] == "NON_DELIVERABLE_MUTATION_FORBIDDEN"
+
+
+def test_resume_variant_plan_reuses_source_identity_without_rotating(monkeypatch) -> None:
+    monkeypatch.setattr(
+        actions_bridge,
+        "reserve_variant_ids",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("resume must not reserve a new variant identity")
+        ),
+    )
+    payload = {"project_id": "project-a", "selected_templates": ["A"], "variants": 1}
+    source_job = {
+        "payload": {
+            "project_id": "project-a",
+            "_variant_plan": [{"variant_id": 6, "logic_template_id": "A"}]
+        }
+    }
+
+    assert actions_bridge._build_resume_variant_plan(payload, source_job) == [
+        {"variant_id": 6, "logic_template_id": "A"}
+    ]
+
+
+def test_resume_variant_plan_rejects_template_drift() -> None:
+    payload = {"project_id": "project-a", "selected_templates": ["B"], "variants": 1}
+    source_job = {
+        "payload": {
+            "project_id": "project-a",
+            "_variant_plan": [{"variant_id": 6, "logic_template_id": "A"}]
+        }
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        actions_bridge._build_resume_variant_plan(payload, source_job)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "RESUME_VARIANT_TEMPLATE_MISMATCH"
+
+
+def test_resume_variant_plan_rejects_cross_scope_checkpoint_reuse() -> None:
+    payload = {
+        "project_id": "project-a",
+        "delivery_scope": "chapter_validation",
+        "selected_templates": ["A"],
+        "variants": 1,
+    }
+    source_job = {
+        "payload": {
+            "project_id": "project-a",
+            "delivery_scope": "document",
+            "_variant_plan": [{"variant_id": 6, "logic_template_id": "A"}],
+        }
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        actions_bridge._build_resume_variant_plan(payload, source_job)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "RESUME_DELIVERY_SCOPE_MISMATCH"
+
+
+def test_resume_variant_plan_rejects_duplicate_identity() -> None:
+    payload = {
+        "project_id": "project-a",
+        "selected_templates": ["A", "B"],
+        "variants": 2,
+    }
+    source_job = {
+        "payload": {
+            "project_id": "project-a",
+            "_variant_plan": [
+                {"variant_id": 6, "logic_template_id": "A"},
+                {"variant_id": 6, "logic_template_id": "B"},
+            ]
+        }
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        actions_bridge._build_resume_variant_plan(payload, source_job)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "RESUME_VARIANT_IDENTITY_INVALID"
+
+
+def test_resume_variant_plan_rejects_cross_project_checkpoint_reuse() -> None:
+    payload = {
+        "project_id": "project-b",
+        "selected_templates": ["A"],
+        "variants": 1,
+    }
+    source_job = {
+        "payload": {
+            "project_id": "project-a",
+            "_variant_plan": [{"variant_id": 6, "logic_template_id": "A"}],
+        }
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        actions_bridge._build_resume_variant_plan(payload, source_job)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "RESUME_PROJECT_SCOPE_MISMATCH"
+
+
+def test_formal_postprocess_failure_is_not_swallowed(monkeypatch) -> None:
+    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(
+        actions_bridge,
+        "_rebuild_postprocessed_artifacts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("boom")),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        actions_bridge._finalize_variant_derivatives(
+            [{"variant_id": 1, "sections": []}],
+            payload={
+                "delivery_scope": "document",
+                "dry_run": False,
+                "quality_strict": True,
+            },
+            force_rebuild=True,
+        )
+
+    assert json.loads(str(exc_info.value))["code"] == "POSTPROCESS_REBUILD_FAILED"
+
+
+def test_formal_variant_diversity_failure_blocks_before_export(monkeypatch) -> None:
+    from backend.zhifei_autoplan import variant_similarity
+
+    monkeypatch.setattr(
+        actions_bridge,
+        "load_params",
+        lambda: {"variant_diversity": {"auto_fix_rounds": 0}},
+    )
+    monkeypatch.setattr(
+        variant_similarity,
+        "compute_variant_similarity",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "variant_count": 2,
+            "flagged_count": 1,
+            "flagged": [],
+        },
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_rebuild_postprocessed_artifacts",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        actions_bridge._finalize_variant_derivatives(
+            [
+                {"variant_id": 1, "sections": []},
+                {"variant_id": 2, "sections": []},
+            ],
+            payload={
+                "delivery_scope": "document",
+                "dry_run": False,
+                "quality_strict": True,
+            },
+        )
+
+    assert json.loads(str(exc_info.value))["code"] == "VARIANT_DIVERSITY_BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_generate_async_resume_reuses_source_variant_plan(monkeypatch) -> None:
+    source_job_id = "a" * 32
+    source_job = {
+        "status": "failed",
+        "payload": {
+            "project_id": "project-a",
+            "_variant_plan": [{"variant_id": 6, "logic_template_id": "A"}]
+        },
+    }
+    captured = {}
+
+    monkeypatch.setattr(actions_bridge, "_merge_plan_defaults", lambda payload: payload)
+    monkeypatch.setattr(actions_bridge, "_assert_mandatory_generation_sources", lambda _payload: None)
+    monkeypatch.setattr(actions_bridge, "get_job", lambda _job_id: source_job)
+    monkeypatch.setattr(actions_bridge, "_apply_server_provider_routing_or_503", lambda payload: payload)
+    monkeypatch.setattr(
+        actions_bridge,
+        "reserve_variant_ids",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("resume must not reserve a new variant identity")
+        ),
+    )
+
+    def _create_job(payload, user_id=None):
+        captured["payload"] = payload
+        captured["user_id"] = user_id
+        return "b" * 32
+
+    monkeypatch.setattr(actions_bridge, "create_job", _create_job)
+    monkeypatch.setattr(actions_bridge, "submit_isolated_job", lambda *_args: 0)
+
+    result = await actions_bridge.actions_generate_async(
+        actions_bridge.ActionsGenerateRequest(
+            topic="恢复测试",
+            project_id="project-a",
+            selected_templates=["A"],
+            resume_from_job_id=source_job_id,
+        ),
+        BackgroundTasks(),
+        x_actions_key="zf-webui-key",
+    )
+
+    assert result["status"] == "queued"
+    assert captured["payload"]["_variant_plan"] == [
+        {"variant_id": 6, "logic_template_id": "A"}
+    ]
+    assert captured["payload"]["_variant_ids"] == [6]
+
+
+@pytest.mark.asyncio
+async def test_sync_resume_is_rejected_before_provider_routing(monkeypatch) -> None:
+    source_job_id = "a" * 32
+    monkeypatch.setattr(actions_bridge, "_merge_plan_defaults", lambda payload: payload)
+    monkeypatch.setattr(actions_bridge, "_assert_mandatory_generation_sources", lambda _payload: None)
+    monkeypatch.setattr(
+        actions_bridge,
+        "get_job",
+        lambda _job_id: {"status": "failed", "payload": {}},
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_apply_server_provider_routing_or_503",
+        lambda _payload: (_ for _ in ()).throw(
+            AssertionError("sync resume must stop before provider routing")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await actions_bridge.actions_generate(
+            actions_bridge.ActionsGenerateRequest(
+                topic="恢复测试",
+                resume_from_job_id=source_job_id,
+            ),
+            x_actions_key="zf-webui-key",
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "RESUME_REQUIRES_ASYNC_JOB"
+
+
 def test_public_runtime_error_keeps_requirement_gate_out_of_provider_classifier() -> None:
     payload = {
         "code": "REQUIREMENT_EVIDENCE_CHAPTER_BLOCKED",

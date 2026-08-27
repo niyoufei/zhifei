@@ -392,19 +392,24 @@ def build_project_fact_ledger_from_inputs(
 
     summary = cpm_data.get("summary") if isinstance(cpm_data.get("summary"), Mapping) else {}
     boq_facts: Dict[str, Any] = {}
-    if summary.get("estimated_duration_days"):
+    schedule_fact_eligible = bool(summary.get("schedule_fact_eligible", False))
+    if schedule_fact_eligible and summary.get("estimated_duration_days"):
         boq_facts["planned_duration_days"] = {
             "value": summary["estimated_duration_days"],
             "unit": "天",
         }
-    if summary.get("resource_peak"):
+    if schedule_fact_eligible and summary.get("resource_peak"):
         boq_facts["resource_peak"] = {"value": summary["resource_peak"], "unit": "人当量"}
-    if summary.get("critical_interval_days"):
+    if schedule_fact_eligible and summary.get("critical_interval_days"):
         boq_facts["critical_interval_days"] = {
             "value": summary["critical_interval_days"],
             "unit": "天",
         }
-    critical_path = [str(x).strip() for x in (summary.get("critical_path_names") or []) if str(x).strip()]
+    critical_path = [
+        str(x).strip()
+        for x in (summary.get("critical_path_names") or [])
+        if schedule_fact_eligible and str(x).strip()
+    ]
     if critical_path:
         boq_facts["critical_path_names"] = critical_path
     if boq_facts:

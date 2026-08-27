@@ -4,9 +4,10 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 class DeliveryReceiptError(RuntimeError):
@@ -21,11 +22,22 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _canonical_digest(payload: dict[str, Any]) -> str:
+def canonical_delivery_receipt_digest(payload: dict[str, Any]) -> str:
+    """Return the canonical decision digest for a delivery receipt.
+
+    Volatile persistence fields are deliberately excluded so a stored receipt
+    can be verified independently of its write time and filesystem location.
+    """
+
     material = dict(payload)
     for key in ("created_at", "decision_digest", "receipt"):
         material.pop(key, None)
-    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -74,21 +86,117 @@ def _artifact(path: Path) -> dict[str, Any]:
     }
 
 
+def _artifact_paths(
+    values: Iterable[str | Path | None],
+    *,
+    label: str,
+    count: int,
+    optional: bool = False,
+) -> list[Path | None]:
+    if isinstance(values, (str, bytes, Path)) or values is None:
+        raise DeliveryReceiptError(f"{label}必须按方案提供等长路径列表")
+    try:
+        raw_values = list(values)
+    except TypeError as exc:
+        raise DeliveryReceiptError(f"{label}必须按方案提供等长路径列表") from exc
+    if len(raw_values) != count:
+        raise DeliveryReceiptError(f"{label}数量与方案数量不一致")
+
+    paths: list[Path | None] = []
+    resolved: set[Path] = set()
+    for index, value in enumerate(raw_values, start=1):
+        raw = str(value or "").strip()
+        if not raw:
+            if not optional:
+                raise DeliveryReceiptError(f"方案 v{index} {label}路径缺失")
+            paths.append(None)
+            continue
+        path = Path(raw)
+        try:
+            identity = path.resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise DeliveryReceiptError(f"方案 v{index} {label}路径无效") from exc
+        if identity in resolved:
+            raise DeliveryReceiptError(f"{label}不能在多个方案间复用同一路径")
+        resolved.add(identity)
+        paths.append(path)
+    return paths
+
+
 def build_delivery_receipt(
     *,
     job_id: str,
     source_docx: Iterable[str | Path],
     professional_docx: Iterable[str | Path],
+    professional_json: Iterable[str | Path],
     professional_receipts: Iterable[str | Path],
+    compare_docx: Iterable[str | Path],
+    focus_xlsx: Iterable[str | Path | None],
+    score_overview_xlsx: Iterable[str | Path | None],
+    expert_review_docx: Iterable[str | Path | None],
     receipt_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Seal the final Word set and every quality receipt into one chain."""
+    """Seal every per-variant formal artifact into one delivery chain."""
 
-    sources = [Path(value) for value in source_docx]
-    outputs = [Path(value) for value in professional_docx]
-    render_receipts = [Path(value) for value in professional_receipts]
-    if not sources or len(sources) != len(outputs) or len(outputs) != len(render_receipts):
-        raise DeliveryReceiptError("中间 Word、专业 Word 与渲染凭证数量不一致")
+    if isinstance(professional_docx, (str, bytes, Path)):
+        raise DeliveryReceiptError("专业 Word 必须按方案提供等长路径列表")
+    try:
+        raw_outputs = list(professional_docx)
+    except TypeError as exc:
+        raise DeliveryReceiptError("专业 Word 必须按方案提供等长路径列表") from exc
+    if not raw_outputs:
+        raise DeliveryReceiptError("专业 Word 路径列表为空")
+    variant_count = len(raw_outputs)
+    source_paths = _artifact_paths(
+        source_docx,
+        label="中间 Word",
+        count=variant_count,
+    )
+    output_paths = _artifact_paths(
+        raw_outputs,
+        label="专业 Word",
+        count=variant_count,
+    )
+    receipt_paths = _artifact_paths(
+        professional_receipts,
+        label="渲染凭证",
+        count=variant_count,
+    )
+    if any(path is None for path in source_paths + output_paths + receipt_paths):
+        raise DeliveryReceiptError("中间 Word、专业 Word 与渲染凭证路径缺失")
+    sources = [path for path in source_paths if path is not None]
+    outputs = [path for path in output_paths if path is not None]
+    render_receipts = [path for path in receipt_paths if path is not None]
+    professional_json_paths = _artifact_paths(
+        professional_json,
+        label="专业 JSON",
+        count=variant_count,
+    )
+    compare_paths = _artifact_paths(
+        compare_docx,
+        label="对比 Word",
+        count=variant_count,
+    )
+    optional_paths = {
+        "focus_xlsx": _artifact_paths(
+            focus_xlsx,
+            label="重点清单表",
+            count=variant_count,
+            optional=True,
+        ),
+        "score_overview_xlsx": _artifact_paths(
+            score_overview_xlsx,
+            label="评分点证据总览",
+            count=variant_count,
+            optional=True,
+        ),
+        "expert_review_docx": _artifact_paths(
+            expert_review_docx,
+            label="专家复核提要",
+            count=variant_count,
+            optional=True,
+        ),
+    }
 
     rows: list[dict[str, Any]] = []
     for index, (source, output, render_receipt_path) in enumerate(
@@ -119,11 +227,17 @@ def build_delivery_receipt(
             "no_blank_pages",
             "no_orphan_headings",
         )
-        if not isinstance(quality_gate, dict) or not all(quality_gate.get(key) is True for key in required_gates):
+        if not isinstance(quality_gate, dict) or not all(
+            quality_gate.get(key) is True for key in required_gates
+        ):
             raise DeliveryReceiptError(f"方案 v{index} 专业 Word 质量门未全部通过")
 
-        structural_path = Path(str((render_receipt.get("structural_quality") or {}).get("receipt") or ""))
-        visual_path = Path(str((render_receipt.get("visual_quality") or {}).get("receipt") or ""))
+        structural_path = Path(
+            str((render_receipt.get("structural_quality") or {}).get("receipt") or "")
+        )
+        visual_path = Path(
+            str((render_receipt.get("visual_quality") or {}).get("receipt") or "")
+        )
         structural_artifact = _artifact(structural_path)
         visual_artifact = _artifact(visual_path)
         structural_receipt = _read_json(structural_path, label=f"方案 v{index} 结构凭证")
@@ -144,22 +258,30 @@ def build_delivery_receipt(
         if figure_manifest.get("delivery_allowed") is not True:
             raise DeliveryReceiptError(f"方案 v{index} 图表交付门未通过")
 
-        rows.append(
-            {
-                "variant": index,
-                "source_docx": source_artifact,
-                "professional_docx": output_artifact,
-                "professional_render_receipt": render_artifact,
-                "structural_quality_receipt": structural_artifact,
-                "visual_quality_receipt": visual_artifact,
-                "figure_manifest": figure_artifact,
-                "quality_gate": {key: True for key in required_gates},
-            }
-        )
+        professional_json_path = professional_json_paths[index - 1]
+        compare_path = compare_paths[index - 1]
+        if professional_json_path is None or compare_path is None:  # defensive typing guard
+            raise DeliveryReceiptError(f"方案 v{index} 正式交付制品路径缺失")
+        row = {
+            "variant": index,
+            "source_docx": source_artifact,
+            "professional_docx": output_artifact,
+            "professional_json": _artifact(professional_json_path),
+            "professional_render_receipt": render_artifact,
+            "compare_docx": _artifact(compare_path),
+            "structural_quality_receipt": structural_artifact,
+            "visual_quality_receipt": visual_artifact,
+            "figure_manifest": figure_artifact,
+            "quality_gate": {key: True for key in required_gates},
+        }
+        for key, paths in optional_paths.items():
+            path = paths[index - 1]
+            row[key] = _artifact(path) if path is not None else None
+        rows.append(row)
 
     target = Path(receipt_path) if receipt_path else outputs[0].parent / f"delivery_receipt_{job_id}.json"
     receipt = {
-        "schema": "zhifei.delivery_receipt.v1",
+        "schema": "zhifei.delivery_receipt.v2",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "pass",
         "job_id": str(job_id),
@@ -167,7 +289,7 @@ def build_delivery_receipt(
         "variant_count": len(rows),
         "variants": rows,
     }
-    receipt["decision_digest"] = _canonical_digest(receipt)
+    receipt["decision_digest"] = canonical_delivery_receipt_digest(receipt)
     _atomic_write_json(target, receipt)
     receipt["receipt"] = str(target)
     return receipt

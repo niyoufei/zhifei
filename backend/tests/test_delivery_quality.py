@@ -20,11 +20,13 @@ def _base_kwargs() -> dict:
         },
         "standard_audit": {"ok": True, "violations": []},
         "cross_index": {
+            "ok": True,
             "focus_count": 1,
             "mentioned_count": 1,
             "closed_ok_count": 1,
             "missing_drawing_locator_count": 0,
             "missing_standard_locator_count": 0,
+            "focus_items": [{"name": "钢筋"}],
         },
         "model_review_required": True,
     }
@@ -53,15 +55,54 @@ def test_professional_delivery_gate_blocks_model_conflict():
 def test_professional_delivery_gate_blocks_incomplete_boq_cross_index():
     kwargs = _base_kwargs()
     kwargs["cross_index"] = {
+        "ok": True,
         "focus_count": 3,
         "mentioned_count": 3,
         "closed_ok_count": 2,
         "missing_drawing_locator_count": 1,
         "missing_standard_locator_count": 0,
+        "focus_items": [
+            {"name": "钢筋"},
+            {"name": "模板"},
+            {"name": "混凝土"},
+        ],
     }
     gate = build_delivery_quality_gate(**kwargs)
     assert gate["delivery_allowed"] is False
     assert "DELIVERY_CROSS_INDEX_BLOCKED" in {
+        row["code"] for row in gate["blockers"]
+    }
+
+
+def test_professional_delivery_gate_fails_closed_when_cross_index_is_unavailable():
+    kwargs = _base_kwargs()
+    kwargs["cross_index"] = {
+        "ok": False,
+        "build_failed": True,
+        "focus_count": 3,
+        "mentioned_count": 0,
+        "closed_ok_count": 0,
+        "missing_drawing_locator_count": 0,
+        "missing_standard_locator_count": 0,
+        "focus_items": [],
+    }
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    assert gate["delivery_allowed"] is False
+    assert "DELIVERY_CROSS_INDEX_UNAVAILABLE" in {
+        row["code"] for row in gate["blockers"]
+    }
+
+
+def test_professional_delivery_gate_fails_closed_on_empty_cross_index_result():
+    kwargs = _base_kwargs()
+    kwargs["cross_index"] = {}
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    assert gate["delivery_allowed"] is False
+    assert "DELIVERY_CROSS_INDEX_UNAVAILABLE" in {
         row["code"] for row in gate["blockers"]
     }
 

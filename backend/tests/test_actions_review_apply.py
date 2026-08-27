@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -23,6 +24,46 @@ def _admitted_review_chain(monkeypatch):
         actions_bridge,
         "_ensure_review_provider_admission",
         fake_admission,
+    )
+    # These behavior tests isolate review transformation from the formal
+    # delivery/CAS boundary, which has dedicated atomicity tests.
+    monkeypatch.setattr(
+        actions_bridge,
+        "_require_formal_document_mutation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_capture_promotion_revision",
+        lambda _job: ("succeeded", 7),
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_promote_job_result_cas",
+        lambda **kwargs: {
+            "status": kwargs["initial_status"],
+            "revision": int(kwargs["initial_revision"]) + 1,
+        },
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_validate_rollback_snapshot",
+        lambda **kwargs: copy.deepcopy(kwargs["revision"]["variants"]),
+    )
+
+    def finalize_with_test_rebuild(results, **kwargs):
+        return actions_bridge._rebuild_postprocessed_artifacts(
+            results,
+            payload=kwargs.get("payload") or {},
+            report=None,
+            params={},
+            fail_closed=bool(kwargs.get("fail_closed")),
+        )
+
+    monkeypatch.setattr(
+        actions_bridge,
+        "_finalize_variant_derivatives",
+        finalize_with_test_rebuild,
     )
 
 
@@ -77,7 +118,7 @@ async def test_actions_review_apply_calls_remediation_and_persists_copy(tmp_path
     monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
     monkeypatch.setattr(actions_bridge, "create_revision_snapshot", review_revision.create_revision_snapshot)
 
-    async def fake_professional_render(*, job_id, outputs, progress_callback=None):
+    async def fake_professional_render(*, job_id, outputs, **_kwargs):
         return dict(outputs)
 
     monkeypatch.setattr(actions_bridge, "_render_professional_outputs_for_job", fake_professional_render)
@@ -113,6 +154,8 @@ async def test_actions_review_apply_calls_remediation_and_persists_copy(tmp_path
     assert output_json.exists()
     assert target["sections"][0]["content"] == "原始内容"
     assert response["revision_id"].startswith("REV-")
+    promotion_rows = review_revision.list_revision_snapshots(job_id="job-review-1")
+    assert promotion_rows[0]["promotion"]["state"] == "committed"
 
 
 @pytest.mark.asyncio
@@ -357,7 +400,7 @@ async def test_actions_review_apply_runs_ai_recheck_and_second_round(tmp_path: P
     monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
     monkeypatch.setattr(actions_bridge, "create_revision_snapshot", review_revision.create_revision_snapshot)
 
-    async def fake_professional_render(*, job_id, outputs, progress_callback=None):
+    async def fake_professional_render(*, job_id, outputs, **_kwargs):
         return dict(outputs)
 
     monkeypatch.setattr(actions_bridge, "_render_professional_outputs_for_job", fake_professional_render)
@@ -400,7 +443,19 @@ def test_review_postprocess_can_fail_closed(monkeypatch):
     monkeypatch.setattr(plan_consistency, "normalize_metrics_in_sections", lambda sections: {"ok": True})
     monkeypatch.setattr(param_trace, "build_param_receipt", lambda sections, params: {"ok": True})
     monkeypatch.setattr(param_trace, "save_latest_receipt", lambda *args, **kwargs: "receipt.json")
-    monkeypatch.setattr(cross_index, "build_cross_index", lambda **kwargs: {"rows": []})
+    monkeypatch.setattr(
+        cross_index,
+        "build_cross_index",
+        lambda **kwargs: {
+            "ok": True,
+            "focus_count": 0,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        },
+    )
 
     def fail_evidence(**kwargs):
         raise ValueError("evidence rebuild failed")
@@ -441,7 +496,19 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
         "save_latest_receipt",
         lambda *args, **kwargs: "receipt.json",
     )
-    monkeypatch.setattr(cross_index, "build_cross_index", lambda **kwargs: {"rows": []})
+    monkeypatch.setattr(
+        cross_index,
+        "build_cross_index",
+        lambda **kwargs: {
+            "ok": True,
+            "focus_count": 0,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        },
+    )
     monkeypatch.setattr(
         actions_bridge,
         "build_evidence_tracking",
@@ -535,7 +602,19 @@ def test_review_postprocess_rejects_unrelated_traceable_locator(monkeypatch):
     monkeypatch.setattr(plan_consistency, "normalize_metrics_in_sections", lambda sections: {"ok": True})
     monkeypatch.setattr(param_trace, "build_param_receipt", lambda sections, params: {"ok": True})
     monkeypatch.setattr(param_trace, "save_latest_receipt", lambda *args, **kwargs: "receipt.json")
-    monkeypatch.setattr(cross_index, "build_cross_index", lambda **kwargs: {"rows": []})
+    monkeypatch.setattr(
+        cross_index,
+        "build_cross_index",
+        lambda **kwargs: {
+            "ok": True,
+            "focus_count": 0,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        },
+    )
     monkeypatch.setattr(actions_bridge, "audit_standard_citations", lambda *args, **kwargs: {"ok": True})
     monkeypatch.setattr(
         actions_bridge,
@@ -594,7 +673,12 @@ async def test_actions_review_rollback_restores_snapshot_atomically(tmp_path: Pa
     promoted: list[object] = []
     monkeypatch.setattr(actions_bridge, "_save_outputs", fake_save)
     monkeypatch.setattr(actions_bridge, "_render_professional_outputs_for_job", fake_render)
-    monkeypatch.setattr(actions_bridge, "update_job", lambda *args, **kwargs: promoted.append((args, kwargs)))
+    monkeypatch.setattr(
+        actions_bridge,
+        "_promote_job_result_cas",
+        lambda **kwargs: promoted.append(kwargs)
+        or {"status": "succeeded", "revision": int(kwargs["initial_revision"]) + 1},
+    )
     request = actions_bridge.ActionsReviewRollbackRequest(
         job_id="job-rollback",
         revision_id=old_revision["revision_id"],
@@ -614,3 +698,4 @@ async def test_actions_review_rollback_restores_snapshot_atomically(tmp_path: Pa
     assert len(rows) == 2
     safety = next(row for row in rows if row["revision_id"] == response["safety_revision_id"])
     assert safety["promotion"]["operation"] == "rollback"
+    assert safety["promotion"]["state"] == "committed"

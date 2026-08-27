@@ -518,14 +518,19 @@ def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
         "resolved_at": int(time.time()),
         "routing_mode": "server_allowlist",
     }
-    document_slot = resolve_document_render_slot()
+    require_document_render = (
+        str(out.get("delivery_scope") or "document").strip().lower()
+        != "chapter_validation"
+    )
+    document_slot = resolve_document_render_slot() if require_document_render else None
     out["_provider_admission_extra_slots"] = (
         [document_slot.as_payload()] if document_slot is not None else []
     )
     required_roles = ["text_draft"]
     if any(str(item.get("slot") or "") == "text_review" for item in chain):
         required_roles.append("text_review")
-    required_roles.append("document_render")
+    if require_document_render:
+        required_roles.append("document_render")
     out["_provider_admission_required_roles"] = required_roles
     return out
 

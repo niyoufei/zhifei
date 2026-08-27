@@ -58,9 +58,11 @@ def test_revision_snapshot_round_trip_promotion_and_tamper_guard(tmp_path: Path,
         revision_id=created["revision_id"],
         promotion={"candidate_result_version": "candidate-v1", "artifacts": []},
     )
+    assert finalized["promotion"]["state"] == "committed"
     assert finalized["promotion"]["candidate_result_version"] == "candidate-v1"
     loaded = review_revision.load_revision_snapshot(job_id="job-1", revision_id=created["revision_id"])
     assert loaded["promotion"]["candidate_result_version"] == "candidate-v1"
+    assert loaded["promotion"]["state"] == "committed"
     assert loaded["snapshot_digest"]
     rows = review_revision.list_revision_snapshots(job_id="job-1")
     assert rows[0]["promotion"]["candidate_result_version"] == "candidate-v1"
@@ -97,3 +99,47 @@ def test_revision_identifiers_reject_path_traversal():
 
     with pytest.raises(ValueError, match="invalid identifier"):
         list_revision_snapshots(job_id="../../")
+
+
+def test_revision_promotion_two_phase_is_explicit_and_idempotent(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from backend.zhifei_autoplan import review_revision
+
+    monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
+    created = review_revision.create_revision_snapshot(
+        job_id="job-two-phase",
+        variants=[{"variant_id": 1, "sections": []}],
+        result={},
+        reason="pre_review_apply",
+    )
+    prepared = review_revision.prepare_revision_promotion(
+        job_id="job-two-phase",
+        revision_id=created["revision_id"],
+        promotion={
+            "candidate_result_version": "candidate-v2",
+            "candidate_artifact_digest": "a" * 64,
+            "artifacts": [],
+        },
+    )
+    assert prepared["promotion"]["state"] == "candidate_prepared"
+    assert "promoted_at" not in prepared["promotion"]
+
+    committed = review_revision.commit_revision_promotion(
+        job_id="job-two-phase",
+        revision_id=created["revision_id"],
+        candidate_artifact_digest="a" * 64,
+        promoted_job_revision=12,
+        promoted_job_status="succeeded",
+    )
+    assert committed["promotion"]["state"] == "committed"
+    assert committed["promotion"]["promoted_job_revision"] == 12
+    replay = review_revision.commit_revision_promotion(
+        job_id="job-two-phase",
+        revision_id=created["revision_id"],
+        candidate_artifact_digest="a" * 64,
+        promoted_job_revision=12,
+        promoted_job_status="succeeded",
+    )
+    assert replay["promotion"] == committed["promotion"]

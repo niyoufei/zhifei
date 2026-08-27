@@ -35,6 +35,12 @@ from backend.zhifei_autoplan.quality_check import (
 )
 from backend.zhifei_autoplan.params_runtime import load_params, get_image_defaults
 from backend.zhifei_autoplan.boq_focus_enforcer import ensure_boq_focus_item_cards
+from backend.zhifei_autoplan.boq_focus_policy import (
+    MAX_BOQ_FOCUS_ITEMS,
+    normalize_boq_focus_items,
+    normalize_boq_focus_name,
+    select_boq_focus_names,
+)
 from backend.zhifei_autoplan.project_types import (
     detect_project_type,
     normalize_project_type,
@@ -70,11 +76,13 @@ from backend.zhifei_autoplan.requirement_evidence_matrix import (
     finalize_requirement_evidence_matrix,
     requirement_prompt_lines_for_chapter,
     requirement_rows_for_chapter,
+    scope_requirement_evidence_plan_to_chapters,
     validate_chapter_requirement_evidence,
     validate_requirement_evidence_matrix,
     validate_requirement_evidence_plan_readiness,
 )
 from backend.zhifei_autoplan.generation_checkpoint import (
+    build_chapter_context_digest,
     build_generation_binding,
     checkpoint_summary,
     finalize_generation_checkpoint,
@@ -238,6 +246,115 @@ def _dedup_lines(lines: List[str], limit: int | None = None) -> List[str]:
     return out
 
 
+def _normalize_delivery_scope(value: Any) -> str:
+    scope = str(value or "document").strip().lower()
+    if scope not in {"document", "chapter_validation"}:
+        raise ValueError("交付范围无效：delivery_scope 必须为 document 或 chapter_validation。")
+    return scope
+
+
+def _validate_strict_outline_for_scope(
+    requested_outline: List[str],
+    tender_outline: List[str],
+    *,
+    delivery_scope: str,
+) -> None:
+    if not tender_outline:
+        return
+    if delivery_scope == "document":
+        if requested_outline != tender_outline:
+            raise ValueError(
+                "TENDER_OUTLINE_MISMATCH："
+                "严格正式交付目录与招标目录不一致，已在模型调用前停止。"
+            )
+        return
+    unknown = [title for title in requested_outline if title not in tender_outline]
+    if unknown:
+        raise ValueError(
+            "CHAPTER_VALIDATION_OUTLINE_INVALID："
+            "章节验证目录包含招标目录外章节，已在模型调用前停止："
+            + "、".join(unknown[:20])
+        )
+
+
+def _build_chapter_validation_quality_gate(
+    *,
+    quality: Dict[str, Any],
+    contract_checks: Dict[str, Any],
+    delivery_quality_gate: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Enforce chapter-level quality without pretending to validate a document."""
+
+    checks: List[Dict[str, Any]] = []
+    blocker_codes: List[str] = []
+    for key in (
+        "structure",
+        "officialese",
+        "risk_triplet",
+        "logic_template_adherence",
+        "quantitative",
+        "required_topics_detail",
+        "evidence_traceability",
+        "standard_evidence",
+    ):
+        value = quality.get(key) if isinstance(quality.get(key), dict) else {}
+        passed = value.get("ok") is True
+        checks.append({"name": key, "pass": passed})
+        if not passed:
+            blocker_codes.append(f"CHAPTER_CHECK_{key.upper()}_BLOCKED")
+
+    review = (
+        quality.get("independent_content_review")
+        if isinstance(quality.get("independent_content_review"), dict)
+        else {}
+    )
+    section_threshold = int(review.get("section_threshold") or 60)
+    section_rows = [
+        row for row in (review.get("by_section") or []) if isinstance(row, dict)
+    ]
+    sections_ok = bool(section_rows) and all(
+        int(row.get("score") or 0) >= section_threshold
+        and str(row.get("status") or "").lower() != "blocked"
+        for row in section_rows
+    )
+    checks.append(
+        {
+            "name": "independent_section_quality",
+            "pass": sections_ok,
+            "threshold": section_threshold,
+            "section_count": len(section_rows),
+        }
+    )
+    if not sections_ok:
+        blocker_codes.append("CHAPTER_SECTION_QUALITY_BLOCKED")
+
+    contract_ok = bool(contract_checks.get("ok"))
+    checks.append({"name": "agent_contract", "pass": contract_ok})
+    if not contract_ok:
+        blocker_codes.append("CHAPTER_AGENT_CONTRACT_BLOCKED")
+
+    model_check = next(
+        (
+            row
+            for row in (delivery_quality_gate.get("checks") or [])
+            if isinstance(row, dict) and row.get("name") == "independent_model_review"
+        ),
+        {},
+    )
+    model_ok = bool(model_check.get("pass"))
+    checks.append({"name": "independent_model_review", "pass": model_ok})
+    if not model_ok:
+        blocker_codes.append("CHAPTER_MODEL_REVIEW_BLOCKED")
+
+    blocker_codes = list(dict.fromkeys(blocker_codes))
+    return {
+        "schema_version": "chapter-validation-quality-v1",
+        "pass": not blocker_codes,
+        "checks": checks,
+        "blocker_codes": blocker_codes,
+    }
+
+
 def _build_weights_and_penalties(tender: Dict[str, Any]) -> tuple[list[str], list[str]]:
     weights = []
     penalties = []
@@ -398,7 +515,7 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
             return
         focus_lines.append(f"{title}：")
         for it in items[:5]:
-            name = (it.get("name") or "").strip()
+            name = normalize_boq_focus_name(it.get("name"))
             qty = it.get("quantity")
             unit = it.get("unit") or ""
             unit_price = it.get("unit_price")
@@ -411,7 +528,7 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
             if total_price is not None:
                 seg += f" / 合价={total_price}"
             focus_lines.append(seg)
-            if name and name not in must_cover:
+            if name:
                 must_cover.append(name)
 
     _pick_lines(stats.get("top_quantity_items") or [], "清单重点（单项工程量大）", "top_quantity_items")
@@ -431,7 +548,10 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "lines": focus_lines,
-        "must_cover_keywords": must_cover[:20],
+        "must_cover_keywords": select_boq_focus_names(
+            stats,
+            limit=MAX_BOQ_FOCUS_ITEMS,
+        ),
         "special_materials": [it.get("name") for it in special_items[:12] if it.get("name")],
         "hazardous_materials": [it.get("name") for it in hazard_items[:12] if it.get("name")],
         "ppe_items": [it.get("name") for it in ppe_items[:12] if it.get("name")],
@@ -834,6 +954,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     model_preflight_receipts: List[Dict[str, Any]] = []
     progress_callback = payload.get("_progress_callback")
     cancel_callback = payload.get("_cancel_callback")
+    checkpoint_write_guard = payload.get("_checkpoint_write_guard")
     execution_runtime = payload.get("_execution_runtime")
     if not isinstance(execution_runtime, ExecutionControlRuntime):
         execution_runtime = ExecutionControlRuntime(
@@ -857,6 +978,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             cancelled = False
         if cancelled:
             raise GenerationCancelledError(f"cancelled_by_user:{stage}")
+
+    def _write_checkpoint(callback: Any, **kwargs: Any) -> Dict[str, Any]:
+        _raise_if_cancelled("before_checkpoint_write")
+        if callable(checkpoint_write_guard):
+            return checkpoint_write_guard(callback, **kwargs)
+        return callback(**kwargs)
 
     def _emit_progress(event: str, **data: Any) -> None:
         if not callable(progress_callback):
@@ -904,6 +1031,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         and not dry_run
     )
     strict_quality = bool(payload.get("quality_strict", True))
+    delivery_scope = _normalize_delivery_scope(payload.get("delivery_scope"))
     case_library_options = payload.get("case_library") if isinstance(payload.get("case_library"), dict) else {}
     image_library_options = payload.get("image_library") if isinstance(payload.get("image_library"), dict) else {}
     reference_library_audit_path = (
@@ -988,12 +1116,22 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(enterprise_override, dict) and enterprise_override:
         enterprise_profile = _deep_merge_dict(enterprise_profile, enterprise_override)
     strict_tender_outline = bool(payload.get("strict_tender_outline", False))
-    if strict_tender_outline:
+    tender_outline = _dedup_lines(
+        tender.get("outline") if isinstance(tender.get("outline"), list) else [],
+        limit=80,
+    )
+    if strict_tender_outline or delivery_scope == "chapter_validation" or tender_outline:
         # 严格模式：目录与招标/评审标准保持一致，不自动补章、不改名。
         outline = _dedup_lines(outline if isinstance(outline, list) else [], limit=80)
     else:
         # 非严格模式：可按项目类型补齐缺失章节。
         outline = enrich_outline(outline if isinstance(outline, list) else [], project_type=project_type)
+    if tender_outline:
+        _validate_strict_outline_for_scope(
+            outline,
+            tender_outline,
+            delivery_scope=delivery_scope,
+        )
     # 版式策略：招标有明确要求时覆盖；否则用系统默认（22磅+2.5/2.0边距+宋体三号/四号）。
     tender_extraction_meta = tender.get("extraction_meta") if isinstance(tender.get("extraction_meta"), dict) else {}
     tender_requirement_matrix = (
@@ -1062,6 +1200,22 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         boq_source,
         enterprise_profile=enterprise_profile,
     )
+    raw_cpm_summary = (
+        boq_wbs_cpm.get("summary")
+        if isinstance(boq_wbs_cpm.get("summary"), dict)
+        else {}
+    )
+    if bool(raw_cpm_summary.get("schedule_fact_eligible", True)):
+        cpm_summary = dict(raw_cpm_summary)
+    else:
+        # Keep the diagnostic state visible to downstream agents without
+        # presenting an implausible derived duration as a usable project fact.
+        cpm_summary = {
+            "schedule_fact_eligible": False,
+            "schedule_fact_ineligibility_reasons": list(
+                raw_cpm_summary.get("schedule_fact_ineligibility_reasons") or []
+            ),
+        }
     boq = sanitize_boq_for_generation(boq_source)
     _emit_progress(
         "boq_schedule_completed",
@@ -1102,12 +1256,25 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         enterprise_profile=enterprise_profile if isinstance(enterprise_profile, dict) else {},
     )
     schedule_constraints: List[str] = []
-    cpm_summary = boq_wbs_cpm.get("summary") if isinstance(boq_wbs_cpm, dict) else {}
-    if isinstance(cpm_summary, dict) and cpm_summary:
-        est_days = cpm_summary.get("estimated_duration_days")
-        peak = cpm_summary.get("resource_peak")
-        cp_gap = cpm_summary.get("critical_interval_days")
-        cp_names = [str(x).strip() for x in (cpm_summary.get("critical_path_names") or []) if str(x).strip()]
+    ledger_facts = (
+        project_fact_ledger.get("facts")
+        if isinstance(project_fact_ledger.get("facts"), dict)
+        else {}
+    )
+    if ledger_facts:
+        def _fact_value(field: str):
+            row = ledger_facts.get(field)
+            return row.get("value") if isinstance(row, dict) else None
+
+        est_days = _fact_value("planned_duration_days")
+        peak = _fact_value("resource_peak")
+        cp_gap = _fact_value("critical_interval_days")
+        raw_cp_names = _fact_value("critical_path_names")
+        cp_names = [
+            str(x).strip()
+            for x in (raw_cp_names if isinstance(raw_cp_names, list) else [])
+            if str(x).strip()
+        ]
         if est_days:
             schedule_constraints.append(f"计划口径统一：总工期={est_days}天。")
         if peak:
@@ -1215,12 +1382,43 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     requirement_evidence_hard_gate = bool(
         payload.get("requirement_evidence_hard_gate", bool(tender))
     )
+    requirement_plan_agent_contract = agent_contract
+    if (
+        delivery_scope == "chapter_validation"
+        and tender_outline
+        and tender_outline != outline
+    ):
+        # Determine requirement ownership against the complete tender outline
+        # first.  Otherwise a score item belonging to an omitted chapter can
+        # fall back onto the first selected validation chapter.
+        requirement_plan_agent_contract = build_agent_contract(
+            topic=str(topic),
+            outline=tender_outline,
+            chapter_pages=(
+                tender_chapter_pages
+                if isinstance(tender_chapter_pages, dict)
+                else {}
+            ),
+            chapter_requirements=(
+                chapter_requirements
+                if isinstance(chapter_requirements, dict)
+                else {}
+            ),
+            multi_agent_summary=multi_agent_plan.summary(),
+            chapter_specialties=multi_agent_plan.chapter_specialties,
+            project_fact_ledger=project_fact_ledger,
+        )
     requirement_evidence_plan = build_requirement_evidence_plan(
         tender=tender if isinstance(tender, dict) else {},
         chapter_requirements=chapter_requirements if isinstance(chapter_requirements, dict) else {},
         global_requirements=tender_globals,
-        agent_contract=agent_contract,
+        agent_contract=requirement_plan_agent_contract,
     )
+    if delivery_scope == "chapter_validation":
+        requirement_evidence_plan = scope_requirement_evidence_plan_to_chapters(
+            requirement_evidence_plan,
+            outline,
+        )
     requirement_evidence_plan_validation = validate_requirement_evidence_matrix(
         requirement_evidence_plan
     )
@@ -1515,6 +1713,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         project_fact_digest=project_fact_ledger.get("ledger_digest"),
         requirement_plan_digest=requirement_evidence_plan.get("matrix_digest"),
         provider_routes=provider_chain,
+        delivery_scope=delivery_scope,
         provider_admission_digest=provider_admission_binding_digest,
         prompt_contract={
             "prompt_layout_version": "section-envelope-v3",
@@ -1539,7 +1738,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
     )
     generation_checkpoint: Dict[str, Any] = {
-        "schema_version": "generation-checkpoint-v2",
+        "schema_version": "generation-checkpoint-v3",
         "binding_digest": generation_binding.get("binding_digest"),
         "status": "disabled" if not checkpoint_enabled else "ready",
         "saved_chapter_count": 0,
@@ -1803,7 +2002,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "warning_list": warnings,
         }
 
-    async def build_section(idx: int, title: str):
+    async def build_section(idx: int, title: str, checkpoint_resolver=None):
         # 章节级重试：多模型轮询重试，最多尝试 3 个 provider（主+备1+备2）
         tries = []
         if tiered_anthropic_route:
@@ -2095,6 +2294,26 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             ctx["logic_template"] = lt.as_dict()
         ctx["chapter_domain"] = dom
 
+        chapter_context_digest = build_chapter_context_digest(
+            chapter_index=idx,
+            chapter_title=title,
+            delivery_scope=delivery_scope,
+            writer_context=ctx,
+        )
+        if checkpoint_resolver is not None:
+            resumed = checkpoint_resolver(chapter_context_digest)
+            if isinstance(resumed, dict):
+                return {
+                    **dict(resumed),
+                    "_checkpoint_resumed": True,
+                    "_chapter_context_digest": chapter_context_digest,
+                }
+
+        def _attach_context_identity(rec: Dict[str, Any] | None) -> Dict[str, Any] | None:
+            if isinstance(rec, dict):
+                rec["_chapter_context_digest"] = chapter_context_digest
+            return rec
+
         def _attach_section_meta(rec: Dict[str, Any] | None) -> Dict[str, Any] | None:
             if not isinstance(rec, dict):
                 return rec
@@ -2287,7 +2506,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     ok=True,
                     circuits=model_reliability.snapshot(),
                 )
-                return last
+                return _attach_context_identity(last)
             _emit_provider_progress(
                 "provider_attempt_finished",
                 chapter_index=int(idx) + 1,
@@ -2301,8 +2520,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 circuits=model_reliability.snapshot(),
             )
         if last:
-            return last
-        return _attach_section_meta({"title": title, "content": "章节生成失败"}) or {"title": title, "content": "章节生成失败"}
+            return _attach_context_identity(last)
+        return _attach_context_identity(
+            _attach_section_meta({"title": title, "content": "章节生成失败"})
+            or {"title": title, "content": "章节生成失败"}
+        )
 
     async def _build_section_with_limit(idx: int, title: str):
         nonlocal generation_checkpoint
@@ -2314,61 +2536,63 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 chapter_title=str(title or ""),
                 chapters_total=len(outline),
             )
-            if checkpoint_enabled:
+
+            def _resolve_checkpoint(
+                chapter_context_digest: str,
+            ) -> Dict[str, Any] | None:
+                nonlocal generation_checkpoint
+                if not checkpoint_enabled:
+                    return None
                 resumed = load_section_checkpoint(
                     namespace=resume_checkpoint_namespace or checkpoint_namespace,
                     scope=checkpoint_scope,
                     binding=generation_binding,
                     chapter_index=idx,
                     chapter_title=str(title or ""),
+                    chapter_context_digest=chapter_context_digest,
                 )
-                if resumed is not None:
-                    resumed_gate = _chapter_evidence_gate(resumed, title)
-                    resumed["requirement_evidence_gate"] = resumed_gate
-                    if (
-                        strict_quality
-                        and requirement_evidence_hard_gate
-                        and not resumed_gate.get("ok")
-                    ):
-                        _emit_progress(
-                            "chapter_checkpoint_rejected",
-                            chapter_index=int(idx) + 1,
-                            chapter_title=str(title or ""),
-                            chapters_total=len(outline),
-                            reason="requirement_evidence_invalid",
-                            blocking_requirement_ids=resumed_gate.get(
-                                "blocking_requirement_ids"
-                            )
-                            or [],
+                if resumed is None:
+                    return None
+                resumed_gate = _chapter_evidence_gate(resumed, title)
+                resumed["requirement_evidence_gate"] = resumed_gate
+                if (
+                    strict_quality
+                    and requirement_evidence_hard_gate
+                    and not resumed_gate.get("ok")
+                ):
+                    _emit_progress(
+                        "chapter_checkpoint_rejected",
+                        chapter_index=int(idx) + 1,
+                        chapter_title=str(title or ""),
+                        chapters_total=len(outline),
+                        reason="requirement_evidence_invalid",
+                        blocking_requirement_ids=resumed_gate.get(
+                            "blocking_requirement_ids"
                         )
-                    else:
-                        if (
-                            resume_checkpoint_namespace
-                            and resume_checkpoint_namespace != checkpoint_namespace
-                        ):
-                            generation_checkpoint = save_section_checkpoint(
-                                namespace=checkpoint_namespace,
-                                scope=checkpoint_scope,
-                                binding=generation_binding,
-                                chapter_index=idx,
-                                chapter_title=str(title or ""),
-                                result=resumed,
-                            )
-                        _emit_progress(
-                            "chapter_resumed",
-                            chapter_index=int(idx) + 1,
-                            chapter_title=str(title or ""),
-                            chapters_total=len(outline),
-                        )
-                        _emit_progress(
-                            "chapter_completed",
-                            chapter_index=int(idx) + 1,
-                            chapter_title=str(title or ""),
-                            chapters_total=len(outline),
-                            ok=True,
-                            resumed=True,
-                        )
-                        return resumed
+                        or [],
+                    )
+                    return None
+                if (
+                    resume_checkpoint_namespace
+                    and resume_checkpoint_namespace != checkpoint_namespace
+                ):
+                    generation_checkpoint = _write_checkpoint(
+                        save_section_checkpoint,
+                        namespace=checkpoint_namespace,
+                        scope=checkpoint_scope,
+                        binding=generation_binding,
+                        chapter_index=idx,
+                        chapter_title=str(title or ""),
+                        chapter_context_digest=chapter_context_digest,
+                        result=resumed,
+                    )
+                _emit_progress(
+                    "chapter_resumed",
+                    chapter_index=int(idx) + 1,
+                    chapter_title=str(title or ""),
+                    chapters_total=len(outline),
+                )
+                return resumed
             target_pages = _extract_chapter_page_target(chapter_pages, title)
             chapter_contract = (
                 chapter_contract_map.get(str(title).strip())
@@ -2383,7 +2607,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
             try:
                 result = await asyncio.wait_for(
-                    build_section(idx, title),
+                    build_section(
+                        idx,
+                        title,
+                        checkpoint_resolver=_resolve_checkpoint,
+                    ),
                     timeout=float(chapter_deadline),
                 )
             except asyncio.TimeoutError:
@@ -2396,18 +2624,41 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "failure_kind": "provider",
                     "code": "timeout",
                 }
+            chapter_context_digest = ""
+            resumed_from_checkpoint = False
+            if isinstance(result, dict):
+                chapter_context_digest = str(
+                    result.pop("_chapter_context_digest", "") or ""
+                ).strip()
+                resumed_from_checkpoint = bool(
+                    result.pop("_checkpoint_resumed", False)
+                )
+            if resumed_from_checkpoint:
+                _emit_progress(
+                    "chapter_completed",
+                    chapter_index=int(idx) + 1,
+                    chapter_title=str(title or ""),
+                    chapters_total=len(outline),
+                    ok=True,
+                    resumed=True,
+                )
+                return result
             if (
                 checkpoint_enabled
                 and isinstance(result, dict)
                 and not result.get("error")
                 and str(result.get("content") or "").strip()
             ):
-                generation_checkpoint = save_section_checkpoint(
+                if not chapter_context_digest:
+                    raise RuntimeError("chapter_context_digest_missing")
+                generation_checkpoint = _write_checkpoint(
+                    save_section_checkpoint,
                     namespace=checkpoint_namespace,
                     scope=checkpoint_scope,
                     binding=generation_binding,
                     chapter_index=idx,
                     chapter_title=str(title or ""),
+                    chapter_context_digest=chapter_context_digest,
                     result=result,
                 )
                 _emit_progress(
@@ -2590,7 +2841,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         checkpoint_terminal_status = "draft_complete"
         progress_event = "draft_complete"
     if checkpoint_enabled:
-        generation_checkpoint = finalize_generation_checkpoint(
+        generation_checkpoint = _write_checkpoint(
+            finalize_generation_checkpoint,
             namespace=checkpoint_namespace,
             scope=checkpoint_scope,
             binding=generation_binding,
@@ -3433,8 +3685,17 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # Cross-index: BoQ focus item -> chapter -> drawing/standard locator -> closure flags.
     cross_index = None
+    expected_focus_count = len(
+        normalize_boq_focus_items(
+            (boq_focus or {}).get("must_cover_keywords") or [],
+            limit=MAX_BOQ_FOCUS_ITEMS,
+        )
+    )
     try:
-        from backend.zhifei_autoplan.cross_index import build_cross_index
+        from backend.zhifei_autoplan.cross_index import (
+            build_cross_index,
+            validate_cross_index_contract,
+        )
 
         cross_index = build_cross_index(
             boq=boq,
@@ -3445,8 +3706,26 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             quality_checks=quality,
             project_id=str(project_id) if project_id else None,
         )
+        cross_index = validate_cross_index_contract(
+            cross_index,
+            expected_names=(boq_focus or {}).get("must_cover_keywords") or [],
+        )
     except Exception:
-        cross_index = None
+        cross_index = {
+            "ok": expected_focus_count == 0,
+            "build_failed": expected_focus_count > 0,
+            "reason": (
+                "cross_index_build_failed"
+                if expected_focus_count > 0
+                else "no_boq_focus_items"
+            ),
+            "focus_count": expected_focus_count,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        }
     evidence_tracking = {}
     try:
         evidence_tracking = build_evidence_tracking(
@@ -3539,7 +3818,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "warning_count": delivery_quality_gate.get("warning_count"),
         }
     )
-    if strict_quality and not bool(delivery_quality_gate.get("delivery_allowed")):
+    if (
+        strict_quality
+        and delivery_scope == "document"
+        and not bool(delivery_quality_gate.get("delivery_allowed"))
+    ):
         blocker_codes = [
             str(row.get("code") or "DELIVERY_QUALITY_BLOCKED")
             for row in (delivery_quality_gate.get("blockers") or [])
@@ -3549,6 +3832,27 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "最终专业交付质量门未通过，已停止交付："
             + "、".join(blocker_codes[:20])
         )
+    chapter_validation_gate = None
+    if delivery_scope == "chapter_validation":
+        chapter_validation_gate = _build_chapter_validation_quality_gate(
+            quality=quality,
+            contract_checks=contract_checks,
+            delivery_quality_gate=delivery_quality_gate,
+        )
+        quality["chapter_validation_gate"] = chapter_validation_gate
+        pipeline_stages.append(
+            {
+                "stage": "chapter_validation_quality_gate",
+                "ok": bool(chapter_validation_gate.get("pass")),
+                "blocker_codes": chapter_validation_gate.get("blocker_codes") or [],
+            }
+        )
+        if strict_quality and not bool(chapter_validation_gate.get("pass")):
+            raise ValueError(
+                "CHAPTER_VALIDATION_QUALITY_BLOCKED："
+                "章节真实模型验证质量门未通过："
+                + "、".join(chapter_validation_gate.get("blocker_codes") or [])
+            )
     params_used = None
     try:
         from backend.zhifei_autoplan.params_runtime import (
@@ -3610,7 +3914,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     _raise_if_cancelled("before_result_delivery")
     if checkpoint_enabled and checkpoint_terminal_status == "draft_complete":
-        generation_checkpoint = finalize_generation_checkpoint(
+        generation_checkpoint = _write_checkpoint(
+            finalize_generation_checkpoint,
             namespace=checkpoint_namespace,
             scope=checkpoint_scope,
             binding=generation_binding,
@@ -3645,6 +3950,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "style_source": style_source,
         "requirement_decision_matrix": requirement_decision_matrix,
         "quality_strict": strict_quality,
+        "delivery_scope": delivery_scope,
+        "delivery_ready": bool(
+            delivery_scope == "document"
+            and not dry_run
+            and delivery_quality_gate.get("delivery_allowed")
+        ),
         "compliance_registry_status": compliance_registry_status,
         "standard_citation_sanitization": standard_citation_sanitization,
         "boq_focus": boq_focus,
