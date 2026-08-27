@@ -247,9 +247,11 @@ def test_ocr_pdf_path_marks_nonblank_empty_ocr_as_unreadable(monkeypatch, tmp_pa
     assert len(result.page_image_sha256[0]) == 64
 
 
+@pytest.mark.parametrize("primary_outcome", ["empty", "timeout"])
 def test_ocr_pdf_path_recovers_sparse_cad_text_with_bounded_second_pass(
     monkeypatch,
     tmp_path,
+    primary_outcome,
 ):
     from backend.zhifei_autoplan import ocr_runtime
 
@@ -332,6 +334,8 @@ def test_ocr_pdf_path_recovers_sparse_cad_text_with_bounded_second_pass(
                 "timeout": timeout,
             }
         )
+        if config == "" and primary_outcome == "timeout":
+            raise RuntimeError("Tesseract process timeout SECRET_RAW_STDERR")
         return "钢梁 GJ-01" if config == "--psm 11" else ""
 
     monkeypatch.setattr(ocr_runtime, "is_tesseract_available", lambda: True)

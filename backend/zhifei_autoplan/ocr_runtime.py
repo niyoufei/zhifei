@@ -553,7 +553,32 @@ def ocr_pdf_path(
                     attempt_timeout_seconds=attempt_timeout,
                 )
                 status = "text"
-                if page_error is not None:
+                if page_error == "ocr_page_timeout" and _is_proven_blank_image(
+                    source_image
+                ):
+                    status = "blank"
+                elif page_error == "ocr_page_timeout":
+                    page_text, retry_error = _run_second_pass(
+                        page=page,
+                        source_image=source_image,
+                        base_scale=base_scale,
+                        pytesseract=pytesseract,
+                        lang=use_lang,
+                        deadline=page_deadline,
+                        attempt_timeout_seconds=attempt_timeout,
+                    )
+                    if page_text:
+                        recovered_pages.append(i + 1)
+                        status = "text"
+                    else:
+                        final_error = retry_error or "ocr_zero_text_nonblank"
+                        page_error_codes.append(final_error)
+                        status = (
+                            "timeout"
+                            if final_error == "ocr_page_timeout"
+                            else "unreadable"
+                        )
+                elif page_error is not None:
                     page_error_codes.append(page_error)
                     status = "timeout" if page_error == "ocr_page_timeout" else "failed"
                 elif not page_text and _is_proven_blank_image(source_image):
