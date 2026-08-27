@@ -281,7 +281,51 @@ def _delivery_gate(
                 "blocking_requirement_ids": [],
             }
         },
-        standard_audit={"ok": True, "violations": []},
+        standard_audit={
+            "ok": True,
+            "verified_standard_count": 1,
+            "verified_standard_codes": ["GB_50000_2020"],
+            "violation_count": 0,
+            "violations": [],
+        },
+        standard_index={
+            "ok": True,
+            "project_id": "P-TRUST-CHAIN",
+            "standards": [
+                {
+                    "filename": "施工标准.pdf",
+                    "sha256": "8" * 64,
+                    "extract_text_sha256": "9" * 64,
+                    "standard_code": "GB 50000-2020",
+                    "standard_codes": ["GB 50000-2020"],
+                    "primary_identity_status": "identified",
+                    "official_registry_status": "verified_clause_source",
+                    "official_registry": {
+                        "status": "verified_clause_source",
+                        "standard_code": "GB 50000-2020",
+                    },
+                    "text_status": "indexed",
+                    "source_integrity_status": "verified",
+                    "clause_evidence_eligible": True,
+                    "clause_evidence_source": "ingested_standard_text",
+                    "registry_metadata_used_as_clause_evidence": False,
+                    "page_anchors": [
+                        {
+                            "page": 1,
+                            "text_sha256": "7" * 64,
+                            "evidence_eligible": True,
+                        }
+                    ],
+                }
+            ],
+            "indexed_standard_count": 1,
+            "official_registry_verified_count": 1,
+            "integrity_rejection_count": 0,
+            "invalid_identity_count": 0,
+            "missing_text_or_ocr_count": 0,
+            "locator_unavailable_count": 0,
+            "text_index_status": "complete",
+        },
         cross_index=cross_index,
         model_review_required=True,
         formal_delivery_required=True,

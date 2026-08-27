@@ -9,8 +9,8 @@ from backend.zhifei_autoplan.compliance_policy import (
     filter_evidence_to_verified_standard_codes,
     is_verified_standard_metadata,
     replace_unverified_standard_citations,
-    standard_citation_directive,
     should_migrate_global_instruction,
+    standard_citation_directive,
 )
 
 
@@ -118,6 +118,8 @@ def test_citation_audit_accepts_verified_code_format_variants():
     audit = audit_standard_citations(sections, manifest)
     assert audit["ok"] is True
     assert audit["violation_count"] == 0
+    assert audit["verified_standard_count"] == 1
+    assert audit["verified_standard_codes"] == ["GB_50300_2024"]
 
 
 def test_citation_audit_blocks_unverified_code_and_unresolved_conflict():

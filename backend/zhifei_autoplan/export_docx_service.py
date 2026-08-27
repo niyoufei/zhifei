@@ -267,7 +267,6 @@ def _validate_formal_export_indexes(
     ):
         raise ValueError("direct_export_cross_index_contract_incomplete")
     requirement_statuses: list[str] = []
-    standard_locator_present = False
     for row in focus_items:
         requirement = row.get("drawing_requirement")
         status = (
@@ -278,12 +277,11 @@ def _validate_formal_export_indexes(
         if status not in {"required", "optional", "not_applicable"}:
             raise ValueError("direct_export_cross_index_contract_incomplete")
         requirement_statuses.append(status)
-        standard_locator_present = standard_locator_present or bool(
-            str(row.get("standard_locator") or "").strip()
-        )
     index_requires_rows = {
         "drawing_index": "required" in requirement_statuses,
-        "standard_index": standard_locator_present,
+        # Formal delivery always needs independent, current standard evidence.
+        # A drawing exemption or an empty body cannot exempt this source gate.
+        "standard_index": True,
     }
     index_rows = {
         "drawing_index": (
@@ -534,6 +532,10 @@ def _validate_direct_export_receipts(
     if not delivery_gate_digest_is_valid(gate):
         raise ValueError("direct_export_delivery_gate_digest_invalid")
     assert isinstance(gate, dict)
+    from backend.zhifei_autoplan.delivery_quality import (
+        FORMAL_DELIVERY_CONTRACT_VERSION,
+    )
+
     check_rows = {
         str(row.get("name") or "").strip(): row
         for row in (gate.get("checks") or [])
@@ -541,6 +543,8 @@ def _validate_direct_export_receipts(
     }
     if (
         gate.get("delivery_allowed") is not True
+        or gate.get("formal_contract_version")
+        != FORMAL_DELIVERY_CONTRACT_VERSION
         or int(gate.get("blocker_count") or 0) != 0
         or bool(gate.get("blockers"))
         or not _DIRECT_EXPORT_REQUIRED_GATE_CHECKS.issubset(check_rows)
@@ -551,6 +555,11 @@ def _validate_direct_export_receipts(
         or check_rows["formal_project_parameters"].get("required") is not True
         or check_rows["formal_parameter_body_binding"].get("required") is not True
         or check_rows["independent_model_review"].get("required") is not True
+        or check_rows["verified_standards"].get("required") is not True
+        or check_rows["verified_standards"].get("standard_index_digest")
+        != canonical_export_digest(payload.get("standard_index"))
+        or check_rows["verified_standards"].get("standard_audit_digest")
+        != canonical_export_digest(payload.get("standard_citation_audit"))
     ):
         raise ValueError("direct_export_delivery_quality_blocked")
     quality_gate_receipt = quality.get("delivery_quality_gate")
@@ -1152,10 +1161,9 @@ def _rebuild_formal_direct_export_receipts(
             or row.get("source_integrity_status") != "verified"
         ):
             continue
-        for code in [row.get("standard_code"), *(row.get("standard_codes") or [])]:
-            canonical = canonical_standard_code(code)
-            if canonical:
-                current_codes.add(canonical)
+        canonical = canonical_standard_code(row.get("standard_code"))
+        if canonical:
+            current_codes.add(canonical)
     manifest_codes = {
         canonical_standard_code(
             (row.get("standard_code_and_name") or {}).get("code")
@@ -1221,6 +1229,7 @@ def _rebuild_formal_direct_export_receipts(
             else {}
         ),
         sections=sections,
+        standard_index=indexes["standard_index"],
     )
     payload["delivery_quality_gate"] = gate
     quality["delivery_quality_gate"] = gate

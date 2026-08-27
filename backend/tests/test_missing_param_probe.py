@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
 from backend.zhifei_autoplan.project_fact_ledger import build_project_fact_ledger
 
@@ -91,20 +93,22 @@ def test_verified_duration_resolves_without_reintroducing_120_day_default():
     }
 
 
-def test_enterprise_defaults_are_provisional_and_not_auto_filled():
+def test_enterprise_defaults_are_not_exposed_or_auto_filled():
     result = _probe(build_project_fact_ledger([]))
 
     assert result["auto_fill"] == {}
     assert result["formal_ready"] is False
-    by_field = {row["field"]: row for row in result["provisional"]}
-    assert by_field["resource_peak"]["proposed_value"] == "80人"
-    assert by_field["risk_inspection_frequency"]["proposed_value"] == "2次/日"
-    assert by_field["deviation_action_deadline"]["proposed_value"] == "偏差处置时限≤4h"
-    missing_by_field = {row["field"]: row for row in result["missing"]}
-    assert missing_by_field["quality_threshold"]["status"] == "missing"
-    assert missing_by_field["quality_threshold"]["proposed_value"] is None
-    assert all(row["usable_for_formal_delivery"] is False for row in result["provisional"])
-    assert not any(row["field"] == "planned_duration_days" for row in result["provisional"])
+    assert result["provisional"] == []
+    assert all(row["status"] == "missing" for row in result["missing"])
+    assert all(row["source"] == "none" for row in result["missing"])
+    assert all(row["proposed_value"] is None for row in result["missing"])
+    assert all(
+        row["usable_for_formal_delivery"] is False
+        for row in result["missing"]
+    )
+    serialized = json.dumps(result, ensure_ascii=False, sort_keys=True)
+    for forbidden in ("80人", "3天", "2次/日", "120天", "≤5mm", "≤4h"):
+        assert forbidden not in serialized
 
 
 def test_unstructured_values_do_not_bypass_fact_status_gate():
@@ -117,6 +121,8 @@ def test_unstructured_values_do_not_bypass_fact_status_gate():
     assert by_field["resource_peak"]["detected_unstructured"] is True
     assert by_field["critical_interval_days"]["detected_unstructured"] is True
     assert by_field["risk_inspection_frequency"]["detected_unstructured"] is True
+    assert all(row["proposed_value"] is None for row in result["missing"])
+    assert result["provisional"] == []
     assert result["resolved"] == []
     assert result["formal_ready"] is False
 

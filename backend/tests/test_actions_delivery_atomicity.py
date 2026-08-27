@@ -110,11 +110,36 @@ def _formal_delivery_fixture(
         focus_xlsx.append(str(ancillary_paths["focus_xlsx"]))
         score_overview_xlsx.append(str(ancillary_paths["score_overview_xlsx"]))
         expert_review_docx.append(str(ancillary_paths["expert_review_docx"]))
+        standard_index = {
+            "ok": True,
+            "project_id": "P-ATOMIC",
+            "standards": [{"standard_code": "GB 50000-2020"}],
+        }
+        standard_audit = {
+            "ok": True,
+            "verified_standard_codes": ["GB_50000_2020"],
+        }
         delivery_gate = {
             "schema_version": "delivery-quality-gate-v1",
+            "formal_contract_version": "formal-evidence-v2",
             "strict": True,
             "delivery_allowed": True,
-            "checks": [],
+            "checks": [
+                {
+                    "name": "verified_standards",
+                    "pass": True,
+                    "required": True,
+                    "standard_audit_digest": canonical_export_digest(
+                        standard_audit
+                    ),
+                    "standard_index_digest": canonical_export_digest(
+                        standard_index
+                    ),
+                    "audit_verified_standard_codes": ["GB_50000_2020"],
+                    "index_verified_standard_codes": ["GB_50000_2020"],
+                    "missing_verified_standard_codes": [],
+                }
+            ],
             "blocker_count": 0,
             "warning_count": 0,
             "blockers": [],
@@ -127,6 +152,8 @@ def _formal_delivery_fixture(
                 "delivery_scope": "document",
                 "delivery_ready": True,
                 "delivery_quality_gate": delivery_gate,
+                "standard_index": standard_index,
+                "standard_citation_audit": standard_audit,
                 "sections": [],
                 "quality_checks": {"issue_list": [], "auto_revision_suggestions": []},
             }
@@ -204,6 +231,42 @@ def test_formal_delivery_state_requires_sealed_exact_professional_artifacts(
     assert actions_bridge._formal_delivery_state(job, result, tampered_gate)[1] == (
         "delivery_gate_invalid"
     )
+
+    stale_gate = copy.deepcopy(variants)
+    gate = stale_gate[0]["delivery_quality_gate"]
+    gate.pop("formal_contract_version")
+    gate["decision_digest"] = actions_bridge.export_docx_core.canonical_export_digest(
+        {key: value for key, value in gate.items() if key != "decision_digest"}
+    )
+    assert actions_bridge._formal_delivery_state(job, result, stale_gate)[1] == (
+        "delivery_gate_contract_stale"
+    )
+
+    tampered_index = copy.deepcopy(variants)
+    tampered_index[0]["standard_index"]["renamed"] = True
+    assert actions_bridge._formal_delivery_state(job, result, tampered_index)[1] == (
+        "delivery_gate_contract_stale"
+    )
+
+    forged_code_binding = copy.deepcopy(variants)
+    forged_gate = forged_code_binding[0]["delivery_quality_gate"]
+    forged_standard_check = forged_gate["checks"][0]
+    forged_standard_check["audit_verified_standard_codes"] = ["CJJ_1_2008"]
+    forged_standard_check["missing_verified_standard_codes"] = []
+    forged_gate["decision_digest"] = (
+        actions_bridge.export_docx_core.canonical_export_digest(
+            {
+                key: value
+                for key, value in forged_gate.items()
+                if key != "decision_digest"
+            }
+        )
+    )
+    assert actions_bridge._formal_delivery_state(
+        job,
+        result,
+        forged_code_binding,
+    )[1] == "delivery_gate_contract_stale"
 
 
 def test_formal_delivery_scope_must_be_explicit_in_payload_and_every_variant(

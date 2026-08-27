@@ -4000,6 +4000,7 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         project_parameters=missing_param_probe,
         project_fact_ledger=project_fact_ledger,
         sections=sections,
+        standard_index=standard_index if isinstance(standard_index, dict) else {},
     )
     quality["delivery_quality_gate"] = delivery_quality_gate
     pipeline_stages.append(

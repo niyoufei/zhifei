@@ -173,6 +173,47 @@ def _bound_sections(ledger: dict) -> list[dict]:
     return [{"title": "项目参数", "content": "\n".join(lines)}]
 
 
+def _verified_standard_index() -> dict:
+    return {
+        "ok": True,
+        "project_id": _PROJECT_ID,
+        "standards": [
+            {
+                "filename": "施工标准.pdf",
+                "sha256": "e" * 64,
+                "extract_text_sha256": "f" * 64,
+                "standard_code": "GB 50000-2020",
+                "standard_codes": ["GB 50000-2020"],
+                "primary_identity_status": "identified",
+                "official_registry_status": "verified_clause_source",
+                "official_registry": {
+                    "status": "verified_clause_source",
+                    "standard_code": "GB 50000-2020",
+                },
+                "text_status": "indexed",
+                "source_integrity_status": "verified",
+                "clause_evidence_eligible": True,
+                "clause_evidence_source": "ingested_standard_text",
+                "registry_metadata_used_as_clause_evidence": False,
+                "page_anchors": [
+                    {
+                        "page": 1,
+                        "text_sha256": "1" * 64,
+                        "evidence_eligible": True,
+                    }
+                ],
+            }
+        ],
+        "indexed_standard_count": 1,
+        "official_registry_verified_count": 1,
+        "integrity_rejection_count": 0,
+        "invalid_identity_count": 0,
+        "missing_text_or_ocr_count": 0,
+        "locator_unavailable_count": 0,
+        "text_index_status": "complete",
+    }
+
+
 def _base_kwargs() -> dict:
     project_parameters, project_fact_ledger = _formal_parameter_receipts()
     return {
@@ -189,7 +230,14 @@ def _base_kwargs() -> dict:
         "requirement_matrix": {
             "summary": {"strict_delivery_allowed": True, "blocking_requirement_ids": []}
         },
-        "standard_audit": {"ok": True, "violations": []},
+        "standard_audit": {
+            "ok": True,
+            "verified_standard_count": 1,
+            "verified_standard_codes": ["GB_50000_2020"],
+            "violation_count": 0,
+            "violations": [],
+        },
+        "standard_index": _verified_standard_index(),
         "cross_index": {
             "ok": True,
             "focus_count": 1,
@@ -211,7 +259,143 @@ def test_professional_delivery_gate_passes_complete_evidence_chain():
     gate = build_delivery_quality_gate(**_base_kwargs())
     assert gate["delivery_allowed"] is True
     assert gate["blocker_count"] == 0
+    assert gate["formal_contract_version"] == "formal-evidence-v2"
     assert len(gate["decision_digest"]) == 64
+
+
+def test_formal_delivery_fails_closed_without_independent_standard_evidence():
+    kwargs = _base_kwargs()
+    kwargs["standard_index"] = {
+        "ok": False,
+        "project_id": _PROJECT_ID,
+        "standards": [],
+        "indexed_standard_count": 0,
+        "official_registry_verified_count": 0,
+        "integrity_rejection_count": 0,
+        "invalid_identity_count": 0,
+        "missing_text_or_ocr_count": 0,
+        "locator_unavailable_count": 0,
+        "text_index_status": "no_standards",
+    }
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(row for row in gate["checks"] if row["name"] == "verified_standards")
+    assert gate["delivery_allowed"] is False
+    assert "independent_standard_evidence_missing" in check["reasons"]
+    assert "DELIVERY_STANDARD_EVIDENCE_BLOCKED" in {
+        row["code"] for row in gate["blockers"]
+    }
+
+
+def test_formal_delivery_rejects_standard_index_from_another_project():
+    kwargs = _base_kwargs()
+    kwargs["standard_index"]["project_id"] = "P-OTHER"
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(row for row in gate["checks"] if row["name"] == "verified_standards")
+    assert gate["delivery_allowed"] is False
+    assert "standard_index_project_mismatch" in check["reasons"]
+
+
+def test_formal_delivery_binds_standard_index_digest_and_rejects_missing_anchor():
+    kwargs = _base_kwargs()
+    first = build_delivery_quality_gate(**kwargs)
+    kwargs["standard_index"]["standards"][0]["page_anchors"][0][
+        "text_sha256"
+    ] = "2" * 64
+
+    changed = build_delivery_quality_gate(**kwargs)
+
+    assert first["delivery_allowed"] is True
+    assert changed["delivery_allowed"] is True
+    assert first["decision_digest"] != changed["decision_digest"]
+
+    kwargs["standard_index"]["standards"][0]["page_anchors"] = []
+    blocked = build_delivery_quality_gate(**kwargs)
+    check = next(
+        row for row in blocked["checks"] if row["name"] == "verified_standards"
+    )
+    assert blocked["delivery_allowed"] is False
+    assert check["row_errors"][0]["errors"] == [
+        "page_anchor_evidence_missing"
+    ]
+
+
+def test_formal_delivery_rejects_unrelated_or_registry_unverified_standard():
+    kwargs = _base_kwargs()
+    row = kwargs["standard_index"]["standards"][0]
+    row["standard_code"] = "CJJ 1-2008"
+    row["standard_codes"] = ["CJJ 1-2008"]
+    row["official_registry_status"] = "not_verified"
+    kwargs["standard_index"]["official_registry_verified_count"] = 0
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(row for row in gate["checks"] if row["name"] == "verified_standards")
+    assert gate["delivery_allowed"] is False
+    assert "standard_rows_untrusted" in check["reasons"]
+    assert "standard_citation_codes_absent_from_index" in check["reasons"]
+    assert check["missing_verified_standard_codes"] == ["GB_50000_2020"]
+    assert "official_registry_unverified" in check["row_errors"][0]["errors"]
+
+
+def test_referenced_code_does_not_become_verified_primary_standard_identity():
+    kwargs = _base_kwargs()
+    kwargs["standard_audit"]["verified_standard_codes"] = ["CJJ_1_2008"]
+    kwargs["standard_index"]["standards"][0]["standard_codes"].append(
+        "CJJ 1-2008"
+    )
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(row for row in gate["checks"] if row["name"] == "verified_standards")
+    assert gate["delivery_allowed"] is False
+    assert check["index_verified_standard_codes"] == ["GB_50000_2020"]
+    assert check["missing_verified_standard_codes"] == ["CJJ_1_2008"]
+
+
+def test_formal_delivery_rejects_missing_or_boolean_standard_counters():
+    kwargs = _base_kwargs()
+    kwargs["standard_index"].pop("official_registry_verified_count")
+    kwargs["standard_index"]["indexed_standard_count"] = True
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(row for row in gate["checks"] if row["name"] == "verified_standards")
+    assert gate["delivery_allowed"] is False
+    assert "official_registry_verified_count_missing" in check["reasons"]
+    assert "indexed_standard_count_invalid" in check["reasons"]
+
+
+def test_formal_delivery_malformed_standard_audit_fails_closed_without_exception():
+    kwargs = _base_kwargs()
+    kwargs["standard_audit"] = {
+        "ok": True,
+        "verified_standard_count": 1,
+        "verified_standard_codes": 1,
+        "violation_count": 0,
+        "violations": 1,
+    }
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(row for row in gate["checks"] if row["name"] == "verified_standards")
+    assert gate["delivery_allowed"] is False
+    assert "standard_citation_violations_invalid" in check["reasons"]
+    assert "verified_standard_codes_invalid" in check["reasons"]
+
+
+def test_formal_delivery_malformed_standard_rows_fail_closed_without_exception():
+    kwargs = _base_kwargs()
+    kwargs["standard_index"]["standards"] = 1
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(row for row in gate["checks"] if row["name"] == "verified_standards")
+    assert gate["delivery_allowed"] is False
+    assert "standard_rows_invalid" in check["reasons"]
 
 
 def test_professional_delivery_gate_rejects_scalar_project_wide_quality_threshold():
@@ -636,6 +820,7 @@ def test_nonformal_preview_does_not_require_formal_parameter_receipts():
     kwargs["formal_delivery_required"] = False
     kwargs["project_parameters"] = {}
     kwargs["project_fact_ledger"] = {}
+    kwargs.pop("standard_index")
 
     gate = build_delivery_quality_gate(**kwargs)
 

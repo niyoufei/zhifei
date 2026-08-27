@@ -58,9 +58,9 @@ def probe_missing_parameters(
     """
     Build a deterministic formal-parameter readiness report before writing.
 
-    Enterprise defaults remain visible as provisional proposals, but are never
-    returned through ``auto_fill`` and therefore cannot become project facts or
-    generation constraints without an approved/verified/derived ledger record.
+    Enterprise defaults are neither exposed nor returned through ``auto_fill``.
+    A formal value must come from an approved/verified/derived ledger record;
+    unresolved fields remain an explicit, value-free confirmation checklist.
     """
     txt = _merge_text(
         topic,
@@ -71,18 +71,13 @@ def probe_missing_parameters(
         boq.get("stats") if isinstance(boq, dict) else None,
     )
 
-    risk_defaults = (
-        enterprise_profile.get("risk_defaults")
-        if isinstance(enterprise_profile.get("risk_defaults"), dict)
-        else {}
-    )
+    del enterprise_profile  # Defaults are not project evidence or safe proposals.
 
     checks = [
         {
             "field": "planned_duration_days",
             "key": "总工期",
             "pattern": r"工期[^\d]{0,8}\d+(?:\.\d+)?\s*(天|日|月|h|小时)",
-            "fallback": "",
             "reason": "进度统筹缺少可计算时长",
             "question": "请确认总工期（天）",
         },
@@ -90,7 +85,6 @@ def probe_missing_parameters(
             "field": "resource_peak",
             "key": "资源峰值",
             "pattern": r"(?:资源峰值|高峰投入|人数峰值)[^\d]{0,8}\d+(?:\.\d+)?\s*(人|台|套)",
-            "fallback": "80人",
             "reason": "资源均衡与现金流测算缺少峰值",
             "question": "请确认资源峰值（人/台）",
         },
@@ -98,7 +92,6 @@ def probe_missing_parameters(
             "field": "critical_interval_days",
             "key": "关键线路间隔",
             "pattern": r"关键线路(?:间隔|步距)?[^\d]{0,8}\d+(?:\.\d+)?\s*(天|日|h|小时)",
-            "fallback": "3天",
             "reason": "关键路径控制缺少节拍参数",
             "question": "请确认关键线路间隔（天）",
         },
@@ -106,7 +99,6 @@ def probe_missing_parameters(
             "field": "risk_inspection_frequency",
             "key": "风险检查频次",
             "pattern": r"频次[^\d]{0,8}\d+(?:\.\d+)?\s*(次/日|次/班|次/周|次)",
-            "fallback": str(risk_defaults.get("frequency") or "2次/日"),
             "reason": "风险闭环缺少可执行检查频次",
             "question": "请确认风险检查频次",
         },
@@ -114,9 +106,6 @@ def probe_missing_parameters(
             "field": "quality_threshold",
             "key": "质量阈值",
             "pattern": r"(?:阈值|偏差|合格率)[^\d]{0,8}(?:≤|>=|≥|<|>)?\s*\d+(?:\.\d+)?\s*(mm|%|MPa)?",
-            # A global enterprise tolerance is not a project fact.  Quality
-            # thresholds are admitted only as process-bound evidence bundles.
-            "fallback": "",
             "reason": "验收判定缺少阈值",
             "question": "请确认质量阈值",
         },
@@ -128,7 +117,6 @@ def probe_missing_parameters(
                 r"(?:偏差处置|整改|复验|复核).{0,10}"
                 r"(?:\d+(?:\.\d+)?\s*(h|小时|天)|时限))"
             ),
-            "fallback": str(risk_defaults.get("deviation_action") or "偏差处置时限≤4h"),
             "reason": "闭环缺少时限约束",
             "question": "请确认偏差处置时限",
         },
@@ -167,21 +155,18 @@ def probe_missing_parameters(
             )
             continue
 
-        proposed_value = str(c.get("fallback") or "").strip()
         item = {
             "field": field,
             "key": key,
             "question": str(c.get("question") or ""),
             "reason": str(c.get("reason") or ""),
-            "status": "provisional" if proposed_value else "missing",
-            "source": "enterprise_default" if proposed_value else "none",
-            "proposed_value": proposed_value or None,
+            "status": "missing",
+            "source": "none",
+            "proposed_value": None,
             "detected_unstructured": _has_pattern(txt, str(c.get("pattern") or "")),
             "usable_for_formal_delivery": False,
         }
         missing.append(item)
-        if proposed_value:
-            provisional.append(dict(item))
 
     return {
         "schema_version": "missing-parameter-probe-v2",

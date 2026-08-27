@@ -46,8 +46,15 @@ from backend.zhifei_autoplan.case_library_service import (
     list_case_library_items,
     normalize_case_library_options,
 )
-from backend.zhifei_autoplan.compliance_policy import audit_standard_citations
-from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
+from backend.zhifei_autoplan.compliance_policy import (
+    audit_standard_citations,
+    build_project_applicable_standards_manifest,
+    canonical_standard_code,
+)
+from backend.zhifei_autoplan.delivery_quality import (
+    FORMAL_DELIVERY_CONTRACT_VERSION,
+    build_delivery_quality_gate,
+)
 from backend.zhifei_autoplan.delivery_receipt import (
     build_delivery_receipt,
     canonical_delivery_receipt_digest,
@@ -2118,6 +2125,18 @@ def _rebuild_postprocessed_artifacts(
     """
     pid = str(payload.get("project_id") or "").strip() or None
     strict = bool(payload.get("quality_strict", True))
+    formal_delivery_required = bool(
+        str(payload.get("delivery_scope") or "document").strip().lower()
+        == "document"
+        and not bool(payload.get("dry_run"))
+    )
+    raw_workspace_dir = payload.get("workspace_dir")
+    workspace_dir = (
+        str(raw_workspace_dir).strip()
+        if isinstance(raw_workspace_dir, (str, Path))
+        and str(raw_workspace_dir).strip()
+        else None
+    )
 
     # Load latest tender/boq for this project scope (best-effort).
     tender = load_tender_matrix(project_id=pid) or {}
@@ -2248,6 +2267,45 @@ def _rebuild_postprocessed_artifacts(
 
         v["quality_checks"] = qc
 
+        # A formal post-process may run long after the original generation.
+        # Rebuild the evidence indexes from the current trusted ingest audit so
+        # stale or since-tampered bytes cannot be carried into the final gate.
+        if formal_delivery_required:
+            try:
+                from backend.zhifei_autoplan.drawing_index import (
+                    build_drawing_index,
+                )
+                from backend.zhifei_autoplan.standard_index import (
+                    build_standard_index,
+                )
+
+                current_outline = list(outline)
+                current_topic = str(
+                    payload.get("topic") or v.get("topic") or ""
+                )
+                v["drawing_index"] = build_drawing_index(
+                    current_topic,
+                    current_outline,
+                    project_id=pid,
+                    workspace_dir=workspace_dir,
+                )
+                v["standard_index"] = build_standard_index(
+                    current_topic,
+                    current_outline,
+                    project_id=pid,
+                    workspace_dir=workspace_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 - current evidence is mandatory for formal delivery
+                v["drawing_index"] = {}
+                v["standard_index"] = {}
+                postprocess_errors.append(
+                    {
+                        "stage": "current_evidence_indexes",
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+
         # Cross-index rebuild (depends on latest qc + final section text).
         try:
             from backend.zhifei_autoplan.cross_index import (
@@ -2351,11 +2409,10 @@ def _rebuild_postprocessed_artifacts(
             )
 
         try:
-            standards_manifest = (
-                v.get("project_applicable_standards")
-                if isinstance(v.get("project_applicable_standards"), dict)
-                else {}
+            standards_manifest = build_project_applicable_standards_manifest(
+                sections
             )
+            v["project_applicable_standards"] = standards_manifest
             v["standard_citation_audit"] = audit_standard_citations(
                 sections,
                 standards_manifest,
@@ -2371,11 +2428,6 @@ def _rebuild_postprocessed_artifacts(
 
         try:
             routing = v.get("model_routing") if isinstance(v.get("model_routing"), dict) else {}
-            formal_delivery_required = bool(
-                str(payload.get("delivery_scope") or "document").strip().lower()
-                == "document"
-                and not bool(payload.get("dry_run"))
-            )
             delivery_gate = build_delivery_quality_gate(
                 strict=strict,
                 content_review=(
@@ -2419,6 +2471,11 @@ def _rebuild_postprocessed_artifacts(
                     else {}
                 ),
                 sections=sections,
+                standard_index=(
+                    v.get("standard_index")
+                    if isinstance(v.get("standard_index"), dict)
+                    else {}
+                ),
             )
             v["delivery_quality_gate"] = delivery_gate
             qc["delivery_quality_gate"] = delivery_gate
@@ -2779,6 +2836,101 @@ def _formal_delivery_state(
         for row in variants
     ):
         return False, "delivery_gate_invalid"
+    for row in variants:
+        gate = row.get("delivery_quality_gate")
+        assert isinstance(gate, dict)
+        raw_checks = gate.get("checks")
+        if not isinstance(raw_checks, list):
+            return False, "delivery_gate_contract_stale"
+        checks = {
+            str(check.get("name") or "").strip(): check
+            for check in raw_checks
+            if isinstance(check, dict)
+            and str(check.get("name") or "").strip()
+        }
+        standard_check = checks.get("verified_standards")
+        audit_codes = (
+            standard_check.get("audit_verified_standard_codes")
+            if isinstance(standard_check, dict)
+            else None
+        )
+        index_codes = (
+            standard_check.get("index_verified_standard_codes")
+            if isinstance(standard_check, dict)
+            else None
+        )
+        missing_codes = (
+            standard_check.get("missing_verified_standard_codes")
+            if isinstance(standard_check, dict)
+            else None
+        )
+        current_standard_index = row.get("standard_index")
+        current_standard_audit = row.get("standard_citation_audit")
+        normalized_audit_codes = (
+            [canonical_standard_code(code) for code in audit_codes]
+            if isinstance(audit_codes, list)
+            and all(isinstance(code, str) for code in audit_codes)
+            else []
+        )
+        normalized_index_codes = (
+            [canonical_standard_code(code) for code in index_codes]
+            if isinstance(index_codes, list)
+            and all(isinstance(code, str) for code in index_codes)
+            else []
+        )
+        if (
+            gate.get("formal_contract_version")
+            != FORMAL_DELIVERY_CONTRACT_VERSION
+            or not isinstance(standard_check, dict)
+            or standard_check.get("pass") is not True
+            or standard_check.get("required") is not True
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(standard_check.get("standard_index_digest") or "")
+                .strip()
+                .lower(),
+            )
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(standard_check.get("standard_audit_digest") or "")
+                .strip()
+                .lower(),
+            )
+            or not isinstance(audit_codes, list)
+            or not audit_codes
+            or any(not isinstance(code, str) or not code for code in audit_codes)
+            or not isinstance(index_codes, list)
+            or not index_codes
+            or any(not isinstance(code, str) or not code for code in index_codes)
+            or not isinstance(missing_codes, list)
+            or bool(missing_codes)
+            or any(
+                normalized != supplied
+                for normalized, supplied in zip(
+                    normalized_audit_codes,
+                    audit_codes or [],
+                )
+            )
+            or len(normalized_audit_codes) != len(set(normalized_audit_codes))
+            or any(
+                normalized != supplied
+                for normalized, supplied in zip(
+                    normalized_index_codes,
+                    index_codes or [],
+                )
+            )
+            or len(normalized_index_codes) != len(set(normalized_index_codes))
+            or not set(normalized_audit_codes).issubset(
+                set(normalized_index_codes)
+            )
+            or not isinstance(current_standard_index, dict)
+            or not isinstance(current_standard_audit, dict)
+            or standard_check.get("standard_index_digest")
+            != export_docx_core.canonical_export_digest(current_standard_index)
+            or standard_check.get("standard_audit_digest")
+            != export_docx_core.canonical_export_digest(current_standard_audit)
+        ):
+            return False, "delivery_gate_contract_stale"
     if not isinstance(result, dict):
         return False, "delivery_result_invalid"
     if str(result.get("delivery_profile") or "").strip() != "sonnet5_professional_word":

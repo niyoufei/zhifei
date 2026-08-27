@@ -476,7 +476,13 @@ def test_review_postprocess_can_fail_closed(monkeypatch):
 
 def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypatch):
     from backend.app.routers import actions_bridge
-    from backend.zhifei_autoplan import cross_index, param_trace, plan_consistency
+    from backend.zhifei_autoplan import (
+        cross_index,
+        drawing_index,
+        param_trace,
+        plan_consistency,
+        standard_index,
+    )
 
     monkeypatch.setattr(actions_bridge, "load_tender_matrix", lambda **kwargs: {})
     monkeypatch.setattr(actions_bridge, "load_boq_data", lambda **kwargs: {})
@@ -514,6 +520,33 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
             "focus_items": [],
         },
     )
+    current_drawing_index = {"ok": True, "project_id": "P-CURRENT"}
+    current_standard_index = {
+        "ok": False,
+        "project_id": "P-CURRENT",
+        "standards": [],
+        "text_index_status": "no_standards",
+    }
+    rebuilt_outlines = {}
+
+    def rebuild_drawing(*args, **kwargs):
+        rebuilt_outlines["drawing"] = list(args[1])
+        return current_drawing_index
+
+    def rebuild_standard(*args, **kwargs):
+        rebuilt_outlines["standard"] = list(args[1])
+        return current_standard_index
+
+    monkeypatch.setattr(
+        drawing_index,
+        "build_drawing_index",
+        rebuild_drawing,
+    )
+    monkeypatch.setattr(
+        standard_index,
+        "build_standard_index",
+        rebuild_standard,
+    )
     monkeypatch.setattr(
         actions_bridge,
         "build_evidence_tracking",
@@ -540,13 +573,15 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
     fact_ledger = {"schema_version": "project-fact-ledger-v1"}
     result = {
         "sections": [{"title": "质量管理", "content": "正文"}],
-        "outline": ["质量管理"],
+        "outline": [],
+        "drawing_index": {"stale": True},
+        "standard_index": {"stale": True},
         "missing_parameters": parameter_report,
         "project_fact_ledger": fact_ledger,
     }
     actions_bridge._rebuild_postprocessed_artifacts(
         [result],
-        payload={"quality_strict": False},
+        payload={"quality_strict": False, "project_id": "P-CURRENT"},
         report=None,
         params={},
         fail_closed=True,
@@ -559,6 +594,99 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
     assert captured_gate_kwargs["project_parameters"] is parameter_report
     assert captured_gate_kwargs["project_fact_ledger"] is fact_ledger
     assert captured_gate_kwargs["sections"] == result["sections"]
+    assert result["drawing_index"] is current_drawing_index
+    assert result["standard_index"] is current_standard_index
+    assert captured_gate_kwargs["standard_index"] is current_standard_index
+    assert rebuilt_outlines == {
+        "drawing": ["质量管理"],
+        "standard": ["质量管理"],
+    }
+
+
+def test_formal_postprocess_fails_closed_when_current_index_rebuild_raises(
+    monkeypatch,
+):
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan import (
+        cross_index,
+        drawing_index,
+        param_trace,
+        plan_consistency,
+        standard_index,
+    )
+
+    monkeypatch.setattr(actions_bridge, "load_tender_matrix", lambda **kwargs: {})
+    monkeypatch.setattr(actions_bridge, "load_boq_data", lambda **kwargs: {})
+    monkeypatch.setattr(
+        actions_bridge, "recommend_four_new", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "run_quality_checks",
+        lambda *args, **kwargs: {"issue_list": []},
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "build_evidence_tracking",
+        lambda **kwargs: {"rows": [], "summary": {}},
+    )
+    monkeypatch.setattr(
+        plan_consistency,
+        "normalize_metrics_in_sections",
+        lambda sections: {"ok": True},
+    )
+    monkeypatch.setattr(
+        param_trace,
+        "build_param_receipt",
+        lambda sections, params: {"ok": True},
+    )
+    monkeypatch.setattr(
+        param_trace,
+        "save_latest_receipt",
+        lambda *args, **kwargs: "receipt.json",
+    )
+    monkeypatch.setattr(
+        cross_index,
+        "build_cross_index",
+        lambda **kwargs: {
+            "ok": True,
+            "focus_count": 0,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        },
+    )
+    monkeypatch.setattr(
+        drawing_index,
+        "build_drawing_index",
+        lambda *args, **kwargs: {"ok": True},
+    )
+
+    def fail_standard_index(*args, **kwargs):
+        raise ValueError("trusted standard bytes changed")
+
+    monkeypatch.setattr(standard_index, "build_standard_index", fail_standard_index)
+    result = {
+        "sections": [{"title": "质量管理", "content": "正文"}],
+        "outline": ["质量管理"],
+        "drawing_index": {"stale": True},
+        "standard_index": {"stale": True},
+    }
+
+    with pytest.raises(RuntimeError, match="POSTPROCESS_REBUILD_FAILED"):
+        actions_bridge._rebuild_postprocessed_artifacts(
+            [result],
+            payload={"project_id": "P-CURRENT"},
+            report=None,
+            params={},
+            fail_closed=True,
+        )
+
+    assert result["drawing_index"] == {}
+    assert result["standard_index"] == {}
+    assert result["postprocess_errors"][0]["stage"] == "current_evidence_indexes"
 
 
 def test_review_postprocess_rejects_unrelated_traceable_locator(monkeypatch):

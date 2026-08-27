@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any
 
+from backend.zhifei_autoplan.compliance_policy import canonical_standard_code
 from backend.zhifei_autoplan.evidence import validate_ingest_evidence_set_receipt
 from backend.zhifei_autoplan.project_fact_ledger import (
     FORMAL_REQUIRED_FIELDS,
@@ -30,6 +31,7 @@ _MACHINE_DECISION_RE = re.compile(
     re.IGNORECASE,
 )
 _FORMAL_PARAMETER_STATUSES = frozenset({"verified", "derived", "approved"})
+FORMAL_DELIVERY_CONTRACT_VERSION = "formal-evidence-v2"
 _FORMAL_PARAMETER_LABELS = {
     "planned_duration_days": ("总工期", "计划工期", "合同工期", "工期要求"),
     "resource_peak": ("资源峰值", "高峰投入", "人数峰值"),
@@ -890,6 +892,231 @@ def _formal_project_parameter_check(
     }
 
 
+def _formal_standard_evidence_check(
+    standard_audit: dict[str, Any] | None,
+    standard_index: dict[str, Any] | None,
+    *,
+    expected_project_id: str,
+) -> dict[str, Any]:
+    """Require current, project-bound independent standard text evidence."""
+
+    audit_is_object = isinstance(standard_audit, dict)
+    index_is_object = isinstance(standard_index, dict)
+    audit = dict(standard_audit) if audit_is_object else {}
+    index = dict(standard_index) if index_is_object else {}
+    reasons: list[str] = []
+    row_errors: list[dict[str, Any]] = []
+    raw_rows = index.get("standards")
+    rows = raw_rows if isinstance(raw_rows, list) else []
+    project_id = str(index.get("project_id") or "").strip()
+    raw_violations = audit.get("violations")
+    violations = raw_violations if isinstance(raw_violations, list) else []
+    raw_audit_codes = audit.get("verified_standard_codes")
+    audit_codes: set[str] = set()
+
+    if not audit_is_object:
+        reasons.append("standard_citation_audit_invalid")
+    if not index_is_object:
+        reasons.append("standard_index_invalid")
+    if not isinstance(raw_rows, list):
+        reasons.append("standard_rows_invalid")
+    if not isinstance(raw_violations, list):
+        reasons.append("standard_citation_violations_invalid")
+    raw_violation_count = audit.get("violation_count")
+    if (
+        isinstance(raw_violation_count, bool)
+        or not isinstance(raw_violation_count, int)
+        or raw_violation_count != len(violations)
+    ):
+        reasons.append("standard_citation_violation_count_invalid")
+    if violations:
+        reasons.append("standard_citation_violations_present")
+
+    if not isinstance(raw_audit_codes, list):
+        reasons.append("verified_standard_codes_invalid")
+    else:
+        for value in raw_audit_codes:
+            if not isinstance(value, str):
+                reasons.append("verified_standard_codes_invalid")
+                continue
+            canonical = canonical_standard_code(value)
+            if not canonical:
+                reasons.append("verified_standard_codes_invalid")
+                continue
+            audit_codes.add(canonical)
+    raw_verified_count = audit.get("verified_standard_count")
+    if (
+        isinstance(raw_verified_count, bool)
+        or not isinstance(raw_verified_count, int)
+        or raw_verified_count <= 0
+    ):
+        reasons.append("verified_standard_count_invalid")
+    elif raw_verified_count != len(audit_codes):
+        reasons.append("verified_standard_count_mismatch")
+    if not audit_codes:
+        reasons.append("verified_standard_codes_missing")
+
+    if audit.get("ok") is not True:
+        reasons.append("standard_citation_audit_failed")
+    if not index:
+        reasons.append("standard_index_missing")
+    if not expected_project_id or project_id != expected_project_id:
+        reasons.append("standard_index_project_mismatch")
+    if index.get("ok") is not True:
+        reasons.append("standard_index_not_ready")
+    if not rows:
+        reasons.append("independent_standard_evidence_missing")
+
+    counters: dict[str, int | None] = {}
+    for field in (
+        "indexed_standard_count",
+        "official_registry_verified_count",
+        "integrity_rejection_count",
+        "invalid_identity_count",
+        "missing_text_or_ocr_count",
+        "locator_unavailable_count",
+    ):
+        if field not in index:
+            counters[field] = None
+            reasons.append(f"{field}_missing")
+            continue
+        value = index.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            counters[field] = None
+            reasons.append(f"{field}_invalid")
+            continue
+        counters[field] = value
+    if counters.get("indexed_standard_count") != len(rows):
+        reasons.append("standard_index_count_mismatch")
+    for field in (
+        "integrity_rejection_count",
+        "invalid_identity_count",
+        "missing_text_or_ocr_count",
+        "locator_unavailable_count",
+    ):
+        if counters.get(field) != 0:
+            reasons.append(f"{field}_nonzero")
+    if str(index.get("text_index_status") or "").strip() != "complete":
+        reasons.append("standard_text_index_incomplete")
+
+    verified_index_codes: set[str] = set()
+    registry_verified_rows = 0
+    for position, row in enumerate(rows, start=1):
+        errors: list[str] = []
+        if not isinstance(row, dict):
+            row_errors.append({"position": position, "errors": ["row_invalid"]})
+            continue
+        registry_status = str(row.get("official_registry_status") or "").strip()
+        registry_verified = registry_status.startswith("verified_")
+        if not registry_verified:
+            errors.append("official_registry_unverified")
+        if str(row.get("primary_identity_status") or "").strip() != "identified":
+            errors.append("primary_standard_identity_unverified")
+        raw_standard_codes = row.get("standard_codes")
+        if not isinstance(raw_standard_codes, list):
+            errors.append("standard_codes_invalid")
+            raw_standard_codes = []
+        primary_value = row.get("standard_code")
+        primary_code = (
+            canonical_standard_code(primary_value)
+            if isinstance(primary_value, str)
+            else ""
+        )
+        listed_codes = {
+            canonical_standard_code(value)
+            for value in raw_standard_codes
+            if isinstance(value, str) and canonical_standard_code(value)
+        }
+        if any(not isinstance(value, str) for value in raw_standard_codes):
+            errors.append("standard_codes_invalid")
+        if not primary_code:
+            errors.append("standard_code_missing")
+        elif primary_code not in listed_codes:
+            errors.append("primary_standard_code_not_listed")
+        registry = row.get("official_registry")
+        if not isinstance(registry, dict):
+            errors.append("official_registry_invalid")
+        else:
+            registry_code = canonical_standard_code(registry.get("standard_code"))
+            if registry_code != primary_code:
+                errors.append("official_registry_code_mismatch")
+            if str(registry.get("status") or "").strip() != registry_status:
+                errors.append("official_registry_status_mismatch")
+        if registry_verified:
+            registry_verified_rows += 1
+            if primary_code:
+                verified_index_codes.add(primary_code)
+        if str(row.get("source_integrity_status") or "") != "verified":
+            errors.append("source_integrity_unverified")
+        if str(row.get("text_status") or "") != "indexed":
+            errors.append("text_not_indexed")
+        if row.get("clause_evidence_eligible") is not True:
+            errors.append("clause_evidence_ineligible")
+        if str(row.get("clause_evidence_source") or "") != "ingested_standard_text":
+            errors.append("clause_evidence_source_invalid")
+        if row.get("registry_metadata_used_as_clause_evidence") is not False:
+            errors.append("registry_metadata_clause_evidence_invalid")
+        for field in ("sha256", "extract_text_sha256"):
+            if _SHA256_RE.fullmatch(str(row.get(field) or "").strip().lower()) is None:
+                errors.append(f"{field}_invalid")
+        anchors = row.get("page_anchors")
+        anchors = anchors if isinstance(anchors, list) else []
+        eligible_anchor = any(
+            isinstance(anchor, dict)
+            and anchor.get("evidence_eligible") is True
+            and isinstance(anchor.get("page"), int)
+            and not isinstance(anchor.get("page"), bool)
+            and anchor["page"] >= 1
+            and _SHA256_RE.fullmatch(
+                str(anchor.get("text_sha256") or "").strip().lower()
+            )
+            is not None
+            for anchor in anchors
+        )
+        if not eligible_anchor:
+            errors.append("page_anchor_evidence_missing")
+        if errors:
+            row_errors.append(
+                {
+                    "position": position,
+                    "filename": str(row.get("filename") or ""),
+                    "errors": errors,
+                }
+            )
+    if row_errors:
+        reasons.append("standard_rows_untrusted")
+    if counters.get("official_registry_verified_count") != registry_verified_rows:
+        reasons.append("official_registry_verified_count_mismatch")
+    if counters.get("official_registry_verified_count") != len(rows):
+        reasons.append("official_registry_verified_count_incomplete")
+    if registry_verified_rows <= 0 or not verified_index_codes:
+        reasons.append("official_registry_verified_standard_missing")
+    missing_audit_codes = sorted(audit_codes - verified_index_codes)
+    if missing_audit_codes:
+        reasons.append("standard_citation_codes_absent_from_index")
+
+    reasons = list(dict.fromkeys(reasons))
+    return {
+        "pass": not reasons,
+        "required": True,
+        "project_id": project_id or None,
+        "expected_project_id": expected_project_id or None,
+        "independent_standard_count": len(rows),
+        "indexed_standard_count": counters.get("indexed_standard_count"),
+        "official_registry_verified_count": counters.get(
+            "official_registry_verified_count"
+        ),
+        "audit_verified_standard_codes": sorted(audit_codes),
+        "index_verified_standard_codes": sorted(verified_index_codes),
+        "missing_verified_standard_codes": missing_audit_codes,
+        "standard_audit_digest": _canonical_digest(audit) if audit else None,
+        "standard_index_digest": _canonical_digest(index) if index else None,
+        "reasons": reasons,
+        "row_errors": row_errors,
+        "citation_violations": violations[:20],
+    }
+
+
 def build_delivery_quality_gate(
     *,
     strict: bool,
@@ -904,6 +1131,7 @@ def build_delivery_quality_gate(
     project_parameters: dict[str, Any] | None = None,
     project_fact_ledger: dict[str, Any] | None = None,
     sections: list[dict[str, Any]] | None = None,
+    standard_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine independent specialist results into one fail-closed delivery decision."""
 
@@ -938,16 +1166,34 @@ def build_delivery_quality_gate(
             )
         )
 
-    standards = dict(standard_audit or {})
-    standards_ok = bool(standards.get("ok", False))
-    checks.append({"name": "verified_standards", "pass": standards_ok})
+    standards = dict(standard_audit) if isinstance(standard_audit, dict) else {}
+    if formal_delivery_required:
+        ledger = dict(project_fact_ledger or {})
+        standard_check = _formal_standard_evidence_check(
+            standard_audit,
+            standard_index,
+            expected_project_id=str(ledger.get("project_id") or "").strip(),
+        )
+    else:
+        raw_violations = standards.get("violations")
+        standard_check = {
+            "pass": bool(standards.get("ok", False)),
+            "required": False,
+            "citation_violations": (
+                list(raw_violations)[:20]
+                if isinstance(raw_violations, list)
+                else []
+            ),
+        }
+    standards_ok = bool(standard_check.get("pass"))
+    checks.append({"name": "verified_standards", **standard_check})
     if not standards_ok:
         blockers.append(
             _issue(
                 "DELIVERY_STANDARD_EVIDENCE_BLOCKED",
                 "存在未核验、过期或冲突的规范引用。",
                 source="standard_citation_audit",
-                details=(standards.get("violations") or [])[:20],
+                details=standard_check,
             )
         )
 
@@ -1135,5 +1381,7 @@ def build_delivery_quality_gate(
         "blockers": blockers,
         "warnings": warnings,
     }
+    if formal_delivery_required:
+        decision["formal_contract_version"] = FORMAL_DELIVERY_CONTRACT_VERSION
     decision["decision_digest"] = _canonical_digest(decision)
     return decision

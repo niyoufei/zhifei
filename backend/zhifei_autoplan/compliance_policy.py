@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List
-
+from collections.abc import Iterable
+from typing import Any
 
 LEGACY_GLOBAL_INSTRUCTION = "严格遵守最新16条行业规定；所有工序采用A/B/C/D/E结构表达。"
 
@@ -46,7 +46,7 @@ def should_migrate_global_instruction(value: Any) -> bool:
     return not text or text == LEGACY_GLOBAL_INSTRUCTION or "最新16条行业规定" in text
 
 
-def is_verified_standard_metadata(item: Dict[str, Any]) -> bool:
+def is_verified_standard_metadata(item: dict[str, Any]) -> bool:
     code = str(item.get("standard_code") or "").strip()
     name = str(item.get("source_name") or item.get("standard_name") or "").strip()
     official_source = str(item.get("official_source") or "").strip()
@@ -62,14 +62,14 @@ def is_verified_standard_metadata(item: Dict[str, Any]) -> bool:
     )
 
 
-def _string_list(value: Any) -> List[str]:
+def _string_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         values = value
     elif value is None:
         values = []
     else:
         values = [value]
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for raw in values:
         text = str(raw or "").strip()
@@ -80,10 +80,10 @@ def _string_list(value: Any) -> List[str]:
     return out
 
 
-def build_project_applicable_standards_manifest(sections: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def build_project_applicable_standards_manifest(sections: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Build the per-project standard register from verified chapter-level readback only."""
-    records: Dict[str, Dict[str, Any]] = {}
-    rejected: Dict[str, Dict[str, Any]] = {}
+    records: dict[str, dict[str, Any]] = {}
+    rejected: dict[str, dict[str, Any]] = {}
     for section in sections or []:
         if not isinstance(section, dict):
             continue
@@ -146,8 +146,8 @@ def build_project_applicable_standards_manifest(sections: Iterable[Dict[str, Any
     }
 
 
-def extract_standard_codes(text: Any) -> List[str]:
-    out: List[str] = []
+def extract_standard_codes(text: Any) -> list[str]:
+    out: list[str] = []
     seen: set[str] = set()
     for match in _STANDARD_CODE_RE.findall(str(text or "")):
         code = re.sub(r"\s+", " ", str(match).strip().upper())
@@ -168,12 +168,12 @@ _canonical_standard_code = canonical_standard_code
 def filter_evidence_to_verified_standard_codes(
     lines: Iterable[Any],
     verified_codes: Iterable[Any],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Remove evidence lines that cite a standard outside the verified project allowlist."""
     allowed = {canonical_standard_code(code) for code in verified_codes}
     allowed.discard("")
-    kept: List[str] = []
-    dropped: List[Dict[str, Any]] = []
+    kept: list[str] = []
+    dropped: list[dict[str, Any]] = []
     for raw in lines or []:
         line = str(raw or "").strip()
         if not line:
@@ -191,9 +191,9 @@ def filter_evidence_to_verified_standard_codes(
     }
 
 
-def standard_citation_directive(verified_metadata: Iterable[Dict[str, Any]]) -> str:
+def standard_citation_directive(verified_metadata: Iterable[dict[str, Any]]) -> str:
     """Return an explicit writer constraint derived only from verified metadata."""
-    labels: List[str] = []
+    labels: list[str] = []
     seen: set[str] = set()
     for row in verified_metadata or []:
         if not isinstance(row, dict) or not is_verified_standard_metadata(row):
@@ -220,7 +220,7 @@ def standard_citation_directive(verified_metadata: Iterable[Dict[str, Any]]) -> 
 def replace_unverified_standard_citations(
     text: Any,
     verified_codes: Iterable[Any],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Fail-safe sanitization for model-invented or stale standard identifiers.
 
     The surrounding requirement is retained, but the unverified identifier is
@@ -230,7 +230,7 @@ def replace_unverified_standard_citations(
     allowed = {canonical_standard_code(code) for code in verified_codes}
     allowed.discard("")
     source = str(text or "")
-    removed: List[str] = []
+    removed: list[str] = []
 
     def _replace(match: re.Match[str]) -> str:
         code = re.sub(r"\s+", " ", str(match.group(0) or "").strip().upper())
@@ -249,16 +249,16 @@ def replace_unverified_standard_citations(
 
 
 def audit_standard_citations(
-    sections: Iterable[Dict[str, Any]],
-    manifest: Dict[str, Any],
-) -> Dict[str, Any]:
+    sections: Iterable[dict[str, Any]],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
     verified_codes = {
         canonical_standard_code((row.get("standard_code_and_name") or {}).get("code"))
         for row in (manifest.get("verified_standards") or [])
         if isinstance(row, dict)
     }
     verified_codes.discard("")
-    violations: List[Dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
     for section in sections or []:
         if not isinstance(section, dict):
             continue
@@ -291,6 +291,7 @@ def audit_standard_citations(
     return {
         "ok": not violations,
         "verified_standard_count": len(verified_codes),
+        "verified_standard_codes": sorted(verified_codes),
         "violation_count": len(violations),
         "violations": violations,
     }

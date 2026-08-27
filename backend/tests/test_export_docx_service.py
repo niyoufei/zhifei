@@ -63,13 +63,32 @@ def _valid_indexes(
             "standards": [
                 {
                     "filename": "规范.pdf",
-                    "standard_code": None,
-                    "standard_codes": [],
-                    "official_registry_status": "not_verified",
+                    "sha256": "a" * 64,
+                    "extract_text_sha256": "b" * 64,
+                    "text_status": "indexed",
+                    "standard_code": "GB 50000-2020",
+                    "standard_codes": ["GB 50000-2020"],
+                    "primary_identity_status": "identified",
+                    "official_registry_status": "verified_clause_source",
+                    "official_registry": {
+                        "status": "verified_clause_source",
+                        "standard_code": "GB 50000-2020",
+                    },
                     "source_integrity_status": "verified",
+                    "clause_evidence_eligible": True,
+                    "clause_evidence_source": "ingested_standard_text",
+                    "registry_metadata_used_as_clause_evidence": False,
+                    "page_anchors": [
+                        {
+                            "page": 1,
+                            "text_sha256": "c" * 64,
+                            "evidence_eligible": True,
+                        }
+                    ],
                 }
             ],
             "indexed_standard_count": 1,
+            "official_registry_verified_count": 1,
             "integrity_rejection_count": 0,
             "invalid_identity_count": 0,
             "missing_text_or_ocr_count": 0,
@@ -152,7 +171,13 @@ def _formal_source_fields(
     }
 
 
-def _passing_complete_delivery_gate() -> dict:
+def _passing_complete_delivery_gate(
+    *,
+    standard_index: dict | None = None,
+    standard_audit: dict | None = None,
+) -> dict:
+    standard_index = standard_index or {"receipt": "current-standard-index"}
+    standard_audit = standard_audit or {"receipt": "current-standard-audit"}
     checks = []
     for name in sorted(export_docx_service._DIRECT_EXPORT_REQUIRED_GATE_CHECKS):
         row = {"name": name, "pass": True}
@@ -160,11 +185,31 @@ def _passing_complete_delivery_gate() -> dict:
             "formal_project_parameters",
             "formal_parameter_body_binding",
             "independent_model_review",
+            "verified_standards",
         }:
             row["required"] = True
+        if name == "verified_standards":
+            row.update(
+                {
+                    "standard_audit_digest": (
+                        export_docx_service.canonical_export_digest(
+                            standard_audit
+                        )
+                    ),
+                    "standard_index_digest": (
+                        export_docx_service.canonical_export_digest(
+                            standard_index
+                        )
+                    ),
+                    "audit_verified_standard_codes": ["GB_50000_2020"],
+                    "index_verified_standard_codes": ["GB_50000_2020"],
+                    "missing_verified_standard_codes": [],
+                }
+            )
         checks.append(row)
     core = {
         "schema_version": "delivery-quality-gate-v1",
+        "formal_contract_version": "formal-evidence-v2",
         "strict": True,
         "delivery_allowed": True,
         "checks": checks,
@@ -214,7 +259,10 @@ def passing_formal_delivery_gate(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
     def _build_gate(**kwargs):
         calls.append(kwargs)
-        return _passing_complete_delivery_gate()
+        return _passing_complete_delivery_gate(
+            standard_index=kwargs.get("standard_index"),
+            standard_audit=kwargs.get("standard_audit"),
+        )
 
     monkeypatch.setattr(
         "backend.zhifei_autoplan.delivery_quality.build_delivery_quality_gate",
@@ -399,6 +447,7 @@ def test_execute_export_docx_request_builds_payload_and_updates_job(
     rebuilt = passing_formal_delivery_gate[0]
     assert rebuilt["sections"] == exported["sections"]
     assert rebuilt["cross_index"] == exported["cross_index"]
+    assert rebuilt["standard_index"] == exported["standard_index"]
     assert rebuilt["formal_delivery_required"] is True
     assert rebuilt["model_review_required"] is True
 
@@ -832,16 +881,17 @@ def _approved_not_applicable_empty_indexes() -> dict:
     }
 
 
-def test_formal_indexes_allow_approved_not_applicable_focus_without_rows() -> None:
+def test_formal_indexes_require_standard_when_drawing_is_not_applicable() -> None:
     indexes = _approved_not_applicable_empty_indexes()
     export_docx_service._validate_export_indexes(
         indexes,
         boq_focus={"must_cover_keywords": ["氧气瓶"]},
     )
-    export_docx_service._validate_formal_export_indexes(
-        indexes,
-        project_id="P-NA",
-    )
+    with pytest.raises(ValueError, match="direct_export_standard_index_incomplete"):
+        export_docx_service._validate_formal_export_indexes(
+            indexes,
+            project_id="P-NA",
+        )
 
 
 def test_formal_indexes_require_complete_rows_when_any_focus_is_required() -> None:
@@ -878,8 +928,12 @@ def test_direct_export_binding_detects_current_index_tampering() -> None:
         **_formal_source_fields("P-BIND", sections=sections),
         "sections": sections,
     }
-    gate = _passing_complete_delivery_gate()
     indexes = _valid_indexes(project_id="P-BIND")
+    standard_audit = {"ok": True, "receipt": "current-standard-audit"}
+    gate = _passing_complete_delivery_gate(
+        standard_index=indexes["standard_index"],
+        standard_audit=standard_audit,
+    )
     quality = _passing_direct_quality()
     quality["delivery_quality_gate"] = gate
     payload = {
@@ -891,6 +945,7 @@ def test_direct_export_binding_detects_current_index_tampering() -> None:
         "plan_consistency": {"ok": True},
         "quality_checks": quality,
         **indexes,
+        "standard_citation_audit": standard_audit,
         "delivery_quality_gate": gate,
         "requirement_evidence_matrix": {
             "matrix_digest": _empty_requirement_plan()["matrix_digest"]
