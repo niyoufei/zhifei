@@ -5,6 +5,7 @@ import concurrent.futures
 import hashlib
 import hmac
 import json
+import logging
 import multiprocessing
 import os
 import shutil
@@ -12,18 +13,25 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Annotated, Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pypdf import PdfReader
 
 from backend.zhifei_autoplan.case_library_service import CASE_LIBRARY_SCOPE
-from backend.zhifei_autoplan.image_library import IMAGE_LIBRARY_SCOPE, normalize_text_list
-from backend.zhifei_autoplan.project_types import normalize_project_type
+from backend.zhifei_autoplan.image_library import (
+    IMAGE_LIBRARY_SCOPE,
+    normalize_text_list,
+)
+from backend.zhifei_autoplan.ingest_tags import (
+    classify_document_tags,
+    normalize_source_hint,
+)
 from backend.zhifei_autoplan.job_store import (
     JobLeaseLostError,
     acquire_job_lease,
@@ -36,15 +44,17 @@ from backend.zhifei_autoplan.job_store import (
     transition_job,
 )
 from backend.zhifei_autoplan.local_job_queue import submit_local_job
+from backend.zhifei_autoplan.project_types import normalize_project_type
 from backend.zhifei_autoplan.runtime_events import append_runtime_event
-from backend.zhifei_autoplan.ingest_tags import (
-    classify_document_tags,
-    normalize_source_hint,
-)
+
+logger = logging.getLogger(__name__)
 
 try:
-    from backend.zhifei_autoplan.local_adapter_shim import normalize_input as _local_adapter_normalize_input
+    from backend.zhifei_autoplan.local_adapter_shim import (
+        normalize_input as _local_adapter_normalize_input,
+    )
 except Exception:
+    logger.warning("local adapter normalizer unavailable; ingest will remain unnormalized", exc_info=True)
     _local_adapter_normalize_input = None
 
 router = APIRouter(prefix="/ingest", tags=["文档解析"])
@@ -55,7 +65,7 @@ PARSE_CACHE_DIR = Path(
 INGEST_SPOOL_DIR = Path(
     os.environ.get("ZF_AUTOPLAN_INGEST_SPOOL_DIR", "backend/data/autoplan/ingest_spool")
 )
-PARSER_VERSION = "2026.08.runtime-v2"
+PARSER_VERSION = "2026.08.runtime-v3-page-ocr"
 PARSE_CACHE_TEXT_SIDECAR_BYTES = 256 * 1024
 FILE_ID_SEARCH_ROOTS = (
     Path("backend/data/uploads"),
@@ -113,11 +123,11 @@ def _discard_parse_executor(
                 try:
                     process.terminate()
                 except Exception:
-                    pass
+                    logger.warning("native parser worker could not be terminated", exc_info=True)
     try:
         executor.shutdown(wait=False, cancel_futures=True)
     except Exception:
-        pass
+        logger.warning("native parser executor shutdown failed", exc_info=True)
 
 
 async def _run_isolated_process(
@@ -137,7 +147,7 @@ async def _run_isolated_process(
         raise
 
 
-async def _extract_text_path_bounded(ext: str, path: Path, total_bytes: int) -> Dict[str, Any]:
+async def _extract_text_path_bounded(ext: str, path: Path, total_bytes: int) -> dict[str, Any]:
     if ext in {"pdf", "doc", "docx"} and int(total_bytes) >= 1024 * 1024:
         return await _run_isolated_process(
             _extract_text_path,
@@ -167,7 +177,7 @@ def _resolve_workspace_context(
     workspace_dir: str | None = None,
     *,
     write_guard: Callable[..., Any] | None = None,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     if workspace_dir:
         root = Path(workspace_dir)
     elif session_id:
@@ -179,7 +189,7 @@ def _resolve_workspace_context(
     return {"session_id": str(session_id or ""), "workspace_dir": str(root)}
 
 
-def _attach_local_adapter_ingest_result(result: Dict[str, Any], project_id: str | None = None) -> Dict[str, Any]:
+def _attach_local_adapter_ingest_result(result: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
     if _local_adapter_normalize_input is None or not isinstance(result, dict):
         return result
     try:
@@ -199,10 +209,20 @@ def _attach_local_adapter_ingest_result(result: Dict[str, Any], project_id: str 
             "source_file_count": len(envelope.get("source_files") or []),
             "missing_params": envelope.get("missing_params") or [],
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - adapter boundary emits a stable fail-closed issue
+        logger.warning(
+            "local adapter input normalization failed: %s",
+            type(exc).__name__,
+        )
         result["local_adapter"] = {
             "status": "normalizer_error",
-            "issues": [{"code": "LOCAL_ADAPTER_INPUT_NORMALIZE_FAILED", "message": repr(exc)}],
+            "issues": [
+                {
+                    "code": "LOCAL_ADAPTER_INPUT_NORMALIZE_FAILED",
+                    "message": "local adapter input normalization failed",
+                    "error_type": type(exc).__name__,
+                }
+            ],
         }
     return result
 
@@ -211,7 +231,7 @@ def workspace_paths(
     workspace_dir: str | Path,
     *,
     write_guard: Callable[..., Any] | None = None,
-) -> Dict[str, Path]:
+) -> dict[str, Path]:
     root = Path(workspace_dir)
     paths = {
         "uploads": root / "uploads",
@@ -232,7 +252,7 @@ def workspace_paths(
     return paths
 
 
-def _extract_text_path(ext: str, path: Path) -> Dict[str, Any]:
+def _extract_text_path(ext: str, path: Path) -> dict[str, Any]:
     if ext in {"txt", "md"}:
         text = path.read_text(encoding="utf-8", errors="ignore")
         return {
@@ -285,8 +305,7 @@ def _extract_text_path(ext: str, path: Path) -> Dict[str, Any]:
                     temp_dir,
                     str(path),
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 timeout=60,
                 check=False,
             )
@@ -302,7 +321,7 @@ def _extract_text_path(ext: str, path: Path) -> Dict[str, Any]:
 
 def _parse_cache_path(digest: str) -> Path:
     version_digest = hashlib.sha256(PARSER_VERSION.encode("utf-8")).hexdigest()[:12]
-    return PARSE_CACHE_DIR / f"{str(digest)}.{version_digest}.json"
+    return PARSE_CACHE_DIR / f"{digest!s}.{version_digest}.json"
 
 
 def _parse_cache_text_path(digest: str) -> Path:
@@ -311,7 +330,7 @@ def _parse_cache_text_path(digest: str) -> Path:
     return _parse_cache_path(digest).with_suffix(".txt")
 
 
-def _resolve_ingested_files(file_ids: List[str] | None) -> list[tuple[str, Path]]:
+def _resolve_ingested_files(file_ids: list[str] | None) -> list[tuple[str, Path]]:
     """Resolve full-SHA file IDs to content-verified local upload paths."""
 
     resolved: list[tuple[str, Path]] = []
@@ -344,14 +363,14 @@ def _resolve_ingested_files(file_ids: List[str] | None) -> list[tuple[str, Path]
     return resolved
 
 
-def resolve_ingested_file_ids(file_ids: List[str] | None) -> list[str]:
+def resolve_ingested_file_ids(file_ids: list[str] | None) -> list[str]:
     """Resolve full-SHA file IDs to verified local upload paths."""
 
     return [str(path) for _digest, path in _resolve_ingested_files(file_ids)]
 
 
 def resolve_ingested_tender_sources(
-    file_ids: List[str] | None,
+    file_ids: list[str] | None,
 ) -> list[dict[str, str | None]]:
     """Resolve Tender sources and reuse only the current validated text cache."""
 
@@ -369,13 +388,14 @@ def resolve_ingested_tender_sources(
     return sources
 
 
-def _load_parse_cache(digest: str) -> Dict[str, Any] | None:
+def _load_parse_cache(digest: str) -> dict[str, Any] | None:
     path = _parse_cache_path(digest)
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, OSError, UnicodeError):
+        logger.warning("ignoring unreadable ingest parse cache: %s", path, exc_info=True)
         return None
     if (
         not isinstance(data, dict)
@@ -425,7 +445,7 @@ def _load_parse_cache(digest: str) -> Dict[str, Any] | None:
 
 def _save_parse_cache(
     digest: str,
-    parsed: Dict[str, Any],
+    parsed: dict[str, Any],
     *,
     write_guard: Callable[..., Any] | None = None,
 ) -> None:
@@ -490,7 +510,7 @@ def _save_parse_cache(
         temp_text.unlink(missing_ok=True)
 
 
-def _extract_text_bytes(ext: str, content: bytes) -> Dict[str, Any]:
+def _extract_text_bytes(ext: str, content: bytes) -> dict[str, Any]:
     if ext in {"txt", "md"}:
         text = content.decode("utf-8", errors="ignore")
         return {
@@ -530,8 +550,8 @@ async def _persist_upload_file(
     _guarded_write(write_guard, lambda: None)
     try:
         await uf.seek(0)
-    except Exception:
-        pass
+    except (OSError, ValueError):
+        logger.warning("upload stream could not be rewound before persistence", exc_info=True)
     try:
         with temp_path.open("wb") as fh:
             while True:
@@ -552,8 +572,8 @@ async def _persist_upload_file(
                 fh.write(chunk)
         try:
             await uf.seek(0)
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            logger.warning("upload stream could not be rewound after persistence", exc_info=True)
         if total_bytes <= 0:
             return None, None, 0
         digest_hex = digest.hexdigest()
@@ -666,6 +686,7 @@ def _make_preview_image(src_path: Path, dst_path: Path, max_width: int = 1400) -
             im.save(dst_path, format="PNG")
         return str(dst_path)
     except Exception:
+        logger.warning("image preview generation failed for %s", src_path, exc_info=True)
         return None
 
 
@@ -682,7 +703,7 @@ def _make_preview_pdf_first_page(src_path: Path, dst_path: Path, scale: float = 
         try:
             pdf.close()
         except Exception:
-            pass
+            logger.warning("PDF preview source could not be closed: %s", src_path, exc_info=True)
         if im.width > max_width:
             from PIL import Image
 
@@ -691,10 +712,11 @@ def _make_preview_pdf_first_page(src_path: Path, dst_path: Path, scale: float = 
         im.save(dst_path, format="PNG")
         return str(dst_path)
     except Exception:
+        logger.warning("PDF preview generation failed for %s", src_path, exc_info=True)
         return None
 
 
-async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> str | None:
+async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> Any | None:
     """
     Best-effort OCR. Only runs when tesseract is installed and extracted text is likely empty.
     """
@@ -704,12 +726,13 @@ async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> str | Non
         return None
     try:
         from backend.zhifei_autoplan.ocr_runtime import (
-            is_tesseract_available,
             guess_ocr_lang,
+            is_tesseract_available,
             is_text_probably_scanned,
             ocr_pdf_path,
         )
     except Exception:
+        logger.warning("OCR runtime unavailable", exc_info=True)
         return None
     if not is_tesseract_available():
         return None
@@ -719,12 +742,13 @@ async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> str | Non
             return None
         lang = guess_ocr_lang(prefer_chinese=True)
         res = await asyncio.to_thread(ocr_pdf_path, str(path), 10, 2.2, lang, True)
-        return res.text if res and res.text else None
+        return res if res and (res.text or res.page_texts) else None
 
     if ext in {"png", "jpg", "jpeg"}:
         try:
             import pytesseract
             from PIL import Image
+
             from backend.zhifei_autoplan.ocr_runtime import guess_ocr_lang
 
             lang = guess_ocr_lang(prefer_chinese=True)
@@ -736,11 +760,53 @@ async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> str | Non
             txt = await asyncio.to_thread(_ocr)
             return txt.strip() if txt and txt.strip() else None
         except Exception:
+            logger.warning("image OCR failed for %s", path, exc_info=True)
             return None
     return None
 
+
+def _merge_pdf_ocr_pages(
+    extracted_text: str | None,
+    ocr_page_texts: Any,
+    declared_pages: Any,
+) -> tuple[str, bool]:
+    """Overlay prefix-page OCR without changing source PDF page ordinals.
+
+    PDF extraction already emits one form-feed-delimited entry per source page.
+    OCR may cover only a bounded prefix, so it must be merged into those same
+    page slots.  Appending a second OCR document would make page numbers and
+    evidence offsets unverifiable.
+    """
+
+    try:
+        page_count = int(declared_pages)
+    except (TypeError, ValueError):
+        return str(extracted_text or ""), False
+    if page_count <= 0:
+        return str(extracted_text or ""), False
+
+    base_pages = str(extracted_text or "").split("\f")
+    if len(base_pages) != page_count:
+        return str(extracted_text or ""), False
+    if not isinstance(ocr_page_texts, (list, tuple)):
+        return str(extracted_text or ""), False
+
+    merged_pages: list[str] = []
+    for index, base_page in enumerate(base_pages):
+        base = str(base_page or "").strip()
+        ocr = (
+            str(ocr_page_texts[index] or "").strip()
+            if index < len(ocr_page_texts)
+            else ""
+        )
+        if ocr and ocr not in base:
+            merged_pages.append(f"{base}\n\n{ocr}".strip() if base else ocr)
+        else:
+            merged_pages.append(base)
+    return "\n\n\f\n\n".join(merged_pages), True
+
 async def _handle_upload(
-    files: List[UploadFile],
+    files: list[UploadFile],
     project_id: str | None = None,
     source_hint: str | None = None,
     session_id: str | None = None,
@@ -848,7 +914,12 @@ async def _handle_upload(
         else:
             try:
                 parsed = await _extract_text_path_bounded(ext, out_path, total_bytes)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - parser boundary rejects and records the file
+                logger.warning(
+                    "ingest parser rejected %s: %s",
+                    uf.filename,
+                    type(exc).__name__,
+                )
                 rejected.append(
                     {
                         "filename": uf.filename,
@@ -864,13 +935,13 @@ async def _handle_upload(
             parsed_meta = None
             if parsed.get("extract_text") is None and ext not in {"txt", "md", "pdf", "doc", "docx"}:
                 try:
-                    def _parse_unified() -> Dict[str, Any]:
+                    def _parse_unified(parse_path: Path) -> dict[str, Any]:
                         from modules.parser.parser_unify import UnifiedParser
 
-                        return UnifiedParser(str(out_path)).parse()
+                        return UnifiedParser(str(parse_path)).parse()
 
                     uret = await asyncio.wait_for(
-                        asyncio.to_thread(_parse_unified),
+                        asyncio.to_thread(_parse_unified, out_path),
                         timeout=PARSE_TIMEOUT_SECONDS,
                     )
                     parsed_type = uret.get("type")
@@ -882,19 +953,53 @@ async def _handle_upload(
                         meta_text = _meta_to_text(parsed_type, parsed_meta)
                         if meta_text.strip():
                             parsed["extract_text"] = meta_text
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - optional parser failure is recorded in metadata
+                    logger.warning(
+                        "unified parser failed for %s: %s",
+                        uf.filename,
+                        type(exc).__name__,
+                    )
                     parsed_meta = {"error_type": type(exc).__name__}
 
             # OCR is cached with the parser result so repeated 268 MiB imports
             # do not repeat the most expensive extraction path.
             try:
-                ocr_text = await _try_ocr(out_path, ext, parsed.get("extract_text"))
-                if ocr_text:
-                    base = (parsed.get("extract_text") or "").strip()
-                    merged = (base + "\n\n" + ocr_text).strip() if base else ocr_text.strip()
-                    parsed["extract_text"] = merged
-            except Exception:
-                pass
+                ocr_result = await _try_ocr(
+                    out_path,
+                    ext,
+                    parsed.get("extract_text"),
+                )
+                if ocr_result:
+                    if ext == "pdf" and hasattr(ocr_result, "page_texts"):
+                        merged, mapped = _merge_pdf_ocr_pages(
+                            parsed.get("extract_text"),
+                            getattr(ocr_result, "page_texts", ()),
+                            parsed.get("pages"),
+                        )
+                        parsed["ocr_pages"] = int(
+                            getattr(ocr_result, "pages", 0) or 0
+                        )
+                        parsed["ocr_page_mapping"] = (
+                            "source_page_prefix" if mapped else "unavailable"
+                        )
+                        if mapped:
+                            parsed["extract_text"] = merged
+                    elif isinstance(ocr_result, str):
+                        base = str(parsed.get("extract_text") or "").strip()
+                        parsed["extract_text"] = (
+                            f"{base}\n\n{ocr_result.strip()}".strip()
+                            if base
+                            else ocr_result.strip()
+                        )
+                    parsed["text_bytes"] = len(
+                        str(parsed.get("extract_text") or "").encode("utf-8")
+                    )
+            except Exception as exc:  # noqa: BLE001 - OCR boundary preserves source-page text on failure
+                logger.warning(
+                    "OCR enrichment failed for %s: %s",
+                    uf.filename,
+                    type(exc).__name__,
+                )
             await asyncio.to_thread(
                 _save_parse_cache,
                 digest,
@@ -976,7 +1081,12 @@ async def _handle_upload(
                 "filename": str(uf.filename or ""),
             }
             preview_path = None
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - preview boundary records a stable warning
+            logger.warning(
+                "preview generation failed for %s: %s",
+                uf.filename,
+                type(exc).__name__,
+            )
             preview_warning = {
                 "code": "PDF_PREVIEW_UNAVAILABLE",
                 "message": "PDF 首页预览生成失败，正文解析结果已保留。",
@@ -1049,11 +1159,11 @@ async def _handle_upload(
         }
         records.append(rec)
 
-        def _append_audit_record() -> None:
+        def _append_audit_record(record: dict[str, Any]) -> None:
             with audit_file.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        _guarded_write(_write_guard, _append_audit_record)
+        _guarded_write(_write_guard, _append_audit_record, rec)
 
     if not records:
         if rejected and all(item.get("code") == "EMPTY_FILE" for item in rejected):
@@ -1255,7 +1365,12 @@ def _process_spooled_entry(
             "warnings": [],
             "cache_hits": 0,
         }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - per-file worker returns a stable rejection envelope
+        logger.warning(
+            "ingest file worker failed for %s: %s",
+            filename,
+            type(exc).__name__,
+        )
         if not _running_lease_active():
             return {"cancelled": True, "index": index}
         elapsed_seconds = round(time.monotonic() - started, 3)
@@ -1624,7 +1739,8 @@ def _run_ingest_job(
         if _status() == "cancel_requested":
             _mark_cancelled(completed=locals().get("completed", 0))
         return
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - job worker persists a stable terminal projection
+        logger.warning("ingest job worker failed: %s", type(exc).__name__)
         if _cancel_requested():
             _mark_cancelled(completed=locals().get("completed", 0))
         else:
@@ -1665,7 +1781,7 @@ def _run_ingest_job(
 
 @router.post("/jobs")
 async def create_ingest_job(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_id: str | None = None,
     source_hint: str | None = None,
     session_id: str | None = None,
@@ -1808,7 +1924,7 @@ async def ping():
 
 @router.post("/upload")
 async def upload(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_id: str | None = None,
     source_hint: str | None = None,
     session_id: str | None = None,
@@ -1848,7 +1964,7 @@ async def upload(
 
 @router.post("/ingest")
 async def ingest(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_id: str | None = None,
     source_hint: str | None = None,
     session_id: str | None = None,

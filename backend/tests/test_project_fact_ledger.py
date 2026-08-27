@@ -163,3 +163,87 @@ def test_eligible_boq_schedule_remains_available_as_lower_priority_fact():
 
     assert ledger["facts"]["planned_duration_days"]["value"] == 180
     assert ledger["facts"]["planned_duration_days"]["source_type"] == "boq"
+    assert ledger["facts"]["planned_duration_days"]["status"] == "derived"
+
+
+def test_tender_source_span_restores_verified_150_day_duration_with_locator():
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={"system_default_project_facts": {"planned_duration_days": 120}},
+        tender={
+            "items": [
+                {
+                    "dimension": "进度节点",
+                    "source_spans": [
+                        {
+                            "file_name": "招标文件.pdf",
+                            "page": 0,
+                            "start": 5207,
+                            "end": 5209,
+                            "snippet": "2.7 合同估算价：约 2234.62 万元\n2.8 计划工期：150 日历天",
+                        }
+                    ],
+                }
+            ]
+        },
+        boq_wbs_cpm={
+            "summary": {
+                "estimated_duration_days": 180,
+                "schedule_fact_eligible": True,
+            }
+        },
+    )
+
+    fact = ledger["facts"]["planned_duration_days"]
+    assert fact["value"] == 150
+    assert fact["unit"] == "天"
+    assert fact["status"] == "verified"
+    assert fact["source_type"] == "tender"
+    assert fact["evidence"]["locator"] == "tender_matrix.items[0].source_spans[0]"
+    assert fact["evidence"]["page"] == 0
+    assert "snippet" not in fact["evidence"]
+    assert len(fact["evidence"]["snippet_sha256"]) == 64
+    assert {row["overridden_source_id"] for row in ledger["overridden_candidates"]} == {
+        "boq-deterministic-schedule",
+        "system-project-fact-defaults",
+    }
+
+
+def test_system_defaults_are_provisional_and_never_enter_prompt_requirements():
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={
+            "system_default_project_facts": {
+                "planned_duration_days": {"value": 120, "unit": "天", "status": "approved"},
+                "resource_peak": {"value": 80, "unit": "人"},
+            }
+        },
+        tender={},
+        boq_wbs_cpm={},
+    )
+
+    assert ledger["facts"]["planned_duration_days"]["status"] == "provisional"
+    assert ledger["facts"]["resource_peak"]["status"] == "provisional"
+    assert ledger["formal_parameter_readiness"]["ready"] is False
+    assert "planned_duration_days" in ledger["formal_parameter_readiness"]["provisional_fields"]
+    assert all("总工期=120" not in line for line in project_fact_prompt_requirements(ledger))
+
+
+def test_all_confirmed_formal_parameters_are_ready():
+    approved = {
+        "planned_duration_days": {"value": 150, "unit": "天"},
+        "resource_peak": {"value": 80, "unit": "人"},
+        "critical_interval_days": {"value": 3, "unit": "天"},
+        "risk_inspection_frequency": "2次/日",
+        "quality_threshold": "按工序图纸及规范",
+        "deviation_action_deadline": "4小时",
+    }
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={"approved_project_fact_resolutions": approved},
+        tender={},
+        boq_wbs_cpm={},
+    )
+
+    readiness = ledger["formal_parameter_readiness"]
+    assert readiness["ready"] is True
+    assert readiness["missing_fields"] == []
+    assert readiness["provisional_fields"] == []
+    assert all(row["status"] == "approved" for row in ledger["facts"].values())

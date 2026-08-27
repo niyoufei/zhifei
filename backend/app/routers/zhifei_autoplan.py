@@ -1,63 +1,84 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
 import tempfile
 import threading
-from typing import Any, Dict, List
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Header, BackgroundTasks
+import jwt
+from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
-from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
-from backend.zhifei_autoplan.kg_store import save_kg_bytes, list_kg, set_active_kg, get_active_kg
-from backend.zhifei_autoplan.kg_runtime import search_kg
-from backend.zhifei_autoplan.tender_store import save_tender_matrix, load_tender_matrix
+from backend.auth_store import (
+    count_user_actions_since,
+    get_user_by_id,
+    log_charge,
+    update_balance,
+)
 from backend.zhifei_autoplan.boq_store import load_boq_data, save_boq_data
-from backend.auth_store import get_user_by_id, update_balance, log_charge, count_user_actions_since
-import jwt
-import os
+from backend.zhifei_autoplan.exporter import (
+    export_autoplan_compare_docx,
+    export_autoplan_docx,
+    export_autoplan_docx_from_file,
+)
+from backend.zhifei_autoplan.job_store import (
+    JobLeaseLostError,
+    acquire_job_lease,
+    cleanup_jobs,
+    create_job,
+    get_job,
+    heartbeat_job,
+    job_lease_active,
+    list_jobs,
+    run_with_job_lease,
+    transition_job,
+)
+from backend.zhifei_autoplan.kg_runtime import search_kg
+from backend.zhifei_autoplan.kg_store import (
+    get_active_kg,
+    list_kg,
+    save_kg_bytes,
+    set_active_kg,
+)
+from backend.zhifei_autoplan.local_job_queue import submit_isolated_job
+from backend.zhifei_autoplan.model_reliability import classify_provider_error
+from backend.zhifei_autoplan.optimizer import optimize_sections
 from backend.zhifei_autoplan.orchestrator import (
     new_provider_admission_run_coordinator,
     probe_provider_candidate,
     run_autoplan,
 )
+from backend.zhifei_autoplan.output_artifacts import sanitize_output_payload
+from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
+from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
+from backend.zhifei_autoplan.plan_store import load_plan, save_plan
 from backend.zhifei_autoplan.provider_runtime import (
     ProviderRoutingConfigurationError,
     apply_server_provider_routing,
     build_server_provider_admission_candidates,
     server_provider_admission_required_roles,
 )
-from backend.zhifei_autoplan.model_reliability import classify_provider_error
-from pathlib import Path
-import json
-from backend.zhifei_autoplan.exporter import export_autoplan_docx_from_file, export_autoplan_docx, export_autoplan_compare_docx
-from fastapi.responses import FileResponse
-from backend.zhifei_autoplan.job_store import (
-    JobLeaseLostError,
-    acquire_job_lease,
-    create_job,
-    get_job,
-    heartbeat_job,
-    job_lease_active,
-    list_jobs,
-    cleanup_jobs,
-    run_with_job_lease,
-    transition_job,
-)
-from backend.zhifei_autoplan.local_job_queue import submit_isolated_job
 from backend.zhifei_autoplan.runtime_events import append_runtime_event
-from backend.zhifei_autoplan.output_artifacts import sanitize_output_payload
-from backend.zhifei_autoplan.plan_store import save_plan, load_plan
-from backend.zhifei_autoplan.optimizer import optimize_sections
+from backend.zhifei_autoplan.tender_store import load_tender_matrix, save_tender_matrix
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
+
+logger = logging.getLogger(__name__)
 
 try:
     from backend.zhifei_autoplan.local_adapter_shim import (
         block_export_response as _local_adapter_block_export_response,
+    )
+    from backend.zhifei_autoplan.local_adapter_shim import (
         map_output as _local_adapter_map_output,
     )
 except Exception:
+    logger.warning("local adapter shim unavailable; exports remain blocked", exc_info=True)
     _local_adapter_block_export_response = None
     _local_adapter_map_output = None
 
@@ -67,7 +88,7 @@ JWT_ALG = "HS256"
 COST_PER_JOB = int(os.environ.get("ZF_JOB_COST", "1"))
 
 
-def _require_generation_sources(payload: Dict[str, Any], project_id: str | None) -> None:
+def _require_generation_sources(payload: dict[str, Any], project_id: str | None) -> None:
     if bool(payload.get("dry_run")):
         return
     if not str(project_id or "").strip():
@@ -96,7 +117,7 @@ def _require_generation_sources(payload: Dict[str, Any], project_id: str | None)
         )
 
 
-def _route_generation_or_503(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _route_generation_or_503(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         routed = apply_server_provider_routing(payload)
         # This compatibility route exports deterministic DOCX directly and
@@ -117,7 +138,7 @@ def _route_generation_or_503(payload: Dict[str, Any]) -> Dict[str, Any]:
         ) from exc
 
 
-async def _admit_server_provider_chain(payload: Dict[str, Any]) -> tuple[Any, List[Dict[str, Any]]]:
+async def _admit_server_provider_chain(payload: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
     """Freshly admit the server-owned chain and return ephemeral text credentials.
 
     The returned credentials live only in memory.  Callers must never place the
@@ -149,7 +170,7 @@ async def _admit_server_provider_chain(payload: Dict[str, Any]) -> tuple[Any, Li
         for row in (snapshot.get("admitted_chain") or [])
         if isinstance(row, dict) and str(row.get("identity_digest") or "")
     }
-    chain: List[Dict[str, Any]] = []
+    chain: list[dict[str, Any]] = []
     for candidate in coordinator.bound_candidates:
         if not str(candidate.role or "").startswith("text_"):
             continue
@@ -186,7 +207,7 @@ def _stable_job_error(
     raw = str(exc or "")
     try:
         parsed = json.loads(raw)
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         parsed = None
     if isinstance(parsed, dict):
         code = str(parsed.get("code") or "").strip()
@@ -214,35 +235,54 @@ def _stable_job_error(
     )
 
 
-def _local_adapter_issue(code: str, message: str, *, variant_index: int | None = None) -> Dict[str, Any]:
-    issue: Dict[str, Any] = {"code": code, "message": message, "severity": "error"}
+def _local_adapter_issue(code: str, message: str, *, variant_index: int | None = None) -> dict[str, Any]:
+    issue: dict[str, Any] = {"code": code, "message": message, "severity": "error"}
     if variant_index is not None:
         issue["variant_index"] = variant_index
     return issue
 
 
-def _local_adapter_block(issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _local_adapter_block(issues: list[dict[str, Any]]) -> dict[str, Any]:
     if _local_adapter_block_export_response is not None:
         return _local_adapter_block_export_response(issues)
     return {"ok": False, "status": "blocked", "export_allowed": False, "issues": issues}
 
 
-def _local_adapter_gate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _local_adapter_gate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     if _local_adapter_map_output is None:
         return {
             "export_allowed": False,
             "results": results,
             "issues": [_local_adapter_issue("ADAPTER_IMPORT_FAILURE", "local adapter shim import failed")],
         }
-    issues: List[Dict[str, Any]] = []
-    gated_results: List[Dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    gated_results: list[dict[str, Any]] = []
     for idx, result in enumerate(results):
         if not isinstance(result, dict):
             issues.append(_local_adapter_issue("ADAPTER_OUTPUT_INVALID", "variant output is not a dict", variant_index=idx))
             continue
+        delivery_scope = str(result.get("delivery_scope") or "document").strip().lower()
+        formal_document = delivery_scope == "document" and not bool(result.get("dry_run"))
+        delivery_gate = (
+            result.get("delivery_quality_gate")
+            if isinstance(result.get("delivery_quality_gate"), dict)
+            else {}
+        )
+        if formal_document and (
+            result.get("delivery_ready") is not True
+            or delivery_gate.get("delivery_allowed") is not True
+        ):
+            issues.append(
+                _local_adapter_issue(
+                    "FORMAL_DELIVERY_QUALITY_GATE_BLOCKED",
+                    "正式文档未通过参数与证据交付门，已阻止导出。",
+                    variant_index=idx,
+                )
+            )
         try:
             envelope = _local_adapter_map_output(result)
         except Exception:
+            logger.warning("local adapter hook failed for variant %s", idx, exc_info=True)
             issues.append(
                 _local_adapter_issue(
                     "ADAPTER_HOOK_FAILURE",
@@ -268,22 +308,22 @@ def _local_adapter_gate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]
     return {"export_allowed": not issues, "results": gated_results, "issues": issues}
 
 
-def _local_adapter_job_error(issues: List[Dict[str, Any]]) -> str:
+def _local_adapter_job_error(issues: list[dict[str, Any]]) -> str:
     return json.dumps(_local_adapter_block(issues), ensure_ascii=False)
 
 
 def _load_field_alias() -> dict:
     try:
-        from pathlib import Path
         import json
+        from pathlib import Path
         cfg_path = Path("backend/data/autoplan/config.json")
         if cfg_path.exists():
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             alias = cfg.get("job_list_field_alias")
             if isinstance(alias, dict):
                 return {str(k): {str(s) for s in v} for k, v in alias.items() if isinstance(v, list)}
-    except Exception:
-        pass
+    except (AttributeError, json.JSONDecodeError, OSError, TypeError, UnicodeError):
+        logger.warning("job-list field alias configuration unavailable", exc_info=True)
     return {}
 
 
@@ -320,16 +360,16 @@ def _job_list_default_fields() -> set[str]:
     if env_fields:
         return {s.strip() for s in env_fields.split(",") if s.strip()}
     try:
-        from pathlib import Path
         import json
+        from pathlib import Path
         cfg_path = Path("backend/data/autoplan/config.json")
         if cfg_path.exists():
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             fields = cfg.get("job_list_default_fields")
             if isinstance(fields, list) and fields:
                 return {str(s) for s in fields}
-    except Exception:
-        pass
+    except (AttributeError, json.JSONDecodeError, OSError, TypeError, UnicodeError):
+        logger.warning("job-list default field configuration unavailable", exc_info=True)
     return {"job_id", "status", "created_at", "updated_at", "result", "error"}
 
 
@@ -355,8 +395,8 @@ def _auth_user(authorization: str | None):
         if not user:
             raise HTTPException(status_code=401, detail="invalid user")
         return user
-    except Exception:
-        raise HTTPException(status_code=401, detail="invalid token")
+    except (AttributeError, TypeError, ValueError, jwt.PyJWTError) as exc:
+        raise HTTPException(status_code=401, detail="invalid token") from exc
 
 
 def _is_admin(authorization: str | None) -> bool:
@@ -377,19 +417,18 @@ def _charge(user: dict, cost: int, action: str):
 
 def _audit(action: str, user_id: int | None = None, detail: dict | None = None):
     try:
-        from datetime import datetime
         path = Path("backend/data/audit/autoplan.jsonl")
         path.parent.mkdir(parents=True, exist_ok=True)
         rec = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "action": action,
             "user_id": user_id,
             "detail": detail or {},
         }
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError):
+        logger.warning("autoplan audit record could not be persisted", exc_info=True)
 
 
 def _read_audit(
@@ -409,7 +448,8 @@ def _read_audit(
             continue
         try:
             rec = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
+            logger.warning("skipping malformed autoplan audit line", exc_info=True)
             continue
         if action and rec.get("action") != action:
             continue
@@ -440,7 +480,8 @@ def _audit_summary(limit: int = 10000, user_id: int | None = None, by_user: bool
             continue
         try:
             rec = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
+            logger.warning("skipping malformed autoplan audit summary line", exc_info=True)
             continue
         if user_id is not None and rec.get("user_id") != user_id:
             continue
@@ -460,17 +501,14 @@ def _audit_stats_by_day(limit_days: int = 30, user_id: int | None = None):
     lines = path.read_text(encoding="utf-8").splitlines()
     by_day = {}
     total = 0
-    try:
-        from datetime import datetime, timedelta
-        cutoff = (datetime.utcnow() - timedelta(days=limit_days)).isoformat()[:10]
-    except Exception:
-        cutoff = ""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=limit_days)).date().isoformat()
     for line in lines:
         if not line.strip():
             continue
         try:
             rec = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
+            logger.warning("skipping malformed autoplan audit statistics line", exc_info=True)
             continue
         if user_id is not None and rec.get("user_id") != user_id:
             continue
@@ -495,7 +533,7 @@ async def _save_upload(uf: UploadFile) -> str:
 
 @router.post("/tender/parse")
 async def parse_tender(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_id: str | None = None,
     authorization: str | None = Header(default=None),
 ):
@@ -523,7 +561,7 @@ async def parse_tender(
 
 @router.post("/boq/parse")
 async def parse_boq(
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File()],
     project_id: str | None = None,
     authorization: str | None = Header(default=None),
 ):
@@ -555,7 +593,11 @@ async def parse_boq(
 @router.post("/plan/save")
 async def save_plan_api(req: PlanRequest, project_id: str | None = None, authorization: str | None = Header(default=None)):
     user = _auth_user(authorization)
-    path = save_plan(req.model_dump(), project_id=project_id)
+    payload = _inherit_project_fact_plan_fields(
+        req.model_dump(),
+        load_plan(project_id=project_id) or {},
+    )
+    path = save_plan(payload, project_id=project_id)
     _audit("plan_save", user_id=user["id"], detail={"path": path, "project_id": project_id})
     return {"ok": True, "saved_at": path}
 
@@ -573,19 +615,20 @@ class ActivateKGRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     project_id: str | None = None
+    delivery_scope: Literal["document", "chapter_validation"] = "document"
     topic: str
-    outline: List[str] = []
-    requirements: List[str] = []
+    outline: list[str] = []
+    requirements: list[str] = []
     chapter_requirements: dict | None = None
     # Reusable project context is accepted as separate fields so the
     # orchestrator can place it before the dynamic chapter instruction.
-    chapter_summaries: List[dict | str] = []
+    chapter_summaries: list[dict | str] = []
     project_stage_context: str | None = None
-    common_construction_requirements: List[str] = []
+    common_construction_requirements: list[str] = []
     provider: str | None = None
     model: str | None = None
-    provider_chain: List[dict] | None = None
-    providers: List[str] = []
+    provider_chain: list[dict] | None = None
+    providers: list[str] = []
     model_map: dict | None = None
     style: dict | None = None
     variants: int = 1
@@ -602,10 +645,12 @@ class GenerateRequest(BaseModel):
     token_url: str | None = None
     dry_run: bool = False
     generate_images: bool = True
+    project_facts: dict[str, Any] | None = None
+    approved_project_fact_resolutions: dict[str, Any] | None = None
 
 
 class PlanRequest(BaseModel):
-    outline: List[str]
+    outline: list[str]
     style: dict = {}
     variants: int = 1
     chapter_requirements: dict = {}
@@ -616,10 +661,27 @@ class PlanRequest(BaseModel):
     compare_mode: str = "full"
     compare_max_chars: int = 800
     compare_titles: list[str] | None = None
+    project_facts: dict[str, Any] | None = None
+    approved_project_fact_resolutions: dict[str, Any] | None = None
+
+
+_PROJECT_FACT_PLAN_FIELDS = (
+    "project_facts",
+    "approved_project_fact_resolutions",
+)
+
+
+def _inherit_project_fact_plan_fields(payload: dict, plan: dict) -> dict:
+    """Inherit only omitted fact maps; an explicit empty map remains a clear."""
+
+    for field in _PROJECT_FACT_PLAN_FIELDS:
+        if payload.get(field) is None and isinstance(plan.get(field), dict):
+            payload[field] = dict(plan[field])
+    return payload
 
 
 class OptimizeRequest(BaseModel):
-    titles: List[str]
+    titles: list[str]
     instruction: str = "请在保持证据引用的前提下优化本章表达。"
     provider: str | None = None
     model: str | None = None
@@ -755,7 +817,7 @@ def run_legacy_generation_job(job_id: str, payload: dict) -> None:
             seal_failed = False
         except JobLeaseLostError:
             return
-        except Exception as seal_error:
+        except Exception as seal_error:  # noqa: BLE001 - cancellation sealing records fail-closed state
             checkpoint_projection = {
                 "status": "interruption_seal_failed",
                 "saved_chapter_count": 0,
@@ -957,7 +1019,7 @@ def run_legacy_generation_job(job_id: str, payload: dict) -> None:
         if _status() == "cancel_requested":
             _mark_cancelled()
         return
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - worker boundary persists a safe terminal job projection
         if _cancel_requested():
             _mark_cancelled()
         else:
@@ -1003,7 +1065,7 @@ async def _wait_for_legacy_job(job_id: str, *, timeout_seconds: float = 3600.0) 
 
 
 @router.post("/kg/upload")
-async def upload_kg(file: UploadFile = File(...)):
+async def upload_kg(file: Annotated[UploadFile, File()]):
     """
     上传你已有的知识图谱（JSON），系统只做存档与追溯，不重新构建。
     """
@@ -1016,8 +1078,8 @@ async def upload_kg(file: UploadFile = File(...)):
         # 仅做 JSON 结构校验，避免错误文件
         import json as _json
         _json.loads(data.decode("utf-8", errors="replace"))
-    except Exception:
-        raise HTTPException(status_code=400, detail="仅支持 JSON 知识图谱文件")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="仅支持 JSON 知识图谱文件") from exc
     meta = save_kg_bytes(data, file.filename)
     return {"ok": True, "kg": meta}
 
@@ -1053,6 +1115,7 @@ async def generate_plan(req: GenerateRequest, authorization: str | None = Header
     payload = req.model_dump()
     pid = str(payload.get("project_id") or "").strip() or None
     plan = load_plan(project_id=pid) or {}
+    payload = _inherit_project_fact_plan_fields(payload, plan)
     tender = load_tender_matrix(project_id=pid) or {}
     if not payload.get("outline"):
         payload["outline"] = plan.get("outline") or []
@@ -1125,6 +1188,7 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
     payload = req.model_dump()
     pid = str(payload.get("project_id") or "").strip() or None
     plan = load_plan(project_id=pid) or {}
+    payload = _inherit_project_fact_plan_fields(payload, plan)
     tender = load_tender_matrix(project_id=pid) or {}
     if not payload.get("outline"):
         payload["outline"] = plan.get("outline") or []
@@ -1181,6 +1245,7 @@ async def generate_async_batch(requests: list[GenerateRequest], background_tasks
         payload = req.model_dump()
         pid = str(payload.get("project_id") or "").strip() or None
         plan = load_plan(project_id=pid) or {}
+        payload = _inherit_project_fact_plan_fields(payload, plan)
         tender = load_tender_matrix(project_id=pid) or {}
         if not payload.get("outline"):
             payload["outline"] = plan.get("outline") or []
@@ -1446,14 +1511,11 @@ async def job_list_filtered(req: JobListFilterRequest, authorization: str | None
 @router.post("/job_download_batch")
 async def job_download_batch(job_ids: list[str], authorization: str | None = Header(default=None)):
     user = _auth_user(authorization)
-    from pathlib import Path
     import zipfile
+    from pathlib import Path
     zip_path = Path("build") / "autoplan_batch.zip"
     if zip_path.exists():
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
+        zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w") as z:
         for jid in job_ids[:20]:
             job = get_job(jid)
@@ -1476,14 +1538,11 @@ async def job_download_batch(job_ids: list[str], authorization: str | None = Hea
 @router.post("/job_download_compare_batch")
 async def job_download_compare_batch(job_ids: list[str], authorization: str | None = Header(default=None)):
     user = _auth_user(authorization)
-    from pathlib import Path
     import zipfile
+    from pathlib import Path
     zip_path = Path("build") / "autoplan_compare_batch.zip"
     if zip_path.exists():
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
+        zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w") as z:
         for jid in job_ids[:20]:
             job = get_job(jid)
@@ -1641,10 +1700,7 @@ async def download_compare_docx_all(authorization: str | None = Header(default=N
         raise HTTPException(status_code=404, detail="docx not found")
     zip_path = build_dir / "autoplan_compare_all.zip"
     if zip_path.exists():
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
+        zip_path.unlink()
     with ZipFile(str(zip_path), "w") as z:
         for p in files:
             z.write(p, arcname=p.name)
@@ -1682,7 +1738,7 @@ async def job_list_fields(authorization: str | None = Header(default=None)):
     return {
         "ok": True,
         "default_fields": sorted(_job_list_default_fields()),
-        "field_alias": {k: sorted(list(v)) for k, v in _job_list_field_alias().items()},
+        "field_alias": {k: sorted(v) for k, v in _job_list_field_alias().items()},
     }
 
 
@@ -1805,8 +1861,8 @@ async def audit_export_xlsx(
     output = io.BytesIO()
     try:
         from openpyxl import Workbook
-    except Exception:
-        raise HTTPException(status_code=500, detail="openpyxl not installed")
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="openpyxl not installed") from exc
 
     wb = Workbook()
     ws = wb.active
@@ -1936,16 +1992,16 @@ async def audit_export_file_cleanup(req: AuditExportCleanupRequest, authorizatio
                 try:
                     p.unlink()
                     removed += 1
-                except Exception:
-                    pass
+                except OSError:
+                    logger.warning("audit export could not be removed: %s", p, exc_info=True)
     if req.keep_latest_n is not None and req.keep_latest_n >= 0:
         for p in files[req.keep_latest_n:]:
             try:
                 if p.exists():
                     p.unlink()
                     removed += 1
-            except Exception:
-                pass
+            except OSError:
+                logger.warning("audit export could not be removed: %s", p, exc_info=True)
     return {"ok": True, "removed": removed}
 
 
@@ -1987,8 +2043,8 @@ async def audit_export_file(req: AuditExportRequest, authorization: str | None =
     out_path = build_dir / f"{base_name}.xlsx"
     try:
         from openpyxl import Workbook
-    except Exception:
-        raise HTTPException(status_code=500, detail="openpyxl not installed")
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="openpyxl not installed") from exc
     wb = Workbook()
     ws = wb.active
     ws.title = "audit"
@@ -2015,10 +2071,7 @@ async def download_docx_all(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=404, detail="docx not found")
     zip_path = build_dir / "autoplan_generated_all.zip"
     if zip_path.exists():
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
+        zip_path.unlink()
     with ZipFile(str(zip_path), "w") as z:
         for p in files:
             z.write(p, arcname=p.name)

@@ -167,6 +167,25 @@ async def test_no_credits_exception_is_classified_as_quota_exhausted(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_machine_credit_balance_code_is_classified_as_quota_exhausted(tmp_path) -> None:
+    class CreditBalanceError(RuntimeError):
+        status_code = 429
+        code = "credit_balance_exhausted"
+
+    async def probe(_candidate):
+        raise CreditBalanceError("request rejected")
+
+    admission = await ProviderAdmissionManager(root=tmp_path).admit(
+        _candidate(),
+        probe=probe,
+    )
+
+    assert admission.admitted is False
+    assert admission.layers["quota"].code == "quota_exhausted"
+    assert "request rejected" not in json.dumps(admission.as_dict())
+
+
+@pytest.mark.asyncio
 async def test_same_slot_provider_and_model_with_different_credentials_are_isolated(tmp_path) -> None:
     calls: list[str] = []
 

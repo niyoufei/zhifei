@@ -32,6 +32,7 @@ def _record(
         "project_id": "p1",
         "filename": filename,
         "sha256": sha,
+        "pages": 1,
         "tags": [],
         "source_hint": "drawing_standard",
         "extract_saved_as": str(extract),
@@ -134,7 +135,115 @@ def test_chapter_specific_extract_binding_preserves_drawing_identity(
     )
 
     binding = result["chapter_bindings"][0]
+    drawing = result["drawings"][0]
     assert binding["filename"] == "钢筋详图.pdf"
     assert binding["sha256"] == sha
-    assert f"_{sha[:8]}@" in binding["locator"] or f"#{sha[:8]}@" in binding["locator"]
+    assert f"#p1_{sha}@" in binding["locator"]
     assert binding["binding_basis"] == "chapter_specific_extract_hit"
+    assert binding["matched_terms"] == ["钢筋绑扎"]
+    assert binding["offset"] == binding["match_start"]
+    assert binding["page_text_sha256"] == drawing["page_anchors"][0]["text_sha256"]
+    assert binding["page_summary"] == drawing["page_anchors"][0]["snippet"]
+    assert binding["match_window"]["text_sha256"]
+    assert drawing["text_status"] == "indexed"
+    assert drawing["page_boundary_status"] == "reliable_declared_single_page"
+    assert drawing["page_anchors"][0]["page"] == 1
+    assert drawing["page_anchors"][0]["text_sha256"]
+
+
+def test_generic_drawing_phrase_does_not_create_binding(monkeypatch, tmp_path: Path) -> None:
+    _write_audit(
+        tmp_path,
+        [
+            _record(
+                tmp_path,
+                filename="总图.pdf",
+                sha="f" * 64,
+                text="图纸施工方案详见图纸说明。",
+            )
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = build_drawing_index("示例项目", ["图纸施工方案"], project_id="p1")
+
+    assert result["chapter_bindings"] == []
+    assert result["chapter_binding_status"] == "no_chapter_specific_evidence"
+
+
+def test_empty_extract_is_marked_missing_ocr_and_never_bound(monkeypatch, tmp_path: Path) -> None:
+    _write_audit(
+        tmp_path,
+        [
+            _record(
+                tmp_path,
+                filename="扫描钢梁图.pdf",
+                sha="1" * 64,
+                text="",
+            )
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = build_drawing_index("示例项目", ["钢梁安装施工工艺"], project_id="p1")
+
+    assert result["drawings"][0]["text_status"] == "missing_text_or_ocr"
+    assert result["drawings"][0]["page_anchors"] == []
+    assert result["chapter_bindings"] == []
+    assert result["missing_text_or_ocr_count"] == 1
+    assert result["chapter_binding_status"] == "drawing_text_or_ocr_missing"
+
+
+def test_multi_page_extract_without_boundaries_is_locator_unavailable(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _write_audit(
+        tmp_path,
+        [
+            _record(
+                tmp_path,
+                filename="多页钢梁图.pdf",
+                sha="2" * 64,
+                text="钢梁安装构件位置与节点做法。",
+                pages=3,
+            )
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = build_drawing_index("示例项目", ["钢梁安装施工工艺"], project_id="p1")
+
+    drawing = result["drawings"][0]
+    assert drawing["text_status"] == "locator_unavailable"
+    assert drawing["page_boundary_status"] == "unreliable_missing_page_boundaries"
+    assert drawing["page_anchors"] == []
+    assert result["locator_unavailable_count"] == 1
+    assert result["chapter_bindings"] == []
+    assert result["chapter_binding_status"] == "drawing_locator_unavailable"
+
+
+def test_multi_page_form_feed_preserves_real_page_and_offset(monkeypatch, tmp_path: Path) -> None:
+    sha = "3" * 64
+    first_page = "总说明与目录。"
+    second_page = "钢梁安装构件位置与节点做法。"
+    _write_audit(
+        tmp_path,
+        [
+            _record(
+                tmp_path,
+                filename="钢梁图.pdf",
+                sha=sha,
+                text=f"{first_page}\f{second_page}",
+                pages=2,
+            )
+        ],
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = build_drawing_index("示例项目", ["钢梁安装施工工艺"], project_id="p1")
+
+    binding = result["chapter_bindings"][0]
+    assert binding["page"] == 2
+    assert binding["offset"] == len(first_page) + 1
+    assert binding["page_boundary_status"] == "reliable_form_feed"
+    assert binding["locator"] == f"钢梁图.pdf#p2_{sha}@{len(first_page) + 1}"

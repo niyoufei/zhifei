@@ -5,30 +5,32 @@ closed loop, engineering checks, template style, remediation, and main entry.
 """
 
 import pytest
+
+from backend.zhifei_autoplan.boq_focus_enforcer import ensure_boq_focus_item_cards
+from backend.zhifei_autoplan.project_fact_ledger import build_project_fact_ledger
 from backend.zhifei_autoplan.quality_check import (
-    _normalize_text,
-    _count_evidence,
-    _count_evidence_by_section,
-    _has_bullets,
     _avg_sentence_len,
-    _check_score_coverage,
-    _check_score_coverage_by_section,
+    _check_boq_focus_item_closure,
+    _check_boq_focus_item_typed_evidence,
     _check_closed_loop,
     _check_closed_loop_by_section,
     _check_engineering,
     _check_engineering_by_section,
-    _check_template_style,
     _check_required_topics,
     _check_required_topics_detail,
+    _check_score_coverage,
+    _check_score_coverage_by_section,
+    _check_template_style,
+    _count_evidence,
+    _count_evidence_by_section,
     _extract_risk_triplets,
-    _check_boq_focus_item_closure,
-    _check_boq_focus_item_typed_evidence,
+    _has_bullets,
+    _normalize_text,
     apply_remediation,
     ensure_local_export_mandatory_content,
     run_quality_checks,
     strip_nonconcrete_language,
 )
-from backend.zhifei_autoplan.boq_focus_enforcer import ensure_boq_focus_item_cards
 
 
 # ========== _normalize_text ==========
@@ -312,7 +314,7 @@ class TestRequiredTopicsAliases:
         res = _check_required_topics_detail(sections)
         assert res.get("ok") is False
         by = res.get("by_topic") or []
-        four = [x for x in by if x.get("topic") == "四新技术"][0]
+        four = next(x for x in by if x.get("topic") == "四新技术")
         assert four.get("ok") is False
         assert "投入" in (four.get("missing") or [])
 
@@ -577,6 +579,127 @@ class TestApplyRemediation:
         assert "加强" not in sections[0]["content"]
         assert "【自动补充】替换空话为可执行项" in sections[0]["content"]
 
+    def test_remediation_does_not_inject_unverified_legacy_defaults(self):
+        sections = [{"title": "章节1", "content": "本章保留用户原文。"}]
+        remediation = [
+            {"title": "章节1", "type": "quantitative_gap", "suggestion": "补充参数"}
+        ]
+        params = {
+            "quant_defaults": {
+                "频次": "2次/日",
+                "阈值": "偏差≤5mm",
+                "时长": "4h/作业段",
+                "人数": "8人/班",
+                "设备型号": "20t挖机1台",
+            }
+        }
+
+        apply_remediation(sections, remediation, params=params)
+
+        generated = sections[0]["content"]
+        for legacy in ("2次/日", "偏差≤5mm", "4h/作业段", "8人/班", "20t挖机"):
+            assert legacy not in generated
+        assert "待依据图纸/规范/批准制度确认" in generated
+
+    def test_remediation_uses_only_source_bound_accepted_values(self):
+        sections = [{"title": "章节1", "content": "用户批准原文保留2次/日。"}]
+        remediation = [
+            {"title": "章节1", "type": "quantitative_gap", "suggestion": "补充参数"}
+        ]
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "3次/班",
+                    "status": "approved",
+                    "evidence": {"locator": "确认单.pdf#p2_deadbeef@20"},
+                },
+                "quality_threshold": {
+                    "value": "偏差≤3mm",
+                    "status": "verified",
+                    "evidence": {"locator": "结构图.pdf#p8_cafebabe@80"},
+                },
+                "deviation_action_deadline": {
+                    "value": "6小时",
+                    "status": "approved",
+                    "evidence": {"locator": "制度.pdf#p3_feedface@30"},
+                },
+                "resource_peak": {
+                    "value": 72,
+                    "unit": "人",
+                    "status": "derived",
+                    "evidence": {"locator": "资源计划.xlsx#p1_aabbccdd@1"},
+                },
+            }
+        }
+
+        apply_remediation(
+            sections,
+            remediation,
+            project_fact_ledger=ledger,
+        )
+
+        content = sections[0]["content"]
+        assert "用户批准原文保留2次/日" in content
+        assert "频次：3次/班" in content
+        assert "阈值：偏差≤3mm" in content
+        assert "时长：6小时" in content
+        assert "人数：72人" in content
+        assert "4h/作业段" not in content
+        assert "8人/班" not in content
+        assert "20t挖机" not in content
+
+    def test_repetition_remediation_preserves_first_exact_sentence_and_is_idempotent(self):
+        shared_a = "危险品材料统一执行采购资质核验和随货资料检查，入库后按分区要求建立领用台账"
+        shared_b = "危险品作业统一执行动火审批和气体检测，异常时立即停工并记录复核关闭结果"
+        sections = [
+            {"title": "第一章", "content": f"{shared_a}。{shared_b}。第一章独有控制。"},
+            {"title": "第二章", "content": f"{shared_a}。{shared_b}。第二章独有控制。"},
+        ]
+        remediation = [
+            {
+                "title": title,
+                "type": "repetitive_content",
+                "repetition_scope": "cross_chapter",
+                "samples": [shared_a, shared_b],
+                "suggestion": "收敛重复句",
+            }
+            for title in ("第一章", "第二章")
+        ]
+
+        apply_remediation(sections, remediation)
+
+        assert shared_a in sections[0]["content"]
+        assert shared_b in sections[0]["content"]
+        assert shared_a not in sections[1]["content"]
+        assert shared_b not in sections[1]["content"]
+        assert "第二章独有控制" in sections[1]["content"]
+        first_pass = [section["content"] for section in sections]
+
+        apply_remediation(sections, remediation)
+        assert [section["content"] for section in sections] == first_pass
+
+    def test_repetition_remediation_preserves_same_prose_with_distinct_page_locators(self):
+        prose = "钢梁吊装前复核构件编号和安装轴线，复核结果写入构件安装检查记录"
+        first = f"{prose}【证据:结构图.pdf#p12_deadbeef@120】"
+        second = f"{prose}【证据:结构图.pdf#p13_cafebabe@240】"
+        sections = [
+            {"title": "钢结构", "content": f"{first}。"},
+            {"title": "吊装工程", "content": f"{second}。"},
+        ]
+        remediation = [
+            {
+                "title": "吊装工程",
+                "type": "repetitive_content",
+                "samples": [prose],
+                "suggestion": "收敛重复句",
+            }
+        ]
+
+        apply_remediation(sections, remediation)
+
+        assert first in sections[0]["content"]
+        assert second in sections[1]["content"]
+
 
 class TestEnsureLocalExportMandatoryContent:
     def test_adds_both_control_tables_to_a_preferred_section(self):
@@ -823,10 +946,25 @@ class TestStrictQualityGate:
 
     def test_boq_closure_matches_nfkc_and_whitespace_variants(self):
         sections = [{"title": "主要施工方案", "content": "施工方案内容。"}]
+        ledger = build_project_fact_ledger(
+            [
+                {
+                    "source_id": "approved-controls",
+                    "source_type": "approved_resolution",
+                    "facts": {
+                        "risk_inspection_frequency": "3次/班",
+                        "quality_threshold": "偏差≤3mm",
+                        "deviation_action_deadline": "6小时",
+                    },
+                    "evidence": {"locator": "确认单.pdf#p2_deadbeef@20"},
+                }
+            ]
+        )
         ensure_boq_focus_item_cards(
             sections,
             {"must_cover_keywords": ["铝 方通吊顶（顶棚四）"], "lines": []},
             evidence_src="清单.pdf#p1_abcd1234@10",
+            project_fact_ledger=ledger,
         )
 
         result = _check_boq_focus_item_closure(
@@ -930,6 +1068,60 @@ class TestStrictQualityGate:
 
         assert result["repetition_control"]["ok"] is False
         assert any(i["type"] == "repetitive_content" for i in result["issue_list"])
+        by_section = result["repetition_control"]["by_section"]
+        assert {row["repetition_scope"] for row in by_section} == {"cross_chapter"}
+        assert all(row["same_chapter_template_ok"] is True for row in by_section)
+        assert all(row["cross_chapter_ok"] is False for row in by_section)
+
+    def test_strict_mode_distinguishes_same_chapter_template_repetition(self):
+        shared_a = "危险品材料统一执行采购资质核验和随货资料检查，入库后按分区要求建立领用台账"
+        shared_b = "危险品作业统一执行动火审批和气体检测，异常时立即停工并记录复核关闭结果"
+        sections = [
+            {
+                "title": "安全管理",
+                "content": (
+                    f"{shared_a}。{shared_a}。{shared_b}。{shared_b}。"
+                    "本章另行列出材料特有风险。本章另行列出逐项验证记录。"
+                ),
+            }
+        ]
+
+        result = run_quality_checks(None, [], sections, strict=True)
+
+        repetition = result["repetition_control"]["by_section"][0]
+        assert repetition["ok"] is False
+        assert repetition["repetition_scope"] == "same_chapter_template"
+        assert repetition["same_chapter_template_ok"] is False
+        assert repetition["cross_chapter_ok"] is True
+        issue = next(row for row in result["issue_list"] if row["type"] == "repetitive_content")
+        assert issue["repetition_scope"] == "same_chapter_template"
+
+    def test_strict_mode_does_not_merge_same_prose_with_distinct_page_locators(self):
+        prose_a = "钢梁吊装前复核构件编号和安装轴线，复核结果写入构件安装检查记录"
+        prose_b = "连接节点施工前核验板厚和螺栓批次，核验结果写入节点检查记录"
+        sections = [
+            {
+                "title": "钢结构一",
+                "content": (
+                    f"{prose_a}【证据:结构图.pdf#p12_deadbeef@120】。"
+                    f"{prose_b}【证据:结构图.pdf#p12_deadbeef@180】。"
+                ),
+            },
+            {
+                "title": "钢结构二",
+                "content": (
+                    f"{prose_a}【证据:结构图.pdf#p13_cafebabe@240】。"
+                    f"{prose_b}【证据:结构图.pdf#p13_cafebabe@300】。"
+                ),
+            },
+        ]
+
+        result = run_quality_checks(None, [], sections, strict=True)
+
+        assert result["repetition_control"]["ok"] is True
+        assert not any(
+            item["type"] == "repetitive_content" for item in result["issue_list"]
+        )
 
     def test_strict_mode_flags_long_generic_content_without_project_evidence(self):
         generic = (

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Any, List, Iterable
+from typing import Any
 
 from backend.zhifei_autoplan.ingest_tags import effective_record_tags
 
@@ -34,7 +36,7 @@ def _load_audit_records(audit_path: str, mtime_ns: int) -> list[dict]:
     for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines()[::-1]:
         try:
             out.append(json.loads(ln))
-        except Exception:
+        except json.JSONDecodeError:
             continue
     return out
 
@@ -47,28 +49,99 @@ def _load_extract_text(extract_path: str, mtime_ns: int) -> str:
     return p.read_text(encoding="utf-8", errors="ignore")
 
 
-def format_hit_locator(hit: Dict[str, Any]) -> str:
+def format_hit_locator(hit: dict[str, Any]) -> str:
     """
     Convert a hit dict into a traceable locator string for evidence markers:
-    - filename#p{page}_{sha8}@{offset}
-    - filename#{sha8}@{offset}
+    - filename#p{page}_{full_sha256}@{offset}
     - filename
+
+    A page locator is emitted only when the source identity is a complete
+    SHA-256 and the page boundary was established by the extractor.  Short
+    hash prefixes and page-less offsets are not reversible identities.
     """
     fname = str(hit.get("filename") or "unknown")
-    sha8 = str(hit.get("sha256") or "")[:8]
+    sha256 = str(hit.get("sha256") or "").strip().lower()
     offset = hit.get("offset")
     page = hit.get("page")
     loc = None
     try:
-        if offset is not None and sha8 and page is not None:
-            loc = f"p{int(page)}_{sha8}@{int(offset)}"
-        elif offset is not None and sha8:
-            loc = f"{sha8}@{int(offset)}"
-        elif offset is not None:
-            loc = str(int(offset))
-    except Exception:
+        if (
+            offset is not None
+            and page is not None
+            and re.fullmatch(r"[0-9a-f]{64}", sha256)
+        ):
+            loc = f"p{int(page)}_{sha256}@{int(offset)}"
+    except (TypeError, ValueError, OverflowError):
         loc = None
     return f"{fname}#{loc}" if loc else fname
+
+
+def _declared_page_count(record: dict[str, Any]) -> int | None:
+    raw = record.get("pages")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _match_page_context(
+    text: str,
+    *,
+    match_start: int,
+    match_end: int,
+    declared_pages: int | None,
+) -> dict[str, Any]:
+    """Return a bounded hit window only when page boundaries are reliable."""
+
+    if "\f" in text:
+        page_parts = text.split("\f")
+        if declared_pages is not None and len(page_parts) != declared_pages:
+            return {
+                "page": None,
+                "page_boundary_status": "unreliable_page_count_mismatch",
+            }
+        page = text[:match_start].count("\f") + 1
+        page_start = text.rfind("\f", 0, match_start) + 1
+        next_boundary = text.find("\f", match_end)
+        page_end = len(text) if next_boundary < 0 else next_boundary
+        boundary_source = "form_feed"
+    elif declared_pages == 1:
+        page = 1
+        page_start = 0
+        page_end = len(text)
+        boundary_source = "declared_single_page"
+    else:
+        return {
+            "page": None,
+            "page_boundary_status": "unreliable_missing_page_boundaries",
+        }
+
+    page_text = text[page_start:page_end]
+    window_start = max(page_start, match_start - 80)
+    window_end = min(page_end, match_end + 160)
+    window_text = text[window_start:window_end]
+    compact_window = " ".join(window_text.replace("\f", " ").split())
+    compact_page = " ".join(page_text.replace("\f", " ").split())
+    matched_text = text[match_start:match_end]
+    return {
+        "page": page,
+        "page_start_offset": page_start,
+        "page_end_offset": page_end,
+        "page_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+        "page_summary": compact_page[:360],
+        "page_boundary_status": f"reliable_{boundary_source}",
+        "match_start": match_start,
+        "match_end": match_end,
+        "matched_text": matched_text,
+        "match_window": {
+            "start_offset": window_start,
+            "end_offset": window_end,
+            "text": window_text,
+            "text_sha256": hashlib.sha256(window_text.encode("utf-8")).hexdigest(),
+            "summary": compact_window,
+        },
+    }
 
 
 def _tags_match(
@@ -97,17 +170,17 @@ def search_ingested_docs(
     project_id: str | None = None,
     require_tags: Iterable[str] | None = None,
     exclude_tags: Iterable[str] | None = None,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     audit_path = Path("backend/data/audit/ingest.jsonl")
     if not audit_path.exists():
         return []
     uniq = _tokenize_query(query)
     if not uniq:
         return []
-    hits: List[Dict[str, Any]] = []
+    hits: list[dict[str, Any]] = []
     try:
         mtime_ns = int(os.stat(audit_path).st_mtime_ns)
-    except Exception:
+    except OSError:
         mtime_ns = 0
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     for rec in _load_audit_records(str(audit_path), mtime_ns):
@@ -124,7 +197,7 @@ def search_ingested_docs(
             continue
         try:
             p_mtime_ns = int(os.stat(p).st_mtime_ns)
-        except Exception:
+        except OSError:
             p_mtime_ns = 0
         text = _load_extract_text(str(p), p_mtime_ns)
         if not text:
@@ -136,24 +209,27 @@ def search_ingested_docs(
             m = re.search(re.escape(tok), text, flags=re.IGNORECASE)
             if not m:
                 continue
-            start = max(0, m.start() - 80)
-            end = min(len(text), m.end() + 160)
-            snippet = text[start:end].replace("\n", " ").replace("\f", " ")
-            page = None
-            try:
-                # Page boundary is stored as form-feed in extract text.
-                if "\f" in text:
-                    page = text[: m.start()].count("\f") + 1
-            except Exception:
-                page = None
+            page_context = _match_page_context(
+                text,
+                match_start=m.start(),
+                match_end=m.end(),
+                declared_pages=_declared_page_count(rec),
+            )
+            match_window = page_context.get("match_window")
+            snippet = (
+                str(match_window.get("summary") or "")
+                if isinstance(match_window, dict)
+                else " ".join(text[max(0, m.start() - 80) : min(len(text), m.end() + 160)].split())
+            )
             hits.append(
                 {
                     "filename": rec.get("filename"),
                     "sha256": rec.get("sha256"),
                     "extract_saved_as": str(p),
                     "offset": m.start(),
-                    "page": page,
                     "snippet": snippet,
+                    "matched_token": tok,
+                    **page_context,
                 }
             )
             if len(hits) >= limit:
@@ -168,7 +244,7 @@ def best_ingested_hit(
     project_id: str | None = None,
     require_tags: Iterable[str] | None = None,
     exclude_tags: Iterable[str] | None = None,
-) -> Dict[str, Any] | None:
+) -> dict[str, Any] | None:
     """
     Pick the best hit for a query. Used for auto-citing BoQ items and for evidence traceability remediation.
     """
@@ -184,7 +260,7 @@ def best_ingested_hit(
     tokens = _tokenize_query(query)
     prefer = [str(x) for x in (prefer_filename_keywords or []) if str(x).strip()]
 
-    def _score(h: Dict[str, Any]) -> float:
+    def _score(h: dict[str, Any]) -> float:
         fname = str(h.get("filename") or "")
         snippet = str(h.get("snippet") or "")
         low_snip = snippet.lower()
@@ -216,7 +292,7 @@ def list_ingested_filenames_by_tag(
     project_id: str | None = None,
     limit: int = 80,
     exclude_tags: Iterable[str] | None = None,
-) -> List[str]:
+) -> list[str]:
     """
     List unique ingested filenames for a given tag from ingest audit.
     Useful for:
@@ -231,11 +307,11 @@ def list_ingested_filenames_by_tag(
         return []
     try:
         mtime_ns = int(os.stat(audit_path).st_mtime_ns)
-    except Exception:
+    except OSError:
         mtime_ns = 0
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
     ex = {str(x).strip() for x in (exclude_tags or []) if str(x).strip()}
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
     for rec in _load_audit_records(str(audit_path), mtime_ns):
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:

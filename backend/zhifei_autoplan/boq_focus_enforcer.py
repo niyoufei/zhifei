@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
-from backend.zhifei_autoplan.evidence import best_ingested_hit
 from backend.zhifei_autoplan.boq_focus_policy import (
     MAX_BOQ_FOCUS_ITEMS,
     boq_focus_name_in_text,
@@ -12,8 +11,11 @@ from backend.zhifei_autoplan.boq_focus_policy import (
     normalize_boq_focus_items,
     normalize_boq_focus_name,
 )
-from backend.zhifei_autoplan.params_runtime import get_quant_defaults, get_boq_focus_card_defaults
-
+from backend.zhifei_autoplan.evidence import best_ingested_hit
+from backend.zhifei_autoplan.project_fact_ledger import (
+    FORMAL_ACCEPTED_STATUSES,
+    validate_project_fact_ledger,
+)
 
 _FOCUS_ITEM_LINE_RE = re.compile(
     r"^\-\s*(?P<name>[^/]+?)\s*(?:/\s*工程量=(?P<qty>[^/]+?))?\s*(?:/\s*单价=(?P<unit_price>[^/]+?))?\s*(?:/\s*合价=(?P<total_price>[^/]+?))?\s*$"
@@ -37,15 +39,66 @@ _STOP_TOKENS = {
     "环保",
 }
 _EVIDENCE_SRC_RE = re.compile(r"【证据:(?P<src>[^】]{2,200})】")
+_HAZARDOUS_MATERIAL_BASELINE_MARKER = "【危险品材料统一管理基线】"
+_PENDING_QUANT_CONTROLS = {
+    "频次": "待依据经批准项目制度确认",
+    "阈值": "待按图纸及适用规范逐工序确认",
+    "间距": "待按图纸定位逐项确认",
+    "厚度": "待按图纸做法逐项确认",
+    "时长": "待依据经批准施工方案确认",
+    "人数": "待依据经批准资源计划确认",
+    "设备型号": "待依据经批准机械配置确认",
+    "偏差处置时限": "待依据经批准项目制度确认",
+}
 
 
-def _parse_focus_lines(lines: List[str]) -> Dict[str, Dict[str, str]]:
+def _format_fact_value(fact: dict[str, Any]) -> str:
+    value = str(fact.get("value") or "").strip()
+    unit = str(fact.get("unit") or "").strip()
+    if value and unit and not value.endswith(unit):
+        value = f"{value}{unit}"
+    evidence = fact.get("evidence") if isinstance(fact.get("evidence"), dict) else {}
+    locator = str(evidence.get("locator") or "").strip()
+    return f"{value}【证据:{locator}】" if value and locator else value
+
+
+def _source_bound_quant_controls(project_fact_ledger: dict[str, Any] | None) -> dict[str, str]:
+    """Use only formally accepted project facts; never promote registry defaults."""
+
+    controls = dict(_PENDING_QUANT_CONTROLS)
+    if not isinstance(project_fact_ledger, dict):
+        return controls
+    if not validate_project_fact_ledger(project_fact_ledger).get("ok"):
+        return controls
+    facts = (
+        project_fact_ledger.get("facts")
+        if isinstance(project_fact_ledger.get("facts"), dict)
+        else {}
+    )
+    bindings = {
+        "risk_inspection_frequency": "频次",
+        "quality_threshold": "阈值",
+        "deviation_action_deadline": "偏差处置时限",
+    }
+    for field, label in bindings.items():
+        fact = facts.get(field)
+        if not isinstance(fact, dict):
+            continue
+        if str(fact.get("status") or "").strip() not in FORMAL_ACCEPTED_STATUSES:
+            continue
+        rendered = _format_fact_value(fact)
+        if rendered:
+            controls[label] = rendered
+    return controls
+
+
+def _parse_focus_lines(lines: list[str]) -> dict[str, dict[str, str]]:
     """
     Parse `boq_focus["lines"]` which contains mixed headers and "- item / 工程量=... / 单价=... / 合价=..."
     Returns a map keyed by the canonical item name so line-wrapped/NFKC
     variants still attach their quantities to the right generated card.
     """
-    out: Dict[str, Dict[str, str]] = {}
+    out: dict[str, dict[str, str]] = {}
     for ln in lines or []:
         s = str(ln or "").strip()
         if not s.startswith("- "):
@@ -73,7 +126,7 @@ def _parse_focus_lines(lines: List[str]) -> Dict[str, Dict[str, str]]:
     return out
 
 
-def _pick_host_section_index(sections: List[Dict[str, Any]]) -> int:
+def _pick_host_section_index(sections: list[dict[str, Any]]) -> int:
     """
     Choose a section to host focus item control cards without changing the tender-derived outline.
     Heuristic: prefer '施工方案/施工方法/技术措施/施工部署/资源' chapters.
@@ -97,8 +150,8 @@ def _has_quant_metrics(text: str) -> bool:
     return any(k in text for k in ("频次", "阈值", "间距", "厚度", "时长", "人数", "设备型号"))
 
 
-def _extract_evidence_sources(text: str) -> List[str]:
-    out: List[str] = []
+def _extract_evidence_sources(text: str) -> list[str]:
+    out: list[str] = []
     for m in _EVIDENCE_SRC_RE.finditer(text or ""):
         src = str(m.group("src") or "").strip()
         if not src:
@@ -137,8 +190,8 @@ def _item_is_closed_with_typed_evidence(
     name: str,
     text: str,
     *,
-    drawing_names: List[str] | None = None,
-    standard_names: List[str] | None = None,
+    drawing_names: list[str] | None = None,
+    standard_names: list[str] | None = None,
     window: int = 520,
 ) -> bool:
     """
@@ -164,7 +217,7 @@ def _item_is_closed_with_typed_evidence(
     return False
 
 
-def _tokenize_item_name(name: str) -> List[str]:
+def _tokenize_item_name(name: str) -> list[str]:
     """
     Extract stable tokens from a BoQ item name for title matching.
     - Prefer longer Chinese sequences; fall back to the full name.
@@ -188,7 +241,7 @@ def _tokenize_item_name(name: str) -> List[str]:
     return out[:8] if out else [s]
 
 
-def _tokenize_snippet(snippet: str) -> List[str]:
+def _tokenize_snippet(snippet: str) -> list[str]:
     s = str(snippet or "").strip()
     if not s:
         return []
@@ -207,7 +260,7 @@ def _tokenize_snippet(snippet: str) -> List[str]:
 
 def _pick_section_for_item(
     name: str,
-    sections: List[Dict[str, Any]],
+    sections: list[dict[str, Any]],
     host_idx: int,
     hint_snippet: str = "",
     process_hint: str = "",
@@ -254,13 +307,12 @@ def _pick_section_for_item(
 
 
 def _build_focus_card(
-    item: Dict[str, str],
+    item: dict[str, str],
     evidence_src: str,
-    quant: Dict[str, str],
-    card_defaults: Dict[str, str],
+    quant: dict[str, str],
     drawing_locator: str | None = None,
     standard_locator: str | None = None,
-    categories: List[str] | None = None,
+    categories: list[str] | None = None,
     process_hint: str | None = None,
 ) -> str:
     name = item.get("name") or ""
@@ -281,7 +333,7 @@ def _build_focus_card(
     head = "；".join(parts)
 
     qline = (
-        f"量化指标：频次={quant['频次']}；阈值={quant['阈值']}；间距={quant['间距']}；厚度={quant['厚度']}；"
+        f"量化指标（{name}）：频次={quant['频次']}；阈值={quant['阈值']}；间距={quant['间距']}；厚度={quant['厚度']}；"
         f"时长={quant['时长']}；人数={quant['人数']}；设备型号={quant['设备型号']}。"
     )
     dwg_line = ""
@@ -301,23 +353,20 @@ def _build_focus_card(
     is_ppe = "劳保用品" in cats_set
 
     if is_hazard:
-        risk = f"{proc_prefix}挥发/燃爆/泄漏导致人员伤害与停工"
-        control = (
-            "MSDS随货(材料员)+专柜/专库通风(库管)+动火审批(安全员)"
-            "+可燃气体检测=1次/班(安全员)+领用双人复核=1次/单(库管+领用人)"
-        )
+        risk = f"{proc_prefix}{name}挥发/燃爆/泄漏导致人员伤害与停工"
+        control = f"执行《危险品材料统一管理基线》+{name}到货逐批核对(材料员)+{name}领用逐单核验(库管+领用人)"
         verify = (
-            "检测记录齐全率=100%+违章=0次/月"
-            f"+应急演练频次={card_defaults.get('应急演练频次','1次/季度')}+记录=《危险品检查与应急台账》"
+            f"逐批核对{name}的MSDS/批次/领用记录并记录检测异常"
+            f"+记录=《{name}风险与领用核验记录》"
         )
     elif is_special:
         risk = f"{proc_prefix}规格/批次不符导致返工或性能不达标"
-        control = "到货验收=1次/批(材料员+质检员)+复验=每批次1次(质检员)+批次隔离+二维码批次追溯(材料员)"
-        verify = f"复验合格率{card_defaults['合格率阈值']}+批次追溯完整率=100%+记录=《特殊材料到货验收+复验台账》"
+        control = "到货逐批验收(材料员+质检员)+逐批复验(质检员)+批次隔离+二维码批次追溯(材料员)"
+        verify = f"复验阈值={quant['阈值']}+逐批反查批次记录+记录=《特殊材料到货验收+复验台账》"
     elif is_ppe:
         risk = "未佩戴或用品失效导致伤害"
-        control = f"发放=1套/人(安全员)+佩戴抽查={quant['频次']}(安全员)+破损48h内更换(库管)"
-        verify = "抽查覆盖率=100%+不佩戴=0次/日+记录=《劳保发放与抽查台账》"
+        control = f"逐人登记发放(安全员)+佩戴抽查={quant['频次']}(安全员)+发现破损立即停用更换(库管)"
+        verify = "逐人核对发放与抽查记录+发现未佩戴立即纠正并复核+记录=《劳保发放与抽查台账》"
     else:
         risk_parts = [f"{proc_prefix}关键参数超差导致返工"]
         if "工程量大" in cats_set:
@@ -329,44 +378,43 @@ def _build_focus_card(
         risk = "+".join([x for x in risk_parts if x][:3])
 
         control_parts = [
-            "首件确认=1次/工序(质检员+施工员)",
-            f"过程抽检={card_defaults['抽检频次']}(质检员)",
-            f"阈值按图纸/标准执行({quant['阈值']})",
+            "逐工序完成首件确认(质检员+施工员)",
+            f"过程抽检={quant['频次']}(质检员)",
+            f"阈值={quant['阈值']}",
         ]
         if "工程量大" in cats_set:
-            control_parts.append("日计划分解=1次/日(施工员)")
-            control_parts.append("资源峰值周滚动校核=1次/周(施工员)")
+            control_parts.append("按经批准进度计划分解并滚动校核(施工员)")
         if "材料需求量大" in cats_set:
-            control_parts.append("采购下单提前期≥7天(材料员)")
-            control_parts.append("库存下限=3天用量(库管)")
+            control_parts.append("采购提前期按经批准物资计划执行(材料员)")
+            control_parts.append("库存下限按经批准物资计划执行(库管)")
         if ("材料单价高" in cats_set) or ("单体造价高" in cats_set):
-            control_parts.append(f"采购比价{card_defaults['采购比价']}(材料员)")
-            control_parts.append("领用按构件/班组核算=1次/日(材料员)")
+            control_parts.append("采购比价按经批准采购制度执行(材料员)")
+            control_parts.append("领用按构件和班组逐笔核算(材料员)")
         control = "+".join(control_parts[:8])
 
         verify_parts = [
-            f"抽检合格率{card_defaults['合格率阈值']}+一次验收通过率{card_defaults['一次验收通过率']}+记录=《抽检与验收记录》",
+            f"验收阈值={quant['阈值']}+逐批形成验收结论+记录=《抽检与验收记录》",
         ]
         if "工程量大" in cats_set:
-            verify_parts.append("完成量/计划量≥0.95(日统计)")
+            verify_parts.append("完成量与经批准计划逐日核对")
         if "材料需求量大" in cats_set:
-            verify_parts.append("缺料停工=0次/月+到货准时率≥95%(周统计)")
+            verify_parts.append("到货日期与经批准物资计划逐批核对")
         if ("材料单价高" in cats_set) or ("单体造价高" in cats_set):
-            verify_parts.append("材料超耗≤2%(周统计)+盘点差异=0(周盘点)")
+            verify_parts.append("材料消耗与经批准定额逐项核对并形成盘点记录")
         verify = "+".join(verify_parts[:4])
 
     operational_fields = (
         f"；频次={quant['频次']}；阈值={quant['阈值']}；责任岗位=质量员+施工员"
-        "；记录=《重点项过程检查台账》；偏差处置4h内复验关闭"
+        f"；记录=《重点项过程检查台账》；偏差处置时限={quant['偏差处置时限']}"
     )
     rline = (
         f"风险：{risk}；控制：{control}；验证：{verify}"
         f"{operational_fields}。【证据:{evidence_src}】"
     )
     trace_line = (
-        "风险：批次、构件或验收记录无法反查；"
-        "控制：进场、施工、验收三阶段使用同一清单编码并逐批核对；"
-        "验证：编码一致率=100%且抽查合格率≥98%"
+        f"风险：{name}的批次、构件或验收记录无法反查；"
+        f"控制：{name}在进场、施工、验收三阶段使用同一清单编码并逐批核对；"
+        f"验证：逐批反查{name}编码且按已确认阈值验收"
         f"{operational_fields}。【证据:{evidence_src}】"
     )
     parts = [f"- {head}", f"  {qline}"]
@@ -379,7 +427,25 @@ def _build_focus_card(
     return "\n".join(parts)
 
 
-def _find_focus_card_span(text: str, item_name: str) -> Tuple[int, int, int] | None:
+def _build_hazardous_material_baseline(
+    *,
+    evidence_src: str,
+    quant: dict[str, str],
+) -> str:
+    """Render document-wide hazardous-material boilerplate exactly once."""
+
+    return (
+        f"{_HAZARDOUS_MATERIAL_BASELINE_MARKER}\n"
+        "- 适用范围：本文件清单列明的全部危险品材料；各材料的特有风险、批次核验和验证记录见对应清单重点项控制卡。\n"
+        "- 统一控制：逐供应商核验采购资质；MSDS随货逐批核验；专柜/专库通风逐班巡检；"
+        "动火逐作业审批；可燃气体逐班检测；领用逐单双人复核。\n"
+        "- 统一验证：逐项核对入库、巡检、检测和领用记录；发现违章立即处置并复核；"
+        f"检查频次={quant['频次']}；记录=《危险品检查与应急台账》。"
+        f"【证据:{evidence_src}】"
+    )
+
+
+def _find_focus_card_span(text: str, item_name: str) -> tuple[int, int, int] | None:
     """
     Locate a focus card block for an item in a section.
     Returns (block_start, block_end, first_line_end).
@@ -402,13 +468,14 @@ def _find_focus_card_span(text: str, item_name: str) -> Tuple[int, int, int] | N
 
 
 def ensure_boq_focus_item_cards(
-    sections: List[Dict[str, Any]],
-    boq_focus: Dict[str, Any],
+    sections: list[dict[str, Any]],
+    boq_focus: dict[str, Any],
     evidence_src: str,
-    params: Dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
     project_id: str | None = None,
-    boq_data: Dict[str, Any] | None = None,
-) -> Tuple[bool, List[str]]:
+    boq_data: dict[str, Any] | None = None,
+    project_fact_ledger: dict[str, Any] | None = None,
+) -> tuple[bool, list[str]]:
     """
     Enforce that each focus item has a concrete control card (quant + triplet + evidence).
     - Does not create new top-level chapters (tender decides outline).
@@ -425,8 +492,10 @@ def ensure_boq_focus_item_cards(
     if not focus_items:
         return False, []
 
-    quant = get_quant_defaults(params)
-    card_defaults = get_boq_focus_card_defaults(params)
+    # Keep ``params`` in the call shape for compatibility, but a mutable
+    # registry is not an authoritative project-fact source.
+    _ = params
+    quant = _source_bound_quant_controls(project_fact_ledger)
     details = _parse_focus_lines(boq_focus.get("lines") or [])
     items = (boq_data or {}).get("items") if isinstance(boq_data, dict) else None
     items = items if isinstance(items, list) else []
@@ -447,7 +516,7 @@ def ensure_boq_focus_item_cards(
 
     # Categories used to expand risk triplets for focus cards.
     try:
-        cat_sets: Dict[str, set[str]] = {
+        cat_sets: dict[str, set[str]] = {
             "工程量大": _name_set((stats or {}).get("top_quantity_items") or []),
             "材料需求量大": _name_set((stats or {}).get("top_material_demand_items") or []),
             "单体造价高": _name_set((stats or {}).get("top_total_price_items") or []),
@@ -456,27 +525,26 @@ def ensure_boq_focus_item_cards(
             "危险品材料": {boq_focus_name_key(x) for x in (boq_focus.get("hazardous_materials") or []) if boq_focus_name_key(x)},
             "劳保用品": {boq_focus_name_key(x) for x in (boq_focus.get("ppe_items") or []) if boq_focus_name_key(x)},
         }
-    except Exception:
+    # BoQ statistics are deserialized input; a malformed optional category
+    # must not prevent the focus closure report from being produced.
+    except Exception:  # noqa: BLE001
         cat_sets = {}
 
-    def _cats_for(name: str) -> List[str]:
+    def _cats_for(name: str) -> list[str]:
         sname = normalize_boq_focus_name(name)
         if not sname:
             return []
-        out: List[str] = []
+        out: list[str] = []
         name_key = boq_focus_name_key(sname)
         for k, s in (cat_sets or {}).items():
-            try:
-                if name_key in (s or set()):
-                    out.append(k)
-            except Exception:
-                continue
+            if isinstance(s, set) and name_key in s:
+                out.append(k)
         return out
 
     # Only do drawing/standard typed-evidence enforcement when project_id is set,
     # to avoid cross-project contamination in global runs.
-    drawing_names: List[str] = []
-    standard_names: List[str] = []
+    drawing_names: list[str] = []
+    standard_names: list[str] = []
     if project_id:
         try:
             from backend.zhifei_autoplan.evidence import list_ingested_filenames_by_tag
@@ -493,7 +561,9 @@ def ensure_boq_focus_item_cards(
                 limit=80,
                 exclude_tags=["logo"],
             )
-        except Exception:
+        # The ingest audit is an optional evidence boundary; empty lists make
+        # the downstream typed-evidence gate fail closed.
+        except Exception:  # noqa: BLE001
             drawing_names = []
             standard_names = []
 
@@ -516,14 +586,18 @@ def ensure_boq_focus_item_cards(
                     return pname
         return ""
 
-    injected: List[str] = []
+    injected: list[str] = []
     changed = False
 
     host_idx = _pick_host_section_index(sections)
-    blocks_by_idx: Dict[int, List[str]] = {}
+    blocks_by_idx: dict[int, list[str]] = {}
+    hazardous_focus_present = False
+    hazardous_baseline_target_idx: int | None = None
     for name in focus_items:
         process_hint = _process_hint_for_item(name)
         cats = _cats_for(name)
+        is_hazardous_focus = "危险品材料" in set(cats)
+        hazardous_focus_present = hazardous_focus_present or is_hazardous_focus
         dwg_loc = None
         std_loc = None
         if project_id and drawing_names:
@@ -538,7 +612,9 @@ def ensure_boq_focus_item_cards(
                 )
                 if hit and hit.get("locator"):
                     dwg_loc = str(hit.get("locator"))
-            except Exception:
+            # Evidence lookup failures leave the required drawing locator
+            # absent, which is reported by the formal closure gate.
+            except Exception:  # noqa: BLE001
                 dwg_loc = None
         if project_id and standard_names:
             try:
@@ -552,7 +628,9 @@ def ensure_boq_focus_item_cards(
                 )
                 if hit and hit.get("locator"):
                     std_loc = str(hit.get("locator"))
-            except Exception:
+            # Evidence lookup failures leave the required standard locator
+            # absent, which is reported by the formal closure gate.
+            except Exception:  # noqa: BLE001
                 std_loc = None
 
         # If a focus card already exists, patch it in-place to include drawing/standard locators.
@@ -564,7 +642,7 @@ def ensure_boq_focus_item_cards(
                     continue
                 bs, be, le = span
                 block = txt[bs:be]
-                inserts: List[str] = []
+                inserts: list[str] = []
                 if dwg_loc and drawing_names:
                     dset = {str(x).strip() for x in drawing_names if str(x).strip()}
                     if ("图纸定位：" not in block) and (not _evidence_has_any(block, dset)):
@@ -580,7 +658,8 @@ def ensure_boq_focus_item_cards(
 
         # Search other sections to avoid duplication.
         already_ok = False
-        for sec in sections:
+        closed_section_idx: int | None = None
+        for section_idx, sec in enumerate(sections):
             txt = str(sec.get("content") or "")
             if project_id and (drawing_names or standard_names):
                 if _item_is_closed_with_typed_evidence(
@@ -590,27 +669,34 @@ def ensure_boq_focus_item_cards(
                     standard_names=standard_names,
                 ):
                     already_ok = True
+                    closed_section_idx = section_idx
                     break
             elif _item_is_closed_in_text(name, txt):
                 already_ok = True
+                closed_section_idx = section_idx
                 break
         if already_ok:
+            if is_hazardous_focus and hazardous_baseline_target_idx is None:
+                hazardous_baseline_target_idx = closed_section_idx
             continue
 
         it = details.get(boq_focus_name_key(name)) or {"name": name}
         item_hit = None
         item_ev = evidence_src
-        try:
-            item_hit = best_ingested_hit(
-                name,
-                limit=10,
-                prefer_filename_keywords=["清单", "工程量", "BOQ", "bill", "报价"],
-                project_id=project_id,
-            )
-            if item_hit and item_hit.get("locator"):
-                item_ev = str(item_hit.get("locator"))
-        except Exception:
-            item_hit = None
+        if project_id:
+            try:
+                item_hit = best_ingested_hit(
+                    name,
+                    limit=10,
+                    prefer_filename_keywords=["清单", "工程量", "BOQ", "bill", "报价"],
+                    project_id=project_id,
+                )
+                if item_hit and item_hit.get("locator"):
+                    item_ev = str(item_hit.get("locator"))
+            # A failed ingest lookup cannot synthesize evidence; retain the
+            # parsed-BoQ locator and let formal evidence validation decide.
+            except Exception:  # noqa: BLE001
+                item_hit = None
         idx = _pick_section_for_item(
             name,
             sections,
@@ -618,12 +704,13 @@ def ensure_boq_focus_item_cards(
             hint_snippet=str((item_hit or {}).get("snippet") or ""),
             process_hint=process_hint,
         )
+        if is_hazardous_focus and hazardous_baseline_target_idx is None:
+            hazardous_baseline_target_idx = idx
         blocks_by_idx.setdefault(idx, []).append(
             _build_focus_card(
                 it,
                 item_ev,
                 quant,
-                card_defaults,
                 drawing_locator=dwg_loc,
                 standard_locator=std_loc,
                 categories=cats,
@@ -631,6 +718,26 @@ def ensure_boq_focus_item_cards(
             )
         )
         injected.append(name)
+
+    baseline_exists = any(
+        _HAZARDOUS_MATERIAL_BASELINE_MARKER in str(sec.get("content") or "")
+        for sec in sections
+        if isinstance(sec, dict)
+    )
+    if hazardous_focus_present and not baseline_exists:
+        target_idx = (
+            hazardous_baseline_target_idx
+            if hazardous_baseline_target_idx is not None
+            else host_idx
+        )
+        target = sections[target_idx]
+        baseline = _build_hazardous_material_baseline(
+            evidence_src=evidence_src,
+            quant=quant,
+        )
+        target_text = str(target.get("content") or "").rstrip()
+        target["content"] = (target_text + "\n\n" + baseline).strip() + "\n"
+        changed = True
 
     for idx, blocks in blocks_by_idx.items():
         if not blocks:

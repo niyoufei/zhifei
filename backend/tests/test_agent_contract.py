@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from backend.zhifei_autoplan.agent_contract import build_agent_contract
 from backend.zhifei_autoplan.multi_agent_runtime import build_multi_agent_plan
+from backend.zhifei_autoplan.project_fact_ledger import build_project_fact_ledger
 
 
 def test_agent_contract_carries_active_quality_roles(monkeypatch):
@@ -40,3 +41,32 @@ def test_agent_contract_carries_active_quality_roles(monkeypatch):
         x.get("name") == "专业渲染Agent"
         for x in contract["global_agents"]["role_catalog"]
     )
+
+
+def test_agent_contract_fact_snapshot_preserves_status_and_locator():
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "approved",
+                "source_type": "approved_resolution",
+                "facts": {"risk_inspection_frequency": "逐班"},
+                "evidence": {"locator": "payload.approved.frequency"},
+            }
+        ]
+    )
+
+    contract = build_agent_contract(
+        topic="道路工程",
+        outline=["道路施工方案"],
+        chapter_pages={},
+        chapter_requirements={},
+        multi_agent_summary={},
+        chapter_specialties={},
+        project_fact_ledger=ledger,
+    )
+
+    fact = contract["project_fact_ledger"]["facts"]["risk_inspection_frequency"]
+    assert fact["value"] == "逐班"
+    assert fact["status"] == "approved"
+    assert fact["evidence"]["locator"] == "payload.approved.frequency"
+    assert len(fact["evidence"]["evidence_digest"]) == 64

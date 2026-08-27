@@ -4,14 +4,13 @@ import json
 import os
 import stat
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 
 from scripts import build_local_release as builder
 from scripts import launch_latest_release as launcher
-from scripts import launch_latest_release_bootstrap as bootstrap
 from scripts.runtime_supervisor import SupervisorError
 
 
@@ -452,6 +451,50 @@ def test_supervise_execves_foreground_current_supervisor_without_secrets(
     assert environment["PYTHONNOUSERSITE"] == "1"
 
 
+def test_supervise_waits_for_verified_detached_owner_before_exec(
+    sealed_release: tuple[dict, Path],
+) -> None:
+    record, base = sealed_release
+    calls: list[tuple[str, list[str], dict[str, str]]] = []
+    sleeps: list[float] = []
+    status_calls = 0
+
+    def runner(argv, cwd, timeout):
+        nonlocal status_calls
+        status_calls += 1
+        if status_calls == 1:
+            return launcher.CommandResult(
+                0,
+                json.dumps(_running_state(record)),
+                "",
+            )
+        return launcher.CommandResult(
+            3,
+            '{"status":"not_running","running":false}',
+            "",
+        )
+
+    class ExecBoundary(Exception):
+        pass
+
+    def execve(path, argv, environment):
+        calls.append((path, list(argv), dict(environment)))
+        raise ExecBoundary
+
+    with pytest.raises(ExecBoundary):
+        launcher.supervise_latest(
+            base=base,
+            runner=runner,
+            execve_fn=execve,
+            sleep=sleeps.append,
+        )
+
+    assert status_calls == 2
+    assert sleeps == [launcher.SUPERVISOR_ADOPTION_POLL_SECONDS]
+    assert len(calls) == 1
+    assert calls[0][1][2] == "run"
+
+
 def test_supervise_rejects_running_old_release_without_exec(
     sealed_release: tuple[dict, Path],
 ) -> None:
@@ -488,8 +531,7 @@ def test_system_python_bootstrap_execs_only_selected_frozen_runtime(
         _isolated_bootstrap_command(base, "--no-open"),
         env=environment,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         timeout=10,
         check=False,
@@ -526,8 +568,7 @@ def test_isolated_bootstrap_ignores_pythonpath_before_trust_checks(tmp_path: Pat
         ],
         env=environment,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         timeout=10,
         check=False,
@@ -559,8 +600,7 @@ def test_bootstrap_full_runtime_tamper_never_executes_candidate_python(
         _isolated_bootstrap_command(base, "--no-open"),
         env=environment,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         timeout=10,
         check=False,
@@ -589,8 +629,7 @@ def test_bootstrap_external_python_byte_tamper_never_executes_candidate(
         _isolated_bootstrap_command(base, "--no-open"),
         env=environment,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         timeout=10,
         check=False,
@@ -614,8 +653,7 @@ def test_bootstrap_rejects_writable_manifest_before_candidate_exec(
         _isolated_bootstrap_command(base, "--no-open"),
         env=environment,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         timeout=10,
         check=False,

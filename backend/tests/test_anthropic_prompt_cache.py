@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -309,7 +310,17 @@ async def test_section_writer_separates_stable_shared_and_dynamic_content():
         "第二章 施工部署",
         {
             "project_id": "P-002",
-            "project_fact_snapshot": {"project_name": "示例项目"},
+            "project_fact_snapshot": {
+                "facts": {
+                    "project_name": {
+                        "value": "示例项目",
+                        "status": "verified",
+                        "evidence": {
+                            "locator": "招标文件.pdf#p1_deadbeef@10"
+                        },
+                    }
+                }
+            },
             "weights": ["技术方案 30分"],
             "word_format_rules": {"body_font": "宋体"},
             "graphics_rules": {"chart": "确定性生成"},
@@ -348,7 +359,7 @@ async def test_usage_log_and_aggregates_are_privacy_safe():
     )
 
     log_path = os.environ["ZHIFEI_CLAUDE_USAGE_LOG"]
-    raw = open(log_path, "r", encoding="utf-8").read()
+    raw = await asyncio.to_thread(Path(log_path).read_text, encoding="utf-8")
     assert private_text not in raw
     assert "敏感项目正文" not in raw
     assert "api_key" not in raw.lower()

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-
 
 _HAN_RE = re.compile(r"[\u4e00-\u9fff]")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -16,7 +16,12 @@ class OcrResult:
     pages: int
     lang: str
     engine: str = "tesseract"
-    error: Optional[str] = None
+    error: str | None = None
+    # One entry for every attempted source page, including empty/failed OCR
+    # pages.  Keeping those placeholders is essential: downstream evidence
+    # locators must never renumber later pages merely because an earlier page
+    # contained no machine-readable text.
+    page_texts: tuple[str, ...] = ()
 
 
 def is_tesseract_available() -> bool:
@@ -44,8 +49,11 @@ def guess_ocr_lang(prefer_chinese: bool = True) -> str:
             if "chi_sim" in langs:
                 return "chi_sim+eng"
             return "chi_tra+eng"
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "ocr_language_detection_failed error_type=%s",
+            type(exc).__name__,
+        )
     return "eng"
 
 
@@ -57,7 +65,7 @@ def _preprocess_pil_for_ocr(im):
         g = im.convert("L")
         g = ImageOps.autocontrast(g)
         return g
-    except Exception:
+    except (AttributeError, OSError, TypeError, ValueError):
         return im
 
 
@@ -81,17 +89,17 @@ def ocr_pdf_path(
     try:
         import pypdfium2 as pdfium
         import pytesseract
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - optional native dependency boundary
         return OcrResult(text="", pages=0, lang=lang or "eng", error=f"ocr_deps_missing:{e!r}")
 
     use_lang = lang or guess_ocr_lang(prefer_chinese=True)
 
     try:
         pdf = pdfium.PdfDocument(str(p))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - native PDF parser boundary
         return OcrResult(text="", pages=0, lang=use_lang, error=f"pdf_open_failed:{e!r}")
 
-    out_parts = []
+    out_parts: list[str] = []
     pages_done = 0
     try:
         total = len(pdf)
@@ -102,27 +110,44 @@ def ocr_pdf_path(
                 im = bitmap.to_pil()
                 im = _preprocess_pil_for_ocr(im)
                 txt = pytesseract.image_to_string(im, lang=use_lang)
-                if txt and txt.strip():
-                    out_parts.append(txt.strip())
+                out_parts.append(str(txt or "").strip())
                 pages_done += 1
                 if stop_on_catalog:
                     joined = "\n".join(out_parts)
-                    if "目录" in joined or "目 录" in joined or "目錄" in joined:
+                    if (
+                        "目录" in joined or "目 录" in joined or "目錄" in joined
+                    ) and pages_done >= 2:
                         # 目录一般在前几页，找到后即可提前结束
-                        if pages_done >= 2:
-                            break
-            except Exception:
+                        break
+            except Exception as exc:  # noqa: BLE001 - per-page OCR isolation boundary
+                # Preserve the failed page's ordinal.  Omitting it would shift
+                # every later OCR hit to the wrong PDF page.
+                logger.warning(
+                    "ocr_page_failed page=%s error_type=%s",
+                    i + 1,
+                    type(exc).__name__,
+                )
+                out_parts.append("")
                 pages_done += 1
                 continue
     finally:
         try:
             pdf.close()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - native close must not mask OCR result
+            logger.warning(
+                "ocr_pdf_close_failed error_type=%s",
+                type(exc).__name__,
+            )
 
     # Use form-feed as a page boundary so downstream evidence search can infer page numbers.
-    text = "\n\n\f\n\n".join(out_parts).strip()
-    return OcrResult(text=text, pages=pages_done, lang=use_lang, error=None)
+    text = "\n\n\f\n\n".join(out_parts)
+    return OcrResult(
+        text=text,
+        pages=pages_done,
+        lang=use_lang,
+        error=None,
+        page_texts=tuple(out_parts),
+    )
 
 
 def is_text_probably_scanned(text: str, min_han: int = 30, min_alnum: int = 80) -> bool:

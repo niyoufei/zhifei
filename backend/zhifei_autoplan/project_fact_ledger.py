@@ -5,14 +5,37 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Dict, Iterable, List, Mapping
-
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 SCHEMA_VERSION = "project-fact-ledger-v1"
 
+FACT_STATUSES = ("verified", "derived", "approved", "provisional", "missing")
+FORMAL_ACCEPTED_STATUSES = frozenset({"verified", "derived", "approved"})
+FORMAL_REQUIRED_FIELDS = (
+    "planned_duration_days",
+    "resource_peak",
+    "critical_interval_days",
+    "risk_inspection_frequency",
+    "quality_threshold",
+    "deviation_action_deadline",
+)
+
+SOURCE_DEFAULT_STATUSES: dict[str, str] = {
+    "approved_resolution": "approved",
+    "clarification": "verified",
+    "tender": "verified",
+    "user_input": "approved",
+    "reviewed_design": "verified",
+    "boq": "derived",
+    "verified_knowledge_graph": "verified",
+    "case_library": "provisional",
+    "system_default": "provisional",
+}
+
 # Higher values are more authoritative.  A later source may only replace an
 # earlier fact by using an explicitly higher class; insertion order never wins.
-SOURCE_PRIORITIES: Dict[str, int] = {
+SOURCE_PRIORITIES: dict[str, int] = {
     "approved_resolution": 600,
     "clarification": 500,
     "tender": 400,
@@ -24,7 +47,7 @@ SOURCE_PRIORITIES: Dict[str, int] = {
     "system_default": 0,
 }
 
-SOURCE_LABELS: Dict[str, str] = {
+SOURCE_LABELS: dict[str, str] = {
     "approved_resolution": "经批准的冲突处理",
     "clarification": "澄清答疑",
     "tender": "招标文件",
@@ -36,16 +59,24 @@ SOURCE_LABELS: Dict[str, str] = {
     "system_default": "系统默认",
 }
 
-FACT_LABELS: Dict[str, str] = {
+FACT_LABELS: dict[str, str] = {
     "project_name": "项目名称",
     "project_code": "项目编号",
     "planned_duration_days": "总工期",
     "resource_peak": "资源峰值",
     "critical_interval_days": "关键线路间隔",
     "critical_path_names": "关键线路工序",
+    "risk_inspection_frequency": "风险检查频次",
+    "quality_threshold": "质量阈值",
+    "deviation_action_deadline": "偏差处置时限",
 }
 
 _FIELD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,79}$")
+_TENDER_DURATION_RE = re.compile(
+    r"(?:计划工期|总工期|合同工期|工期要求)[^\d]{0,16}"
+    r"(?P<value>\d+(?:\.\d+)?)\s*(?:日历天|天|日)",
+    re.IGNORECASE,
+)
 
 
 def _json_default(value: Any) -> str:
@@ -92,7 +123,7 @@ def _normalize_unit(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
-def _sanitize_evidence(value: Any, *, default_locator: str = "") -> Dict[str, Any]:
+def _sanitize_evidence(value: Any, *, default_locator: str = "") -> dict[str, Any]:
     evidence = value if isinstance(value, Mapping) else {}
     allowed = (
         "file_name",
@@ -103,7 +134,7 @@ def _sanitize_evidence(value: Any, *, default_locator: str = "") -> Dict[str, An
         "start",
         "end",
     )
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
     for key in allowed:
         item = evidence.get(key)
         if item is None or str(item).strip() == "":
@@ -118,7 +149,7 @@ def _sanitize_evidence(value: Any, *, default_locator: str = "") -> Dict[str, An
     return result
 
 
-def _normalize_fact_record(field: str, raw: Any) -> Dict[str, Any] | None:
+def _normalize_fact_record(field: str, raw: Any) -> dict[str, Any] | None:
     key = str(field or "").strip()
     if not _FIELD_RE.fullmatch(key):
         return None
@@ -127,26 +158,50 @@ def _normalize_fact_record(field: str, raw: Any) -> Dict[str, Any] | None:
         unit = _normalize_unit(raw.get("unit"))
         confidence = raw.get("confidence")
         evidence = raw.get("evidence")
+        status = str(raw.get("status") or "").strip().lower()
     else:
         value = raw
         unit = ""
         confidence = None
         evidence = None
+        status = ""
     value = _normalize_scalar(value)
     if value is None or value == "" or value == [] or value == {}:
         return None
-    record: Dict[str, Any] = {"field": key, "value": value, "unit": unit}
+    record: dict[str, Any] = {"field": key, "value": value, "unit": unit}
+    if status in FACT_STATUSES:
+        record["status"] = status
     if confidence is not None:
         try:
-            record["confidence"] = max(0.0, min(1.0, float(confidence)))
-        except Exception:
-            pass
+            normalized_confidence = float(confidence)
+        except (TypeError, ValueError):
+            normalized_confidence = None
+        if normalized_confidence is not None:
+            record["confidence"] = max(0.0, min(1.0, normalized_confidence))
     if isinstance(evidence, Mapping):
         record["evidence"] = _sanitize_evidence(evidence)
     return record
 
 
-def _iter_source_facts(source: Mapping[str, Any]) -> Iterable[Dict[str, Any]]:
+def _fact_status(source_type: str, explicit_status: Any = None) -> str:
+    default = SOURCE_DEFAULT_STATUSES.get(source_type, "provisional")
+    requested = str(explicit_status or "").strip().lower()
+    if requested not in FACT_STATUSES:
+        return default
+    # Low-trust sources can never self-promote into a formal fact merely by
+    # carrying a caller-supplied status string.
+    if source_type in {"system_default", "case_library"}:
+        return "provisional"
+    if source_type == "approved_resolution":
+        return "approved"
+    if source_type in {"clarification", "tender", "reviewed_design"}:
+        return "verified"
+    if source_type == "boq":
+        return "derived"
+    return requested
+
+
+def _iter_source_facts(source: Mapping[str, Any]) -> Iterable[dict[str, Any]]:
     raw_facts = source.get("facts")
     if isinstance(raw_facts, Mapping):
         for field, raw in raw_facts.items():
@@ -163,10 +218,10 @@ def _iter_source_facts(source: Mapping[str, Any]) -> Iterable[Dict[str, Any]]:
                 yield record
 
 
-def build_project_fact_ledger(sources: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+def build_project_fact_ledger(sources: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """Resolve project facts without mutating inputs and bind the result to a digest."""
-    candidates: Dict[str, List[Dict[str, Any]]] = {}
-    source_receipts: List[Dict[str, Any]] = []
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    source_receipts: list[dict[str, Any]] = []
 
     for index, source in enumerate(copy.deepcopy(list(sources or []))):
         if not isinstance(source, Mapping):
@@ -184,8 +239,10 @@ def build_project_fact_ledger(sources: Iterable[Mapping[str, Any]]) -> Dict[str,
         for record in _iter_source_facts(source):
             fact_count += 1
             evidence = record.pop("evidence", None) or source_evidence
+            status = _fact_status(source_type, record.pop("status", None))
             candidate = {
                 **record,
+                "status": status,
                 "source_id": source_id,
                 "source_type": source_type,
                 "source_label": SOURCE_LABELS[source_type],
@@ -204,9 +261,9 @@ def build_project_fact_ledger(sources: Iterable[Mapping[str, Any]]) -> Dict[str,
             }
         )
 
-    selected: Dict[str, Dict[str, Any]] = {}
-    conflicts: List[Dict[str, Any]] = []
-    overridden: List[Dict[str, Any]] = []
+    selected: dict[str, dict[str, Any]] = {}
+    conflicts: list[dict[str, Any]] = []
+    overridden: list[dict[str, Any]] = []
     for field in sorted(candidates):
         rows = sorted(
             candidates[field],
@@ -214,7 +271,7 @@ def build_project_fact_ledger(sources: Iterable[Mapping[str, Any]]) -> Dict[str,
         )
         top_priority = int(rows[0]["priority"])
         top_rows = [row for row in rows if int(row["priority"]) == top_priority]
-        value_groups: Dict[str, List[Dict[str, Any]]] = {}
+        value_groups: dict[str, list[dict[str, Any]]] = {}
         for row in top_rows:
             identity = _canonical_json({"value": row["value"], "unit": row.get("unit") or ""})
             value_groups.setdefault(identity, []).append(row)
@@ -256,12 +313,13 @@ def build_project_fact_ledger(sources: Iterable[Mapping[str, Any]]) -> Dict[str,
                     }
                 )
 
-    ledger: Dict[str, Any] = {
+    ledger: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "policy": {
             "source_priorities": dict(SOURCE_PRIORITIES),
             "same_priority_conflict": "HOLD",
             "lower_priority_conflict": "record_and_override",
+            "formal_accepted_statuses": sorted(FORMAL_ACCEPTED_STATUSES),
         },
         "status": "HOLD_PROJECT_FACT_CONFLICT" if conflicts else "PASS_PROJECT_FACTS_RESOLVED",
         "unresolved_fields": [row["field"] for row in conflicts],
@@ -270,16 +328,35 @@ def build_project_fact_ledger(sources: Iterable[Mapping[str, Any]]) -> Dict[str,
         "overridden_candidates": overridden,
         "sources": sorted(source_receipts, key=lambda row: (-int(row["priority"]), str(row["source_id"]))),
     }
+    ready_fields: list[str] = []
+    missing_fields: list[str] = []
+    provisional_fields: list[str] = []
+    for field in FORMAL_REQUIRED_FIELDS:
+        fact = selected.get(field)
+        if not isinstance(fact, Mapping):
+            missing_fields.append(field)
+        elif str(fact.get("status") or "missing") in FORMAL_ACCEPTED_STATUSES:
+            ready_fields.append(field)
+        else:
+            provisional_fields.append(field)
+    ledger["formal_parameter_readiness"] = {
+        "ready": not conflicts and not missing_fields and not provisional_fields,
+        "required_fields": list(FORMAL_REQUIRED_FIELDS),
+        "ready_fields": ready_fields,
+        "missing_fields": missing_fields,
+        "provisional_fields": provisional_fields,
+        "accepted_statuses": sorted(FORMAL_ACCEPTED_STATUSES),
+    }
     ledger["ledger_digest"] = _sha256(ledger)
     return ledger
 
 
-def validate_project_fact_ledger(ledger: Mapping[str, Any]) -> Dict[str, Any]:
+def validate_project_fact_ledger(ledger: Mapping[str, Any]) -> dict[str, Any]:
     payload = copy.deepcopy(dict(ledger or {}))
     claimed = str(payload.pop("ledger_digest", "")).strip()
     computed = _sha256(payload)
     unresolved = [str(x) for x in (payload.get("unresolved_fields") or []) if str(x)]
-    errors: List[str] = []
+    errors: list[str] = []
     if not claimed:
         errors.append("ledger_digest_missing")
     elif claimed != computed:
@@ -295,8 +372,55 @@ def validate_project_fact_ledger(ledger: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _facts_mapping(value: Any) -> Dict[str, Any]:
+def _facts_mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _tender_duration_sources(tender: Mapping[str, Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    items = tender.get("items") if isinstance(tender.get("items"), list) else []
+    for item_index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            continue
+        spans = item.get("source_spans") if isinstance(item.get("source_spans"), list) else []
+        for span_index, span in enumerate(spans):
+            if not isinstance(span, Mapping):
+                continue
+            snippet = str(span.get("snippet") or "")
+            match = _TENDER_DURATION_RE.search(snippet)
+            if not match:
+                continue
+            raw_value = float(match.group("value"))
+            value: int | float = int(raw_value) if raw_value.is_integer() else raw_value
+            file_name = str(span.get("file_name") or "")
+            source_type = (
+                "clarification"
+                if any(marker in file_name for marker in ("答疑", "澄清", "补疑"))
+                else "tender"
+            )
+            locator = f"tender_matrix.items[{item_index}].source_spans[{span_index}]"
+            evidence = {
+                key: span.get(key)
+                for key in ("file_name", "page", "start", "end", "snippet")
+                if span.get(key) is not None
+            }
+            evidence["locator"] = locator
+            sources.append(
+                {
+                    "source_id": f"tender-duration-{item_index + 1}-{span_index + 1}",
+                    "source_type": source_type,
+                    "facts": {
+                        "planned_duration_days": {
+                            "value": value,
+                            "unit": "天",
+                            "status": "verified",
+                            "confidence": 1.0,
+                        }
+                    },
+                    "evidence": evidence,
+                }
+            )
+    return sources
 
 
 def build_project_fact_ledger_from_inputs(
@@ -304,11 +428,11 @@ def build_project_fact_ledger_from_inputs(
     payload: Mapping[str, Any] | None,
     tender: Mapping[str, Any] | None,
     boq_wbs_cpm: Mapping[str, Any] | None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     payload_data = dict(payload or {})
     tender_data = dict(tender or {})
     cpm_data = dict(boq_wbs_cpm or {})
-    sources: List[Dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
 
     approved = _facts_mapping(payload_data.get("approved_project_fact_resolutions"))
     if approved:
@@ -335,7 +459,7 @@ def build_project_fact_ledger_from_inputs(
             }
         )
 
-    tender_header_facts: Dict[str, Any] = {}
+    tender_header_facts: dict[str, Any] = {}
     if str(tender_data.get("project_name") or "").strip():
         tender_header_facts["project_name"] = tender_data["project_name"]
     if str(tender_data.get("project_code") or "").strip():
@@ -373,6 +497,12 @@ def build_project_fact_ledger_from_inputs(
             }
         )
 
+    # Older tender matrices did not project schedule facts into
+    # extraction_meta.project_facts, but they did preserve exact source spans.
+    # Deterministically recover a tender-authoritative duration from those
+    # spans, retaining the locator and hashed snippet in the ledger.
+    sources.extend(_tender_duration_sources(tender_data))
+
     user_facts = _facts_mapping(payload_data.get("project_facts"))
     topic = str(payload_data.get("topic") or "").strip()
     project_code = str(payload_data.get("project_code") or "").strip()
@@ -391,7 +521,7 @@ def build_project_fact_ledger_from_inputs(
         )
 
     summary = cpm_data.get("summary") if isinstance(cpm_data.get("summary"), Mapping) else {}
-    boq_facts: Dict[str, Any] = {}
+    boq_facts: dict[str, Any] = {}
     schedule_fact_eligible = bool(summary.get("schedule_fact_eligible", False))
     if schedule_fact_eligible and summary.get("estimated_duration_days"):
         boq_facts["planned_duration_days"] = {
@@ -435,7 +565,7 @@ def build_project_fact_ledger_from_inputs(
     return build_project_fact_ledger(sources)
 
 
-def project_fact_prompt_requirements(ledger: Mapping[str, Any]) -> List[str]:
+def project_fact_prompt_requirements(ledger: Mapping[str, Any]) -> list[str]:
     digest = str(ledger.get("ledger_digest") or "").strip()
     lines = [
         f"【不可变项目事实台账】digest={digest}。所有Agent必须使用下列统一口径，不得另行推测、改写或制造冲突。"
@@ -444,6 +574,9 @@ def project_fact_prompt_requirements(ledger: Mapping[str, Any]) -> List[str]:
     for field in sorted(facts):
         row = facts[field]
         if not isinstance(row, Mapping):
+            continue
+        status = str(row.get("status") or "missing")
+        if status not in FORMAL_ACCEPTED_STATUSES:
             continue
         value = row.get("value")
         if isinstance(value, list):
@@ -457,6 +590,7 @@ def project_fact_prompt_requirements(ledger: Mapping[str, Any]) -> List[str]:
         evidence = row.get("evidence") if isinstance(row.get("evidence"), Mapping) else {}
         locator = str(evidence.get("locator") or evidence.get("file_name") or "metadata")
         lines.append(
-            f"项目事实：{FACT_LABELS.get(field, field)}={rendered}{unit}【来源:{source_label};证据:{locator}】"
+            f"项目事实：{FACT_LABELS.get(field, field)}={rendered}{unit}"
+            f"【状态:{status};来源:{source_label};证据:{locator}】"
         )
     return lines

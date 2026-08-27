@@ -18,7 +18,6 @@ def _admitted_review_chain(monkeypatch):
     async def fake_admission(payload):
         payload["_provider_admission_run_coordinator"] = object()
         payload.setdefault("provider_chain", [])
-        return None
 
     monkeypatch.setattr(
         actions_bridge,
@@ -104,7 +103,7 @@ async def test_actions_review_apply_calls_remediation_and_persists_copy(tmp_path
     )
     monkeypatch.setattr(actions_bridge, "apply_remediation", fake_apply_remediation)
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
     def fake_rebuild(results, **kwargs):
         results[0]["quality_checks"] = {"issue_list": [], "auto_revision_suggestions": []}
 
@@ -190,9 +189,11 @@ async def test_actions_review_apply_rejects_stale_issue_list(monkeypatch):
         expected_variant_version=versions["variant_version"],
         expected_issue_digest="stale-digest",
     )
-    with patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False):
-        with pytest.raises(HTTPException) as exc:
-            await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
+    with (
+        patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
     assert exc.value.status_code == 409
     assert exc.value.detail["code"] == "STALE_REVIEW_STATE"
 
@@ -226,7 +227,7 @@ async def test_actions_review_apply_render_failure_keeps_live_result(tmp_path: P
     monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
     monkeypatch.setattr(actions_bridge, "create_revision_snapshot", review_revision.create_revision_snapshot)
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
     monkeypatch.setattr(
         actions_bridge,
         "apply_remediation",
@@ -258,9 +259,11 @@ async def test_actions_review_apply_render_failure_keeps_live_result(tmp_path: P
         expected_variant_version=versions["variant_version"],
         expected_issue_digest=versions["issue_digest"],
     )
-    with patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False):
-        with pytest.raises(RuntimeError, match="render failed"):
-            await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
+    with (
+        patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False),
+        pytest.raises(RuntimeError, match="render failed"),
+    ):
+        await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
     assert target["sections"][0]["content"] == "原始正文"
     assert promoted == []
 
@@ -293,7 +296,7 @@ async def test_actions_review_apply_blocks_remaining_high_risk(tmp_path: Path, m
     monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
     monkeypatch.setattr(actions_bridge, "create_revision_snapshot", review_revision.create_revision_snapshot)
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
     monkeypatch.setattr(actions_bridge, "apply_remediation", lambda *args, **kwargs: None)
     monkeypatch.setattr(actions_bridge, "_rebuild_postprocessed_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(actions_bridge, "_save_outputs", lambda *args, **kwargs: pytest.fail("must not persist"))
@@ -305,9 +308,11 @@ async def test_actions_review_apply_blocks_remaining_high_risk(tmp_path: Path, m
         expected_variant_version=versions["variant_version"],
         expected_issue_digest=versions["issue_digest"],
     )
-    with patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False):
-        with pytest.raises(HTTPException) as exc:
-            await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
+    with (
+        patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
     assert exc.value.status_code == 409
     assert exc.value.detail["code"] == "REVIEW_HIGH_RISK_REMAINS"
     assert target["sections"][0]["content"] == "原始正文"
@@ -387,7 +392,7 @@ async def test_actions_review_apply_runs_ai_recheck_and_second_round(tmp_path: P
     )
     monkeypatch.setattr(actions_bridge, "_rewrite_review_section", fake_rewrite)
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
     monkeypatch.setattr(actions_bridge, "_rebuild_postprocessed_artifacts", fake_rebuild)
     saved: dict[str, object] = {}
 
@@ -519,20 +524,29 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
         "audit_standard_citations",
         lambda *args, **kwargs: {"ok": True},
     )
-    monkeypatch.setattr(
-        actions_bridge,
-        "build_delivery_quality_gate",
-        lambda **kwargs: {
+    captured_gate_kwargs = {}
+
+    def fake_delivery_gate(**kwargs):
+        captured_gate_kwargs.update(kwargs)
+        return {
             "delivery_allowed": False,
             "decision_digest": "blocked-but-not-rebuild-error",
             "blockers": [{"code": "CONTENT_REVIEW_BLOCKED"}],
-        },
-    )
+        }
 
-    result = {"sections": [{"title": "质量管理", "content": "正文"}], "outline": ["质量管理"]}
+    monkeypatch.setattr(actions_bridge, "build_delivery_quality_gate", fake_delivery_gate)
+
+    parameter_report = {"schema_version": "missing-parameter-probe-v2"}
+    fact_ledger = {"schema_version": "project-fact-ledger-v1"}
+    result = {
+        "sections": [{"title": "质量管理", "content": "正文"}],
+        "outline": ["质量管理"],
+        "missing_parameters": parameter_report,
+        "project_fact_ledger": fact_ledger,
+    }
     actions_bridge._rebuild_postprocessed_artifacts(
         [result],
-        payload={"dry_run": True, "quality_strict": False},
+        payload={"quality_strict": False},
         report=None,
         params={},
         fail_closed=True,
@@ -540,6 +554,11 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
 
     assert "postprocess_errors" not in result
     assert result["delivery_quality_gate"]["delivery_allowed"] is False
+    assert captured_gate_kwargs["formal_delivery_required"] is True
+    assert captured_gate_kwargs["model_review_required"] is True
+    assert captured_gate_kwargs["project_parameters"] is parameter_report
+    assert captured_gate_kwargs["project_fact_ledger"] is fact_ledger
+    assert captured_gate_kwargs["sections"] == result["sections"]
 
 
 def test_review_postprocess_rejects_unrelated_traceable_locator(monkeypatch):

@@ -15,25 +15,22 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.runtime_supervisor import (  # noqa: E402
+from scripts.runtime_supervisor import (
     ExpectedIdentity,
     SupervisorError,
     compute_runtime_digest,
     compute_source_digest,
     verify_release_manifest,
 )
-
 
 SCHEMA_VERSION = 1
 SYSTEM_ID_DEFAULT = "docgen-system"
@@ -348,7 +345,7 @@ def ensure_runtime_secret(
             )
         if content and not content.endswith(b"\n"):
             content += b"\n"
-        content += f"ZF_ACTIONS_KEY={generated}\n".encode("utf-8")
+        content += f"ZF_ACTIONS_KEY={generated}\n".encode()
     _atomic_write_bytes(destination, content, mode=0o600)
     return destination
 
@@ -385,7 +382,7 @@ def _read_bootstrap_source(path: Path) -> bytes:
         raise ReleaseBuildError(
             "RELEASE_BOOTSTRAP_SOURCE_UNAVAILABLE", "固定启动入口源文件不可用"
         ) from exc
-    signature = lambda info: (  # noqa: E731 - compact immutable comparison
+    signature = lambda info: (
         info.st_dev,
         info.st_ino,
         info.st_size,
@@ -538,9 +535,7 @@ def _is_excluded(relative: Path, *, is_directory: bool) -> bool:
         return True
     if Path(name).suffix.lower() in EXCLUDED_FILE_SUFFIXES:
         return True
-    if name.endswith("~") or name.startswith(".#"):
-        return True
-    return False
+    return bool(name.endswith("~") or name.startswith(".#"))
 
 
 def _source_inventory(root: Path) -> tuple[list[Path], list[Path], dict[str, tuple[Any, ...]]]:
@@ -794,6 +789,69 @@ def _runtime_python(runtime_root: Path) -> Path:
     )
 
 
+_PYTHON_SHEBANG_RE = re.compile(
+    rb"^#![^\r\n]*python(?:\d+(?:\.\d+)*)?(?:[ \t][^\r\n]*)?\r?\n"
+)
+_RELOCATABLE_CONSOLE_PREFIX = (
+    b"#!/bin/sh\n"
+    b"'''exec' \"$(dirname -- \"$0\")/python\" \"$0\" \"$@\"\n"
+    b"' '''\n"
+)
+
+
+def _relocate_console_scripts(venv_root: Path) -> int:
+    """Remove absolute source-venv shebangs from copied Python entrypoints."""
+
+    bin_dir = venv_root / "bin"
+    if not bin_dir.is_dir() or bin_dir.is_symlink():
+        raise ReleaseBuildError(
+            "RELEASE_RUNTIME_BIN_INVALID", "复制的运行时缺少可信 bin 目录"
+        )
+    relocated = 0
+    for entry in sorted(os.scandir(bin_dir), key=lambda item: item.name):
+        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            continue
+        path = Path(entry.path)
+        info = path.lstat()
+        if not stat.S_IMODE(info.st_mode) & 0o111:
+            continue
+        with path.open("rb") as handle:
+            first_line = handle.readline(4096)
+            remainder = handle.read()
+        if not _PYTHON_SHEBANG_RE.fullmatch(first_line):
+            continue
+        path.write_bytes(_RELOCATABLE_CONSOLE_PREFIX + remainder)
+        path.chmod(stat.S_IMODE(info.st_mode))
+        relocated += 1
+    return relocated
+
+
+def _assert_console_scripts_relocatable(venv_root: Path) -> None:
+    bin_dir = venv_root / "bin"
+    for entry in sorted(os.scandir(bin_dir), key=lambda item: item.name):
+        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            continue
+        path = Path(entry.path)
+        info = path.lstat()
+        if not stat.S_IMODE(info.st_mode) & 0o111:
+            continue
+        with path.open("rb") as handle:
+            prefix = handle.read(max(4096, len(_RELOCATABLE_CONSOLE_PREFIX)))
+        first_line = prefix.splitlines(keepends=True)[:1]
+        if first_line and _PYTHON_SHEBANG_RE.fullmatch(first_line[0]):
+            raise ReleaseBuildError(
+                "RELEASE_RUNTIME_ABSOLUTE_SHEBANG",
+                f"运行时命令仍绑定外部Python: {entry.name}",
+            )
+        if prefix.startswith(b"#!/bin/sh\n'''exec'") and not prefix.startswith(
+            _RELOCATABLE_CONSOLE_PREFIX
+        ):
+            raise ReleaseBuildError(
+                "RELEASE_RUNTIME_CONSOLE_WRAPPER_INVALID",
+                f"运行时命令相对启动器无效: {entry.name}",
+            )
+
+
 def build_runtime(
     *,
     source_venv: Path,
@@ -811,6 +869,8 @@ def build_runtime(
     try:
         shutil.copytree(source_venv, staging / "venv", symlinks=True)
         staging_python = _runtime_python(staging)
+        _relocate_console_scripts(staging / "venv")
+        _assert_console_scripts_relocatable(staging / "venv")
         _freeze_tree(staging)
         digest = digest_fn(staging_python)
         if not isinstance(digest, str) or not _DIGEST_RE.fullmatch(digest):
@@ -834,6 +894,7 @@ def build_runtime(
                     "RELEASE_RUNTIME_EXISTING_MISMATCH", "已有运行时摘要反向校验失败"
                 )
             _assert_tree_read_only(destination)
+            _assert_console_scripts_relocatable(destination / "venv")
             _remove_staging(staging)
         else:
             os.replace(staging, destination)
@@ -844,6 +905,7 @@ def build_runtime(
                 "RELEASE_RUNTIME_REVERSE_VERIFY_FAILED", "最终运行时摘要反向校验失败"
             )
         _assert_tree_read_only(destination)
+        _assert_console_scripts_relocatable(destination / "venv")
         return digest, final_python
     except Exception:
         _remove_staging(staging)
@@ -1251,22 +1313,19 @@ def _load_transition_intent(base: Path) -> dict[str, Any] | None:
         )
     old_current = payload.get("old_current")
     new_current = payload.get("new_current")
-    try:
-        if old_current is not None:
-            _validate_current_payload(
-                old_current,
-                base=base,
-                code="RELEASE_TRANSITION_INTENT_INVALID",
-                message="发布切换意图旧身份无效",
-            )
+    if old_current is not None:
         _validate_current_payload(
-            new_current,
+            old_current,
             base=base,
             code="RELEASE_TRANSITION_INTENT_INVALID",
-            message="发布切换意图新身份无效",
+            message="发布切换意图旧身份无效",
         )
-    except ReleaseBuildError:
-        raise
+    _validate_current_payload(
+        new_current,
+        base=base,
+        code="RELEASE_TRANSITION_INTENT_INVALID",
+        message="发布切换意图新身份无效",
+    )
     if (
         (old_current is not None and not isinstance(old_current, Mapping))
         or not isinstance(new_current, Mapping)

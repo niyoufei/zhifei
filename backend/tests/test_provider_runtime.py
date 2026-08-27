@@ -89,6 +89,7 @@ def test_apply_server_provider_routing_uses_env_text_chain(monkeypatch) -> None:
     assert prepared["_server_provider_roles"]["routing_mode"] == "server_allowlist"
     assert prepared["_provider_admission_required_roles"] == [
         "text_draft",
+        "text_review",
         "document_render",
     ]
     assert prepared["_provider_admission_extra_slots"] == []
@@ -271,7 +272,26 @@ def test_operation_specific_admission_does_not_require_unused_renderer(monkeypat
     )
 
     assert "text_draft" in roles
+    assert "text_review" in roles
     assert "document_render" not in roles
+
+
+def test_operation_specific_admission_requires_missing_independent_reviewer(monkeypatch) -> None:
+    from backend.zhifei_autoplan.provider_runtime import (
+        build_server_provider_admission_candidates,
+        server_provider_admission_required_roles,
+    )
+
+    monkeypatch.setenv("OPENAI_API_KEY_TEXT_MAIN", "openai-only-key")
+    candidates = build_server_provider_admission_candidates()
+
+    roles = server_provider_admission_required_roles(
+        candidates,
+        require_document_render=False,
+    )
+
+    assert {row.role for row in candidates} == {"text_main"}
+    assert roles == ["text_draft", "text_review"]
 
 
 def test_apply_server_provider_routing_orders_anthropic_tiered_chain(monkeypatch) -> None:

@@ -39,6 +39,37 @@ class _ChunkOnlyUpload:
         self._offset = max(0, offset)
 
 
+def test_pdf_ocr_overlay_preserves_declared_page_ordinals() -> None:
+    base = "首页文字\f\f第三页文字\f"
+
+    merged, mapped = ingest_router._merge_pdf_ocr_pages(
+        base,
+        ("首页OCR", "第二页OCR", "", "第四页OCR"),
+        4,
+    )
+
+    assert mapped is True
+    assert merged.count("\f") == 3
+    pages = merged.split("\f")
+    assert "首页文字" in pages[0] and "首页OCR" in pages[0]
+    assert "第二页OCR" in pages[1]
+    assert "第三页文字" in pages[2]
+    assert "第四页OCR" in pages[3]
+
+
+def test_pdf_ocr_overlay_rejects_unreliable_base_page_boundaries() -> None:
+    base = "第一页\f第二页"
+
+    merged, mapped = ingest_router._merge_pdf_ocr_pages(
+        base,
+        ("第一页OCR", "第二页OCR"),
+        3,
+    )
+
+    assert mapped is False
+    assert merged == base
+
+
 def test_handle_upload_streams_large_files_to_disk(monkeypatch, tmp_path: Path) -> None:
     chunk_size = 1024 * 1024
     payload = b"A" * (chunk_size * 2 + 17)
@@ -122,7 +153,7 @@ def _isolate_workspace(monkeypatch, tmp_path: Path) -> Path:
 
 def test_handle_upload_preserves_chinese_name_and_rejects_duplicate(monkeypatch, tmp_path: Path) -> None:
     _isolate_workspace(monkeypatch, tmp_path)
-    payload = "第一项目施工组织设计验收资料".encode("utf-8")
+    payload = "第一项目施工组织设计验收资料".encode()
     first = _ChunkOnlyUpload(payload, filename="中文资料文件.txt")
     duplicate = _ChunkOnlyUpload(payload, filename="重复资料文件.txt")
 

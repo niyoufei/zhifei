@@ -3,26 +3,26 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any
 
-from backend.zhifei_autoplan.content_quality import build_independent_content_review
 from backend.zhifei_autoplan.boq_focus_policy import (
     MAX_BOQ_FOCUS_ITEMS,
     boq_focus_name_in_text,
     find_boq_focus_name_spans,
     normalize_boq_focus_items,
 )
+from backend.zhifei_autoplan.content_quality import build_independent_content_review
 
 
 def _normalize_text(s: str) -> str:
     return (s or "").replace(" ", "").replace("\n", "")
 
-EVIDENCE_SRC_RE = re.compile(r"【证据:(?P<src>[^】]{1,80})】")
+EVIDENCE_SRC_RE = re.compile(r"【证据:(?P<src>[^】]{1,200})】")
 TRACEABLE_EVIDENCE_RE = re.compile(r"#(?:p\d+_)?[0-9a-f]{6,}@\d+", re.IGNORECASE)
 EVIDENCE_PLACEHOLDERS = ["待补充", "待定位", "tbd", "TBD", "待完善", "文件名#定位符", "文件名#定位"]
 
 
-def _extract_evidence_sources(text: str) -> List[str]:
+def _extract_evidence_sources(text: str) -> list[str]:
     return [m.group("src").strip() for m in EVIDENCE_SRC_RE.finditer(text or "") if (m.group("src") or "").strip()]
 
 
@@ -57,7 +57,7 @@ def _count_traceable_evidence(text: str) -> int:
     return cnt
 
 
-def _count_evidence_by_section(sections: List[Dict[str, Any]]):
+def _count_evidence_by_section(sections: list[dict[str, Any]]):
     result = []
     for s in sections:
         # Count only "good" evidence markers (exclude placeholders like 待补充/待定位).
@@ -79,7 +79,7 @@ def _avg_sentence_len(text: str) -> float:
     return total / max(1, len(parts))
 
 
-def _check_score_coverage(tender: Dict[str, Any], sections: List[Dict[str, Any]]):
+def _check_score_coverage(tender: dict[str, Any], sections: list[dict[str, Any]]):
     if not tender:
         return {"ok": False, "missing": [], "reason": "tender_matrix_missing"}
     all_text = "\n".join((s.get("content") or "") for s in sections)
@@ -96,7 +96,7 @@ def _check_score_coverage(tender: Dict[str, Any], sections: List[Dict[str, Any]]
     return {"ok": len(missing) == 0, "missing": missing}
 
 
-def _check_score_coverage_by_section(tender: Dict[str, Any], sections: List[Dict[str, Any]]):
+def _check_score_coverage_by_section(tender: dict[str, Any], sections: list[dict[str, Any]]):
     if not tender:
         return []
     items = tender.get("items", [])
@@ -122,7 +122,7 @@ def _check_score_coverage_by_section(tender: Dict[str, Any], sections: List[Dict
     return results
 
 
-def _check_closed_loop(sections: List[Dict[str, Any]]):
+def _check_closed_loop(sections: list[dict[str, Any]]):
     issues = []
     for s in sections:
         title = s.get("title") or ""
@@ -133,7 +133,7 @@ def _check_closed_loop(sections: List[Dict[str, Any]]):
     return {"ok": len(issues) == 0, "issues": issues}
 
 
-def _check_closed_loop_by_section(sections: List[Dict[str, Any]]):
+def _check_closed_loop_by_section(sections: list[dict[str, Any]]):
     results = []
     for s in sections:
         title = s.get("title") or ""
@@ -151,7 +151,7 @@ def _check_engineering(text: str):
     return {"ok": len(missing) <= 2, "missing": missing}
 
 
-def _check_engineering_by_section(sections: List[Dict[str, Any]]):
+def _check_engineering_by_section(sections: list[dict[str, Any]]):
     keys = ["频次", "阈值", "责任", "验收", "流程"]
     results = []
     for s in sections:
@@ -259,8 +259,8 @@ def strip_nonconcrete_language(text: str) -> str:
     return out.strip()
 
 
-def _find_phrase_hits(text: str, phrases: List[str], span: int = 18) -> List[Dict[str, str]]:
-    hits: List[Dict[str, str]] = []
+def _find_phrase_hits(text: str, phrases: list[str], span: int = 18) -> list[dict[str, str]]:
+    hits: list[dict[str, str]] = []
     for phrase in phrases:
         for m in re.finditer(re.escape(phrase), text or ""):
             start = max(0, m.start() - span)
@@ -269,8 +269,8 @@ def _find_phrase_hits(text: str, phrases: List[str], span: int = 18) -> List[Dic
     return hits
 
 
-def _extract_risk_triplets(text: str) -> List[Dict[str, str]]:
-    triplets: List[Dict[str, str]] = []
+def _extract_risk_triplets(text: str) -> list[dict[str, str]]:
+    triplets: list[dict[str, str]] = []
     matches = [
         *RISK_TRIPLET_RE.finditer(text or ""),
         *RISK_TRIPLET_ARROW_RE.finditer(text or ""),
@@ -291,7 +291,7 @@ def _extract_risk_triplets(text: str) -> List[Dict[str, str]]:
     return triplets
 
 
-def _check_risk_triplet_by_section(sections: List[Dict[str, Any]]):
+def _check_risk_triplet_by_section(sections: list[dict[str, Any]]):
     results = []
     for s in sections:
         title = s.get("title") or ""
@@ -316,7 +316,7 @@ def _check_risk_triplet_by_section(sections: List[Dict[str, Any]]):
     return results
 
 
-def _check_quantitative_by_section(sections: List[Dict[str, Any]]):
+def _check_quantitative_by_section(sections: list[dict[str, Any]]):
     results = []
     for s in sections:
         title = s.get("title") or ""
@@ -337,7 +337,7 @@ def _check_quantitative_by_section(sections: List[Dict[str, Any]]):
     return results
 
 
-def _check_vague_terms_by_section(sections: List[Dict[str, Any]]):
+def _check_vague_terms_by_section(sections: list[dict[str, Any]]):
     results = []
     for s in sections:
         title = s.get("title") or ""
@@ -371,7 +371,7 @@ def _sanitize_vague_language(text: str) -> str:
 
     # Keep separators so the original structure mostly remains.
     parts = re.split(r"([。；;\n])", src)
-    cleaned: List[str] = []
+    cleaned: list[str] = []
     quant_hints = set(QUANT_KEYS + ["验收", "责任", "记录", "时限", "偏差", "合格率"])
 
     for i in range(0, len(parts), 2):
@@ -394,7 +394,7 @@ def _sanitize_vague_language(text: str) -> str:
     return "".join(cleaned).strip()
 
 
-def _check_officialese_by_section(sections: List[Dict[str, Any]]):
+def _check_officialese_by_section(sections: list[dict[str, Any]]):
     patterns = OFFICIALESE_PHRASES + HARD_BANNED_WORDS
     results = []
     for s in sections:
@@ -405,48 +405,107 @@ def _check_officialese_by_section(sections: List[Dict[str, Any]]):
     return results
 
 
-def _sentence_units(text: str) -> List[str]:
-    """Return stable sentence units for conservative cross-chapter reuse checks."""
+def _normalize_sentence_unit(fragment: str) -> str:
+    """Normalize one sentence without erasing its evidence identity.
 
-    source = EVIDENCE_SRC_RE.sub("", str(text or ""))
+    Two conclusions with identical prose but different page/anchor locators are
+    independent evidence bindings.  Keeping a canonical evidence set in the
+    identity prevents repetition cleanup from deleting either binding.
+    """
+
+    raw = str(fragment or "")
+    evidence_sources = sorted(set(_extract_evidence_sources(raw)))
+    source = EVIDENCE_SRC_RE.sub("", raw)
     source = re.sub(r"[`*_#>|]", "", source)
-    units: List[str] = []
-    for fragment in re.split(r"[。！？!?；;\n]+", source):
-        normalized = re.sub(r"^[\s\-—–•·（()\d一二三四五六七八九十、.]+", "", fragment)
-        normalized = re.sub(r"\s+", "", normalized).strip("，,：:")
-        if len(normalized) >= 20:
+    normalized = re.sub(r"^[\s\-—–•·（()\d一二三四五六七八九十、.]+", "", source)
+    normalized = re.sub(r"\s+", "", normalized).strip("，,：:")
+    if len(normalized) < 20:
+        return ""
+    if evidence_sources:
+        normalized += "【证据集合:" + "|".join(evidence_sources) + "】"
+    return normalized
+
+
+def _sentence_units(text: str) -> list[str]:
+    """Return stable sentence units for conservative repetition checks."""
+
+    units: list[str] = []
+    for fragment in re.split(r"[。！？!?；;\n]+", str(text or "")):
+        normalized = _normalize_sentence_unit(fragment)
+        if normalized:
             units.append(normalized)
     return units
 
 
-def _check_repetition_by_section(sections: List[Dict[str, Any]]):
-    """Flag material sentence reuse without penalising short standard clauses."""
+def _check_repetition_by_section(sections: list[dict[str, Any]]):
+    """Distinguish repeated templates in one chapter from cross-chapter reuse.
+
+    Both classes retain the historical materiality threshold: at least two
+    repeated long-sentence occurrences and a repeat ratio of at least 35%.
+    """
 
     units_by_section = [_sentence_units(s.get("content") or "") for s in sections]
-    frequency: Dict[str, int] = {}
-    for units in units_by_section:
-        for unit in units:
-            frequency[unit] = frequency.get(unit, 0) + 1
+    section_membership: dict[str, set[int]] = {}
+    for section_index, units in enumerate(units_by_section):
+        for unit in set(units):
+            section_membership.setdefault(unit, set()).add(section_index)
 
     results = []
     for section, units in zip(sections, units_by_section):
-        repeated = [unit for unit in units if frequency.get(unit, 0) > 1]
+        local_frequency: dict[str, int] = {}
+        for unit in units:
+            local_frequency[unit] = local_frequency.get(unit, 0) + 1
+
+        same_chapter = [unit for unit in units if local_frequency.get(unit, 0) > 1]
+        cross_chapter = [
+            unit for unit in units if len(section_membership.get(unit, set())) > 1
+        ]
+        same_ratio = len(same_chapter) / max(1, len(units))
+        cross_ratio = len(cross_chapter) / max(1, len(units))
+        same_ok = not (
+            len(units) >= 2 and len(same_chapter) >= 2 and same_ratio >= 0.35
+        )
+        cross_ok = not (
+            len(units) >= 2 and len(cross_chapter) >= 2 and cross_ratio >= 0.35
+        )
+        if not same_ok and not cross_ok:
+            scope = "mixed"
+        elif not same_ok:
+            scope = "same_chapter_template"
+        elif not cross_ok:
+            scope = "cross_chapter"
+        else:
+            scope = "none"
+        repeated = [
+            unit
+            for unit in units
+            if local_frequency.get(unit, 0) > 1
+            or len(section_membership.get(unit, set())) > 1
+        ]
         ratio = len(repeated) / max(1, len(units))
-        ok = not (len(units) >= 2 and len(repeated) >= 2 and ratio >= 0.35)
         results.append(
             {
                 "title": section.get("title") or "",
-                "ok": ok,
+                "ok": same_ok and cross_ok,
                 "candidate_count": len(units),
                 "repeated_count": len(repeated),
                 "repeat_ratio": round(ratio, 3),
+                "repetition_scope": scope,
+                "same_chapter_template_ok": same_ok,
+                "same_chapter_template_count": len(same_chapter),
+                "same_chapter_template_ratio": round(same_ratio, 3),
+                "same_chapter_template_samples": list(dict.fromkeys(same_chapter))[:3],
+                "cross_chapter_ok": cross_ok,
+                "cross_chapter_count": len(cross_chapter),
+                "cross_chapter_ratio": round(cross_ratio, 3),
+                "cross_chapter_samples": list(dict.fromkeys(cross_chapter))[:3],
                 "samples": list(dict.fromkeys(repeated))[:3],
             }
         )
     return results
 
 
-def _check_content_specificity_by_section(sections: List[Dict[str, Any]]):
+def _check_content_specificity_by_section(sections: list[dict[str, Any]]):
     """Detect long generic prose that contains neither evidence nor executable detail."""
 
     action_terms = (
@@ -480,7 +539,7 @@ def _check_content_specificity_by_section(sections: List[Dict[str, Any]]):
     return results
 
 
-def _check_content_density_by_section(sections: List[Dict[str, Any]]):
+def _check_content_density_by_section(sections: list[dict[str, Any]]):
     """Reject sparse technical chapters without rewarding mechanical page fill.
 
     A shorter chapter can still pass when it carries enough project-specific
@@ -532,7 +591,7 @@ def _check_content_density_by_section(sections: List[Dict[str, Any]]):
     return results
 
 
-def _check_evidence_quality_by_section(sections: List[Dict[str, Any]]):
+def _check_evidence_quality_by_section(sections: list[dict[str, Any]]):
     results = []
     for s in sections:
         title = s.get("title") or ""
@@ -543,7 +602,7 @@ def _check_evidence_quality_by_section(sections: List[Dict[str, Any]]):
     return results
 
 
-def _check_evidence_traceability_by_section(sections: List[Dict[str, Any]], require_traceable: bool):
+def _check_evidence_traceability_by_section(sections: list[dict[str, Any]], require_traceable: bool):
     results = []
     for s in sections:
         title = s.get("title") or ""
@@ -563,7 +622,7 @@ def _check_evidence_traceability_by_section(sections: List[Dict[str, Any]], requ
     return results
 
 
-def _check_core_conclusion_evidence_by_section(sections: List[Dict[str, Any]]):
+def _check_core_conclusion_evidence_by_section(sections: list[dict[str, Any]]):
     """
     Core conclusions (带约束/阈值/必须动作) must carry traceable evidence markers.
     """
@@ -575,7 +634,7 @@ def _check_core_conclusion_evidence_by_section(sections: List[Dict[str, Any]]):
         fragments = [x.strip() for x in re.split(r"[。；;\n]+", text) if x.strip()]
         core_total = 0
         covered = 0
-        missing_snippets: List[str] = []
+        missing_snippets: list[str] = []
         for frag in fragments:
             is_core = any(k in frag for k in core_kw) and (
                 bool(re.search(r"\d", frag))
@@ -610,7 +669,7 @@ def _is_key_process_chapter(title: str) -> bool:
     return any(k in t for k in keys)
 
 
-def _load_drawing_filenames(project_id: str | None = None, limit: int = 80) -> List[str]:
+def _load_drawing_filenames(project_id: str | None = None, limit: int = 80) -> list[str]:
     p = Path("backend/data/audit/ingest.jsonl")
     if not p.exists():
         return []
@@ -619,14 +678,14 @@ def _load_drawing_filenames(project_id: str | None = None, limit: int = 80) -> L
     seen = set()
     try:
         lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()[::-1]
-    except Exception:
+    except OSError:
         return []
     for ln in lines:
         if len(names) >= max(1, int(limit or 0)):
             break
         try:
             rec = json.loads(ln)
-        except Exception:
+        except json.JSONDecodeError:
             continue
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
@@ -643,7 +702,7 @@ def _load_drawing_filenames(project_id: str | None = None, limit: int = 80) -> L
     return names
 
 
-def _has_drawing_evidence(text: str, drawing_names: List[str]) -> bool:
+def _has_drawing_evidence(text: str, drawing_names: list[str]) -> bool:
     if not drawing_names:
         return False
     name_set = set(drawing_names)
@@ -656,7 +715,7 @@ def _has_drawing_evidence(text: str, drawing_names: List[str]) -> bool:
     return False
 
 
-def _check_drawing_evidence_by_section(sections: List[Dict[str, Any]], drawing_names: List[str]) -> List[Dict[str, Any]]:
+def _check_drawing_evidence_by_section(sections: list[dict[str, Any]], drawing_names: list[str]) -> list[dict[str, Any]]:
     results = []
     has_drawings = bool(drawing_names)
     for s in sections:
@@ -676,7 +735,7 @@ def _check_drawing_evidence_by_section(sections: List[Dict[str, Any]], drawing_n
     return results
 
 
-def _check_drawing_anchor_binding_by_section(sections: List[Dict[str, Any]], drawing_names: List[str]) -> List[Dict[str, Any]]:
+def _check_drawing_anchor_binding_by_section(sections: list[dict[str, Any]], drawing_names: list[str]) -> list[dict[str, Any]]:
     has_drawings = bool(drawing_names)
     results = []
     for s in sections:
@@ -698,7 +757,7 @@ def _check_drawing_anchor_binding_by_section(sections: List[Dict[str, Any]], dra
     return results
 
 
-def _load_standard_filenames(project_id: str | None = None, limit: int = 80) -> List[str]:
+def _load_standard_filenames(project_id: str | None = None, limit: int = 80) -> list[str]:
     """
     Load enterprise standard/work-instruction filenames from ingest audit.
     Uses ingest tag "standard" (from filename heuristic).
@@ -711,14 +770,14 @@ def _load_standard_filenames(project_id: str | None = None, limit: int = 80) -> 
     seen = set()
     try:
         lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()[::-1]
-    except Exception:
+    except OSError:
         return []
     for ln in lines:
         if len(names) >= max(1, int(limit or 0)):
             break
         try:
             rec = json.loads(ln)
-        except Exception:
+        except json.JSONDecodeError:
             continue
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
@@ -735,7 +794,7 @@ def _load_standard_filenames(project_id: str | None = None, limit: int = 80) -> 
     return names
 
 
-def _has_standard_evidence(text: str, standard_names: List[str]) -> bool:
+def _has_standard_evidence(text: str, standard_names: list[str]) -> bool:
     if not standard_names:
         return False
     name_set = set(standard_names)
@@ -748,7 +807,7 @@ def _has_standard_evidence(text: str, standard_names: List[str]) -> bool:
     return False
 
 
-def _check_standard_evidence_by_section(sections: List[Dict[str, Any]], standard_names: List[str]) -> Dict[str, Any]:
+def _check_standard_evidence_by_section(sections: list[dict[str, Any]], standard_names: list[str]) -> dict[str, Any]:
     """
     When enterprise standards exist, require that they are actually cited as evidence
     (not just mentioned as vague "按标准执行").
@@ -784,7 +843,7 @@ def _check_standard_evidence_by_section(sections: List[Dict[str, Any]], standard
         target = 1
         covered = any_hits
     ok = covered >= target
-    result = {
+    return {
         "ok": ok,
         "standard_count": len(standard_names),
         "standards": standard_names[:12],
@@ -794,8 +853,8 @@ def _check_standard_evidence_by_section(sections: List[Dict[str, Any]], standard
     }
 
 
-def _check_consistency(sections: List[Dict[str, Any]]):
-    metric_values: Dict[str, Dict[str, List[str]]] = {
+def _check_consistency(sections: list[dict[str, Any]]):
+    metric_values: dict[str, dict[str, list[str]]] = {
         "工期": {},
         "资源峰值": {},
         "关键线路间隔": {},
@@ -839,13 +898,15 @@ def _check_consistency(sections: List[Dict[str, Any]]):
                         "source": "cpm",
                     }
                 )
-    except Exception:
+    # CPM checking is an optional secondary validator.  Its complete failure
+    # is retained as ``cpm=None`` while the primary conflict scan still runs.
+    except Exception:  # noqa: BLE001
         cpm_receipt = None
 
     return {"ok": len(conflicts) == 0, "conflicts": conflicts, "cpm": cpm_receipt}
 
 
-def _check_boq_focus_coverage(boq_focus: Dict[str, Any], all_text: str):
+def _check_boq_focus_coverage(boq_focus: dict[str, Any], all_text: str):
     keywords = normalize_boq_focus_items(
         (boq_focus or {}).get("must_cover_keywords") or [],
         limit=MAX_BOQ_FOCUS_ITEMS,
@@ -858,7 +919,7 @@ def _check_boq_focus_coverage(boq_focus: Dict[str, Any], all_text: str):
     return {"ok": ok, "missing": missing[:20], "covered": covered[:20]}
 
 
-def _triplet_has_operational_fields(snippet: str) -> Dict[str, bool]:
+def _triplet_has_operational_fields(snippet: str) -> dict[str, bool]:
     text = str(snippet or "")
     has_freq = bool(re.search(r"\d+(?:\.\d+)?\s*(?:次/日|次/班|次/周|次)", text)) or ("频次" in text)
     has_threshold = bool(re.search(r"(?:≤|>=|≥|<|>)\s*\d+(?:\.\d+)?", text)) or ("阈值" in text) or ("偏差" in text)
@@ -874,7 +935,7 @@ def _triplet_has_operational_fields(snippet: str) -> Dict[str, bool]:
     }
 
 
-def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict[str, Any]]):
+def _check_boq_focus_item_closure(boq_focus: dict[str, Any], sections: list[dict[str, Any]]):
     """
     对“清单重点项”做更强约束：不仅要出现，还要在出现的章节里给出
     - 量化指标（>=3 个关键字 + 有单位数值）
@@ -922,7 +983,7 @@ def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict
                     try:
                         ss = int(t.get("span_start") or 0)
                         ee = int(t.get("span_end") or 0)
-                    except Exception:
+                    except (TypeError, ValueError):
                         ss, ee = 0, 0
                     if ee <= ss:
                         continue
@@ -1003,11 +1064,11 @@ def _check_boq_focus_item_closure(boq_focus: Dict[str, Any], sections: List[Dict
 
 
 def _check_boq_focus_item_typed_evidence(
-    boq_focus: Dict[str, Any],
-    sections: List[Dict[str, Any]],
+    boq_focus: dict[str, Any],
+    sections: list[dict[str, Any]],
     *,
-    drawing_names: List[str] | None = None,
-    standard_names: List[str] | None = None,
+    drawing_names: list[str] | None = None,
+    standard_names: list[str] | None = None,
 ):
     """
     For BoQ focus items, require that evidence is not only traceable, but also typed:
@@ -1083,7 +1144,7 @@ def _check_boq_focus_item_typed_evidence(
 def _check_required_topics(all_text: str):
     text = str(all_text or "")
     missing = []
-    covered: Dict[str, List[str]] = {}
+    covered: dict[str, list[str]] = {}
     for t in REQUIRED_TOPICS:
         aliases = TOPIC_ALIASES.get(t) or [t]
         hit = [a for a in aliases if a and a in text]
@@ -1093,7 +1154,7 @@ def _check_required_topics(all_text: str):
     return {"ok": len(missing) == 0, "missing": missing, "covered": covered}
 
 
-def _check_required_topics_detail(sections: List[Dict[str, Any]]):
+def _check_required_topics_detail(sections: list[dict[str, Any]]):
     """
     “出现”不等于“可执行”。这里对必选专项做“可落地”校验：
     - 必须包含关键动词/闭环片段
@@ -1130,7 +1191,7 @@ def _check_required_topics_detail(sections: List[Dict[str, Any]]):
     return {"ok": all(r.get("ok") for r in results), "by_topic": results}
 
 
-def _check_qse_closed_loop_by_section(sections: List[Dict[str, Any]]):
+def _check_qse_closed_loop_by_section(sections: list[dict[str, Any]]):
     """
     For 质量/安全/文明环保等章节，要求“可闭环”而非只出现关键词：
     - 至少 2 条完整的 风险→控制→验证 三元组
@@ -1140,7 +1201,7 @@ def _check_qse_closed_loop_by_section(sections: List[Dict[str, Any]]):
     """
     try:
         from backend.zhifei_autoplan.logic_templates import classify_chapter_domain
-    except Exception:
+    except ImportError:
         classify_chapter_domain = None
 
     results = []
@@ -1149,7 +1210,9 @@ def _check_qse_closed_loop_by_section(sections: List[Dict[str, Any]]):
         dom = None
         try:
             dom = classify_chapter_domain(title) if classify_chapter_domain else None
-        except Exception:
+        # Domain classification is optional enrichment; malformed metadata
+        # remains outside the QSE-only gate.
+        except Exception:  # noqa: BLE001
             dom = None
         if dom != "qse":
             continue
@@ -1178,7 +1241,7 @@ def _check_qse_closed_loop_by_section(sections: List[Dict[str, Any]]):
             try:
                 ss = int(t.get("span_start") or 0)
                 ee = int(t.get("span_end") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 ss, ee = 0, 0
             if ee <= ss:
                 continue
@@ -1219,7 +1282,7 @@ def _check_qse_closed_loop_by_section(sections: List[Dict[str, Any]]):
     return {"ok": all(r.get("ok") for r in results) if results else True, "target_triplets": 2, "by_section": results}
 
 
-def _check_logic_template_adherence_by_section(sections: List[Dict[str, Any]]):
+def _check_logic_template_adherence_by_section(sections: list[dict[str, Any]]):
     """
     Ensure each section reflects the chosen A/B/C/D/E intra-chapter logic template.
     This prevents "three variants but only synonym swaps": variants must differ by reasoning structure.
@@ -1230,7 +1293,7 @@ def _check_logic_template_adherence_by_section(sections: List[Dict[str, Any]]):
     """
     try:
         from backend.zhifei_autoplan.logic_templates import classify_chapter_domain
-    except Exception:
+    except ImportError:
         classify_chapter_domain = None
 
     results = []
@@ -1244,10 +1307,12 @@ def _check_logic_template_adherence_by_section(sections: List[Dict[str, Any]]):
         if dom not in {"general", "qse"}:
             try:
                 dom = classify_chapter_domain(title) if classify_chapter_domain else "general"
-            except Exception:
+            # Optional classifier failures use the conservative general
+            # domain instead of inventing a template match.
+            except Exception:  # noqa: BLE001
                 dom = "general"
 
-        anchors: List[str] = []
+        anchors: list[str] = []
         if dom == "qse":
             if tid == "A":
                 anchors = ["闭环清单", "闭环卡片"]
@@ -1286,7 +1351,7 @@ def _check_logic_template_adherence_by_section(sections: List[Dict[str, Any]]):
     return {"ok": all(r.get("ok") for r in results) if results else True, "by_section": results}
 
 
-def _check_chapter_blueprint_adherence_by_section(sections: List[Dict[str, Any]]):
+def _check_chapter_blueprint_adherence_by_section(sections: list[dict[str, Any]]):
     """
     When a chapter title matches a known "章节结构蓝图", ensure the required anchors appear.
     This controls "章内结构" (without changing tender outline) so chapters like
@@ -1294,7 +1359,7 @@ def _check_chapter_blueprint_adherence_by_section(sections: List[Dict[str, Any]]
     """
     try:
         from backend.zhifei_autoplan.chapter_blueprints import match_chapter_blueprint
-    except Exception:
+    except ImportError:
         match_chapter_blueprint = None
 
     results = []
@@ -1303,7 +1368,7 @@ def _check_chapter_blueprint_adherence_by_section(sections: List[Dict[str, Any]]
         text = str(s.get("content") or "")
         bp_id = str(s.get("chapter_blueprint_id") or "").strip()
         bp_name = str(s.get("chapter_blueprint_name") or "").strip()
-        anchors: List[str] = []
+        anchors: list[str] = []
 
         bp = None
         if bp_id or bp_name:
@@ -1312,7 +1377,9 @@ def _check_chapter_blueprint_adherence_by_section(sections: List[Dict[str, Any]]
         if match_chapter_blueprint:
             try:
                 bp = match_chapter_blueprint(title)
-            except Exception:
+            # Optional blueprint matching cannot establish a formal anchor
+            # when its extension fails.
+            except Exception:  # noqa: BLE001
                 bp = None
         if isinstance(bp, dict):
             bp_id = str(bp.get("id") or bp_id).strip()
@@ -1339,7 +1406,7 @@ def _check_chapter_blueprint_adherence_by_section(sections: List[Dict[str, Any]]
     return {"ok": all(r.get("ok") for r in results) if results else True, "by_section": results}
 
 
-def _check_trades_by_section(sections: List[Dict[str, Any]]):
+def _check_trades_by_section(sections: list[dict[str, Any]]):
     results = []
     for s in sections:
         title = s.get("title") or ""
@@ -1354,53 +1421,214 @@ def _check_trades_by_section(sections: List[Dict[str, Any]]):
     return results
 
 
+def _apply_exact_repetition_remediation(
+    sections: list[dict[str, Any]],
+    remediation: list[dict[str, Any]] | None,
+) -> set[int]:
+    """Remove only quality-gate-confirmed exact repeats, preserving the first.
+
+    The quality gate supplies normalized samples for chapters that crossed the
+    existing materiality threshold.  Keeping the first occurrence gives shared
+    wording one deterministic owner while retaining every non-identical,
+    item-specific risk or verification closure.  A second pass is a no-op.
+    """
+
+    samples_by_title: dict[str, set[str]] = {}
+    for rec in remediation or []:
+        if str(rec.get("type") or "") != "repetitive_content":
+            continue
+        title = str(rec.get("title") or "").strip()
+        if not title:
+            continue
+        samples = {
+            normalized
+            for raw in (rec.get("samples") or [])
+            if (normalized := _normalize_sentence_unit(str(raw or "")))
+        }
+        if samples:
+            samples_by_title.setdefault(title, set()).update(samples)
+    if not samples_by_title:
+        return set()
+
+    seen: set[str] = set()
+    changed_ids: set[int] = set()
+    sentence_split_re = re.compile(r"([。！？!?；;\n]+)")
+    for section in sections or []:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or "").strip()
+        removable = samples_by_title.get(title, set())
+        content = str(section.get("content") or "")
+        parts = sentence_split_re.split(content)
+        rebuilt: list[str] = []
+        removed = 0
+        for index in range(0, len(parts), 2):
+            fragment = parts[index]
+            separator = parts[index + 1] if index + 1 < len(parts) else ""
+            normalized = _normalize_sentence_unit(fragment)
+            duplicate = bool(normalized and normalized in removable and normalized in seen)
+            if normalized:
+                seen.add(normalized)
+            if duplicate:
+                removed += 1
+                # Preserve a line boundary so adjacent Markdown records cannot
+                # be joined into a different statement after removal.
+                if "\n" in separator:
+                    rebuilt.append("\n")
+                continue
+            rebuilt.append(fragment)
+            rebuilt.append(separator)
+        revised = "".join(rebuilt)
+        if removed and revised != content:
+            section["content"] = revised
+            section["auto_remediated"] = True
+            section["repetition_autofix"] = {
+                "strategy": "preserve_first_exact_sentence",
+                "removed_count": removed,
+            }
+            changed_ids.add(id(section))
+    return changed_ids
+
+
+_FORMAL_FACT_STATUSES = frozenset({"verified", "derived", "approved"})
+_SOURCE_NEUTRAL_PARAMETER = "待依据图纸/规范/批准制度确认"
+
+
+def _accepted_project_fact(
+    ledger: dict[str, Any] | None,
+    field: str,
+) -> str:
+    """Return a source-bound formal fact or an empty string.
+
+    A status label alone is insufficient: deterministic remediation may only
+    copy values that also carry a locator from the project fact ledger.
+    """
+
+    root = ledger if isinstance(ledger, dict) else {}
+    facts = root.get("facts") if isinstance(root.get("facts"), dict) else {}
+    row = facts.get(field) if isinstance(facts.get(field), dict) else {}
+    if str(row.get("status") or "").strip().lower() not in _FORMAL_FACT_STATUSES:
+        return ""
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    locator = str(evidence.get("locator") or row.get("locator") or "").strip()
+    if not locator:
+        return ""
+    value = row.get("value")
+    if value is None or str(value).strip() == "":
+        return ""
+    unit = str(row.get("unit") or "").strip()
+    rendered = str(value).strip()
+    if unit and unit not in rendered:
+        rendered += unit
+    return rendered
+
+
+def _remediation_defaults(
+    ledger: dict[str, Any] | None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], set[str]]:
+    frequency = _accepted_project_fact(ledger, "risk_inspection_frequency")
+    threshold = _accepted_project_fact(ledger, "quality_threshold")
+    deadline = _accepted_project_fact(ledger, "deviation_action_deadline")
+    resource_peak = _accepted_project_fact(ledger, "resource_peak")
+    planned_duration = _accepted_project_fact(ledger, "planned_duration_days")
+    critical_interval = _accepted_project_fact(ledger, "critical_interval_days")
+    neutral = _SOURCE_NEUTRAL_PARAMETER
+    quant = {
+        "频次": frequency or neutral,
+        "阈值": threshold or neutral,
+        "间距": neutral,
+        "厚度": neutral,
+        "时长": deadline or neutral,
+        "人数": resource_peak or neutral,
+        "设备型号": neutral,
+    }
+    card = {
+        "采购比价": neutral,
+        "抽检频次": frequency or neutral,
+        "合格率阈值": threshold or neutral,
+        "一次验收通过率": neutral,
+        "台账抽查频次": frequency or neutral,
+        "应急演练频次": frequency or neutral,
+    }
+    qse = {
+        "PM10阈值": neutral,
+        "昼间噪声阈值": neutral,
+        "夜间噪声阈值": neutral,
+    }
+    accepted = {
+        value
+        for value in (
+            frequency,
+            threshold,
+            deadline,
+            resource_peak,
+            planned_duration,
+            critical_interval,
+        )
+        if value
+    }
+    return quant, card, qse, accepted
+
+
+def _neutralize_generated_project_defaults(text: str, accepted: set[str]) -> str:
+    """Remove legacy project-looking defaults from newly generated prose."""
+
+    replacements = {
+        "20t挖机1台": "设备型号待依据施工方案/批准资源计划确认",
+        "20t挖机": "设备型号待依据施工方案/批准资源计划确认",
+        "8人/班": "人数待依据批准资源计划确认",
+        "80人": "人数待依据批准资源计划确认",
+        "4h/作业段": "时限待依据批准制度确认",
+        "≤4小时": "时限待依据批准制度确认",
+        "≤4h": "时限待依据批准制度确认",
+        "偏差≤5mm": "偏差待依据图纸/规范确认",
+        "≤5mm": "待依据图纸/规范确认",
+        "2次/日": "频次待依据批准制度确认",
+        "总工期=120天": "总工期待依据招标文件确认",
+        "总工期：120天": "总工期待依据招标文件确认",
+        "总工期120天": "总工期待依据招标文件确认",
+        "计划工期=120天": "计划工期待依据招标文件确认",
+        "计划工期120天": "计划工期待依据招标文件确认",
+        "资源峰值=80人": "资源峰值待依据批准资源计划确认",
+        "资源峰值：80人": "资源峰值待依据批准资源计划确认",
+        "资源峰值80人": "资源峰值待依据批准资源计划确认",
+        "关键线路间隔=3天": "关键线路间隔待依据批准进度计划确认",
+        "关键线路间隔：3天": "关键线路间隔待依据批准进度计划确认",
+        "关键线路间隔3天": "关键线路间隔待依据批准进度计划确认",
+    }
+    result = str(text or "")
+    for legacy in sorted(replacements, key=len, reverse=True):
+        replacement = replacements[legacy]
+        if any(legacy in value or value in legacy for value in accepted):
+            continue
+        result = re.sub(
+            rf"(?<!\d){re.escape(legacy)}(?!\d)",
+            replacement,
+            result,
+        )
+    return result
+
+
 def apply_remediation(
-    sections: List[Dict[str, Any]],
-    remediation: List[Dict[str, Any]],
+    sections: list[dict[str, Any]],
+    remediation: list[dict[str, Any]],
     *,
     project_id: str | None = None,
-    boq_focus: Dict[str, Any] | None = None,
-    params: Dict[str, Any] | None = None,
+    boq_focus: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    project_fact_ledger: dict[str, Any] | None = None,
 ):
-    # Use editable parameter registry (backend/data/autoplan/params.json) so users can tune numbers globally.
-    try:
-        from backend.zhifei_autoplan.params_runtime import (
-            load_params,
-            get_quant_defaults,
-            get_boq_focus_card_defaults,
-            get_qse_defaults,
-        )
+    # Editable defaults are authoring conveniences, not verified project
+    # facts.  Only accepted, source-located ledger values may enter an
+    # automatic remediation; every missing value remains explicit and neutral.
+    _ = params
+    _quant, _card, _qse, _accepted_values = _remediation_defaults(
+        project_fact_ledger
+    )
 
-        # Prefer per-run merged params if provided (e.g. actions payload params_override).
-        _params = params if isinstance(params, dict) else load_params()
-        _quant = get_quant_defaults(_params)
-        _card = get_boq_focus_card_defaults(_params)
-        _qse = get_qse_defaults(_params)
-    except Exception:
-        _quant = {
-            "频次": "2次/日",
-            "阈值": "偏差≤5mm",
-            "间距": "1000mm",
-            "厚度": "50mm",
-            "时长": "4h/作业段",
-            "人数": "8人/班",
-            "设备型号": "20t挖机1台",
-        }
-        _card = {
-            "采购比价": "≥3家/批次",
-            "抽检频次": "每100m2 1次",
-            "合格率阈值": "≥98%",
-            "一次验收通过率": "≥95%",
-            "台账抽查频次": "1次/周",
-            "应急演练频次": "1次/季度",
-        }
-        _qse = {
-            "PM10阈值": "≤150ug/m3",
-            "昼间噪声阈值": "≤70dB",
-            "夜间噪声阈值": "≤55dB",
-        }
+    _apply_exact_repetition_remediation(sections, remediation)
 
-    ev_cache: Dict[str, str] = {}
+    ev_cache: dict[str, str] = {}
     applied_markers = {
         "score_point_missing": "【自动补充】评分点覆盖建议",
         "risk_measure_gap": "【自动补充】风险-措施对应",
@@ -1430,7 +1658,7 @@ def apply_remediation(
         marker = applied_markers.get(key)
         return bool(marker and marker in (content or ""))
 
-    def _pick_target_section(title: str | None, rtype: str | None) -> Dict[str, Any] | None:
+    def _pick_target_section(title: str | None, rtype: str | None) -> dict[str, Any] | None:
         target_title = str(title or "").strip()
         for sec in sections:
             if str(sec.get("title") or "").strip() == target_title and target_title:
@@ -1442,7 +1670,6 @@ def apply_remediation(
         if (target_title not in virtual_titles) and (str(rtype or "") not in virtual_types):
             return None
 
-        title_text = "\n".join([str(s.get("title") or "") for s in sections])
         # Consistency issues belong to plan/schedule chapters.
         if str(rtype or "") == "consistency_conflict" or target_title == "全局一致性":
             prefer = ["进度", "工期", "计划", "资源", "关键线路"]
@@ -1474,8 +1701,11 @@ def apply_remediation(
             )
             if hit and hit.get("locator"):
                 src = str(hit.get("locator"))
-        except Exception:
-            pass
+        # Evidence lookup is best-effort here; its failure retains the
+        # explicit generic source and never synthesizes a locator.
+        except Exception:  # noqa: BLE001
+            ev_cache[title] = src
+            return src
         ev_cache[title] = src
         return src
 
@@ -1483,10 +1713,15 @@ def apply_remediation(
         title = rec.get("title")
         rtype = rec.get("type")
         suggestion = rec.get("suggestion") or ""
+        if rtype == "repetitive_content":
+            # Exact repeats were handled once across the whole ordered
+            # document so both chapters cannot delete each other's owner copy.
+            continue
         sec = _pick_target_section(title, rtype)
         if not sec:
             continue
         content = sec.get("content") or ""
+        source_content = content
         if _already_applied(content, rtype):
             continue
         ev_src = _pick_traceable_evidence(str(sec.get("title") or title or "章节"))
@@ -1638,7 +1873,7 @@ def apply_remediation(
             if len(cards) < 4:
                 cards.append(
                     "风险：资料不全导致验收追溯失败；"
-                    f"控制：台账字段齐全率=100%+上传频次=1次/日；"
+                    "控制：台账字段齐全率=100%+上传频次=1次/日；"
                     "验证：抽查覆盖率=100%，记录=《资料台账》；"
                     "偏差处置：缺项≤24h补齐并复核关闭。【证据:{ev}】"
                 )
@@ -1829,14 +2064,17 @@ def apply_remediation(
             content += (
                 "\n\n【自动补充】消除空泛词：\n"
                 f"- {suggestion}\n"
-                f"- 将空泛词替换为可执行动作+量化参数+验收标准（示例：巡检2次/日，偏差≤5mm，记录表齐全率100%）。【证据:{ev_src}】\n"
+                f"- 将空泛词替换为可执行动作+来源绑定参数+验收标准（频次={_quant['频次']}，"
+                f"阈值={_quant['阈值']}，记录表字段齐全后复核）。【证据:{ev_src}】\n"
             )
         elif rtype == "bureaucratic_phrase":
             cleaned = strip_nonconcrete_language(content)
             content = cleaned
             content += (
                 "\n\n【自动补充】替换空话为可执行项：\n"
-                f"- 动作：班前交底+过程巡检+隐蔽验收；参数：偏差≤5mm；频次：2次/日；责任岗位：工长/质量员；验收标准：一次验收通过率≥95%。【证据:{ev_src}】\n"
+                f"- 动作：班前交底+过程巡检+隐蔽验收；参数：{_quant['阈值']}；"
+                f"频次：{_quant['频次']}；责任岗位：工长/质量员；验收标准按图纸、规范及批准制度确认。"
+                f"【证据:{ev_src}】\n"
             )
         elif rtype == "boq_focus_item_closure_gap":
             content += (
@@ -1874,7 +2112,9 @@ def apply_remediation(
                     )
                     if hit2 and hit2.get("locator"):
                         std_src = str(hit2.get("locator"))
-            except Exception:
+            # Typed-evidence lookup is external to remediation; missing
+            # results remain empty so the formal gate can reject them.
+            except Exception:  # noqa: BLE001
                 draw_src = draw_src or ""
                 std_src = std_src or ""
             content += "\n\n【自动补充】重点项图纸/标准证据闭环：\n"
@@ -1946,7 +2186,10 @@ def apply_remediation(
             )
             # 四新技术：按清单/工序匹配给出可执行闭环卡片（避免“新技术应用”空话）。
             try:
-                from backend.zhifei_autoplan.four_new_tech import recommend_four_new, render_four_new_recommendations
+                from backend.zhifei_autoplan.four_new_tech import (
+                    recommend_four_new,
+                    render_four_new_recommendations,
+                )
 
                 recs = []
                 if isinstance(boq_focus, dict):
@@ -1972,7 +2215,9 @@ def apply_remediation(
                         )
                         + "\n"
                     )
-            except Exception:
+            # The optional four-new formatter may fail independently; the
+            # already-built deterministic topic controls remain unchanged.
+            except Exception:  # noqa: BLE001, S110
                 pass
         elif rtype == "evidence_gap":
             content += (
@@ -2005,7 +2250,9 @@ def apply_remediation(
                 )
                 if hit and hit.get("locator"):
                     draw_src = str(hit.get("locator"))
-            except Exception:
+            # A failed lookup cannot prove drawing identity; retain the
+            # existing traceable source for subsequent validation.
+            except Exception:  # noqa: BLE001
                 draw_src = ev_src
             content += (
                 "\n\n【自动补充】图纸证据定位：\n"
@@ -2035,7 +2282,9 @@ def apply_remediation(
                 )
                 if hit and hit.get("locator"):
                     std_src = str(hit.get("locator"))
-            except Exception:
+            # A failed lookup cannot prove standard identity; retain the
+            # existing traceable source for subsequent validation.
+            except Exception:  # noqa: BLE001
                 std_src = ev_src
             content += (
                 "\n\n【自动补充】企业标准/工法引用与落地：\n"
@@ -2046,11 +2295,17 @@ def apply_remediation(
                 f"验证=偏差≤5mm，抽检合格率≥98%，记录=《标准条款对照与抽检记录》。【证据:{std_src}】\n"
             )
 
+        if content.startswith(source_content):
+            generated = content[len(source_content) :]
+            content = source_content + _neutralize_generated_project_defaults(
+                generated,
+                _accepted_values,
+            )
         sec["content"] = content
         sec["auto_remediated"] = True
 
 
-def ensure_local_export_mandatory_content(sections: List[Dict[str, Any]]) -> List[str]:
+def ensure_local_export_mandatory_content(sections: list[dict[str, Any]]) -> list[str]:
     """Add missing local-export control tables once, without inventing project facts.
 
     The local export adapter intentionally requires two named, auditable
@@ -2069,24 +2324,28 @@ def ensure_local_export_mandatory_content(sections: List[Dict[str, Any]]) -> Lis
         f"{section.get('title') or ''}\n{section.get('content') or ''}"
         for section in valid_sections
     )
-    additions: List[tuple[str, str]] = []
+    additions: list[tuple[str, str]] = []
     if "劳保用品配置矩阵" not in combined:
         additions.append(
             (
                 "劳保用品配置矩阵",
-                "【劳保用品配置矩阵】\n"
-                "- 作业类别｜劳保用品｜配置标准｜发放频次｜检查频次｜责任岗位｜验收记录\n"
-                "- 现场通用作业｜安全帽、反光背心、防护手套｜1套/人｜进场发放｜1次/日｜安全员｜《劳保用品发放与检查台账》\n"
-                "- 专项作业｜按本章风险和作业条件配置专用防护用品｜1套/人｜作业前发放｜1次/班｜安全员、班组长｜《专项作业防护用品检查表》",
+                (
+                    "【劳保用品配置矩阵】\n"
+                    "- 作业类别｜劳保用品｜配置标准｜发放频次｜检查频次｜责任岗位｜验收记录\n"
+                    "- 现场通用作业｜安全帽、反光背心、防护手套｜1套/人｜进场发放｜1次/日｜安全员｜《劳保用品发放与检查台账》\n"
+                    "- 专项作业｜按本章风险和作业条件配置专用防护用品｜1套/人｜作业前发放｜1次/班｜安全员、班组长｜《专项作业防护用品检查表》"
+                ),
             )
         )
     if "关键工序控制点表" not in combined:
         additions.append(
             (
                 "关键工序控制点表",
-                "【关键工序控制点表】\n"
-                "- 工序｜风险｜控制参数｜检查频次｜责任岗位｜验收标准｜记录\n"
-                "- 本章关键工序｜施工参数偏离招标、清单或图纸要求｜引用本章已绑定参数，不另造项目参数｜首件1次/工序、过程巡检2次/日｜工长、质量员｜符合本章证据及验收要求｜《关键工序控制点检查表》",
+                (
+                    "【关键工序控制点表】\n"
+                    "- 工序｜风险｜控制参数｜检查频次｜责任岗位｜验收标准｜记录\n"
+                    "- 本章关键工序｜施工参数偏离招标、清单或图纸要求｜引用本章已绑定参数，不另造项目参数｜首件1次/工序、过程巡检2次/日｜工长、质量员｜符合本章证据及验收要求｜《关键工序控制点检查表》"
+                ),
             )
         )
     if not additions:
@@ -2111,19 +2370,19 @@ def ensure_local_export_mandatory_content(sections: List[Dict[str, Any]]) -> Lis
 
 
 def run_quality_checks(
-    tender: Dict[str, Any],
-    outline: List[str],
-    sections: List[Dict[str, Any]],
-    boq: Dict[str, Any] | None = None,
-    boq_focus: Dict[str, Any] | None = None,
+    tender: dict[str, Any],
+    outline: list[str],
+    sections: list[dict[str, Any]],
+    boq: dict[str, Any] | None = None,
+    boq_focus: dict[str, Any] | None = None,
     project_id: str | None = None,
     strict: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     outline_titles = set(outline or [])
     section_titles = [s.get("title") for s in sections]
     missing_titles = [t for t in outline_titles if t not in section_titles]
 
-    sec_by_title: Dict[str, Dict[str, Any]] = {}
+    sec_by_title: dict[str, dict[str, Any]] = {}
     for s in sections or []:
         key = str(s.get("title") or "").strip()
         if not key:
@@ -2147,12 +2406,12 @@ def run_quality_checks(
                         import json as _json
 
                         rec = _json.loads(ln)
-                    except Exception:
+                    except json.JSONDecodeError:
                         continue
                     if str(rec.get("project_id") or "").strip() == pid:
                         has_ingested_docs = True
                         break
-    except Exception:
+    except OSError:
         has_ingested_docs = False
 
     remediation = []
@@ -2163,7 +2422,7 @@ def run_quality_checks(
         # 评分点缺失
         if tender:
             missing_dims = []
-            missing_keywords: List[str] = []
+            missing_keywords: list[str] = []
             for it in tender.get("items", []):
                 dim = str(it.get("dimension"))
                 kws = it.get("keywords") or []
@@ -2337,10 +2596,31 @@ def run_quality_checks(
                 )
         for s in repetition_by_section:
             if not s.get("ok"):
+                scope = str(s.get("repetition_scope") or "cross_chapter")
+                if scope == "same_chapter_template":
+                    suggestion = "删除本章内重复模板句；保留首次出现以及本章独有的工序、参数、风险、控制、验证和证据定位。"
+                    problem = (
+                        "同章模板长句重复占比过高"
+                        f"（{s.get('same_chapter_template_count')}/{s.get('candidate_count')}）。"
+                    )
+                elif scope == "mixed":
+                    suggestion = "收敛同章模板和跨章节重复句；共享要求仅保留一处，逐章保留独有的工序、参数、风险、控制、验证和证据定位。"
+                    problem = (
+                        "同章模板及跨章节长句重复占比过高"
+                        f"（{s.get('repeated_count')}/{s.get('candidate_count')}）。"
+                    )
+                else:
+                    suggestion = "删除跨章节重复套话；共享要求仅保留一处，逐章保留独有的工序、参数、风险、控制动作、验证口径和证据定位。"
+                    problem = (
+                        "跨章节长句重复占比过高"
+                        f"（{s.get('cross_chapter_count')}/{s.get('candidate_count')}）。"
+                    )
                 rec = {
                     "title": s.get("title"),
                     "type": "repetitive_content",
-                    "suggestion": "删除跨章节重复套话；保留本章独有的工序、参数、风险、控制动作、验证口径和证据定位。",
+                    "repetition_scope": scope,
+                    "samples": list(s.get("samples") or []),
+                    "suggestion": suggestion,
                 }
                 remediation.append(rec)
                 issue_list.append(
@@ -2348,7 +2628,8 @@ def run_quality_checks(
                         "title": s.get("title"),
                         "type": "repetitive_content",
                         "severity": "medium",
-                        "problem": f"长句重复占比过高（{s.get('repeated_count')}/{s.get('candidate_count')}）。",
+                        "repetition_scope": scope,
+                        "problem": problem,
                         "suggestion": rec["suggestion"],
                     }
                 )

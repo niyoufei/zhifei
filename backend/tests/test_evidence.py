@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-import pytest
-
-from backend.zhifei_autoplan.evidence import search_ingested_docs
+from backend.zhifei_autoplan.evidence import format_hit_locator, search_ingested_docs
 
 
 class TestSearchIngestedDocs:
@@ -443,3 +441,70 @@ class TestSearchIngestedDocs:
             result = search_ingested_docs("施工方案 construction")
             # 应该能找到匹配
             assert len(result) >= 0
+
+    def test_unknown_multi_page_boundary_does_not_invent_page_one(self, tmp_path):
+        extract_file = tmp_path / "multi.txt"
+        extract_file.write_text("钢梁安装构件位置与节点做法。", encoding="utf-8")
+        audit_file = tmp_path / "ingest.jsonl"
+        sha = "1" * 64
+        audit_file.write_text(
+            json.dumps(
+                {
+                    "filename": "multi.pdf",
+                    "sha256": sha,
+                    "pages": 3,
+                    "extract_saved_as": str(extract_file),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("backend.zhifei_autoplan.evidence.Path") as mock_path:
+            def path_side_effect(p):
+                if "ingest.jsonl" in str(p):
+                    return audit_file
+                return Path(p)
+
+            mock_path.side_effect = path_side_effect
+            result = search_ingested_docs("钢梁安装")
+
+        assert result[0]["page"] is None
+        assert result[0]["page_boundary_status"] == "unreliable_missing_page_boundaries"
+        assert format_hit_locator(result[0]) == "multi.pdf"
+
+    def test_declared_single_page_hit_uses_full_sha_and_bound_window(self, tmp_path):
+        extract_file = tmp_path / "single.txt"
+        extract_file.write_text("钢梁安装构件位置与节点做法。", encoding="utf-8")
+        audit_file = tmp_path / "ingest.jsonl"
+        sha = "2" * 64
+        audit_file.write_text(
+            json.dumps(
+                {
+                    "filename": "single.pdf",
+                    "sha256": sha,
+                    "pages": 1,
+                    "extract_saved_as": str(extract_file),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("backend.zhifei_autoplan.evidence.Path") as mock_path:
+            def path_side_effect(p):
+                if "ingest.jsonl" in str(p):
+                    return audit_file
+                return Path(p)
+
+            mock_path.side_effect = path_side_effect
+            result = search_ingested_docs("钢梁安装")
+
+        hit = result[0]
+        assert format_hit_locator(hit) == f"single.pdf#p1_{sha}@0"
+        assert hit["page_boundary_status"] == "reliable_declared_single_page"
+        assert hit["match_start"] == hit["offset"] == 0
+        assert hit["matched_text"] == "钢梁安装"
+        assert hit["match_window"]["text"].startswith("钢梁安装")
+        assert hit["page_text_sha256"]
+        assert hit["page_summary"]

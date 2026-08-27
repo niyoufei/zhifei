@@ -2,13 +2,147 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Dict, Any
+import re
+from typing import Any
 
 from backend.zhifei_autoplan.requirement_evidence_matrix import (
     requirement_prompt_lines_for_chapter,
     validate_chapter_requirement_evidence,
 )
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
+
+_FORMAL_FACT_STATUSES = frozenset({"verified", "derived", "approved"})
+_SOURCE_NEUTRAL_PARAMETER = "待依据图纸/规范/批准制度确认"
+
+
+def _source_bound_project_facts(context: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return only accepted project facts that retain a source locator."""
+
+    raw = context.get("project_fact_ledger")
+    if not isinstance(raw, dict):
+        raw = context.get("project_fact_snapshot")
+    root = raw if isinstance(raw, dict) else {}
+    facts = root.get("facts") if isinstance(root.get("facts"), dict) else {}
+    accepted: dict[str, dict[str, Any]] = {}
+    for field, candidate in facts.items():
+        if not isinstance(candidate, dict):
+            continue
+        if (
+            str(candidate.get("status") or "").strip().lower()
+            not in _FORMAL_FACT_STATUSES
+        ):
+            continue
+        evidence = (
+            candidate.get("evidence")
+            if isinstance(candidate.get("evidence"), dict)
+            else {}
+        )
+        locator = str(
+            evidence.get("locator") or candidate.get("locator") or ""
+        ).strip()
+        value = candidate.get("value")
+        if not locator or value is None or str(value).strip() == "":
+            continue
+        accepted[str(field)] = dict(candidate)
+    return accepted
+
+
+def _render_fact_value(facts: dict[str, dict[str, Any]], field: str) -> str:
+    row = facts.get(field) if isinstance(facts.get(field), dict) else {}
+    value = row.get("value")
+    if value is None or str(value).strip() == "":
+        return ""
+    rendered = str(value).strip()
+    unit = str(row.get("unit") or "").strip()
+    if unit and unit not in rendered:
+        rendered += unit
+    return rendered
+
+
+def _fallback_defaults(
+    facts: dict[str, dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], set[str]]:
+    frequency = _render_fact_value(facts, "risk_inspection_frequency")
+    threshold = _render_fact_value(facts, "quality_threshold")
+    deadline = _render_fact_value(facts, "deviation_action_deadline")
+    resource_peak = _render_fact_value(facts, "resource_peak")
+    planned_duration = _render_fact_value(facts, "planned_duration_days")
+    critical_interval = _render_fact_value(facts, "critical_interval_days")
+    neutral = _SOURCE_NEUTRAL_PARAMETER
+    quant = {
+        "频次": frequency or neutral,
+        "阈值": threshold or neutral,
+        "间距": neutral,
+        "厚度": neutral,
+        "时长": deadline or neutral,
+        "人数": resource_peak or neutral,
+        "设备型号": neutral,
+    }
+    card = {
+        "采购比价": neutral,
+        "抽检频次": frequency or neutral,
+        "合格率阈值": threshold or neutral,
+        "一次验收通过率": neutral,
+        "台账抽查频次": frequency or neutral,
+        "应急演练频次": frequency or neutral,
+    }
+    qse = {
+        "PM10阈值": neutral,
+        "昼间噪声阈值": neutral,
+        "夜间噪声阈值": neutral,
+    }
+    accepted_values = {
+        value
+        for value in (
+            frequency,
+            threshold,
+            deadline,
+            resource_peak,
+            planned_duration,
+            critical_interval,
+        )
+        if value
+    }
+    return quant, card, qse, accepted_values
+
+
+def _neutralize_fallback_defaults(text: str, accepted_values: set[str]) -> str:
+    replacements = {
+        "20t挖机1台": "设备型号待依据施工方案/批准资源计划确认",
+        "20t挖机": "设备型号待依据施工方案/批准资源计划确认",
+        "8人/班": "人数待依据批准资源计划确认",
+        "80人": "人数待依据批准资源计划确认",
+        "4h/作业段": "时限待依据批准制度确认",
+        "≤4小时": "时限待依据批准制度确认",
+        "≤4h": "时限待依据批准制度确认",
+        "偏差≤5mm": "偏差待依据图纸/规范确认",
+        "≤5mm": "待依据图纸/规范确认",
+        "2次/日": "频次待依据批准制度确认",
+        "总工期=120天": "总工期待依据招标文件确认",
+        "总工期：120天": "总工期待依据招标文件确认",
+        "总工期120天": "总工期待依据招标文件确认",
+        "计划工期=120天": "计划工期待依据招标文件确认",
+        "计划工期120天": "计划工期待依据招标文件确认",
+        "资源峰值=80人": "资源峰值待依据批准资源计划确认",
+        "资源峰值：80人": "资源峰值待依据批准资源计划确认",
+        "资源峰值80人": "资源峰值待依据批准资源计划确认",
+        "关键线路间隔=3天": "关键线路间隔待依据批准进度计划确认",
+        "关键线路间隔：3天": "关键线路间隔待依据批准进度计划确认",
+        "关键线路间隔3天": "关键线路间隔待依据批准进度计划确认",
+    }
+    result = str(text or "")
+    for legacy in sorted(replacements, key=len, reverse=True):
+        replacement = replacements[legacy]
+        if any(
+            legacy in value or value in legacy for value in accepted_values
+        ):
+            continue
+        result = re.sub(
+            rf"(?<!\d){re.escape(legacy)}(?!\d)",
+            replacement,
+            result,
+        )
+    return result
 
 
 def compact_chapter_summary(title: str, content: Any, *, maximum: int = 800) -> str:
@@ -31,7 +165,7 @@ class SectionWriter:
     def __init__(self, llm: LLMClient | None = None):
         self.llm = llm
 
-    async def write(self, title: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def write(self, title: str, context: dict[str, Any]) -> dict[str, Any]:
         stable_prompt, shared_prompt, dynamic_prompt = self._build_prompt_parts(title, context)
         prompt = "\n\n".join(
             part for part in (stable_prompt, shared_prompt, dynamic_prompt) if part.strip()
@@ -60,7 +194,7 @@ class SectionWriter:
             == "anthropic"
         )
         request_prompt = dynamic_prompt if is_anthropic else prompt
-        request_kwargs: Dict[str, Any] = {
+        request_kwargs: dict[str, Any] = {
             "project_id": context.get("project_id"),
             "task_type": "chapter_generation",
         }
@@ -88,7 +222,7 @@ class SectionWriter:
         )
         text = str(resp.get("text") or "")
         continuation_count = 0
-        continuation_receipt: Dict[str, Any] | None = None
+        continuation_receipt: dict[str, Any] | None = None
         initial_stop_reason = str(resp.get("stop_reason") or "").strip()
         stop_reason = initial_stop_reason
         continuation_prompt = ""
@@ -145,6 +279,9 @@ class SectionWriter:
             generation_mode = "fallback"
         else:
             generation_mode = "llm"
+        accepted_facts = _source_bound_project_facts(context)
+        _, _, _, accepted_values = _fallback_defaults(accepted_facts)
+        text = _neutralize_fallback_defaults(text, accepted_values)
         return {
             "title": title,
             "content": text,
@@ -204,7 +341,7 @@ class SectionWriter:
     @staticmethod
     def _build_continuation_prompt(
         title: str,
-        context: Dict[str, Any],
+        context: dict[str, Any],
         *,
         partial_text: str,
     ) -> str:
@@ -269,7 +406,7 @@ class SectionWriter:
             "请从下一个完整自然段开始输出续写正文。"
         )
 
-    def _build_prompt(self, title: str, context: Dict[str, Any]) -> str:
+    def _build_prompt(self, title: str, context: dict[str, Any]) -> str:
         return "\n\n".join(
             part for part in self._build_prompt_parts(title, context) if part.strip()
         )
@@ -277,7 +414,7 @@ class SectionWriter:
     def _build_prompt_parts(
         self,
         title: str,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> tuple[str, str, str]:
         """Build stable, medium-lived, and per-chapter prompt segments.
 
@@ -339,7 +476,7 @@ class SectionWriter:
         variant_id = context.get("variant_id")
         try:
             variant_id = int(variant_id or 1)
-        except Exception:
+        except (TypeError, ValueError):
             variant_id = 1
         project_type = str(context.get("project_type") or "").strip()
         global_instruction = str(context.get("global_instruction") or "").strip()
@@ -361,52 +498,46 @@ class SectionWriter:
         bp = context.get("chapter_blueprint") if isinstance(context.get("chapter_blueprint"), dict) else None
         if bp:
             try:
-                from backend.zhifei_autoplan.chapter_blueprints import render_blueprint_requirements
+                from backend.zhifei_autoplan.chapter_blueprints import (
+                    render_blueprint_requirements,
+                )
 
                 lines = render_blueprint_requirements(bp)
                 if lines:
                     bp_block = "【章节结构蓝图（不改变招标目录，仅约束章内结构）】\n"
                     bp_block += "\n".join([f"- {ln}" for ln in lines[:12] if str(ln).strip()]) + "\n"
-            except Exception:
+            # Blueprint rendering is an optional extension boundary; its
+            # failures must not prevent the source-bound chapter prompt.
+            except Exception:  # noqa: BLE001
                 bp_block = ""
-        params = context.get("params") if isinstance(context.get("params"), dict) else {}
-        quant = params.get("quant_defaults") if isinstance(params.get("quant_defaults"), dict) else {}
-        focus_card = params.get("boq_focus_card") if isinstance(params.get("boq_focus_card"), dict) else {}
-        qse_defaults = params.get("qse_defaults") if isinstance(params.get("qse_defaults"), dict) else {}
+        accepted_facts = _source_bound_project_facts(context)
         labor_hint = context.get("labor_hint") if isinstance(context.get("labor_hint"), dict) else {}
         common_param_lines = []
-        if quant:
-            common_param_lines.append(
-                "量化默认值："
-                + "；".join([f"{k}={str(v).strip()}" for k, v in quant.items() if str(k).strip() and str(v).strip()][:10])
-            )
-        if focus_card:
-            common_param_lines.append(
-                "清单重点项默认值："
-                + "；".join([f"{k}={str(v).strip()}" for k, v in focus_card.items() if str(k).strip() and str(v).strip()][:10])
-            )
-        if qse_defaults:
-            common_param_lines.append(
-                "质量/安全/环保默认阈值："
-                + "；".join([f"{k}={str(v).strip()}" for k, v in qse_defaults.items() if str(k).strip() and str(v).strip()][:10])
-            )
+        fact_labels = {
+            "planned_duration_days": "总工期",
+            "resource_peak": "资源峰值",
+            "critical_interval_days": "关键线路间隔",
+            "risk_inspection_frequency": "风险检查频次",
+            "quality_threshold": "质量阈值",
+            "deviation_action_deadline": "偏差处置时限",
+        }
+        accepted_lines = [
+            f"{label}={_render_fact_value(accepted_facts, field)}"
+            for field, label in fact_labels.items()
+            if _render_fact_value(accepted_facts, field)
+        ]
+        if accepted_lines:
+            common_param_lines.append("已核验项目参数：" + "；".join(accepted_lines))
         chapter_param_lines = []
-        if labor_hint:
+        if labor_hint and _render_fact_value(accepted_facts, "resource_peak"):
             skill_ratio = labor_hint.get("skill_ratio") if isinstance(labor_hint.get("skill_ratio"), dict) else {}
             trade_ratio = labor_hint.get("trade_ratio") if isinstance(labor_hint.get("trade_ratio"), dict) else {}
             chapter_param_lines.append(
-                f"劳动力矩阵：项目类型={labor_hint.get('project_type')}；规模={labor_hint.get('size')}；阶段={labor_hint.get('stage')}；阶段说明={labor_hint.get('stage_detail')}"
+                "劳动力矩阵：资源峰值="
+                + _render_fact_value(accepted_facts, "resource_peak")
+                + "；其余工种比例待依据批准资源计划确认"
             )
-            if skill_ratio:
-                chapter_param_lines.append(
-                    "技能等级比例："
-                    + "；".join([f"{k}={str(v).strip()}" for k, v in skill_ratio.items() if str(k).strip() and str(v).strip()][:8])
-                )
-            if trade_ratio:
-                chapter_param_lines.append(
-                    "工种配置比例："
-                    + "；".join([f"{k}={str(v).strip()}" for k, v in trade_ratio.items() if str(k).strip() and str(v).strip()][:10])
-                )
+            _ = skill_ratio, trade_ratio
         common_params_text = "\n".join(
             [f"- {ln}" for ln in common_param_lines if ln.strip()]
         )
@@ -451,12 +582,17 @@ class SectionWriter:
                     separators=(",", ":"),
                     default=str,
                 )
-            except Exception:
+            # ``default=str`` can still execute arbitrary object formatters;
+            # keep the prompt usable if one of those formatters fails.
+            except Exception:  # noqa: BLE001
                 rendered = str(value or "")
             return rendered[:maximum]
 
-        project_facts = context.get("project_fact_snapshot")
-        project_fact_text = _json_block(project_facts) if project_facts else "（无已核验项目事实）"
+        project_fact_text = (
+            _json_block({"facts": accepted_facts})
+            if accepted_facts
+            else "（无已核验项目事实）"
+        )
         word_format_rules = context.get("word_format_rules")
         word_format_text = _json_block(word_format_rules) if word_format_rules else "以招标文件已解析版式和系统交付规范为准。"
         graphics_rules = context.get("graphics_rules")
@@ -576,7 +712,7 @@ Word排版规范：{word_format_text}
 请直接输出本章完整正文，并遵守固定系统规则、评分规则、格式要求和证据边界。""".strip()
         return stable_prompt, shared_prompt, dynamic_prompt
 
-    def _fallback(self, title: str, context: Dict[str, Any]) -> str:
+    def _fallback(self, title: str, context: dict[str, Any]) -> str:
         # 无外部模型 API 时仍输出“可执行+可验收”的最小合格稿：
         # - 必含量化指标（满足质量闸门）
         # - 必含 风险→控制→验证（满足闭环闸门）
@@ -589,36 +725,10 @@ Word排版规范：{word_format_text}
         ppe_items = boq_focus.get("ppe_items") or []
         trades = [str(x).strip() for x in (context.get("standard_trades") or []) if str(x).strip()]
 
-        params = context.get("params") if isinstance(context.get("params"), dict) else None
-        try:
-            from backend.zhifei_autoplan.params_runtime import get_quant_defaults, get_boq_focus_card_defaults, get_qse_defaults
-
-            quant = get_quant_defaults(params)
-            card_defaults = get_boq_focus_card_defaults(params)
-            qse_defaults = get_qse_defaults(params)
-        except Exception:
-            quant = {
-                "频次": "2次/日（班前+收工）",
-                "阈值": "偏差≤5mm",
-                "间距": "1000mm",
-                "厚度": "50mm",
-                "时长": "4h/作业段",
-                "人数": "8人/班",
-                "设备型号": "20t挖机1台",
-            }
-            card_defaults = {
-                "采购比价": "≥3家/批次",
-                "抽检频次": "每100m2 1次",
-                "合格率阈值": "≥98%",
-                "一次验收通过率": "≥95%",
-                "台账抽查频次": "1次/周",
-                "应急演练频次": "1次/季度",
-            }
-            qse_defaults = {
-                "PM10阈值": "≤150ug/m3",
-                "昼间噪声阈值": "≤70dB",
-                "夜间噪声阈值": "≤55dB",
-            }
+        accepted_facts = _source_bound_project_facts(context)
+        quant, card_defaults, qse_defaults, accepted_values = _fallback_defaults(
+            accepted_facts
+        )
 
         # Pick a non-placeholder evidence source for the fallback (deterministic, but traceable when docs exist).
         evidence_src = "工程量清单(解析统计)"
@@ -626,8 +736,10 @@ Word排版规范：{word_format_text}
             doc_evs = [str(x) for x in (context.get("doc_evidence") or []) if str(x).strip()]
             if doc_evs:
                 evidence_src = doc_evs[0].split(":", 1)[0].strip() or evidence_src
-        except Exception:
-            pass
+        # Optional evidence hints are untrusted context objects.  The fallback
+        # remains traceable to the parsed BoQ when their conversion fails.
+        except Exception:  # noqa: BLE001
+            evidence_src = "工程量清单(解析统计)"
 
         project_type = str(context.get("project_type") or "").strip()
         logic = context.get("logic_template") if isinstance(context.get("logic_template"), dict) else {}
@@ -754,7 +866,7 @@ Word排版规范：{word_format_text}
                 f"- 成本风险：材料超耗；控制：领用按构件核算=1次/日；验证：超耗≤2%（周统计）。【证据:{evidence_src}】"
             )
             lines.append(
-                f"- 环保风险：扬尘/噪声超标；控制：喷淋2次/日+噪声监测；验证：夜间噪声≤55dB。【证据:环保监测记录】"
+                "- 环保风险：扬尘/噪声超标；控制：喷淋2次/日+噪声监测；验证：夜间噪声≤55dB。【证据:环保监测记录】"
             )
         elif logic_id == "D":
             if is_qse_title:
@@ -877,7 +989,10 @@ Word排版规范：{word_format_text}
         # 四新技术：优先使用“可编辑库+清单/工序匹配”的推荐清单，保证可执行与可验收。
         four_new_recs = boq_focus.get("four_new_recommendations") if isinstance(boq_focus, dict) else None
         try:
-            from backend.zhifei_autoplan.four_new_tech import recommend_four_new, render_four_new_recommendations
+            from backend.zhifei_autoplan.four_new_tech import (
+                recommend_four_new,
+                render_four_new_recommendations,
+            )
 
             recs = four_new_recs if isinstance(four_new_recs, list) else []
             if not recs:
@@ -896,7 +1011,10 @@ Word排版规范：{word_format_text}
                 )
             else:
                 lines.append("- 四新技术：移动端隐蔽验收+二维码材料追溯；适用=材料批次多/隐蔽验收多；验收=台账字段齐全率100%。")
-        except Exception:
+        # Four-new recommendations are enrichment only; retain the explicit
+        # deterministic fallback when the optional renderer fails.
+        except Exception:  # noqa: BLE001
             lines.append("- 四新技术：移动端隐蔽验收+二维码材料追溯；适用=材料批次多/隐蔽验收多；验收=台账字段齐全率100%。")
 
-        return "\n".join(lines).strip() + "\n"
+        generated = "\n".join(lines).strip() + "\n"
+        return _neutralize_fallback_defaults(generated, accepted_values)

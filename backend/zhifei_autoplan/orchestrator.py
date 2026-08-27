@@ -2,38 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
-from typing import Dict, Any, List
+from typing import Any
 
-from backend.zhifei_autoplan.tender_store import load_tender_matrix
-from backend.zhifei_autoplan.boq_store import load_boq_data
-from backend.zhifei_autoplan.kg_runtime import search_kg
-from backend.zhifei_autoplan.evidence import search_ingested_docs, format_hit_locator, best_ingested_hit
-from backend.zhifei_autoplan.utils.llm_client import LLMClient
-from backend.zhifei_autoplan.model_reliability import (
-    ModelReliabilityRuntime,
-    classify_provider_error,
-    sanitize_provider_message,
-)
-from backend.zhifei_autoplan.provider_admission import (
-    ProviderAdmissionManager,
-    ProviderCandidate,
-    canonical_digest as provider_admission_canonical_digest,
-    public_snapshot as public_provider_admission_snapshot,
+from backend.zhifei_autoplan.agent_contract import (
+    build_agent_contract,
+    validate_section_with_contract,
 )
 from backend.zhifei_autoplan.agents.section_writer import (
     SectionWriter,
     compact_chapter_summary,
 )
-from backend.zhifei_autoplan.media import generate_boq_chart, generate_ingested_previews, generate_outline_mindmap
-from backend.zhifei_autoplan.quality_check import (
-    run_quality_checks,
-    apply_remediation,
-    ensure_local_export_mandatory_content,
-    strip_nonconcrete_language,
-)
-from backend.zhifei_autoplan.params_runtime import load_params, get_image_defaults
 from backend.zhifei_autoplan.boq_focus_enforcer import ensure_boq_focus_item_cards
 from backend.zhifei_autoplan.boq_focus_policy import (
     MAX_BOQ_FOCUS_ITEMS,
@@ -41,69 +22,14 @@ from backend.zhifei_autoplan.boq_focus_policy import (
     normalize_boq_focus_name,
     select_boq_focus_names,
 )
-from backend.zhifei_autoplan.project_types import (
-    detect_project_type,
-    normalize_project_type,
-    project_type_requirements,
-)
-from backend.zhifei_autoplan.style_policy import resolve_style_with_decisions
-from backend.zhifei_autoplan.outline_planner import (
-    enrich_outline,
-    infer_total_page_limit,
-    plan_chapter_pages,
-    recommend_chart_every_n,
-)
-from backend.zhifei_autoplan.multi_agent_runtime import (
-    build_agent_execution_ledger,
-    build_multi_agent_plan,
-)
-from backend.zhifei_autoplan.enterprise_params import get_enterprise_profile
 from backend.zhifei_autoplan.boq_schedule import (
     build_boq_wbs_cpm,
     sanitize_boq_for_generation,
 )
-from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
-from backend.zhifei_autoplan.agent_contract import build_agent_contract, validate_section_with_contract
-from backend.zhifei_autoplan.project_fact_ledger import (
-    build_project_fact_ledger_from_inputs,
-    project_fact_prompt_requirements,
-    validate_project_fact_ledger,
-)
-from backend.zhifei_autoplan.score_mapper import build_score_mapping
-from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
-from backend.zhifei_autoplan.requirement_evidence_matrix import (
-    build_requirement_evidence_plan,
-    finalize_requirement_evidence_matrix,
-    requirement_prompt_lines_for_chapter,
-    requirement_rows_for_chapter,
-    scope_requirement_evidence_plan_to_chapters,
-    validate_chapter_requirement_evidence,
-    validate_requirement_evidence_matrix,
-    validate_requirement_evidence_plan_readiness,
-)
-from backend.zhifei_autoplan.generation_checkpoint import (
-    build_chapter_context_digest,
-    build_generation_binding,
-    checkpoint_summary,
-    finalize_generation_checkpoint,
-    load_section_checkpoint,
-    save_section_checkpoint,
-)
-from backend.zhifei_autoplan.execution_control import (
-    ExecutionBudgetExceededError,
-    ExecutionCancelledError,
-    ExecutionControlRuntime,
-)
-from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
+from backend.zhifei_autoplan.boq_store import load_boq_data
 from backend.zhifei_autoplan.case_library_service import (
     build_case_reference_pack,
     case_reference_prompt_requirements,
-)
-from backend.zhifei_autoplan.image_library import build_image_selection_pack
-from backend.zhifei_autoplan.compliance_runtime import (
-    get_compliance_registry_status,
-    list_verified_standard_metadata,
-    query_compliance,
 )
 from backend.zhifei_autoplan.compliance_policy import (
     GLOBAL_COMPLIANCE_REQUIREMENT,
@@ -114,12 +40,102 @@ from backend.zhifei_autoplan.compliance_policy import (
     replace_unverified_standard_citations,
     standard_citation_directive,
 )
+from backend.zhifei_autoplan.compliance_runtime import (
+    get_compliance_registry_status,
+    list_verified_standard_metadata,
+    query_compliance,
+)
+from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
+from backend.zhifei_autoplan.enterprise_params import get_enterprise_profile
+from backend.zhifei_autoplan.evidence import (
+    best_ingested_hit,
+    format_hit_locator,
+    search_ingested_docs,
+)
+from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
+from backend.zhifei_autoplan.execution_control import (
+    ExecutionBudgetExceededError,
+    ExecutionCancelledError,
+    ExecutionControlRuntime,
+)
+from backend.zhifei_autoplan.generation_checkpoint import (
+    build_chapter_context_digest,
+    build_generation_binding,
+    finalize_generation_checkpoint,
+    load_section_checkpoint,
+    save_section_checkpoint,
+)
+from backend.zhifei_autoplan.image_library import build_image_selection_pack
+from backend.zhifei_autoplan.kg_runtime import search_kg
+from backend.zhifei_autoplan.media import (
+    generate_boq_chart,
+    generate_ingested_previews,
+    generate_outline_mindmap,
+)
+from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
+from backend.zhifei_autoplan.model_reliability import (
+    ModelReliabilityRuntime,
+    classify_provider_error,
+    sanitize_provider_message,
+)
+from backend.zhifei_autoplan.multi_agent_runtime import (
+    build_agent_execution_ledger,
+    build_multi_agent_plan,
+)
+from backend.zhifei_autoplan.outline_planner import (
+    enrich_outline,
+    infer_total_page_limit,
+    plan_chapter_pages,
+    recommend_chart_every_n,
+)
+from backend.zhifei_autoplan.params_runtime import get_image_defaults, load_params
+from backend.zhifei_autoplan.project_fact_ledger import (
+    build_project_fact_ledger_from_inputs,
+    project_fact_prompt_requirements,
+    validate_project_fact_ledger,
+)
+from backend.zhifei_autoplan.project_types import (
+    detect_project_type,
+    normalize_project_type,
+    project_type_requirements,
+)
+from backend.zhifei_autoplan.provider_admission import (
+    ProviderAdmissionManager,
+    ProviderCandidate,
+)
+from backend.zhifei_autoplan.provider_admission import (
+    canonical_digest as provider_admission_canonical_digest,
+)
+from backend.zhifei_autoplan.provider_admission import (
+    public_snapshot as public_provider_admission_snapshot,
+)
+from backend.zhifei_autoplan.quality_check import (
+    apply_remediation,
+    ensure_local_export_mandatory_content,
+    run_quality_checks,
+    strip_nonconcrete_language,
+)
+from backend.zhifei_autoplan.requirement_evidence_matrix import (
+    build_requirement_evidence_plan,
+    finalize_requirement_evidence_matrix,
+    requirement_prompt_lines_for_chapter,
+    requirement_rows_for_chapter,
+    scope_requirement_evidence_plan_to_chapters,
+    validate_chapter_requirement_evidence,
+    validate_requirement_evidence_matrix,
+    validate_requirement_evidence_plan_readiness,
+)
+from backend.zhifei_autoplan.score_mapper import build_score_mapping
+from backend.zhifei_autoplan.style_policy import resolve_style_with_decisions
+from backend.zhifei_autoplan.tender_store import load_tender_matrix
 from backend.zhifei_autoplan.terminology_guard import (
     load_labor_allocation_matrix,
     normalize_sections_terminology_async,
     suggest_labor_ratio_for_chapter,
 )
+from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
+logger = logging.getLogger(__name__)
 
 STANDARD_TRADES = [
     "测量工",
@@ -173,37 +189,51 @@ def _is_critical_review_chapter(title: str | None) -> bool:
     return bool(normalized and any(keyword in normalized for keyword in _CRITICAL_REVIEW_KEYWORDS))
 
 
-def _has_tiered_anthropic_route(chain: List[Dict[str, Any]]) -> bool:
+def _has_tiered_anthropic_route(chain: list[dict[str, Any]]) -> bool:
     slots = {str(item.get("slot") or "").strip() for item in chain if isinstance(item, dict)}
     return "text_draft" in slots and "text_review" in slots
 
 
 def _provider_chain_for_role(
-    chain: List[Dict[str, Any]],
+    chain: list[dict[str, Any]],
     role: str,
     *,
     allow_fable_escalation: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return a stable role-aware chain while keeping Fable opt-in only."""
-    if not _has_tiered_anthropic_route(chain):
+    recognized_slots = {
+        "text_draft",
+        "text_review",
+        "text_escalation",
+        "text_backup",
+        "text_main",
+        "text_compat_google",
+    }
+    if not any(
+        str(item.get("slot") or "").strip() in recognized_slots
+        for item in chain
+        if isinstance(item, dict)
+    ):
         return [dict(item) for item in chain if isinstance(item, dict)]
 
     if role == "review":
+        # Preserve the independent-review boundary: generic drafting backups
+        # must not silently become the formal reviewer.  Fable is the only
+        # review escalation and remains explicit opt-in.
         order = ["text_review"]
         if allow_fable_escalation:
             order.append("text_escalation")
-        order.extend(["text_backup", "text_draft", "text_main", "text_compat_google"])
     else:
-        order = ["text_draft", "text_backup", "text_review", "text_main", "text_compat_google"]
-        if allow_fable_escalation:
-            order.append("text_escalation")
+        # Draft/main work may use the configured text backups, but must not
+        # consume the independent reviewer as a drafting fallback.
+        order = ["text_draft", "text_backup", "text_main", "text_compat_google"]
 
     slot_map = {
         str(item.get("slot") or "").strip(): dict(item)
         for item in chain
         if isinstance(item, dict) and str(item.get("slot") or "").strip()
     }
-    ordered: List[Dict[str, Any]] = []
+    ordered: list[dict[str, Any]] = []
     seen: set[str] = set()
     for slot in order:
         item = slot_map.get(slot)
@@ -211,14 +241,6 @@ def _provider_chain_for_role(
             continue
         seen.add(slot)
         ordered.append(item)
-    for item in chain:
-        if not isinstance(item, dict):
-            continue
-        slot = str(item.get("slot") or "").strip()
-        if slot in seen or (slot == "text_escalation" and not allow_fable_escalation):
-            continue
-        seen.add(slot)
-        ordered.append(dict(item))
     return ordered
 
 
@@ -232,8 +254,8 @@ def _model_role_for_slot(slot_id: str | None) -> str:
     }.get(str(slot_id or "").strip(), "legacy")
 
 
-def _dedup_lines(lines: List[str], limit: int | None = None) -> List[str]:
-    out: List[str] = []
+def _dedup_lines(lines: list[str], limit: int | None = None) -> list[str]:
+    out: list[str] = []
     seen: set[str] = set()
     for raw in lines:
         s = str(raw or "").strip()
@@ -254,8 +276,8 @@ def _normalize_delivery_scope(value: Any) -> str:
 
 
 def _validate_strict_outline_for_scope(
-    requested_outline: List[str],
-    tender_outline: List[str],
+    requested_outline: list[str],
+    tender_outline: list[str],
     *,
     delivery_scope: str,
 ) -> None:
@@ -279,14 +301,14 @@ def _validate_strict_outline_for_scope(
 
 def _build_chapter_validation_quality_gate(
     *,
-    quality: Dict[str, Any],
-    contract_checks: Dict[str, Any],
-    delivery_quality_gate: Dict[str, Any],
-) -> Dict[str, Any]:
+    quality: dict[str, Any],
+    contract_checks: dict[str, Any],
+    delivery_quality_gate: dict[str, Any],
+) -> dict[str, Any]:
     """Enforce chapter-level quality without pretending to validate a document."""
 
-    checks: List[Dict[str, Any]] = []
-    blocker_codes: List[str] = []
+    checks: list[dict[str, Any]] = []
+    blocker_codes: list[str] = []
     for key in (
         "structure",
         "officialese",
@@ -373,7 +395,7 @@ def _build_chapter_validation_quality_gate(
 
 
 def _build_consistency_review_prompt(
-    consistency_material: List[str],
+    consistency_material: list[str],
     *,
     delivery_scope: str,
 ) -> str:
@@ -401,10 +423,10 @@ def _build_consistency_review_prompt(
 
 
 def _build_consistency_material(
-    sections: List[Dict[str, Any]],
+    sections: list[dict[str, Any]],
     *,
     delivery_scope: str,
-) -> List[str]:
+) -> list[str]:
     """Build a bounded, fair review sample instead of reading only each head."""
 
     rows = [row for row in sections if isinstance(row, dict)]
@@ -412,7 +434,7 @@ def _build_consistency_material(
         return []
     total_budget = 21000
     per_section_budget = max(1500, total_budget // len(rows))
-    material: List[str] = []
+    material: list[str] = []
     for row in rows:
         title = str(row.get("title") or "").strip()
         content = str(row.get("content") or "").strip()
@@ -428,7 +450,7 @@ def _build_consistency_material(
     return material
 
 
-def _build_weights_and_penalties(tender: Dict[str, Any]) -> tuple[list[str], list[str]]:
+def _build_weights_and_penalties(tender: dict[str, Any]) -> tuple[list[str], list[str]]:
     weights = []
     penalties = []
     for it in tender.get("items", []):
@@ -446,11 +468,11 @@ def _to_int_or_none(v: Any) -> int | None:
     try:
         n = int(float(v))
         return n if n > 0 else None
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
-def _extract_chapter_page_target(chapter_pages: Dict[str, Any], title: str) -> int | None:
+def _extract_chapter_page_target(chapter_pages: dict[str, Any], title: str) -> int | None:
     if not isinstance(chapter_pages, dict):
         return None
     raw = chapter_pages.get(title)
@@ -467,7 +489,7 @@ def _extract_chapter_page_target(chapter_pages: Dict[str, Any], title: str) -> i
 
 
 def _chapter_deadline_seconds(
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     *,
     target_pages: int | None,
 ) -> int:
@@ -490,7 +512,7 @@ def _chapter_deadline_seconds(
     return max(60, min(900, requested))
 
 
-def _chapter_requirements_for_title(chapter_requirements: Dict[str, Any], title: str) -> list[str]:
+def _chapter_requirements_for_title(chapter_requirements: dict[str, Any], title: str) -> list[str]:
     if not isinstance(chapter_requirements, dict):
         return []
     raw = chapter_requirements.get(title)
@@ -513,7 +535,7 @@ def _chapter_requirements_for_title(chapter_requirements: Dict[str, Any], title:
     return [text] if text else []
 
 
-def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
+def _estimate_chars_per_page(style: dict[str, Any]) -> int:
     default_chars = 900
     if not isinstance(style, dict):
         return default_chars
@@ -523,7 +545,7 @@ def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
     def _to_float(v: Any, default: float) -> float:
         try:
             return float(v)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return default
 
     body_size = style.get("body_size") or style.get("font_size")
@@ -542,10 +564,14 @@ def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
         line_spacing_pt = 22.0
     # 固定值行距（磅）转近似倍数，用于估算字数/页
     if line_spacing_pt is not None:
-        try:
-            spacing = max(1.0, min(3.0, float(line_spacing_pt) / max(8.0, size)))
-        except Exception:
-            pass
+        spacing = max(
+            1.0,
+            min(
+                3.0,
+                _to_float(line_spacing_pt, spacing * max(8.0, size))
+                / max(8.0, size),
+            ),
+        )
 
     left = _to_float(margins_cfg.get("left"), 2.0)
     right = _to_float(margins_cfg.get("right"), 2.0)
@@ -560,7 +586,7 @@ def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
     return max(350, min(1800, est))
 
 
-def _deep_merge_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+def _deep_merge_dict(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
     out = dict(dst or {})
     for k, v in (src or {}).items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
@@ -570,7 +596,7 @@ def _deep_merge_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]
     return out
 
 
-def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
+def _build_boq_focus(boq: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(boq, dict):
         return {
             "lines": [],
@@ -583,7 +609,7 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
     focus_lines: list[str] = []
     must_cover: list[str] = []
 
-    def _pick_lines(items: List[Dict[str, Any]], title: str, key: str):
+    def _pick_lines(items: list[dict[str, Any]], title: str, key: str):
         if not items:
             return
         focus_lines.append(f"{title}：")
@@ -632,7 +658,7 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_provider_api_key(
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     provider: str | None,
     *,
     slot_id: str | None = None,
@@ -679,8 +705,10 @@ def _resolve_provider_api_key(
         server_key, _server_alias = resolve_provider_slot_credentials(slot_id, p)
         if isinstance(server_key, str) and server_key.strip():
             return server_key.strip()
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - server credential adapters are optional and provider-defined.
+        logger.warning(
+            "Server-owned provider credential resolution failed; falling back to environment lookup"
+        )
 
     env_map = {
         "openai": ("OPENAI_API_KEY", "ZF_OPENAI_API_KEY"),
@@ -701,14 +729,14 @@ def _resolve_provider_api_key(
     return None
 
 
-def _normalize_provider_chain(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _normalize_provider_chain(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Normalize provider chain to support multiple keys for same provider.
     Preferred input schema:
       provider_chain = [{"slot":"primary","provider":"google","model":"...", "api_key":"..."}]
     Backward compatible with legacy providers/model_map/provider fields.
     """
-    chain: List[Dict[str, Any]] = []
+    chain: list[dict[str, Any]] = []
 
     raw_chain = payload.get("provider_chain")
     if isinstance(raw_chain, list):
@@ -762,7 +790,7 @@ def _normalize_provider_chain(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return chain
 
 
-_PROVIDER_ADMISSION_MANAGERS: Dict[tuple[str, float], ProviderAdmissionManager] = {}
+_PROVIDER_ADMISSION_MANAGERS: dict[tuple[str, float], ProviderAdmissionManager] = {}
 # Test modules may patch this in-process boolean.  It is deliberately not an
 # environment variable or payload field, so HTTP clients and launch scripts
 # cannot turn provider admission off.
@@ -774,10 +802,10 @@ class ProviderAdmissionRunCoordinator:
 
     def __init__(self, manager: ProviderAdmissionManager) -> None:
         self.manager = manager
-        self._task: asyncio.Task[Dict[str, Any]] | None = None
+        self._task: asyncio.Task[dict[str, Any]] | None = None
         self._candidates: tuple[ProviderCandidate, ...] = ()
         self._required_roles: tuple[str, ...] = ()
-        self._snapshot: Dict[str, Any] | None = None
+        self._snapshot: dict[str, Any] | None = None
         self._events_claimed = False
 
     @property
@@ -812,10 +840,10 @@ class ProviderAdmissionRunCoordinator:
     async def admit_chain_once(
         self,
         *,
-        candidates: List[ProviderCandidate],
+        candidates: list[ProviderCandidate],
         probe: Any,
-        required_roles: List[str],
-    ) -> Dict[str, Any]:
+        required_roles: list[str],
+    ) -> dict[str, Any]:
         if self._snapshot is not None:
             if (
                 tuple(candidate.identity_digest for candidate in candidates)
@@ -849,7 +877,7 @@ class ProviderAdmissionRunCoordinator:
         return result
 
 
-def _provider_admission_manager(payload: Dict[str, Any]) -> ProviderAdmissionManager:
+def _provider_admission_manager(payload: dict[str, Any]) -> ProviderAdmissionManager:
     supplied = payload.get("_provider_admission_manager")
     if isinstance(supplied, ProviderAdmissionManager):
         return supplied
@@ -880,20 +908,20 @@ def _provider_admission_manager(payload: Dict[str, Any]) -> ProviderAdmissionMan
 
 
 def new_provider_admission_run_coordinator(
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
 ) -> ProviderAdmissionRunCoordinator:
     return ProviderAdmissionRunCoordinator(_provider_admission_manager(payload))
 
 
 def _provider_admission_candidates(
-    payload: Dict[str, Any],
-    provider_chain: List[Dict[str, Any]],
-) -> List[ProviderCandidate]:
+    payload: dict[str, Any],
+    provider_chain: list[dict[str, Any]],
+) -> list[ProviderCandidate]:
     raw_candidates = list(provider_chain)
     extra = payload.get("_provider_admission_extra_slots")
     if isinstance(extra, list):
         raw_candidates.extend(item for item in extra if isinstance(item, dict))
-    candidates: List[ProviderCandidate] = []
+    candidates: list[ProviderCandidate] = []
     for item in raw_candidates:
         provider = str(item.get("provider") or "").strip().lower()
         model = str(item.get("model") or "").strip()
@@ -936,7 +964,7 @@ async def probe_provider_candidate(
     *,
     reliability_runtime: ModelReliabilityRuntime | None = None,
     execution_runtime: ExecutionControlRuntime | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run one minimal, streamed, credential-bound admission probe."""
 
     started = time.monotonic()
@@ -984,7 +1012,7 @@ async def probe_provider_candidate(
     }
 
 
-async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
+async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
     topic = payload.get("topic") or "未命名项目"
     outline = payload.get("outline") or []
     requirements = payload.get("requirements") or []
@@ -999,14 +1027,14 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     provider_chain = _normalize_provider_chain(payload)
     try:
         agent_parallelism = int(payload.get("agent_parallelism") or 4)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         agent_parallelism = 4
     agent_parallelism = max(1, min(16, agent_parallelism))
     try:
         requested_model_parallelism = int(
             payload.get("max_model_parallelism") or min(agent_parallelism, 2)
         )
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         requested_model_parallelism = min(agent_parallelism, 2)
     max_model_parallelism = max(
         1, min(8, agent_parallelism, requested_model_parallelism)
@@ -1016,7 +1044,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             payload.get("model_circuit_failure_threshold")
             or 2
         )
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         requested_failure_threshold = 2
     model_circuit_failure_threshold = max(
         2, min(16, requested_failure_threshold)
@@ -1024,7 +1052,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     model_reliability = ModelReliabilityRuntime(
         failure_threshold=model_circuit_failure_threshold
     )
-    model_preflight_receipts: List[Dict[str, Any]] = []
+    model_preflight_receipts: list[dict[str, Any]] = []
     progress_callback = payload.get("_progress_callback")
     cancel_callback = payload.get("_cancel_callback")
     checkpoint_write_guard = payload.get("_checkpoint_write_guard")
@@ -1045,14 +1073,14 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             return
         try:
             cancelled = bool(cancel_callback())
-        except Exception:
+        except Exception:  # noqa: BLE001 - arbitrary control-plane callbacks cannot cancel generation implicitly.
             # Cancellation is a control-plane decision.  A broken probe must not
             # silently cancel or change the generated document.
             cancelled = False
         if cancelled:
             raise GenerationCancelledError(f"cancelled_by_user:{stage}")
 
-    def _write_checkpoint(callback: Any, **kwargs: Any) -> Dict[str, Any]:
+    def _write_checkpoint(callback: Any, **kwargs: Any) -> dict[str, Any]:
         _raise_if_cancelled("before_checkpoint_write")
         if callable(checkpoint_write_guard):
             return checkpoint_write_guard(callback, **kwargs)
@@ -1063,9 +1091,9 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             return
         try:
             progress_callback({"event": str(event or ""), **data})
-        except Exception:
+        except Exception:  # noqa: BLE001 - telemetry callbacks are isolated from document generation.
             # Observability must never change the generated document outcome.
-            pass
+            return
     _raise_if_cancelled("run_started")
     _emit_progress("preflight_started", stage="project_context")
     if provider_chain:
@@ -1104,7 +1132,9 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         and not dry_run
     )
     strict_quality = bool(payload.get("quality_strict", True))
-    delivery_scope = _normalize_delivery_scope(payload.get("delivery_scope"))
+    raw_delivery_scope = payload.get("delivery_scope")
+    delivery_scope = _normalize_delivery_scope(raw_delivery_scope)
+    formal_document_delivery = bool(delivery_scope == "document" and not dry_run)
     case_library_options = payload.get("case_library") if isinstance(payload.get("case_library"), dict) else {}
     image_library_options = payload.get("image_library") if isinstance(payload.get("image_library"), dict) else {}
     reference_library_audit_path = (
@@ -1132,7 +1162,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_variant_id = payload.get("variant_id")
     try:
         variant_index = int(raw_variant_id or 1)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         variant_index = 1
     if variant_index <= 0:
         variant_index = 1
@@ -1150,12 +1180,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             explicit_template_id=explicit_logic,
             domain="qse",
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional template adapters may fail without changing the outline.
         logic_template_general = None
         logic_template_qse = None
 
     # Branding (logo/company) is optional but should be stable within one project run.
-    branding: Dict[str, Any] = {
+    branding: dict[str, Any] = {
         "bidder_company": payload.get("bidder_company"),
         "bidder_domain": payload.get("bidder_domain"),
         "logo_url": payload.get("logo_url"),
@@ -1233,7 +1263,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         _raw_tp = payload.get("total_pages_target")
         if _raw_tp is not None and int(_raw_tp) > 0:
             user_total_pages_target = int(_raw_tp)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         user_total_pages_target = None
     total_pages_limit = infer_total_page_limit(
         tender,
@@ -1327,8 +1357,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         tender=tender if isinstance(tender, dict) else {},
         boq=boq if isinstance(boq, dict) else {},
         enterprise_profile=enterprise_profile if isinstance(enterprise_profile, dict) else {},
+        project_fact_ledger=project_fact_ledger,
     )
-    schedule_constraints: List[str] = []
+    missing_param_probe["project_fact_ledger_digest"] = str(
+        project_fact_ledger.get("ledger_digest") or ""
+    )
+    schedule_constraints: list[str] = []
     ledger_facts = (
         project_fact_ledger.get("facts")
         if isinstance(project_fact_ledger.get("facts"), dict)
@@ -1337,7 +1371,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     if ledger_facts:
         def _fact_value(field: str):
             row = ledger_facts.get(field)
-            return row.get("value") if isinstance(row, dict) else None
+            if not isinstance(row, dict):
+                return None
+            if str(row.get("status") or "") not in {"verified", "derived", "approved"}:
+                return None
+            return row.get("value")
 
         est_days = _fact_value("planned_duration_days")
         peak = _fact_value("resource_peak")
@@ -1371,8 +1409,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         recs = recommend_four_new(boq, outline=outline, limit=6, topic=str(topic))
         if isinstance(recs, list) and recs:
             boq_focus["four_new_recommendations"] = recs
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - optional recommendation adapters are isolated from core generation.
+        logger.warning("Four-new-technology recommendations are unavailable for this run")
     type_requirements = project_type_requirements(project_type)
 
     base_requirements: list[str] = []
@@ -1531,7 +1569,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
         )
 
-    provider_admission_public: Dict[str, Any] = {
+    provider_admission_public: dict[str, Any] = {
         "schema_version": "provider-admission-v1",
         "status": "not_required",
         "generation_allowed": True,
@@ -1540,7 +1578,6 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "admitted_chain": [],
         "missing_roles": [],
     }
-    provider_admission_digest: str | None = None
     provider_admission_binding_digest: str | None = None
     provider_admission_required = bool(
         not dry_run
@@ -1577,7 +1614,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 required_roles=required_roles,
             )
 
-        async def _probe_provider_candidate(candidate: ProviderCandidate) -> Dict[str, Any]:
+        async def _probe_provider_candidate(candidate: ProviderCandidate) -> dict[str, Any]:
             return await probe_provider_candidate(
                 candidate,
                 reliability_runtime=model_reliability,
@@ -1609,9 +1646,6 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     ensure_ascii=False,
                 )
             ) from exc
-        provider_admission_digest = str(
-            internal_snapshot.get("admission_digest") or ""
-        ).strip() or None
         provider_admission_binding_digest = provider_admission_canonical_digest(
             {
                 "schema_version": "provider-admission-binding-v1",
@@ -1662,7 +1696,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             for item in (internal_snapshot.get("admitted_chain") or [])
             if isinstance(item, dict) and str(item.get("identity_digest") or "")
         }
-        admitted_text_chain: List[Dict[str, Any]] = []
+        admitted_text_chain: list[dict[str, Any]] = []
         text_slots = {str(item.get("slot") or "") for item in provider_chain}
         for candidate in coordinator.bound_candidates:
             if candidate.slot not in text_slots:
@@ -1707,7 +1741,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             if logo_raw:
                 logo_raw_path = str(logo_raw)
                 logo_embed = prepare_logo_for_embedding(logo_raw) or None
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional branding adapters must not block content generation.
         logo_embed = None
     if logo_embed:
         branding["logo_path"] = logo_embed
@@ -1727,10 +1761,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     },
                     merge=True,
                 )
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - branding persistence is an optional side effect.
+            logger.warning("Resolved branding could not be persisted for this run")
 
-    def _chapter_evidence_gate(section: Dict[str, Any], title: str | None = None) -> Dict[str, Any]:
+    def _chapter_evidence_gate(section: dict[str, Any], title: str | None = None) -> dict[str, Any]:
         chapter_title = str(title or section.get("title") or "").strip()
         return validate_chapter_requirement_evidence(
             plan=requirement_evidence_plan,
@@ -1739,7 +1773,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     def _assign_evidence_safe_content(
-        section: Dict[str, Any],
+        section: dict[str, Any],
         content: Any,
         *,
         stage: str,
@@ -1810,7 +1844,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             or [],
         },
     )
-    generation_checkpoint: Dict[str, Any] = {
+    generation_checkpoint: dict[str, Any] = {
         "schema_version": "generation-checkpoint-v3",
         "binding_digest": generation_binding.get("binding_digest"),
         "status": "disabled" if not checkpoint_enabled else "ready",
@@ -1833,7 +1867,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             return p, m, None, None
         return provider, model, None, None
 
-    def _role_attempts(role: str) -> List[tuple[str | None, str | None, str | None, str | None]]:
+    def _role_attempts(role: str) -> list[tuple[str | None, str | None, str | None, str | None]]:
         entries = _provider_chain_for_role(
             provider_chain,
             role,
@@ -1856,7 +1890,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     ):
         _raise_if_cancelled("model_preflight_started")
         _emit_progress("model_preflight_started")
-        unique_candidates: Dict[tuple[str, str], tuple[str, str, str | None, str | None]] = {}
+        unique_candidates: dict[tuple[str, str], tuple[str, str, str | None, str | None]] = {}
         for role in ("draft", "review"):
             for p, m, key_override, slot_id in _role_attempts(role):
                 if not p or not m:
@@ -1941,8 +1975,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     def _pick_agent_role(title: str) -> str:
         # 可配置角色规则（优先）
         try:
-            from pathlib import Path
             import json
+            from pathlib import Path
             cfg_path = Path("backend/data/autoplan/agent_roles.json")
             if cfg_path.exists():
                 cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -1953,8 +1987,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     if any(k in title for k in keys):
                         return r.get("role") or default_role
                 return default_role
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - malformed optional role configuration falls back deterministically.
+            logger.warning("Agent-role configuration is unavailable; using deterministic role rules")
         # 回退默认规则
         t = title
         if any(k in t for k in ("质量", "检验", "验收")):
@@ -1985,7 +2019,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 project_type=project_type,
                 audit_path=reference_library_audit_path,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - optional reference-pack adapters expose arbitrary backends.
             return {
                 "enabled": bool(case_library_options.get("enabled")),
                 "requested_selected_case_ids": [],
@@ -1998,7 +2032,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "reference_lines": [],
                 "non_fact_reference_notice": "",
                 "hits": [],
-                "warning_list": [f"case_reference_pack_error:{repr(e)}"],
+                "warning_list": [f"case_reference_pack_error:{e!r}"],
             }
 
     def _build_image_pack_for_section(title: str) -> dict[str, Any]:
@@ -2011,7 +2045,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 tags=[str(title)],
                 audit_path=reference_library_audit_path,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - optional image-pack adapters expose arbitrary backends.
             return {
                 "enabled": bool(image_library_options.get("enabled")),
                 "requested_selected_image_ids": [],
@@ -2022,7 +2056,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "insertion_hint": "",
                 "caption_hint": "",
                 "images": [],
-                "warning_list": [f"image_selection_pack_error:{repr(e)}"],
+                "warning_list": [f"image_selection_pack_error:{e!r}"],
             }
 
     def _reference_pack_summary(pack: Any, *, id_key: str, item_key: str) -> dict[str, Any]:
@@ -2151,9 +2185,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         # inject the corresponding "章内结构" guidance (does not change outline).
         bp = None
         try:
-            from backend.zhifei_autoplan.chapter_blueprints import match_chapter_blueprint
+            from backend.zhifei_autoplan.chapter_blueprints import (
+                match_chapter_blueprint,
+            )
             bp = match_chapter_blueprint(title)
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional blueprint loading falls back to no blueprint.
             bp = None
         chapter_target_pages = _extract_chapter_page_target(chapter_pages, title)
         if chapter_target_pages is None and isinstance(chapter_contract, dict):
@@ -2233,7 +2269,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             prefer_latest=True,
             verified_only=True,
         )
-        compliance_hits: List[Dict[str, Any]] = []
+        compliance_hits: list[dict[str, Any]] = []
         seen_compliance_rows: set[tuple[str, str]] = set()
         for raw_hit in [*verified_project_standards, *clause_hits]:
             if not isinstance(raw_hit, dict):
@@ -2360,7 +2396,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             from backend.zhifei_autoplan.logic_templates import classify_chapter_domain
 
             dom = classify_chapter_domain(title)
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional domain classification falls back to the general template.
             dom = "general"
         lt = logic_template_qse if dom == "qse" else logic_template_general
         if lt:
@@ -2382,12 +2418,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "_chapter_context_digest": chapter_context_digest,
                 }
 
-        def _attach_context_identity(rec: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        def _attach_context_identity(rec: dict[str, Any] | None) -> dict[str, Any] | None:
             if isinstance(rec, dict):
                 rec["_chapter_context_digest"] = chapter_context_digest
             return rec
 
-        def _attach_section_meta(rec: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        def _attach_section_meta(rec: dict[str, Any] | None) -> dict[str, Any] | None:
             if not isinstance(rec, dict):
                 return rec
             # Always keep deterministic metadata for downstream quality gates and exports.
@@ -2451,14 +2487,17 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                         retry_attempts=1,
                         execution_runtime=execution_runtime,
                     )
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - provider SDK constructors raise vendor-specific errors.
                     last = _attach_section_meta(
                         {
                             "title": title,
                             "content": "",
                             "provider": p,
                             "model": m,
-                            "error": f"provider_init_failed: {e}",
+                            "error": (
+                                "provider_init_failed: "
+                                + sanitize_provider_message(e)
+                            ),
                         }
                     )
                     continue
@@ -2480,7 +2519,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     last.setdefault("model_role", _model_role_for_slot(slot_id))
             except ExecutionCancelledError:
                 raise
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - provider failures are normalized for fallback routing.
                 budget_exhausted = isinstance(e, ExecutionBudgetExceededError)
                 error_info = classify_provider_error(
                     e.as_dict() if budget_exhausted else e,
@@ -2612,7 +2651,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
 
             def _resolve_checkpoint(
                 chapter_context_digest: str,
-            ) -> Dict[str, Any] | None:
+            ) -> dict[str, Any] | None:
                 nonlocal generation_checkpoint
                 if not checkpoint_enabled:
                     return None
@@ -2750,7 +2789,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             _raise_if_cancelled("after_chapter")
             return result
 
-    async def _gather_with_cancellation(coroutines: List[Any]) -> List[Any]:
+    async def _gather_with_cancellation(coroutines: list[Any]) -> list[Any]:
         """Gather tasks in input order while polling the durable cancel flag."""
 
         tasks = [asyncio.create_task(coro) for coro in coroutines]
@@ -2779,8 +2818,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-    async def _complete_with_role(prompt: str, role: str) -> tuple[str, Dict[str, Any]]:
-        failures: List[Dict[str, str]] = []
+    async def _complete_with_role(prompt: str, role: str) -> tuple[str, dict[str, Any]]:
+        failures: list[dict[str, str]] = []
         if dry_run:
             return "", {"ok": False, "reason": "dry_run", "failures": failures}
         for p, m, key_override, slot_id in _role_attempts(role)[:5]:
@@ -2831,7 +2870,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                         "error": str((error_info or {}).get("code") or response.get("error") or "no_visible_text"),
                     }
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - role providers expose vendor-specific exceptions.
                 failures.append(
                     {
                         "slot": str(slot_id or ""),
@@ -2985,7 +3024,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             stage="strip_nonconcrete_language_after_draft",
         )
 
-    page_target_enrichment: Dict[str, Any] = {
+    page_target_enrichment: dict[str, Any] = {
         "enabled": bool(style.get("enforce_chapter_pages")),
         "policy": "technical_content_only_no_page_padding",
         "candidates": [],
@@ -2995,7 +3034,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     if page_target_enrichment["enabled"] and not dry_run:
         enrichment_sem = asyncio.Semaphore(2)
 
-        async def _enrich_short_section(sec: Dict[str, Any]) -> Dict[str, Any]:
+        async def _enrich_short_section(sec: dict[str, Any]) -> dict[str, Any]:
             title = str(sec.get("title") or "章节").strip()
             content = str(sec.get("content") or "").strip()
             target_pages = _extract_chapter_page_target(chapter_pages, title)
@@ -3120,7 +3159,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 enhanced_count=len(page_target_enrichment["enhanced"]),
             )
 
-    model_review_audit: Dict[str, Any] = {
+    model_review_audit: dict[str, Any] = {
         "enabled": bool(tiered_anthropic_route),
         "fable_escalation_enabled": bool(allow_fable_escalation),
         "critical_chapters": [],
@@ -3139,7 +3178,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         ]
         review_sem = asyncio.Semaphore(2)
 
-        async def _review_critical_section(sec: Dict[str, Any]) -> Dict[str, Any]:
+        async def _review_critical_section(sec: dict[str, Any]) -> dict[str, Any]:
             title = str(sec.get("title") or "章节").strip()
             content = str(sec.get("content") or "").strip()
             if not content or sec.get("error"):
@@ -3222,7 +3261,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         id_key="selected_image_ids",
         item_key="images",
     )
-    pipeline_stages: List[Dict[str, Any]] = [
+    pipeline_stages: list[dict[str, Any]] = [
         {
             "stage": "compliance_preflight",
             "ok": bool(compliance_registry_status.get("ready")) and bool(verified_standard_codes),
@@ -3276,8 +3315,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
     ]
 
-    def _run_contract_checks(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-        results: List[Dict[str, Any]] = []
+    def _run_contract_checks(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
         for sec in rows:
             title = str(sec.get("title") or "").strip()
             if not title:
@@ -3299,14 +3338,16 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         # Note: sections do not store doc_evidence; auto-pick a traceable locator for "工程量清单" if ingested docs exist.
         evidence_src = str(payload.get("evidence_src") or "").strip()
-        if not evidence_src:
+        if not evidence_src and str(project_id or "").strip():
             hit = best_ingested_hit(
                 "工程量清单 报价 清单",
                 limit=10,
                 prefer_filename_keywords=["清单", "BOQ", "报价", "工程量"],
                 project_id=project_id,
             )
-            evidence_src = str((hit or {}).get("locator") or "工程量清单(解析统计)")
+            evidence_src = str((hit or {}).get("locator") or "")
+        if not evidence_src:
+            evidence_src = "工程量清单(解析统计)"
         ensure_boq_focus_item_cards(
             sections,
             boq_focus,
@@ -3314,9 +3355,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             params=params,
             project_id=project_id,
             boq_data=boq,
+            project_fact_ledger=project_fact_ledger,
         )
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - enrichment failures are surfaced through quality gates downstream.
+        logger.warning("BoQ focus-item card enrichment failed for this run")
 
     media = []
     if generate_images:
@@ -3371,11 +3413,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     )
             if mm:
                 media.append(mm)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - media providers are optional and must not alter text delivery.
+            logger.warning("Optional media generation failed for this run")
 
-    quality: Dict[str, Any] = {}
-    quality_draft: Dict[str, Any] | None = None
+    quality: dict[str, Any] = {}
+    quality_draft: dict[str, Any] | None = None
     if payload.get("auto_remediate", True):
         quality_draft = run_quality_checks(
             tender,
@@ -3409,7 +3451,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(sec, dict)
         }
 
-        async def _remediate_with_llm(sec: Dict[str, Any], recs: List[Dict[str, Any]]):
+        async def _remediate_with_llm(sec: dict[str, Any], recs: list[dict[str, Any]]):
             if not recs:
                 return
             title = sec.get("title") or "章节"
@@ -3431,16 +3473,15 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "请输出修复后的正文："
             )
             revised, audit = await _complete_with_role(prompt, "review")
-            if revised:
-                if _assign_evidence_safe_content(
-                    sec,
-                    strip_nonconcrete_language(revised),
-                    stage="quality_llm_remediation",
-                ):
-                    sec["auto_remediated"] = "llm"
-                    sec["remediation_model_slot"] = audit.get("slot")
-                    sec["remediation_provider"] = audit.get("provider")
-                    sec["remediation_model"] = audit.get("model")
+            if revised and _assign_evidence_safe_content(
+                sec,
+                strip_nonconcrete_language(revised),
+                stage="quality_llm_remediation",
+            ):
+                sec["auto_remediated"] = "llm"
+                sec["remediation_model_slot"] = audit.get("slot")
+                sec["remediation_provider"] = audit.get("provider")
+                sec["remediation_model"] = audit.get("model")
 
         if remediate_mode == "llm":
             recs_by_title = {}
@@ -3459,6 +3500,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 project_id=project_id,
                 boq_focus=boq_focus,
                 params=params,
+                project_fact_ledger=project_fact_ledger,
             )
         for sec in sections:
             candidate_content = strip_nonconcrete_language(sec.get("content") or "")
@@ -3482,7 +3524,9 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Plan consistency: normalize duplicated metrics (工期/资源峰值/关键线路间隔) to a single canonical value.
     plan_receipt = None
     try:
-        from backend.zhifei_autoplan.plan_consistency import normalize_metrics_in_sections
+        from backend.zhifei_autoplan.plan_consistency import (
+            normalize_metrics_in_sections,
+        )
 
         pre_plan_consistency_content = {
             id(sec): str(sec.get("content") or "")
@@ -3506,7 +3550,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "ok": bool((plan_receipt or {}).get("ok", True)),
             }
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - stage failure is recorded and consumed by the delivery gate.
         plan_receipt = None
         pipeline_stages.append({"stage": "plan_consistency", "ok": False, "reason": "plan_consistency_exception"})
 
@@ -3534,7 +3578,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 sec["content"] = (text.rstrip() + add).strip() + "\n"
                 break
-    except Exception:
+    except Exception:  # noqa: BLE001 - missing drawing evidence remains fail-closed in the cross-index gate.
         drawing_index = None
 
     # Enterprise standards index (best-effort): list standard docs + chapter bindings for traceability.
@@ -3562,7 +3606,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 sec["content"] = (text.rstrip() + add).strip() + "\n"
                 break
-    except Exception:
+    except Exception:  # noqa: BLE001 - missing standards remain visible to evidence and quality gates.
         standard_index = None
 
     terminology_audit = {"ok": True, "terminology_loaded": False, "entry_count": 0, "changed_sections": 0, "replacement_count": 0}
@@ -3610,7 +3654,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "replacement_count": int(terminology_audit.get("replacement_count") or 0),
             }
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - terminology failure is retained as an explicit failed stage.
         terminology_audit = {"ok": False, "terminology_loaded": False, "entry_count": 0, "changed_sections": 0, "replacement_count": 0}
         pipeline_stages.append({"stage": "terminology_audit", "ok": False, "reason": "terminology_guard_exception"})
 
@@ -3622,9 +3666,15 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 strip_nonconcrete_language(sec.get("content") or ""),
                 stage="strip_nonconcrete_language_final",
             )
-    except Exception:
-        pass
-    standard_citation_sanitization: List[Dict[str, Any]] = []
+    except Exception:  # noqa: BLE001 - final sanitization failure is retained for delivery auditing.
+        pipeline_stages.append(
+            {
+                "stage": "strip_nonconcrete_language_final",
+                "ok": False,
+                "reason": "final_language_sanitization_exception",
+            }
+        )
+    standard_citation_sanitization: list[dict[str, Any]] = []
     for sec in sections:
         if not isinstance(sec, dict):
             continue
@@ -3678,7 +3728,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     if strict_quality and not bool(standard_citation_audit.get("ok", False)):
         sample = (standard_citation_audit.get("violations") or [])[:5]
         details = "；".join(
-            f"{str(row.get('chapter') or '未命名章节')}:{str(row.get('standard_code') or '未知规范')}"
+            f"{row.get('chapter') or '未命名章节'!s}:{row.get('standard_code') or '未知规范'!s}"
             for row in sample
             if isinstance(row, dict)
         )
@@ -3742,12 +3792,15 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     param_receipt = None
     param_receipt_path = None
     try:
-        from backend.zhifei_autoplan.param_trace import build_param_receipt, save_latest_receipt
+        from backend.zhifei_autoplan.param_trace import (
+            build_param_receipt,
+            save_latest_receipt,
+        )
 
         param_receipt = build_param_receipt(sections, params)
         if not no_write_preview:
             param_receipt_path = save_latest_receipt(param_receipt, project_id=str(project_id) if project_id else None)
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional receipt failure is represented by a missing receipt.
         param_receipt = None
         param_receipt_path = None
 
@@ -3778,7 +3831,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             cross_index,
             expected_names=(boq_focus or {}).get("must_cover_keywords") or [],
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - fail-closed cross-index state blocks focused-item delivery.
         cross_index = {
             "ok": expected_focus_count == 0,
             "build_failed": expected_focus_count > 0,
@@ -3801,7 +3854,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             tender=tender if isinstance(tender, dict) else {},
             chapter_pages=chapter_pages if isinstance(chapter_pages, dict) else {},
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - empty evidence tracking is an explicit failed pipeline stage below.
         evidence_tracking = {"rows": [], "summary": {}}
     pipeline_stages.append(
         {
@@ -3874,7 +3927,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         requirement_matrix=requirement_evidence_matrix,
         standard_audit=standard_citation_audit,
         cross_index=cross_index if isinstance(cross_index, dict) else {},
-        model_review_required=bool(tiered_anthropic_route and not dry_run),
+        model_review_required=formal_document_delivery,
+        formal_delivery_required=formal_document_delivery,
+        project_parameters=missing_param_probe,
+        project_fact_ledger=project_fact_ledger,
+        sections=sections,
     )
     quality["delivery_quality_gate"] = delivery_quality_gate
     pipeline_stages.append(
@@ -3886,16 +3943,16 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "warning_count": delivery_quality_gate.get("warning_count"),
         }
     )
+    blocker_codes = [
+        str(row.get("code") or "DELIVERY_QUALITY_BLOCKED")
+        for row in (delivery_quality_gate.get("blockers") or [])
+        if isinstance(row, dict)
+    ]
     if (
         strict_quality
         and delivery_scope == "document"
         and not bool(delivery_quality_gate.get("delivery_allowed"))
     ):
-        blocker_codes = [
-            str(row.get("code") or "DELIVERY_QUALITY_BLOCKED")
-            for row in (delivery_quality_gate.get("blockers") or [])
-            if isinstance(row, dict)
-        ]
         raise ValueError(
             "最终专业交付质量门未通过，已停止交付："
             + "、".join(blocker_codes[:20])
@@ -3924,9 +3981,9 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     params_used = None
     try:
         from backend.zhifei_autoplan.params_runtime import (
-            get_quant_defaults,
             get_boq_focus_card_defaults,
             get_qse_defaults,
+            get_quant_defaults,
         )
 
         params_used = {
@@ -3937,7 +3994,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             # Use the module-level import to avoid local-scope shadowing (which would break mindmap generation).
             "image_defaults": get_image_defaults(params),
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional parameter summaries are omitted on adapter failure.
         params_used = None
     graph_binding_missing = [
         str(sec.get("title") or "")
@@ -4018,6 +4075,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "style_source": style_source,
         "requirement_decision_matrix": requirement_decision_matrix,
         "quality_strict": strict_quality,
+        "dry_run": dry_run,
         "delivery_scope": delivery_scope,
         "delivery_ready": bool(
             delivery_scope == "document"

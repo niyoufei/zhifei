@@ -19,6 +19,7 @@ from backend.zhifei_autoplan.utils.llm_client import LLMClient
         ("401 invalid api key", "authentication_failed", False),
         ("429 rate limit exceeded", "rate_limited", True),
         ("429 insufficient_quota: credit balance exhausted", "quota_exhausted", False),
+        ("429 credit_balance_exhausted", "quota_exhausted", False),
         ("You have no credits remaining. Please add credits.", "quota_exhausted", False),
         ("404 model not found", "model_not_found", False),
         (TimeoutError(), "timeout", True),
@@ -38,6 +39,17 @@ def test_classify_provider_error(error, code, retryable):
     assert result["user_message"]
     assert result["action"]
     assert result["severity"] in {"warning", "error"}
+
+
+def test_machine_readable_credit_balance_code_is_normalized_without_retry():
+    result = classify_provider_error(
+        {"code": "credit_balance_exhausted", "message": "request rejected"},
+        provider="openai",
+        model="gpt-test",
+    )
+
+    assert result["code"] == "quota_exhausted"
+    assert result["retryable"] is False
 
 
 def test_sanitize_provider_message_removes_secret_shaped_values():

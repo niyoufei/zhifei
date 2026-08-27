@@ -1,21 +1,39 @@
 """Unit tests for backend/zhifei_autoplan/orchestrator.py"""
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 import asyncio
 import json
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from backend.zhifei_autoplan.execution_control import ExecutionBudgetExceededError
 from backend.zhifei_autoplan.orchestrator import (
     _build_weights_and_penalties,
     _chapter_deadline_seconds,
     _is_critical_review_chapter,
     _provider_chain_for_role,
-    run_autoplan,
 )
-from backend.zhifei_autoplan.execution_control import ExecutionBudgetExceededError
+from backend.zhifei_autoplan.orchestrator import (
+    run_autoplan as _production_run_autoplan,
+)
+
+
+async def run_autoplan(payload, *args, **kwargs):
+    """Keep legacy unit cases inspectable without weakening production gates.
+
+    These tests exercise orchestration internals with mocked providers and
+    incomplete evidence.  They use the document scope but disable the final
+    exception so the returned fail-closed receipt can still be inspected.
+    HTTP/save routes independently refuse to publish such a receipt.
+    """
+
+    scoped_payload = dict(payload or {})
+    scoped_payload.setdefault("delivery_scope", "document")
+    scoped_payload.setdefault("quality_strict", False)
+    return await _production_run_autoplan(scoped_payload, *args, **kwargs)
 
 
 def test_long_chapter_deadline_allows_one_bounded_continuation() -> None:
@@ -151,13 +169,24 @@ def test_tiered_provider_chain_keeps_fable_opt_in_only():
         allow_fable_escalation=True,
     )
 
-    assert [item["slot"] for item in draft] == ["text_draft", "text_backup", "text_review"]
-    assert [item["slot"] for item in review] == ["text_review", "text_backup", "text_draft"]
+    assert [item["slot"] for item in draft] == ["text_draft", "text_backup"]
+    assert [item["slot"] for item in review] == ["text_review"]
     assert [item["slot"] for item in review_with_escalation] == [
         "text_review",
         "text_escalation",
+    ]
+
+
+def test_role_chain_does_not_promote_backup_when_reviewer_is_missing():
+    chain = [
+        {"slot": "text_main", "provider": "anthropic", "model": "claude-sonnet-5"},
+        {"slot": "text_backup", "provider": "openai", "model": "gpt-5.6-sol"},
+    ]
+
+    assert _provider_chain_for_role(chain, "review") == []
+    assert [row["slot"] for row in _provider_chain_for_role(chain, "draft")] == [
         "text_backup",
-        "text_draft",
+        "text_main",
     ]
 
 
@@ -256,7 +285,7 @@ class TestBuildWeightsAndPenalties:
                 }
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
         # kw9 and kw10 should not be in the output (truncated at 8)
         assert "kw8" in weights[0]
@@ -273,7 +302,7 @@ class TestBuildWeightsAndPenalties:
                 }
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        _weights, penalties = _build_weights_and_penalties(tender)
         assert len(penalties) == 1
         assert "p10" in penalties[0]
         assert "p11" not in penalties[0]
@@ -285,7 +314,7 @@ class TestBuildWeightsAndPenalties:
                 {"dimension": "技术", "weight": 30}
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
         assert "技术" in weights[0]
 
@@ -296,7 +325,7 @@ class TestBuildWeightsAndPenalties:
                 {"dimension": "技术", "keywords": None, "weight": 30}
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
 
     def test_missing_weight(self):
@@ -306,7 +335,7 @@ class TestBuildWeightsAndPenalties:
                 {"dimension": "技术", "keywords": ["kw1"]}
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
         assert "权重=None" in weights[0]
 
@@ -317,7 +346,7 @@ class TestBuildWeightsAndPenalties:
                 {"dimension": 123, "keywords": ["kw1"], "weight": 10}
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
         assert "123" in weights[0]
 
@@ -396,15 +425,66 @@ class TestRunAutoplan:
 
     @pytest.mark.asyncio
     async def test_empty_payload(self, mock_dependencies):
-        """Empty payload returns default structure."""
-        result = await run_autoplan({})
+        """Missing raw scope still defaults to a fail-closed formal document."""
+        with pytest.raises(ValueError, match="DELIVERY_PROJECT_PARAMETERS_UNRESOLVED"):
+            await _production_run_autoplan({})
 
-        assert result["topic"] == "未命名项目"
-        assert isinstance(result["outline"], list) and result["outline"]
-        assert "编制依据与原则" in result["outline"]
-        assert len(result["sections"]) == len(result["outline"])
-        assert "quality_checks" in result
-        assert "evidence" in result
+    @pytest.mark.asyncio
+    async def test_explicit_strict_document_delivery_blocks_unresolved_parameters(
+        self,
+        mock_dependencies,
+    ):
+        with pytest.raises(ValueError, match="DELIVERY_PROJECT_PARAMETERS_UNRESOLVED"):
+            await run_autoplan(
+                {
+                    "delivery_scope": "document",
+                    "quality_strict": True,
+                    "outline": ["工程概况"],
+                    "generate_images": False,
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_explicit_strict_document_delivery_accepts_approved_parameters(
+        self,
+        mock_dependencies,
+    ):
+        result = await run_autoplan(
+            {
+                "delivery_scope": "document",
+                "quality_strict": False,
+                "outline": ["工程概况"],
+                "generate_images": False,
+                "project_facts": {
+                    "planned_duration_days": 180,
+                    "resource_peak": 80,
+                    "critical_interval_days": 3,
+                    "risk_inspection_frequency": "2次/日",
+                    "quality_threshold": "偏差≤5mm",
+                    "deviation_action_deadline": "4h",
+                },
+            }
+        )
+
+        parameter_check = next(
+            row
+            for row in result["delivery_quality_gate"]["checks"]
+            if row["name"] == "formal_project_parameters"
+        )
+        assert parameter_check["required"] is True
+        assert parameter_check["pass"] is True
+        assert set(parameter_check["accepted_statuses"]) == {
+            "verified",
+            "derived",
+            "approved",
+        }
+        assert result["delivery_ready"] is False
+        checks = {
+            row["name"]: row for row in result["delivery_quality_gate"]["checks"]
+        }
+        assert checks["formal_parameter_body_binding"]["pass"] is False
+        assert checks["independent_model_review"]["required"] is True
+        assert checks["independent_model_review"]["pass"] is False
 
     @pytest.mark.asyncio
     async def test_topic_from_payload(self, mock_dependencies):
@@ -423,6 +503,7 @@ class TestRunAutoplan:
                         "project_facts": {"project_code": "BODY-02"},
                     },
                     "outline": ["第一章"],
+                    "quality_strict": True,
                     "generate_images": False,
                 }
             )
@@ -1063,16 +1144,19 @@ class TestRunAutoplan:
         assert isinstance(result.get("pipeline_stages"), list)
 
     @pytest.mark.asyncio
-    async def test_missing_param_fallback_injected_into_requirements(self, mock_dependencies):
-        """Missing-parameter fallback guidance should be injected into section requirements."""
-        await run_autoplan({
+    async def test_unconfirmed_missing_param_defaults_are_not_injected(self, mock_dependencies):
+        """Enterprise proposals remain advisory until explicitly approved."""
+        result = await run_autoplan({
             "outline": ["工程概况"],
             "requirements": [],
+            "dry_run": True,
         })
         call_args = mock_dependencies["writer"].write.call_args
         ctx = call_args[0][1]
         reqs = [str(x) for x in (ctx.get("requirements") or [])]
-        assert any("参数缺失自动补位" in x for x in reqs)
+        assert not any("参数缺失自动补位" in x for x in reqs)
+        assert result["missing_parameters"]["auto_fill"] == {}
+        assert result["missing_parameters"]["formal_ready"] is False
 
     @pytest.mark.asyncio
     async def test_contract_chapter_id_attached(self, mock_dependencies):
@@ -1265,9 +1349,13 @@ class TestRunAutoplan:
                 "saved_chapter_indexes": [0, 1],
                 "status": "draft_complete",
             },
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator._build_chapter_validation_quality_gate",
+            return_value={"pass": True, "blocker_codes": []},
         ):
             result = await run_autoplan(
                 {
+                    "delivery_scope": "chapter_validation",
                     "outline": ["质量管理", "安全管理"],
                     "strict_tender_outline": True,
                     "tender_matrix": tender,
@@ -1361,9 +1449,13 @@ class TestRunAutoplan:
         ), patch(
             "backend.zhifei_autoplan.orchestrator.finalize_generation_checkpoint",
             return_value={"saved_chapter_count": 1, "status": "draft_complete"},
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator._build_chapter_validation_quality_gate",
+            return_value={"pass": True, "blocker_codes": []},
         ):
             await run_autoplan(
                 {
+                    "delivery_scope": "chapter_validation",
                     "outline": ["质量管理"],
                     "strict_tender_outline": True,
                     "tender_matrix": tender,
@@ -1715,7 +1807,7 @@ class TestOrchestratorIntegration:
             ]
         }
 
-        result = await run_autoplan({
+        await run_autoplan({
             "topic": "测试项目",
             "outline": ["质量管理"],
             "auto_remediate": True,
@@ -2011,7 +2103,7 @@ class TestLLMRemediation:
     @pytest.mark.asyncio
     async def test_llm_remediation_applied(self, mock_deps_llm):
         """LLM remediation mode calls LLM to fix sections."""
-        result = await run_autoplan({
+        await run_autoplan({
             "outline": ["章节1"],
             "provider": "openai",
             "model": "gpt-4",
@@ -2132,7 +2224,8 @@ class TestLLMRemediation:
 
         # Content should not be updated on bad response
         section = result["sections"][0]
-        # auto_remediated flag should not be set since response was bad
+        # A failed LLM response must not be recorded as an LLM remediation.
+        assert section.get("auto_remediated") != "llm"
 
 
 # =============================================================================
@@ -2193,26 +2286,28 @@ class TestPickProviderWithList:
                     limit=4,
                 )
 
-        with patch("backend.zhifei_autoplan.orchestrator.SectionWriter", _BudgetWriter):
-            with pytest.raises(RuntimeError) as exc_info:
-                await run_autoplan(
-                    {
-                        "outline": ["章节1"],
-                        "provider_chain": [
-                            {
-                                "slot": "text_draft",
-                                "provider": "anthropic",
-                                "model": "claude-sonnet-5",
-                                "api_key": "test-key",
-                            }
-                        ],
-                        "fail_on_model_exhaustion": True,
-                        "quality_strict": False,
-                        "auto_remediate": False,
-                        "generate_images": False,
-                        "dry_run": False,
-                    }
-                )
+        with (
+            patch("backend.zhifei_autoplan.orchestrator.SectionWriter", _BudgetWriter),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
+            await run_autoplan(
+                {
+                    "outline": ["章节1"],
+                    "provider_chain": [
+                        {
+                            "slot": "text_draft",
+                            "provider": "anthropic",
+                            "model": "claude-sonnet-5",
+                            "api_key": "test-key",
+                        }
+                    ],
+                    "fail_on_model_exhaustion": True,
+                    "quality_strict": False,
+                    "auto_remediate": False,
+                    "generate_images": False,
+                    "dry_run": False,
+                }
+            )
 
         failure = json.loads(str(exc_info.value))
         assert failure["code"] == "EXECUTION_BUDGET_EXCEEDED"
@@ -2276,8 +2371,6 @@ class TestPickProviderWithList:
         calls = mock_deps_prov["llm_calls"]
         # Check that providers rotate correctly
         providers_used = [c["provider"] for c in calls]
-        models_used = [c["model"] for c in calls]
-
         # 3 sections with 2 providers should show rotation pattern
         assert "provider_a" in providers_used
         assert "provider_b" in providers_used

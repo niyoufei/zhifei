@@ -63,6 +63,11 @@ def _small_source(tmp_path: Path) -> tuple[Path, Path, Path]:
         mode=0o755,
     )
     _write(venv / "pyvenv.cfg", "home = /fixture\n")
+    _write(
+        venv / "bin" / "fixture-console",
+        f"#!{venv}/bin/python\nprint('fixture console')\n",
+        mode=0o755,
+    )
     _write(venv / "lib" / "python3.12" / "site-packages" / "fixture.py", "VALUE = 1\n")
     return source, venv, env_file
 
@@ -128,6 +133,10 @@ def test_build_seals_complete_source_runtime_manifest_and_current_pointer(tmp_pa
     assert not (release / ".venv").exists()
     assert not (release / ".env.local").exists()
     assert not (release / "__pycache__").exists()
+    console = runtime / "venv" / "bin" / "fixture-console"
+    assert console.read_bytes().startswith(builder._RELOCATABLE_CONSOLE_PREFIX)
+    assert str(source / ".venv").encode() not in console.read_bytes()
+    builder._assert_console_scripts_relocatable(runtime / "venv")
     assert not (release / "diagnostic.log").exists()
     assert not (release / "docs" / "RUNTIME_ACCEPTANCE_REPORT.md").exists()
     assert not (release / "docs" / "RUNTIME_REMEDIATION_REPORT.md").exists()

@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -12,12 +13,58 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, UploadFile, File
-from pydantic import BaseModel
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
+from backend.app.routers.ingest import (
+    _handle_upload as _handle_ingest_upload,
+)
+from backend.app.routers.ingest import (
+    _resolve_workspace_context as _resolve_ingest_workspace_context,
+)
+from backend.app.routers.ingest import (
+    resolve_ingested_file_ids,
+    resolve_ingested_tender_sources,
+)
+from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
+from backend.zhifei_autoplan import export_docx_service as export_docx_core
+from backend.zhifei_autoplan.boq_store import load_boq_data, save_boq_data
+from backend.zhifei_autoplan.case_library_service import (
+    CASE_LIBRARY_SCOPE,
+    case_library_record_id,
+    list_case_library_items,
+    normalize_case_library_options,
+)
+from backend.zhifei_autoplan.compliance_policy import audit_standard_citations
+from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
+from backend.zhifei_autoplan.delivery_receipt import (
+    build_delivery_receipt,
+    canonical_delivery_receipt_digest,
+)
+from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
+from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
+from backend.zhifei_autoplan.four_new_tech import recommend_four_new
+from backend.zhifei_autoplan.generation_checkpoint import (
+    mark_failed_checkpoint_namespace,
+)
+from backend.zhifei_autoplan.image_library import (
+    IMAGE_LIBRARY_SCOPE,
+    image_library_record_id,
+    list_image_library_items,
+    normalize_image_library_options,
+    normalize_text_list,
+)
 from backend.zhifei_autoplan.job_store import (
     JobLeaseLostError,
     acquire_job_lease,
@@ -28,14 +75,15 @@ from backend.zhifei_autoplan.job_store import (
     merge_job,
     run_with_job_lease,
     transition_job,
-    update_job,
+    update_job,  # noqa: F401 - stable no-write test sentinel/patch surface
 )
 from backend.zhifei_autoplan.local_job_queue import submit_isolated_job
-from backend.zhifei_autoplan.runtime_events import append_runtime_event, event_journal_path
-from backend.zhifei_autoplan.generation_checkpoint import (
-    mark_failed_checkpoint_namespace,
+from backend.zhifei_autoplan.model_reliability import classify_provider_error
+from backend.zhifei_autoplan.multi_agent_runtime import AGENT_ROLE_DIRECTIVES
+from backend.zhifei_autoplan.ollama_preview import (
+    run_ollama_preview,
+    run_ollama_section_review,
 )
-from backend.zhifei_autoplan import export_docx_service as export_docx_core
 from backend.zhifei_autoplan.orchestrator import (
     _build_boq_focus,
     _normalize_provider_chain,
@@ -45,65 +93,33 @@ from backend.zhifei_autoplan.orchestrator import (
     probe_provider_candidate,
     run_autoplan,
 )
-from backend.zhifei_autoplan.provider_runtime import (
-    ProviderSlot,
-    ProviderRoutingConfigurationError,
-    apply_server_provider_routing,
-    build_server_provider_admission_candidates,
-    server_provider_admission_required_roles,
+from backend.zhifei_autoplan.output_artifacts import (
+    save_outputs as save_output_artifacts,
 )
-from backend.zhifei_autoplan.multi_agent_runtime import AGENT_ROLE_DIRECTIVES
-from backend.zhifei_autoplan.output_artifacts import save_outputs as save_output_artifacts
+from backend.zhifei_autoplan.params_runtime import load_params, save_params
+from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
+from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
+from backend.zhifei_autoplan.plan_store import load_plan, save_plan
 from backend.zhifei_autoplan.professional_document_renderer import (
     ProfessionalRenderError,
     render_professional_document,
 )
-from backend.zhifei_autoplan.plan_store import load_plan, save_plan
-from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
-from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
-from backend.zhifei_autoplan.tender_store import save_tender_matrix
-from backend.zhifei_autoplan.boq_store import save_boq_data
-from backend.zhifei_autoplan.tender_store import load_tender_matrix
-from backend.zhifei_autoplan.boq_store import load_boq_data
-from backend.zhifei_autoplan.quality_check import apply_remediation, run_quality_checks, strip_nonconcrete_language
-from backend.zhifei_autoplan.utils.llm_client import LLMClient
-from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
-from backend.zhifei_autoplan.model_reliability import classify_provider_error
-from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
-from backend.zhifei_autoplan.delivery_receipt import (
-    build_delivery_receipt,
-    canonical_delivery_receipt_digest,
+from backend.zhifei_autoplan.provider_runtime import (
+    ProviderRoutingConfigurationError,
+    ProviderSlot,
+    apply_server_provider_routing,
+    build_server_provider_admission_candidates,
+    server_provider_admission_required_roles,
+)
+from backend.zhifei_autoplan.quality_check import (
+    apply_remediation,
+    run_quality_checks,
+    strip_nonconcrete_language,
 )
 from backend.zhifei_autoplan.requirement_evidence_matrix import (
     finalize_requirement_evidence_matrix,
     validate_chapter_requirement_evidence,
     validate_requirement_evidence_matrix,
-)
-from backend.zhifei_autoplan.compliance_policy import audit_standard_citations
-from backend.zhifei_autoplan.params_runtime import load_params, save_params
-from backend.zhifei_autoplan.four_new_tech import recommend_four_new
-from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
-from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
-from backend.zhifei_autoplan.case_library_service import (
-    CASE_LIBRARY_SCOPE,
-    case_library_record_id,
-    list_case_library_items,
-    normalize_case_library_options,
-)
-from backend.zhifei_autoplan.image_library import (
-    IMAGE_LIBRARY_SCOPE,
-    image_library_record_id,
-    list_image_library_items,
-    normalize_image_library_options,
-    normalize_text_list,
-)
-from backend.zhifei_autoplan.ollama_preview import run_ollama_preview, run_ollama_section_review
-from backend.zhifei_autoplan.section_drafts import (
-    apply_section_draft,
-    build_section_draft,
-    compute_section_draft_diff,
-    reject_section_draft,
-    rollback_section_draft,
 )
 from backend.zhifei_autoplan.review_revision import (
     artifact_manifest,
@@ -118,23 +134,32 @@ from backend.zhifei_autoplan.review_revision import (
     stable_issue_id,
     variant_version,
 )
-from backend.zhifei_autoplan.zbid_snapshot_mapper import map_zbid_snapshot_to_zdoc_draft_input
-from backend.app.routers.ingest import (
-    _handle_upload as _handle_ingest_upload,
-    resolve_ingested_file_ids,
-    resolve_ingested_tender_sources,
+from backend.zhifei_autoplan.runtime_events import (
+    append_runtime_event,
+    event_journal_path,
 )
-from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
-from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
-
+from backend.zhifei_autoplan.section_drafts import (
+    apply_section_draft,
+    build_section_draft,
+    compute_section_draft_diff,
+    reject_section_draft,
+    rollback_section_draft,
+)
+from backend.zhifei_autoplan.tender_store import load_tender_matrix, save_tender_matrix
+from backend.zhifei_autoplan.utils.llm_client import LLMClient
+from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
+from backend.zhifei_autoplan.zbid_snapshot_mapper import (
+    map_zbid_snapshot_to_zdoc_draft_input,
+)
 
 router = APIRouter(prefix="/actions", tags=["Actions Bridge"])
+logger = logging.getLogger(__name__)
 
 
-def _provider_admission_api_projection(value: Any) -> Dict[str, Any]:
+def _provider_admission_api_projection(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
 
-    def _chain_entry(item: Any) -> Dict[str, Any]:
+    def _chain_entry(item: Any) -> dict[str, Any]:
         row = item if isinstance(item, dict) else {}
         return {
             "slot": str(row.get("slot") or "")[:80],
@@ -147,7 +172,7 @@ def _provider_admission_api_projection(value: Any) -> Dict[str, Any]:
     for item in raw.get("slots") if isinstance(raw.get("slots"), list) else []:
         row = _chain_entry(item)
         source = item if isinstance(item, dict) else {}
-        safe_layers: Dict[str, Any] = {}
+        safe_layers: dict[str, Any] = {}
         layers = source.get("layers") if isinstance(source.get("layers"), dict) else {}
         for name in ("configuration", "credentials", "model", "quota", "stream", "circuit"):
             layer = layers.get(name) if isinstance(layers.get(name), dict) else {}
@@ -240,7 +265,7 @@ def actions_claude_usage_stats(
     }
 
 
-def _public_provider_error(value: Any) -> Dict[str, Any]:
+def _public_provider_error(value: Any) -> dict[str, Any]:
     """Reduce a provider diagnostic to stable, user-safe fields."""
 
     raw = dict(value) if isinstance(value, dict) else {"message": str(value or "provider_error")}
@@ -261,7 +286,7 @@ def _public_provider_error(value: Any) -> Dict[str, Any]:
     }
 
 
-def _public_provider_state(value: Any) -> Dict[str, Any]:
+def _public_provider_state(value: Any) -> dict[str, Any]:
     """Return provider runtime state without raw SDK/billing/network messages."""
 
     if not isinstance(value, dict):
@@ -271,7 +296,7 @@ def _public_provider_state(value: Any) -> Dict[str, Any]:
         if key in {"last_error", "error"} and node:
             return _public_provider_error(node)
         if isinstance(node, dict):
-            result: Dict[str, Any] = {}
+            result: dict[str, Any] = {}
             for child_key, child_value in node.items():
                 normalized = str(child_key).strip().lower().replace("-", "_")
                 if (
@@ -296,9 +321,7 @@ def _public_provider_state(value: Any) -> Dict[str, Any]:
                         "token_url",
                         "url",
                     }
-                    or normalized.endswith("_api_key")
-                    or normalized.endswith("_secret")
-                    or normalized.endswith("_token")
+                    or normalized.endswith(("_api_key", "_secret", "_token"))
                 ):
                     continue
                 if normalized == "message":
@@ -314,7 +337,7 @@ def _public_provider_state(value: Any) -> Dict[str, Any]:
     return scrubbed if isinstance(scrubbed, dict) else {}
 
 
-_DELIVERY_BLOCKER_GUIDANCE: Dict[str, tuple[str, str]] = {
+_DELIVERY_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
     "DELIVERY_CONTENT_QUALITY_BLOCKED": (
         "独立内容质量审核未通过。",
         "请按内容审核阻断项修订章节后从检查点恢复。",
@@ -345,7 +368,7 @@ _DELIVERY_BLOCKER_GUIDANCE: Dict[str, tuple[str, str]] = {
     ),
 }
 
-_CHAPTER_VALIDATION_BLOCKER_GUIDANCE: Dict[str, tuple[str, str]] = {
+_CHAPTER_VALIDATION_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
     "CHAPTER_CHECK_STRUCTURE_BLOCKED": (
         "所选章节结构不完整。",
         "请补齐所选章节及其正文后从检查点恢复。",
@@ -393,7 +416,7 @@ _CHAPTER_VALIDATION_BLOCKER_GUIDANCE: Dict[str, tuple[str, str]] = {
 }
 
 
-def _public_runtime_error(error: Any) -> Dict[str, Any]:
+def _public_runtime_error(error: Any) -> dict[str, Any]:
     """Return a stable, bounded error object without repr/prompt leakage."""
 
     raw = str(error or "").strip()
@@ -405,12 +428,12 @@ def _public_runtime_error(error: Any) -> Dict[str, Any]:
                 import ast
 
                 candidates.insert(0, str(ast.literal_eval(inner)))
-            except Exception:
-                pass
+            except (SyntaxError, ValueError):
+                logger.debug("runtime error wrapper was not a Python literal")
     for candidate in candidates:
         try:
             parsed = json.loads(candidate)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(parsed, dict):
             code = str(parsed.get("code") or "RUNTIME_FAILED")[:80]
@@ -632,8 +655,8 @@ def _public_runtime_error(error: Any) -> Dict[str, Any]:
 
 def _runtime_failure_transition(
     error: Any,
-    prior_job: Dict[str, Any] | None,
-) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any] | None]:
+    prior_job: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Build a truthful failure transition without discarding a complete draft."""
 
     prior = dict(prior_job or {})
@@ -653,7 +676,7 @@ def _runtime_failure_transition(
     public_error = _public_runtime_error(error)
     phase = str(prior_progress.get("phase") or "generation")
     stage = "failed"
-    recovery_result: Dict[str, Any] | None = None
+    recovery_result: dict[str, Any] | None = None
     if complete_draft:
         phase = "quality_review"
         stage = "quality_review_failed"
@@ -683,12 +706,12 @@ def _runtime_failure_transition(
     return public_error, progress, recovery_result
 
 
-def _seal_failed_run_checkpoints(job_id: str) -> Dict[str, Any] | None:
+def _seal_failed_run_checkpoints(job_id: str) -> dict[str, Any] | None:
     """Make persisted checkpoint scopes agree with a failed run terminal state."""
 
     try:
         scopes = mark_failed_checkpoint_namespace(job_id)
-    except Exception:
+    except Exception:  # noqa: BLE001 - checkpoint failure sealing must not mask the primary job failure
         append_runtime_event(
             job_id,
             "checkpoint_terminal_update_failed",
@@ -714,13 +737,13 @@ def _seal_failed_run_checkpoints(job_id: str) -> Dict[str, Any] | None:
 
 
 def _successful_checkpoint_projection(
-    results: List[Dict[str, Any]],
-) -> Dict[str, Any] | None:
+    results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
     """Aggregate only fully finalized variant checkpoints for job success."""
 
     if not results:
         return None
-    scopes: List[Dict[str, Any]] = []
+    scopes: list[dict[str, Any]] = []
     for result in results:
         checkpoint = (
             result.get("generation_checkpoint")
@@ -771,22 +794,22 @@ class ActionsGenerateRequest(BaseModel):
     project_type: str | None = None
     generation_mode: str | None = None
     delivery_scope: Literal["document", "chapter_validation"] = "document"
-    outline: List[str] = []
-    requirements: List[str] = []
+    outline: list[str] = []
+    requirements: list[str] = []
     global_instruction: str | None = None
     chapter_requirements: dict | None = None
-    chapter_summaries: List[dict | str] = []
+    chapter_summaries: list[dict | str] = []
     project_stage_context: str | None = None
-    common_construction_requirements: List[str] = []
+    common_construction_requirements: list[str] = []
     provider: str | None = None
     model: str | None = None
-    provider_chain: List[dict] | None = None
-    providers: List[str] = []
+    provider_chain: list[dict] | None = None
+    providers: list[str] = []
     model_map: dict | None = None
     style: dict | None = None
     variants: int = 1
     # 可选模板（A/B/C/D/E）；若提供则按所选模板逐份生成。
-    selected_templates: List[str] | None = None
+    selected_templates: list[str] | None = None
     # 并行控制：章节级 Agent 并行数（单份方案内），以及多份方案并行数（A/B/C/D/E 之间）。
     agent_parallelism: int | None = None
     variant_parallelism: int | None = None
@@ -833,16 +856,18 @@ class ActionsGenerateRequest(BaseModel):
     # job. A changed project, outline, style, requirement plan or model route
     # produces a different binding and therefore cannot reuse old content.
     resume_from_job_id: str | None = None
+    project_facts: dict[str, Any] | None = None
+    approved_project_fact_resolutions: dict[str, Any] | None = None
 
 
 class ActionsPlanRequest(BaseModel):
-    outline: List[str]
+    outline: list[str]
     style: dict = {}
     project_type: str | None = None
     generation_mode: str | None = None
     global_instruction: str | None = None
     variants: int = 1
-    selected_templates: List[str] | None = None
+    selected_templates: list[str] | None = None
     strict_tender_outline: bool | None = None
     total_pages_target: int | None = None
     chapter_requirements: dict = {}
@@ -855,6 +880,8 @@ class ActionsPlanRequest(BaseModel):
     compare_titles: list[str] | None = None
     case_library: dict | None = None
     image_library: dict | None = None
+    project_facts: dict[str, Any] | None = None
+    approved_project_fact_resolutions: dict[str, Any] | None = None
 
 
 class ActionsSection(BaseModel):
@@ -865,8 +892,8 @@ class ActionsSection(BaseModel):
 
 class ActionsQualityCheckRequest(BaseModel):
     project_id: str | None = None
-    outline: List[str] = []
-    sections: List[ActionsSection]
+    outline: list[str] = []
+    sections: list[ActionsSection]
     strict: bool = True
 
 
@@ -874,8 +901,8 @@ class ActionsExportRequest(BaseModel):
     topic: str
     project_id: str | None = None
     style: dict | None = None
-    outline: List[str] = []
-    sections: List[ActionsSection]
+    outline: list[str] = []
+    sections: list[ActionsSection]
     quality_checks: dict | None = None
     generate_images: bool = True
     # Images / mindmap (prefer Gemini "banana" model)
@@ -886,7 +913,7 @@ class ActionsExportRequest(BaseModel):
     bidder_company: str | None = None
     bidder_domain: str | None = None
     logo_url: str | None = None
-    media: List[dict] | None = None
+    media: list[dict] | None = None
     image_selection_pack: dict | None = None
     case_reference_pack: dict | None = None
 
@@ -920,7 +947,7 @@ class ActionsReviewApplyRequest(BaseModel):
     job_id: str
     variant: int = 1
     apply_all: bool = False
-    decisions: List[ActionsReviewDecision] = []
+    decisions: list[ActionsReviewDecision] = []
     expected_result_version: str = ""
     expected_variant_version: str = ""
     expected_issue_digest: str = ""
@@ -973,8 +1000,8 @@ class ActionsOllamaSectionDraftDecisionRequest(BaseModel):
 
 class ActionsOllamaMainChainSmokeRequest(BaseModel):
     topic: str | None = None
-    outline: List[str] = []
-    requirements: List[str] = []
+    outline: list[str] = []
+    requirements: list[str] = []
     global_instruction: str | None = None
     section_title: str | None = None
     section_content: str | None = None
@@ -1001,10 +1028,14 @@ async def actions_params_set(req: ActionsParamsSetRequest, project_id: str | Non
     after = load_params()
     diff = None
     try:
-        from backend.zhifei_autoplan.param_trace import load_latest_receipt, diff_params_with_receipt
+        from backend.zhifei_autoplan.param_trace import (
+            diff_params_with_receipt,
+            load_latest_receipt,
+        )
 
         diff = diff_params_with_receipt(before, after, load_latest_receipt(project_id=project_id))
-    except Exception:
+    except (ImportError, OSError, TypeError, ValueError):
+        logger.warning("parameter receipt diff unavailable after parameter update", exc_info=True)
         diff = None
     return {"ok": True, "saved_at": path, "params": after, "diff": diff}
 
@@ -1029,10 +1060,14 @@ async def actions_params_diff(req: ActionsParamsDiffRequest, project_id: str | N
         after = update
     diff = None
     try:
-        from backend.zhifei_autoplan.param_trace import load_latest_receipt, diff_params_with_receipt
+        from backend.zhifei_autoplan.param_trace import (
+            diff_params_with_receipt,
+            load_latest_receipt,
+        )
 
         diff = diff_params_with_receipt(before, after, load_latest_receipt(project_id=project_id))
-    except Exception:
+    except (ImportError, OSError, TypeError, ValueError):
+        logger.warning("parameter receipt diff unavailable during preview", exc_info=True)
         diff = None
     return {"ok": True, "before": before, "after": after, "diff": diff}
 
@@ -1045,7 +1080,8 @@ async def actions_params_receipt_get(project_id: str | None = None, x_actions_ke
 
         receipt = load_latest_receipt(project_id=project_id) or {}
         return {"ok": True, "receipt": receipt}
-    except Exception:
+    except (ImportError, OSError, TypeError, ValueError):
+        logger.warning("parameter receipt unavailable", exc_info=True)
         return {
             "ok": False,
             "error": {
@@ -1079,7 +1115,7 @@ def _to_positive_int(v: Any) -> int | None:
     try:
         n = int(float(v))
         return n if n > 0 else None
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
@@ -1122,7 +1158,7 @@ def _delivery_progress_for_run(
     *,
     dry_run: bool,
     delivery_scope: str = "document",
-) -> Dict[str, str]:
+) -> dict[str, str]:
     if dry_run:
         return {
             "stage": "dry_run_done",
@@ -1142,9 +1178,9 @@ def _delivery_progress_for_run(
     }
 
 
-def _normalize_selected_templates(raw: Any) -> List[str]:
+def _normalize_selected_templates(raw: Any) -> list[str]:
     arr = raw if isinstance(raw, list) else ([raw] if raw is not None else [])
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
     for x in arr:
         tid = _normalize_logic_template_id(x)
@@ -1157,7 +1193,7 @@ def _normalize_selected_templates(raw: Any) -> List[str]:
     return out
 
 
-def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
+def _build_variant_plan(payload: dict) -> list[dict[str, Any]]:
     pid = str(payload.get("project_id") or "").strip() or None
     selected = _normalize_selected_templates(payload.get("selected_templates"))
     explicit_variant_id = payload.get("variant_id")
@@ -1179,7 +1215,7 @@ def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
 
     try:
         variants = int(payload.get("variants") or 1)
-    except Exception:
+    except (TypeError, ValueError):
         variants = 1
     variants = max(1, min(5, variants))
     variant_ids = reserve_variant_ids(
@@ -1193,7 +1229,7 @@ def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
     return [{"variant_id": int(vid)} for vid in variant_ids]
 
 
-def _build_resume_variant_plan(payload: dict, source_job: dict) -> List[Dict[str, Any]]:
+def _build_resume_variant_plan(payload: dict, source_job: dict) -> list[dict[str, Any]]:
     """Reuse the source job's immutable variant identities for checkpoint recovery."""
 
     source_payload = (
@@ -1224,7 +1260,7 @@ def _build_resume_variant_plan(payload: dict, source_job: dict) -> List[Dict[str
             },
         )
     source_plan = source_payload.get("_variant_plan")
-    normalized: List[Dict[str, Any]] = []
+    normalized: list[dict[str, Any]] = []
     seen_variant_ids: set[int] = set()
     source_plan_invalid = not isinstance(source_plan, list) or not 1 <= len(source_plan) <= 5
     if isinstance(source_plan, list):
@@ -1243,7 +1279,7 @@ def _build_resume_variant_plan(payload: dict, source_job: dict) -> List[Dict[str
                 source_plan_invalid = True
                 continue
             seen_variant_ids.add(variant_id)
-            row: Dict[str, Any] = {"variant_id": variant_id}
+            row: dict[str, Any] = {"variant_id": variant_id}
             template_id = _normalize_logic_template_id(item.get("logic_template_id"))
             if template_id:
                 row["logic_template_id"] = template_id
@@ -1303,7 +1339,7 @@ def _planned_total_pages(payload: dict) -> int:
     if not chapter_pages:
         return 0
     s = 0
-    for _, raw in chapter_pages.items():
+    for raw in chapter_pages.values():
         n = _page_target_value(raw)
         if n:
             s += int(n)
@@ -1384,9 +1420,25 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
     return payload
 
 
+_PROJECT_FACT_PLAN_FIELDS = (
+    "project_facts",
+    "approved_project_fact_resolutions",
+)
+
+
+def _inherit_project_fact_plan_fields(payload: dict, plan: dict) -> dict:
+    """Inherit only omitted fact maps; an explicit empty map remains a clear."""
+
+    for field in _PROJECT_FACT_PLAN_FIELDS:
+        if payload.get(field) is None and isinstance(plan.get(field), dict):
+            payload[field] = dict(plan[field])
+    return payload
+
+
 def _merge_plan_defaults(payload: dict) -> dict:
     pid = str(payload.get("project_id") or "").strip() or None
     plan = load_plan(project_id=pid) or {}
+    payload = _inherit_project_fact_plan_fields(payload, plan)
     tender = load_tender_matrix(project_id=pid) or {}
     if not payload.get("outline"):
         payload["outline"] = plan.get("outline") or []
@@ -1543,7 +1595,7 @@ def _save_outputs(
 def _clamp_execution_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
-    except Exception:
+    except (TypeError, ValueError):
         parsed = int(default)
     return max(int(minimum), min(int(maximum), parsed))
 
@@ -2056,7 +2108,7 @@ def _rebuild_postprocessed_artifacts(
         if isinstance(recs, list) and recs:
             base_focus["four_new_recommendations"] = recs
     except Exception:
-        pass
+        logger.warning("four-new recommendations unavailable during post-processing", exc_info=True)
 
     postprocess_errors: list[dict[str, str]] = []
 
@@ -2071,31 +2123,39 @@ def _rebuild_postprocessed_artifacts(
             outline = [str(s.get("title") or "").strip() for s in sections if isinstance(s, dict) and str(s.get("title") or "").strip()]
 
         boq_focus = v.get("boq_focus") if isinstance(v.get("boq_focus"), dict) else base_focus
-        if isinstance(boq_focus, dict) and isinstance(base_focus.get("four_new_recommendations"), list):
-            if not isinstance(boq_focus.get("four_new_recommendations"), list):
-                merged = dict(boq_focus)
-                merged["four_new_recommendations"] = base_focus.get("four_new_recommendations") or []
-                boq_focus = merged
-                v["boq_focus"] = merged
+        if (
+            isinstance(boq_focus, dict)
+            and isinstance(base_focus.get("four_new_recommendations"), list)
+            and not isinstance(boq_focus.get("four_new_recommendations"), list)
+        ):
+            merged = dict(boq_focus)
+            merged["four_new_recommendations"] = base_focus.get("four_new_recommendations") or []
+            boq_focus = merged
+            v["boq_focus"] = merged
 
         # Plan consistency normalization (in-place section edits).
         try:
-            from backend.zhifei_autoplan.plan_consistency import normalize_metrics_in_sections
+            from backend.zhifei_autoplan.plan_consistency import (
+                normalize_metrics_in_sections,
+            )
 
             v["plan_consistency"] = normalize_metrics_in_sections(sections)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {"stage": "plan_consistency", "error_type": type(exc).__name__, "message": str(exc)}
             )
 
         # Param trace receipt (in-place placeholder substitution).
         try:
-            from backend.zhifei_autoplan.param_trace import build_param_receipt, save_latest_receipt
+            from backend.zhifei_autoplan.param_trace import (
+                build_param_receipt,
+                save_latest_receipt,
+            )
 
             receipt = build_param_receipt(sections, params)
             saved_at = save_latest_receipt(receipt, project_id=str(pid) if pid else None)
             v["param_trace"] = {"ok": True, "saved_at": saved_at, "receipt": receipt}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {"stage": "param_trace", "error_type": type(exc).__name__, "message": str(exc)}
             )
@@ -2173,7 +2233,7 @@ def _rebuild_postprocessed_artifacts(
                 ),
                 expected_names=(boq_focus or {}).get("must_cover_keywords") or [],
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {"stage": "cross_index", "error_type": type(exc).__name__, "message": str(exc)}
             )
@@ -2183,7 +2243,7 @@ def _rebuild_postprocessed_artifacts(
                 tender=tender,
                 chapter_pages=v.get("chapter_pages") if isinstance(v.get("chapter_pages"), dict) else {},
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             v["evidence_tracking"] = {"rows": [], "summary": {}}
             postprocess_errors.append(
                 {"stage": "evidence_tracking", "error_type": type(exc).__name__, "message": str(exc)}
@@ -2245,7 +2305,7 @@ def _rebuild_postprocessed_artifacts(
                         ),
                     }
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {
                     "stage": "requirement_evidence_matrix",
@@ -2264,7 +2324,7 @@ def _rebuild_postprocessed_artifacts(
                 sections,
                 standards_manifest,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {
                     "stage": "standard_citation_audit",
@@ -2275,6 +2335,11 @@ def _rebuild_postprocessed_artifacts(
 
         try:
             routing = v.get("model_routing") if isinstance(v.get("model_routing"), dict) else {}
+            formal_delivery_required = bool(
+                str(payload.get("delivery_scope") or "document").strip().lower()
+                == "document"
+                and not bool(payload.get("dry_run"))
+            )
             delivery_gate = build_delivery_quality_gate(
                 strict=strict,
                 content_review=(
@@ -2305,10 +2370,19 @@ def _rebuild_postprocessed_artifacts(
                 cross_index=(
                     v.get("cross_index") if isinstance(v.get("cross_index"), dict) else {}
                 ),
-                model_review_required=(
-                    str(routing.get("mode") or "") == "anthropic_tiered"
-                    and not bool(payload.get("dry_run"))
+                model_review_required=formal_delivery_required,
+                formal_delivery_required=formal_delivery_required,
+                project_parameters=(
+                    v.get("missing_parameters")
+                    if isinstance(v.get("missing_parameters"), dict)
+                    else {}
                 ),
+                project_fact_ledger=(
+                    v.get("project_fact_ledger")
+                    if isinstance(v.get("project_fact_ledger"), dict)
+                    else {}
+                ),
+                sections=sections,
             )
             v["delivery_quality_gate"] = delivery_gate
             qc["delivery_quality_gate"] = delivery_gate
@@ -2318,7 +2392,7 @@ def _rebuild_postprocessed_artifacts(
             # preview may still persist non-deliverable diagnostic artifacts.
             # Genuine derivation failures above remain fail-closed through
             # ``postprocess_errors``.
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {
                     "stage": "delivery_quality_gate",
@@ -2490,7 +2564,7 @@ def _finalize_variant_derivatives(
             return None
         try:
             parsed = json.loads(str(exc))
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             parsed = None
         if isinstance(parsed, dict) and parsed.get("code"):
             raise
@@ -3042,8 +3116,8 @@ def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> l
     recs = qc.get("auto_revision_suggestions") if isinstance(qc.get("auto_revision_suggestions"), list) else []
     sections = variant_rec.get("sections") if isinstance(variant_rec.get("sections"), list) else []
 
-    title_to_excerpt: Dict[str, str] = {}
-    title_to_digest: Dict[str, str] = {}
+    title_to_excerpt: dict[str, str] = {}
+    title_to_digest: dict[str, str] = {}
     for s in sections:
         if not isinstance(s, dict):
             continue
@@ -3271,8 +3345,8 @@ async def _rewrite_review_section(
     issue_lines = []
     for index, item in enumerate(issues, start=1):
         issue_lines.append(
-            f"{index}. 类型：{str(item.get('type') or 'issue')}；"
-            f"级别：{str(item.get('severity') or 'medium')}；"
+            f"{index}. 类型：{item.get('type') or 'issue'!s}；"
+            f"级别：{item.get('severity') or 'medium'!s}；"
             f"问题：{str(item.get('problem') or '').strip()}；"
             f"修订要求：{str(item.get('suggestion') or '').strip()}"
         )
@@ -3319,7 +3393,7 @@ async def _rewrite_review_section(
                 max_tokens=12000,
                 stream=True,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - provider boundary classifies and audits every failure
             info = classify_provider_error(exc, provider=provider, model=model)
             attempt.update(
                 {
@@ -3347,7 +3421,11 @@ async def _rewrite_review_section(
 @router.post("/plan/save")
 async def actions_plan_save(req: ActionsPlanRequest, project_id: str | None = None, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
-    path = save_plan(req.model_dump(), project_id=project_id)
+    payload = _inherit_project_fact_plan_fields(
+        req.model_dump(),
+        load_plan(project_id=project_id) or {},
+    )
+    path = save_plan(payload, project_id=project_id)
     return {"ok": True, "saved_at": path}
 
 
@@ -3426,7 +3504,7 @@ async def actions_case_library_items(
 
 @router.post("/case_library/upload")
 async def actions_case_library_upload(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_type: str | None = None,
     title: str | None = None,
     tags: str | None = None,
@@ -3482,7 +3560,7 @@ async def actions_image_library_items(
 
 @router.post("/image_library/upload")
 async def actions_image_library_upload(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_type: str | None = None,
     title: str | None = None,
     tags: str | None = None,
@@ -3863,7 +3941,7 @@ async def actions_ollama_main_chain_smoke(
     payload = _ollama_smoke_payload(req)
     try:
         result = await run_autoplan(payload)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - smoke endpoint reports arbitrary provider/pipeline failures
         return {
             "ok": False,
             "enabled": True,
@@ -3897,8 +3975,8 @@ async def actions_ollama_main_chain_smoke(
 
 @router.post("/tender/parse")
 async def actions_tender_parse(
-    files: List[UploadFile] | None = File(default=None),
-    file_id: List[str] | None = Query(default=None),
+    files: Annotated[list[UploadFile] | None, File()] = None,
+    file_id: Annotated[list[str] | None, Query()] = None,
     project_id: str | None = None,
     x_actions_key: str | None = Header(default=None),
 ):
@@ -3906,7 +3984,7 @@ async def actions_tender_parse(
     if not files and not file_id:
         raise HTTPException(status_code=400, detail="no files")
     paths = await asyncio.gather(*[_save_upload(f) for f in (files or [])])
-    cached_texts: Dict[str, str] = {}
+    cached_texts: dict[str, str] = {}
     resolved_sources = await asyncio.to_thread(
         resolve_ingested_tender_sources, file_id
     )
@@ -3950,8 +4028,8 @@ async def actions_tender_parse(
 
 @router.post("/boq/parse")
 async def actions_boq_parse(
-    file: List[UploadFile] | None = File(default=None),
-    file_id: List[str] | None = Query(default=None),
+    file: Annotated[list[UploadFile] | None, File()] = None,
+    file_id: Annotated[list[str] | None, Query()] = None,
     project_id: str | None = None,
     x_actions_key: str | None = Header(default=None),
 ):
@@ -4002,7 +4080,7 @@ async def actions_quality_check(req: ActionsQualityCheckRequest, x_actions_key: 
         if isinstance(recs, list) and recs:
             boq_focus["four_new_recommendations"] = recs
     except Exception:
-        pass
+        logger.warning("four-new recommendations unavailable during quality check", exc_info=True)
     sections = [s.model_dump() for s in req.sections]
     qc = run_quality_checks(
         tender,
@@ -4259,11 +4337,11 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             except JobLeaseLostError:
                 return False
 
-        def _mark_cancelled(result: Dict[str, Any] | None = None) -> None:
+        def _mark_cancelled(result: dict[str, Any] | None = None) -> None:
             if not _lease_active():
                 return
             prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
-            checkpoint_projection: Dict[str, Any]
+            checkpoint_projection: dict[str, Any]
             seal_failed = False
             try:
                 from backend.zhifei_autoplan.generation_checkpoint import (
@@ -4295,7 +4373,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 }
             except JobLeaseLostError:
                 return
-            except Exception as seal_error:
+            except Exception as seal_error:  # noqa: BLE001 - cancellation sealing records fail-closed state
                 seal_failed = True
                 saved_chapter_count = 0
                 chapters_total = int(prior_progress.get("chapters_total") or 0)
@@ -4319,7 +4397,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 saved_chapter_count,
                 int(prior_chapters.get("started") or 0),
             )
-            values: Dict[str, Any] = {
+            values: dict[str, Any] = {
                 "error": {
                     "code": (
                         "JOB_CANCELLED_CHECKPOINT_SEAL_FAILED"
@@ -4406,7 +4484,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             "current_chapters": [],
         }
         activity_lock = threading.RLock()
-        activity_state: Dict[str, Any] = {
+        activity_state: dict[str, Any] = {
             "activity": "主控Agent正在准备章节任务",
             "work_state": "idle",
             "chapter_totals": {},
@@ -4417,7 +4495,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             "provider": {},
         }
 
-        def _activity_snapshot() -> tuple[str, Dict[str, Any]]:
+        def _activity_snapshot() -> tuple[str, dict[str, Any]]:
             with activity_lock:
                 runtime = dict(agent_runtime)
                 current = [str(x) for x in activity_state.get("active", {}).values() if str(x).strip()]
@@ -4463,7 +4541,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 heartbeat_stop.wait(5.0)
 
         def _variant_progress_callback(variant_id: int):
-            def _callback(event: Dict[str, Any]) -> None:
+            def _callback(event: dict[str, Any]) -> None:
                 if not _lease_active():
                     return
                 event_name = str(event.get("event") or "").strip()
@@ -4599,7 +4677,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     failed = len(activity_state.get("failed", set()))
                     all_total = int(sum(activity_state.get("chapter_totals", {}).values()))
 
-                progress_updates: Dict[str, Any] = {
+                progress_updates: dict[str, Any] = {
                     "chapters_total": all_total,
                     "chapters_done": succeeded,
                     "chapters_succeeded": succeeded,
@@ -4711,18 +4789,18 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 f"生成模式={mode_name}，页数规划={pages_planned}",
             )
         variant_plan = local_payload.get("_variant_plan")
-        normalized_plan: List[Dict[str, Any]] = []
+        normalized_plan: list[dict[str, Any]] = []
         if isinstance(variant_plan, list) and variant_plan:
             for it in variant_plan:
                 if not isinstance(it, dict):
                     continue
                 try:
                     vid = int(it.get("variant_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     vid = 0
                 if vid <= 0:
                     continue
-                rec: Dict[str, Any] = {"variant_id": vid}
+                rec: dict[str, Any] = {"variant_id": vid}
                 tid = _normalize_logic_template_id(it.get("logic_template_id"))
                 if tid:
                     rec["logic_template_id"] = tid
@@ -4740,7 +4818,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             for vid in variant_ids:
                 try:
                     normalized_plan.append({"variant_id": int(vid)})
-                except Exception:
+                except (TypeError, ValueError):
                     continue
         if not normalized_plan:
             normalized_plan = [{"variant_id": 1}]
@@ -4766,7 +4844,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             done_count = 0
             ordered: list[dict | None] = [None for _ in range(len(variant_plan))]
 
-            async def _run_one(pos: int, item: Dict[str, Any]):
+            async def _run_one(pos: int, item: dict[str, Any]):
                 nonlocal done_count
                 if _is_cancelled():
                     return
@@ -4890,7 +4968,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                         ),
                     )
                 )
-        except Exception as render_error:
+        except Exception as render_error:  # noqa: BLE001 - render boundary converts failures to recoverable job state
             if _is_cancelled():
                 _mark_cancelled()
                 return
@@ -4997,7 +5075,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 dry_run=is_dry_run,
                 delivery_scope=delivery_scope,
             )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - worker boundary persists a safe terminal job projection
         error_text = str(e)
         cancel_probe = locals().get("_is_cancelled")
         was_cancelled = bool(cancel_probe()) if callable(cancel_probe) else False
@@ -5039,7 +5117,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                             "delivery_ready": False,
                         }
                     )
-            failure_fields: Dict[str, Any] = {
+            failure_fields: dict[str, Any] = {
                 "error": public_error,
                 "progress": failure_progress,
             }
@@ -5080,7 +5158,7 @@ async def actions_generate_async(
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
     _assert_mandatory_generation_sources(payload)
-    resume_source_job: Dict[str, Any] | None = None
+    resume_source_job: dict[str, Any] | None = None
     resume_from_job_id = str(payload.get("resume_from_job_id") or "").strip()
     if resume_from_job_id:
         if not re.fullmatch(r"[a-f0-9]{32}", resume_from_job_id):
@@ -5199,7 +5277,8 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
                     ma = variants[0].get("multi_agent")
                     if isinstance(ma, dict):
                         out["multi_agent"] = ma
-            except Exception:
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+                logger.warning("job result artifact could not be decoded: %s", json_path, exc_info=True)
                 variants = []
         out["files"] = _public_job_files(job, result, variants)
     return {"ok": True, "job": out}
@@ -5438,6 +5517,11 @@ async def actions_review_apply(
             project_id=pid,
             boq_focus=boq_focus,
             params=params,
+            project_fact_ledger=(
+                target.get("project_fact_ledger")
+                if isinstance(target.get("project_fact_ledger"), dict)
+                else {}
+            ),
         )
         for item in selected:
             section = _find_review_target_section(sections, item)

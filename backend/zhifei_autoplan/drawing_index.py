@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
+from backend.zhifei_autoplan.drawing_semantic import (
+    pick_chapter_anchor,
+    summarize_spatial_anchors,
+)
 from backend.zhifei_autoplan.evidence import best_ingested_hit
-from backend.zhifei_autoplan.drawing_semantic import summarize_spatial_anchors, pick_chapter_anchor
 from backend.zhifei_autoplan.ingest_tags import effective_record_tags
-
 
 _HAN_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 _STOP = {
@@ -32,13 +36,36 @@ _STOP = {
     "项目",
 }
 
+_GENERIC_QUERY_PARTS = (
+    "主要施工",
+    "施工组织设计",
+    "施工方法",
+    "施工工艺",
+    "施工方案",
+    "技术措施",
+    "作业方法",
+    "工艺流程",
+    "专项方案",
+    "专项",
+    "工程",
+    "施工",
+    "安装",
+    "图纸",
+    "详图",
+    "大样",
+    "节点",
+    "做法",
+    "说明",
+)
+_MEANINGFUL_TEXT_RE = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]")
 
-def _top_keywords(text: str, limit: int = 12) -> List[str]:
+
+def _top_keywords(text: str, limit: int = 12) -> list[str]:
     s = (text or "").strip()
     if not s:
         return []
     toks = [t.strip() for t in _HAN_TOKEN_RE.findall(s[:8000]) if t and len(t) >= 2]
-    freq: Dict[str, int] = {}
+    freq: dict[str, int] = {}
     for t in toks:
         if t in _STOP:
             continue
@@ -56,7 +83,79 @@ def _is_key_process_chapter(title: str) -> bool:
     return any(k in t for k in keys)
 
 
-def build_drawing_index(topic: str, outline: List[str], project_id: str | None = None) -> Dict[str, Any]:
+def _specific_query_terms(value: str) -> list[str]:
+    """Return non-generic terms suitable for claim-grade drawing matching."""
+
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    chunks = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+", normalized)
+    candidates = ["".join(chunks)] if chunks else []
+    candidates.extend(chunks)
+    out: list[str] = []
+    for candidate in candidates:
+        term = candidate.strip()
+        for generic in _GENERIC_QUERY_PARTS:
+            term = term.replace(generic, "")
+        term = term.strip()
+        if len(term) < 2 or term in _STOP or term in out:
+            continue
+        out.append(term)
+    return sorted(out, key=lambda item: (-len(item), item))
+
+
+def _declared_page_count(value: Any) -> int | None:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if count > 0 else None
+
+
+def _page_anchors(
+    text: str,
+    *,
+    declared_pages: int | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Build page anchors only from reliable page boundaries."""
+
+    raw_text = str(text or "")
+    if not raw_text:
+        return [], "missing_text_or_ocr"
+    if "\f" in raw_text:
+        raw_pages = raw_text.split("\f")
+        if declared_pages is not None and len(raw_pages) != declared_pages:
+            return [], "unreliable_page_count_mismatch"
+        boundary_source = "form_feed"
+    elif declared_pages == 1:
+        raw_pages = [raw_text]
+        boundary_source = "declared_single_page"
+    else:
+        return [], "unreliable_missing_page_boundaries"
+
+    anchors: list[dict[str, Any]] = []
+    start = 0
+    for page, raw_page in enumerate(raw_pages, start=1):
+        end = start + len(raw_page)
+        compact = " ".join(raw_page.split())
+        meaningful_count = len(_MEANINGFUL_TEXT_RE.findall(compact))
+        if meaningful_count >= 2:
+            anchors.append(
+                {
+                    "page": page,
+                    "start_offset": start,
+                    "end_offset": end,
+                    "text_sha256": hashlib.sha256(raw_page.encode("utf-8")).hexdigest(),
+                    "keywords": _top_keywords(raw_page, limit=10),
+                    "snippet": compact[:360],
+                    "boundary_source": boundary_source,
+                }
+            )
+        # split() removes the delimiter; account for its one-character width
+        # so offsets stay aligned with evidence.search_ingested_docs().
+        start = end + 1
+    return anchors, f"reliable_{boundary_source}"
+
+
+def build_drawing_index(topic: str, outline: list[str], project_id: str | None = None) -> dict[str, Any]:
     """
     Build a lightweight “图纸目录/关键构件-章节映射表”.
     - Drawings are taken from ingest audit records where tags include 'drawing'.
@@ -64,13 +163,23 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
     """
     audit_path = Path("backend/data/audit/ingest.jsonl")
     if not audit_path.exists():
-        return {"ok": False, "drawings": [], "chapter_bindings": [], "reason": "no_ingest_audit"}
+        return {
+            "ok": False,
+            "drawings": [],
+            "chapter_bindings": [],
+            "indexed_drawing_count": 0,
+            "missing_text_or_ocr_count": 0,
+            "locator_unavailable_count": 0,
+            "text_index_status": "no_ingest_audit",
+            "chapter_binding_status": "no_ingest_audit",
+            "reason": "no_ingest_audit",
+        }
 
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
-    drawings: List[Dict[str, Any]] = []
+    drawings: list[dict[str, Any]] = []
     try:
         lines = audit_path.read_text(encoding="utf-8", errors="ignore").splitlines()[::-1]
-    except Exception:
+    except OSError:
         lines = []
     seen_content_ids: set[str] = set()
     for ln in lines:
@@ -78,7 +187,7 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
             break
         try:
             rec = json.loads(ln)
-        except Exception:
+        except json.JSONDecodeError:
             continue
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
@@ -103,18 +212,27 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
         extract_path = str(rec.get("extract_saved_as") or "")
         preview = str(rec.get("preview_saved_as") or "")
         kw = []
+        page_anchors: list[dict[str, Any]] = []
+        page_boundary_status = "missing_text_or_ocr"
         topo = {}
         sem = {}
         try:
             if extract_path and Path(extract_path).exists():
-                kw = _top_keywords(Path(extract_path).read_text(encoding="utf-8", errors="ignore"), limit=10)
-        except Exception:
+                extract_text = Path(extract_path).read_text(encoding="utf-8", errors="ignore")
+                kw = _top_keywords(extract_text, limit=10)
+                page_anchors, page_boundary_status = _page_anchors(
+                    extract_text,
+                    declared_pages=_declared_page_count(rec.get("pages")),
+                )
+        except (OSError, TypeError, ValueError):
             kw = []
+            page_anchors = []
+            page_boundary_status = "page_index_error"
         try:
             pm = rec.get("parsed_meta") if isinstance(rec.get("parsed_meta"), dict) else {}
             topo = pm.get("topology") if isinstance(pm.get("topology"), dict) else {}
             sem = summarize_spatial_anchors(pm, limit=6)
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             topo = {}
             sem = {}
         drawings.append(
@@ -124,6 +242,26 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
                 "pages": rec.get("pages"),
                 "preview": preview if preview and Path(preview).exists() else None,
                 "keywords": kw,
+                "page_anchors": page_anchors,
+                "text_status": (
+                    "indexed"
+                    if page_anchors
+                    else (
+                        "locator_unavailable"
+                        if page_boundary_status.startswith("unreliable_")
+                        else "missing_text_or_ocr"
+                    )
+                ),
+                "page_boundary_status": page_boundary_status,
+                "chapter_scope": str(rec.get("chapter_scope") or "").strip() or None,
+                "process_scope": str(rec.get("process_scope") or "").strip() or None,
+                "discipline_tags": [
+                    str(tag).strip()
+                    for tag in (rec.get("library_tags") or [])
+                    if str(tag).strip()
+                ]
+                if isinstance(rec.get("library_tags"), list)
+                else [],
                 "topology": {
                     "nodes_count": topo.get("nodes_count"),
                     "edges_count": topo.get("edges_count"),
@@ -142,16 +280,24 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
         )
 
     key_chapters = [str(t).strip() for t in (outline or []) if str(t).strip() and _is_key_process_chapter(str(t))]
-    bindings: List[Dict[str, Any]] = []
+    bindings: list[dict[str, Any]] = []
     for title in key_chapters[:24]:
-        hit = best_ingested_hit(
-            title,
-            limit=10,
-            prefer_filename_keywords=["图", "图纸", "施工图", "平面", "剖面", "大样", "节点"],
-            project_id=pid,
-            require_tags=["drawing"],
-            exclude_tags=["logo"],
-        )
+        query_terms = _specific_query_terms(title)
+        hit = None
+        matched_term = None
+        for query_term in query_terms:
+            candidate = best_ingested_hit(
+                query_term,
+                limit=10,
+                prefer_filename_keywords=["图", "图纸", "施工图", "平面", "剖面", "大样", "节点"],
+                project_id=pid,
+                require_tags=["drawing"],
+                exclude_tags=["logo"],
+            )
+            if candidate and candidate.get("locator") and candidate.get("page") is not None:
+                hit = candidate
+                matched_term = query_term
+                break
         if not hit or not hit.get("locator"):
             continue
         hit_filename = str(hit.get("filename") or "").strip()
@@ -161,7 +307,27 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
             for drawing in drawings
             if str(drawing.get("filename") or "").strip() == hit_filename
             and str(drawing.get("sha256") or "").strip() == hit_sha
+            and drawing.get("text_status") == "indexed"
         ]
+        if not matching_drawings:
+            continue
+        drawing = matching_drawings[0]
+        page_anchor = next(
+            (
+                item
+                for item in (drawing.get("page_anchors") or [])
+                if isinstance(item, dict) and item.get("page") == hit.get("page")
+            ),
+            None,
+        )
+        match_window = hit.get("match_window") if isinstance(hit.get("match_window"), dict) else None
+        if (
+            not isinstance(page_anchor, dict)
+            or not isinstance(match_window, dict)
+            or str(hit.get("page_text_sha256") or "") != str(page_anchor.get("text_sha256") or "")
+            or str(hit.get("page_summary") or "") != str(page_anchor.get("snippet") or "")
+        ):
+            continue
         anchor = pick_chapter_anchor(title, matching_drawings)
         bindings.append(
             {
@@ -172,21 +338,52 @@ def build_drawing_index(topic: str, outline: List[str], project_id: str | None =
                 "page": hit.get("page"),
                 "offset": hit.get("offset"),
                 "snippet": hit.get("snippet"),
+                "matched_text": hit.get("matched_text"),
+                "match_start": hit.get("match_start"),
+                "match_end": hit.get("match_end"),
+                "match_window": dict(match_window),
+                "page_text_sha256": hit.get("page_text_sha256"),
+                "page_summary": hit.get("page_summary"),
+                "page_boundary_status": hit.get("page_boundary_status"),
                 "binding_basis": "chapter_specific_extract_hit",
+                "matched_terms": [matched_term] if matched_term else [],
                 "spatial_anchor": anchor.get("spatial_anchor"),
                 "dimension_anchor": anchor.get("dimension_anchor"),
                 "topology": anchor.get("topology") if isinstance(anchor.get("topology"), dict) else {},
             }
         )
 
+    indexed_drawing_count = sum(1 for drawing in drawings if drawing.get("text_status") == "indexed")
+    missing_text_or_ocr_count = sum(
+        1 for drawing in drawings if drawing.get("text_status") == "missing_text_or_ocr"
+    )
+    locator_unavailable_count = sum(
+        1 for drawing in drawings if drawing.get("text_status") == "locator_unavailable"
+    )
     return {
-        "ok": bool(drawings),
+        "ok": bool(drawings) and indexed_drawing_count == len(drawings),
         "project_id": pid,
         "drawings": drawings[:30],
         "chapter_bindings": bindings[:24],
+        "indexed_drawing_count": indexed_drawing_count,
+        "missing_text_or_ocr_count": missing_text_or_ocr_count,
+        "locator_unavailable_count": locator_unavailable_count,
+        "text_index_status": (
+            "complete"
+            if drawings and indexed_drawing_count == len(drawings)
+            else ("incomplete" if drawings else "no_drawings")
+        ),
         "chapter_binding_status": (
             "bound"
             if bindings
-            else ("no_chapter_specific_evidence" if drawings else "no_drawings")
+            else (
+                "drawing_locator_unavailable"
+                if drawings and locator_unavailable_count > 0 and indexed_drawing_count == 0
+                else (
+                    "drawing_text_or_ocr_missing"
+                    if drawings and indexed_drawing_count == 0
+                    else ("no_chapter_specific_evidence" if drawings else "no_drawings")
+                )
+            )
         ),
     }

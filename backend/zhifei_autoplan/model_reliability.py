@@ -4,9 +4,9 @@ import asyncio
 import random
 import re
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict
-
+from typing import Any
 
 _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
@@ -23,6 +23,23 @@ def sanitize_provider_message(value: Any, *, limit: int = 500) -> str:
         text = pattern.sub("[REDACTED]", text)
     text = " ".join(text.split())
     return text[:limit]
+
+
+def _machine_error_code(error: Any) -> str:
+    """Extract a bounded provider machine code without retaining raw payloads."""
+
+    candidates: list[Any] = [getattr(error, "code", None)]
+    body = getattr(error, "body", None)
+    if isinstance(body, Mapping):
+        candidates.append(body.get("code"))
+        nested = body.get("error")
+        if isinstance(nested, Mapping):
+            candidates.append(nested.get("code"))
+    for candidate in candidates:
+        value = str(candidate or "").strip().lower()
+        if value and re.fullmatch(r"[a-z0-9_.-]{1,80}", value):
+            return value
+    return ""
 
 
 def _status_from_error(error: Any, message: str) -> int | None:
@@ -70,7 +87,7 @@ def _retry_after(error: Any) -> float | None:
     return None
 
 
-_USER_GUIDANCE: Dict[str, tuple[str, str]] = {
+_USER_GUIDANCE: dict[str, tuple[str, str]] = {
     "authentication_failed": ("模型凭据无效或已失效。", "请重新配置对应供应商 API Key 后再试。"),
     "permission_denied": ("当前凭据没有调用该模型的权限。", "请在供应商控制台开通模型权限或改用已授权模型。"),
     "model_not_found": ("配置的模型不存在或当前账户不可见。", "请刷新模型名称并确认账户所在区域和项目。"),
@@ -96,7 +113,7 @@ _USER_GUIDANCE: Dict[str, tuple[str, str]] = {
 }
 
 
-def _with_user_guidance(info: Dict[str, Any]) -> Dict[str, Any]:
+def _with_user_guidance(info: dict[str, Any]) -> dict[str, Any]:
     result = dict(info)
     code = str(result.get("code") or "provider_error")
     user_message, action = _USER_GUIDANCE.get(code, _USER_GUIDANCE["provider_error"])
@@ -111,13 +128,25 @@ def classify_provider_error(
     *,
     provider: str,
     model: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Normalize SDK/provider failures into a stable, non-secret record."""
 
     is_connection_error = isinstance(error, ConnectionError)
 
     if isinstance(error, dict) and error.get("code"):
         info = dict(error)
+        machine_code = str(info.get("code") or "").strip().lower()
+        if machine_code in {
+            "credit_balance_exhausted",
+            "insufficient_quota",
+            "billing_hard_limit_reached",
+            "billing_limit_exceeded",
+        }:
+            info["code"] = "quota_exhausted"
+            info["retryable"] = False
+        elif machine_code in {"rate_limit_exceeded", "rate_limited"}:
+            info["code"] = "rate_limited"
+            info["retryable"] = True
         info.setdefault("provider", provider)
         info.setdefault("model", model)
         info["message"] = sanitize_provider_message(info.get("message") or info.get("code"))
@@ -130,12 +159,15 @@ def classify_provider_error(
     else:
         message = sanitize_provider_message(error)
         status = _status_from_error(error, message)
-    lower = message.lower()
+    lower = " ".join(part for part in (message.lower(), _machine_error_code(error)) if part)
 
     quota_markers = (
         "insufficient_quota",
+        "credit_balance_exhausted",
         "quota exceeded",
         "quota_exceeded",
+        "billing_hard_limit_reached",
+        "billing_limit_exceeded",
         "credit balance",
         "billing hard limit",
         "billing limit",
@@ -193,9 +225,7 @@ def classify_provider_error(
         code, retryable = "no_visible_text", True
     elif lower in {"output_truncated", "max_output_tokens"}:
         code, retryable = "output_truncated", False
-    elif lower in {"api_key_missing", "secret_key_missing"}:
-        code, retryable = lower, False
-    elif lower in {"provider_not_configured", "ollama_provider_disabled"}:
+    elif lower in {"api_key_missing", "secret_key_missing"} or lower in {"provider_not_configured", "ollama_provider_disabled"}:
         code, retryable = lower, False
     else:
         code, retryable = "provider_error", False
@@ -217,7 +247,7 @@ class ModelReliabilityRuntime:
     """Job-local circuit breaker and provider-health ledger."""
 
     failure_threshold: int = 2
-    states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    states: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @staticmethod
     def key(provider: str, model: str, identity: str | None = None) -> str:
@@ -258,7 +288,7 @@ class ModelReliabilityRuntime:
         self,
         provider: str,
         model: str,
-        error_info: Dict[str, Any],
+        error_info: dict[str, Any],
         identity: str | None = None,
     ) -> None:
         state = self.states.setdefault(self.key(provider, model, identity), {})
@@ -279,7 +309,7 @@ class ModelReliabilityRuntime:
             }
         )
 
-    def snapshot(self) -> Dict[str, Dict[str, Any]]:
+    def snapshot(self) -> dict[str, dict[str, Any]]:
         return {key: dict(value) for key, value in sorted(self.states.items())}
 
 

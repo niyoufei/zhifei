@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
-
+from typing import Any
 
 TRACE_LOC_RE = re.compile(r"#(?:p\d+_)?[0-9a-f]{6,}@\d+", re.IGNORECASE)
 
@@ -10,13 +9,13 @@ TRACE_LOC_RE = re.compile(r"#(?:p\d+_)?[0-9a-f]{6,}@\d+", re.IGNORECASE)
 def build_agent_contract(
     *,
     topic: str,
-    outline: List[str],
-    chapter_pages: Dict[str, Any] | None,
-    chapter_requirements: Dict[str, Any] | None,
-    multi_agent_summary: Dict[str, Any] | None,
-    chapter_specialties: Dict[str, List[Dict[str, Any]]] | None,
-    project_fact_ledger: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
+    outline: list[str],
+    chapter_pages: dict[str, Any] | None,
+    chapter_requirements: dict[str, Any] | None,
+    multi_agent_summary: dict[str, Any] | None,
+    chapter_specialties: dict[str, list[dict[str, Any]]] | None,
+    project_fact_ledger: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     cp = chapter_pages if isinstance(chapter_pages, dict) else {}
     cr = chapter_requirements if isinstance(chapter_requirements, dict) else {}
     mas = multi_agent_summary if isinstance(multi_agent_summary, dict) else {}
@@ -24,14 +23,14 @@ def build_agent_contract(
     chapter_aux = mas.get("chapter_auxiliary_agents") if isinstance(mas.get("chapter_auxiliary_agents"), dict) else {}
     role_catalog = mas.get("agent_role_catalog") if isinstance(mas.get("agent_role_catalog"), list) else []
 
-    chapters: List[Dict[str, Any]] = []
+    chapters: list[dict[str, Any]] = []
     for i, t in enumerate([str(x).strip() for x in (outline or []) if str(x).strip()]):
         raw_page = cp.get(t)
         if isinstance(raw_page, dict):
             raw_page = raw_page.get("target") or raw_page.get("pages") or raw_page.get("page_target")
         try:
             page_target = int(raw_page) if raw_page is not None else None
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             page_target = None
 
         req = cr.get(t)
@@ -88,12 +87,14 @@ def build_agent_contract(
         str(field): {
             "value": row.get("value"),
             "unit": row.get("unit") or "",
+            "status": row.get("status"),
             "source_type": row.get("source_type"),
-            "evidence_digest": (
-                row.get("evidence", {}).get("evidence_digest")
-                if isinstance(row.get("evidence"), dict)
-                else None
-            ),
+            "evidence": {
+                "locator": row.get("evidence", {}).get("locator"),
+                "evidence_digest": row.get("evidence", {}).get("evidence_digest"),
+            }
+            if isinstance(row.get("evidence"), dict)
+            else {},
         }
         for field, row in fact_rows.items()
         if isinstance(row, dict)
@@ -116,14 +117,14 @@ def build_agent_contract(
     }
 
 
-def _extract_evidence(content: str) -> List[str]:
+def _extract_evidence(content: str) -> list[str]:
     return [m.group(1).strip() for m in re.finditer(r"【证据:([^】]{1,180})】", str(content or "")) if m.group(1).strip()]
 
 
-def validate_section_with_contract(section: Dict[str, Any], chapter_contract: Dict[str, Any]) -> Dict[str, Any]:
+def validate_section_with_contract(section: dict[str, Any], chapter_contract: dict[str, Any]) -> dict[str, Any]:
     content = str(section.get("content") or "")
-    errors: List[str] = []
-    warns: List[str] = []
+    errors: list[str] = []
+    warns: list[str] = []
 
     if not content.strip():
         errors.append("content_empty")

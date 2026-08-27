@@ -1,7 +1,8 @@
 """Unit tests for backend/zhifei_autoplan/agents/section_writer.py"""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from backend.zhifei_autoplan.agents.section_writer import SectionWriter
 from backend.zhifei_autoplan.requirement_evidence_matrix import (
@@ -50,9 +51,11 @@ async def test_token_limited_chapter_gets_one_evidence_aware_continuation():
         "工期与质量",
         {
             "requirements": [
-                "【要求绑定:REQ-505-A】必须落实工期控制；落实段落必须保留"
-                "【要求:REQ-505-A】标记，并引用"
-                "【证据:招标文件.pdf#p2_deadbeef@120】。"
+                (
+                    "【要求绑定:REQ-505-A】必须落实工期控制；落实段落必须保留"
+                    "【要求:REQ-505-A】标记，并引用"
+                    "【证据:招标文件.pdf#p2_deadbeef@120】。"
+                )
             ],
             "requirement_evidence_rows": [evidence_row],
             "max_chapter_output_tokens": 8192,
@@ -315,6 +318,83 @@ class TestFallback:
         assert "风险：" in result and "控制：" in result and "验证：" in result
         assert "【证据:" in result
 
+    def test_fallback_does_not_inject_unverified_legacy_defaults(self):
+        writer = SectionWriter()
+        result = writer._fallback(
+            "施工方案",
+            {
+                "params": {
+                    "quant_defaults": {
+                        "频次": "2次/日",
+                        "阈值": "偏差≤5mm",
+                        "时长": "4h/作业段",
+                        "人数": "8人/班",
+                        "设备型号": "20t挖机1台",
+                    }
+                }
+            },
+        )
+
+        for legacy in ("2次/日", "偏差≤5mm", "4h/作业段", "8人/班", "20t挖机"):
+            assert legacy not in result
+        assert "待依据图纸/规范/批准制度确认" in result
+
+    def test_fallback_uses_source_bound_accepted_values_not_legacy_defaults(self):
+        writer = SectionWriter()
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "3次/班",
+                    "status": "approved",
+                    "evidence": {"locator": "确认单.pdf#p2_deadbeef@20"},
+                },
+                "quality_threshold": {
+                    "value": "偏差≤3mm",
+                    "status": "verified",
+                    "evidence": {"locator": "结构图.pdf#p8_cafebabe@80"},
+                },
+                "deviation_action_deadline": {
+                    "value": "6小时",
+                    "status": "approved",
+                    "evidence": {"locator": "制度.pdf#p3_feedface@30"},
+                },
+                "resource_peak": {
+                    "value": 72,
+                    "unit": "人",
+                    "status": "derived",
+                    "evidence": {"locator": "资源计划.xlsx#p1_aabbccdd@1"},
+                },
+            }
+        }
+
+        result = writer._fallback("施工方案", {"project_fact_ledger": ledger})
+
+        assert "频次：3次/班" in result
+        assert "阈值：偏差≤3mm" in result
+        assert "时长：6小时" in result
+        assert "人数：72人" in result
+        assert "2次/日" not in result
+        assert "偏差≤5mm" not in result
+        assert "4h/作业段" not in result
+        assert "8人/班" not in result
+        assert "20t挖机" not in result
+
+    def test_fallback_preserves_an_approved_value_equal_to_old_default(self):
+        writer = SectionWriter()
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "2次/日",
+                    "status": "approved",
+                    "evidence": {"locator": "确认单.pdf#p2_deadbeef@20"},
+                }
+            }
+        }
+
+        result = writer._fallback("安全管理", {"project_fact_ledger": ledger})
+
+        assert "频次：2次/日" in result
+
     def test_fallback_can_use_doc_evidence_as_source(self):
         """Fallback may use doc_evidence as a traceable evidence source."""
         writer = SectionWriter()
@@ -373,6 +453,36 @@ class TestWrite:
         assert result["model"] == "gpt-4"
         assert result["generation_mode"] == "llm"
         mock_llm.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_successful_llm_output_neutralizes_unaccepted_legacy_defaults(self):
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = {
+            "text": (
+                "总工期120天，资源峰值80人，关键线路间隔3天；"
+                "巡检2次/日，偏差≤5mm，处置≤4h；"
+                "每班8人/班，配置20t挖机1台。"
+            ),
+            "provider": "openai",
+            "model": "test-model",
+        }
+
+        result = await SectionWriter(llm=mock_llm).write("施工部署", {})
+
+        content = result["content"]
+        for legacy in (
+            "总工期120天",
+            "资源峰值80人",
+            "关键线路间隔3天",
+            "2次/日",
+            "偏差≤5mm",
+            "≤4h",
+            "8人/班",
+            "20t挖机",
+        ):
+            assert legacy not in content
+        assert "待依据" in content
+        assert result["generation_mode"] == "llm"
 
     @pytest.mark.asyncio
     async def test_write_with_empty_llm_response_uses_fallback(self):

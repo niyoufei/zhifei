@@ -18,10 +18,10 @@ import re
 import tempfile
 import threading
 import time
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
-
+from typing import Any
 
 SCHEMA_VERSION = "provider-admission-v1"
 LATEST_SNAPSHOT_FILENAME = "provider-admission-v1.latest.json"
@@ -339,7 +339,22 @@ def _error_code_and_layer(error: BaseException) -> tuple[str, str]:
         status = int(status) if status is not None else None
     except (TypeError, ValueError):
         status = None
-    text = str(error or "").lower()
+    machine_codes: list[str] = []
+    for candidate in (getattr(error, "code", None),):
+        value = str(candidate or "").strip().lower()
+        if value and re.fullmatch(r"[a-z0-9_.-]{1,80}", value):
+            machine_codes.append(value)
+    body = getattr(error, "body", None)
+    if isinstance(body, Mapping):
+        nested = body.get("error")
+        for candidate in (
+            body.get("code"),
+            nested.get("code") if isinstance(nested, Mapping) else None,
+        ):
+            value = str(candidate or "").strip().lower()
+            if value and re.fullmatch(r"[a-z0-9_.-]{1,80}", value):
+                machine_codes.append(value)
+    text = " ".join([str(error or "").lower(), *machine_codes])
     if status == 401 or "unauthorized" in text or "invalid api key" in text:
         return "authentication_failed", "credentials"
     if status == 403 or "forbidden" in text or "permission denied" in text:
@@ -350,7 +365,10 @@ def _error_code_and_layer(error: BaseException) -> tuple[str, str]:
         marker in text
         for marker in (
             "insufficient_quota",
+            "credit_balance_exhausted",
             "quota exhausted",
+            "billing_hard_limit_reached",
+            "billing_limit_exceeded",
             "out of credits",
             "no credits remaining",
             "add credits",
@@ -987,7 +1005,7 @@ class ProviderAdmissionManager:
                 layers.update(_probe_layers(raw_outcome, stream_required=candidate.stream_required))
             except asyncio.CancelledError:
                 raise
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - arbitrary probe errors are classified into fail-closed layers.
                 code, failed_layer = _error_code_and_layer(error)
                 layers[failed_layer] = AdmissionLayer(_FAIL, code)
         if not candidate.stream_required:
@@ -1075,14 +1093,14 @@ class ProviderAdmissionManager:
 
 
 __all__ = [
-    "AdmissionLayer",
     "LATEST_SNAPSHOT_FILENAME",
     "LAYER_NAMES",
+    "SCHEMA_VERSION",
+    "AdmissionLayer",
     "ProbeOutcome",
     "ProviderAdmission",
     "ProviderAdmissionManager",
     "ProviderCandidate",
-    "SCHEMA_VERSION",
     "canonical_digest",
     "credential_fingerprint",
     "decide_required_roles",

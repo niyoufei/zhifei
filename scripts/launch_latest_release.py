@@ -20,18 +20,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.build_local_release import default_release_base  # noqa: E402
-from scripts.runtime_supervisor import (  # noqa: E402
+from scripts.build_local_release import default_release_base
+from scripts.runtime_supervisor import (
     ExpectedIdentity,
     SupervisorError,
     compute_runtime_digest,
     verify_release_manifest,
 )
-
 
 CURRENT_FIELDS = {
     "schema_version",
@@ -56,6 +54,7 @@ RUNNING_IDENTITY_FIELDS = (
 )
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 SUPERVISOR_START_COMMAND_TIMEOUT_SECONDS = 120.0
+SUPERVISOR_ADOPTION_POLL_SECONDS = 2.0
 
 
 class LaunchError(RuntimeError):
@@ -320,8 +319,7 @@ def _default_runner(argv: Sequence[str], cwd: Path, timeout: float) -> CommandRe
             list(argv),
             cwd=str(cwd),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
@@ -627,27 +625,71 @@ def supervise_latest(
     runtime_digest_fn: Callable[[Path], str] = compute_runtime_digest,
     verify_fn: Callable[[Path, ExpectedIdentity], dict[str, Any]] = verify_release_manifest,
     execve_fn: Execve = os.execve,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Replace this process with the current release's foreground supervisor."""
+    """Adopt ownership, then replace this process with the foreground supervisor.
+
+    A pre-existing, identity-verified detached supervisor may have been started
+    by the desktop launcher before the LaunchAgent was installed.  Exiting in
+    that state makes ``KeepAlive`` relaunch this bootstrap forever.  Waiting is
+    both safer for active jobs and lets launchd take ownership automatically as
+    soon as the verified detached supervisor stops.
+    """
 
     base = Path(os.path.abspath(os.fspath(base)))
     snapshot = load_current_snapshot(base / "current.json")
     spec = parse_release_spec(snapshot, base)
     preflight_release(spec, runtime_digest_fn=runtime_digest_fn, verify_fn=verify_fn)
-    status_code, payload = _read_status(spec, runner)
-    if status_code == 0:
-        _assert_running_identity(payload, spec)
-        raise LaunchError("LAUNCH_SUPERVISOR_ALREADY_RUNNING", "当前冻结监管器已经在运行")
-    if payload.get("running") is True:
-        raise LaunchError("LAUNCH_STALE_STATE_BLOCKED", "监管状态矛盾，禁止启动第二个监管器")
-    _assert_current_unchanged(snapshot)
-    argv = build_run_argv(spec)
-    execve_fn(
-        str(spec.python_executable),
-        argv,
-        _minimal_supervisor_environment(),
-    )
-    raise LaunchError("LAUNCH_SUPERVISE_EXEC_RETURNED", "监管器进程替换未生效")
+
+    while True:
+        status_code, payload = _read_status(spec, runner)
+        if status_code == 0:
+            try:
+                _assert_running_identity(payload, spec)
+            except LaunchError:
+                latest = load_current_snapshot(base / "current.json")
+                if (
+                    latest.raw_digest == snapshot.raw_digest
+                    and latest.raw_bytes == snapshot.raw_bytes
+                ):
+                    raise
+                snapshot = latest
+                spec = parse_release_spec(snapshot, base)
+                preflight_release(
+                    spec,
+                    runtime_digest_fn=runtime_digest_fn,
+                    verify_fn=verify_fn,
+                )
+                continue
+            sleep(SUPERVISOR_ADOPTION_POLL_SECONDS)
+            continue
+        if payload.get("running") is True:
+            raise LaunchError(
+                "LAUNCH_STALE_STATE_BLOCKED", "监管状态矛盾，禁止启动第二个监管器"
+            )
+
+        latest = load_current_snapshot(base / "current.json")
+        if (
+            latest.raw_digest != snapshot.raw_digest
+            or latest.raw_bytes != snapshot.raw_bytes
+        ):
+            snapshot = latest
+            spec = parse_release_spec(snapshot, base)
+            preflight_release(
+                spec,
+                runtime_digest_fn=runtime_digest_fn,
+                verify_fn=verify_fn,
+            )
+            continue
+
+        _assert_current_unchanged(snapshot)
+        argv = build_run_argv(spec)
+        execve_fn(
+            str(spec.python_executable),
+            argv,
+            _minimal_supervisor_environment(),
+        )
+        raise LaunchError("LAUNCH_SUPERVISE_EXEC_RETURNED", "监管器进程替换未生效")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -689,7 +731,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    except Exception:
+    except Exception:  # noqa: BLE001 - top-level fail-closed error boundary
         print(
             json.dumps(
                 {
