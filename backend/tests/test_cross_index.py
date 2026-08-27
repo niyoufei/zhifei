@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +10,15 @@ from backend.zhifei_autoplan.cross_index import (
     build_cross_index,
     validate_cross_index_contract,
 )
+
+_TEST_CONTEXT: dict[str, Path] = {}
+
+
+@pytest.fixture(autouse=True)
+def _trusted_extract_root(tmp_path: Path):
+    _TEST_CONTEXT["extract_root"] = tmp_path
+    yield
+    _TEST_CONTEXT.pop("extract_root", None)
 
 
 def _full_sha(prefix: str) -> str:
@@ -33,6 +43,11 @@ def _drawing_index(
     sha256 = _full_sha(sha8)
     locator = f"{filename}#p{page}_{sha256}@{offset}"
     page_text = " " * offset + text
+    extract_bytes = page_text.encode("utf-8")
+    extract_path = _TEST_CONTEXT["extract_root"] / (
+        f"{sha256}-{page}-{hashlib.sha256(extract_bytes).hexdigest()}.txt"
+    )
+    extract_path.write_bytes(extract_bytes)
     page_summary = " ".join(page_text.split())[:360]
     page_hash = hashlib.sha256(page_text.encode("utf-8")).hexdigest()
     matched_text = text[: max(1, min(4, len(text)))]
@@ -41,6 +56,9 @@ def _drawing_index(
         "filename": filename,
         "sha256": sha256,
         "text_status": text_status,
+        "extract_saved_as": str(extract_path),
+        "extract_bytes_sha256": hashlib.sha256(extract_bytes).hexdigest(),
+        "extract_text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
         "page_anchors": (
             [
                 {
@@ -207,6 +225,131 @@ def test_build_cross_index_happy_path():
     assert row["standard_locator"] == "std.pdf#p2_abcdef12@34"
     assert "工程量大" in row["categories"]
     assert row["process_name"] == "钢筋绑扎"
+    assert row["closure"]["ok"] is True
+
+
+def test_focus_specific_binding_propagates_without_chapter_binding():
+    chapter = "钢结构施工工艺"
+    drawing_index = _drawing_index(
+        filename="钢梁图.pdf",
+        sha8="abababab",
+        page=1,
+        offset=20,
+        text="钢梁安装构件位置与连接做法。",
+        chapter=chapter,
+        project_id="p1",
+    )
+    binding = drawing_index["chapter_bindings"].pop()
+    binding.update(
+        {
+            "focus_item": "钢梁",
+            "project_id": "p1",
+            "binding_basis": "focus_item_specific_extract_hit",
+            "source_relation": {
+                "type": "boq_focus_item_drawing",
+                "focus_item": "钢梁",
+                "chapter": chapter,
+                "project_id": "p1",
+            },
+        }
+    )
+    out = build_cross_index(
+        boq={"items": [{"name": "钢梁", "process": {"name": "钢梁安装"}}], "stats": {}},
+        sections=[
+            {
+                "title": chapter,
+                "content": f"钢梁：频次=1次/日，风险→控制→验证。【证据:{binding['locator']}】",
+            }
+        ],
+        boq_focus={
+            "must_cover_keywords": ["钢梁"],
+            "drawing_bindings": [binding],
+        },
+        drawing_index=drawing_index,
+        quality_checks=_closed_quality(chapter, "钢梁"),
+        project_id="p1",
+    )
+
+    row = out["focus_items"][0]
+    assert row["drawing_locator"] == binding["locator"]
+    assert row["drawing_validation"]["binding_basis"] == "focus_item_specific_extract_hit"
+    assert row["closure"]["ok"] is True
+    assert out["closed_ok_count"] == 1
+    assert out["missing_drawing_locator_count"] == 0
+    assert validate_cross_index_contract(out, expected_names=["钢梁"]) is out
+
+
+def test_required_focus_item_without_specific_hit_remains_hold():
+    chapter = "钢结构施工工艺"
+    drawing_index = _drawing_index(
+        filename="总图.pdf",
+        sha8="cdcdcdcd",
+        page=1,
+        offset=20,
+        text="图纸详见说明与大样。",
+        project_id="p1",
+    )
+    out = build_cross_index(
+        boq={"items": [{"name": "钢梁"}], "stats": {}},
+        sections=[{"title": chapter, "content": "钢梁：频次=1次/日，风险→控制→验证。"}],
+        boq_focus={"must_cover_keywords": ["钢梁"], "drawing_bindings": []},
+        drawing_index=drawing_index,
+        quality_checks=_closed_quality(chapter, "钢梁"),
+        project_id="p1",
+    )
+
+    row = out["focus_items"][0]
+    assert row["drawing_requirement"] == {
+        "status": "required",
+        "reason": "focus_item_default",
+    }
+    assert row["drawing_locator"] is None
+    assert row["drawing_validation"]["reason"] == "drawing_locator_missing"
+    assert row["closure"]["content_ok"] is True
+    assert row["closure"]["ok"] is False
+    assert out["missing_drawing_locator_count"] == 1
+
+
+def test_invalid_focus_relation_cannot_shadow_valid_chapter_binding():
+    chapter = "钢梁安装施工工艺"
+    drawing_index = _drawing_index(
+        filename="钢梁图.pdf",
+        sha8="efefefef",
+        page=1,
+        offset=20,
+        text="钢梁安装构件位置与连接做法。",
+        chapter=chapter,
+        project_id="p1",
+    )
+    invalid_focus_binding = deepcopy(drawing_index["chapter_bindings"][0])
+    invalid_focus_binding.update(
+        {
+            "focus_item": "钢梁",
+            "project_id": "p1",
+            "binding_basis": "focus_item_specific_extract_hit",
+            "source_relation": {
+                "type": "boq_focus_item_drawing",
+                "focus_item": "钢梁",
+                "chapter": "错误章节",
+                "project_id": "p1",
+            },
+        }
+    )
+    out = build_cross_index(
+        boq={"items": [{"name": "钢梁", "process": {"name": "钢梁安装"}}], "stats": {}},
+        sections=[{"title": chapter, "content": "钢梁风险→控制→验证。"}],
+        boq_focus={
+            "must_cover_keywords": ["钢梁"],
+            "drawing_bindings": [invalid_focus_binding],
+        },
+        drawing_index=drawing_index,
+        quality_checks=_closed_quality(chapter, "钢梁"),
+        project_id="p1",
+    )
+
+    row = out["focus_items"][0]
+    assert row["drawing_locator"] == drawing_index["chapter_bindings"][0]["locator"]
+    assert row["drawing_validation"]["binding_basis"] == "chapter_specific_extract_hit"
     assert row["closure"]["ok"] is True
 
 
@@ -764,6 +907,80 @@ def test_locator_must_match_binding_offset_window_and_page_summary(
     assert row["drawing_validation"]["reason"] == expected_reason
 
 
+def test_self_consistent_forged_window_is_rejected_against_current_extract():
+    chapter = "钢梁安装施工工艺"
+    drawing_index = _drawing_index(
+        filename="钢梁图.pdf",
+        sha8="56565656",
+        page=1,
+        offset=20,
+        text="钢梁安装构件位置与节点做法。",
+        chapter=chapter,
+    )
+    binding = drawing_index["chapter_bindings"][0]
+    forged = "钢梁安装伪造内容与节点做法。"
+    assert len(forged) == len(binding["match_window"]["text"])
+    binding["match_window"].update(
+        {
+            "text": forged,
+            "text_sha256": hashlib.sha256(forged.encode("utf-8")).hexdigest(),
+            "summary": forged,
+        }
+    )
+
+    out = build_cross_index(
+        boq={"items": [{"name": "钢梁"}], "stats": {}},
+        sections=[
+            {
+                "title": chapter,
+                "content": f"钢梁风险→控制→验证。【证据:{binding['locator']}】",
+            }
+        ],
+        boq_focus={"must_cover_keywords": ["钢梁"]},
+        drawing_index=drawing_index,
+        quality_checks=_closed_quality(chapter, "钢梁"),
+    )
+
+    row = out["focus_items"][0]
+    assert row["drawing_locator"] is None
+    assert (
+        row["drawing_validation"]["reason"]
+        == "drawing_match_window_extract_mismatch"
+    )
+
+
+def test_changed_current_extract_invalidates_previously_indexed_binding():
+    chapter = "钢梁安装施工工艺"
+    drawing_index = _drawing_index(
+        filename="钢梁图.pdf",
+        sha8="57575757",
+        page=1,
+        offset=20,
+        text="钢梁安装构件位置与节点做法。",
+        chapter=chapter,
+    )
+    binding = drawing_index["chapter_bindings"][0]
+    extract_path = Path(drawing_index["drawings"][0]["extract_saved_as"])
+    extract_path.write_text("已被替换的当前提取文本。", encoding="utf-8")
+
+    out = build_cross_index(
+        boq={"items": [{"name": "钢梁"}], "stats": {}},
+        sections=[
+            {
+                "title": chapter,
+                "content": f"钢梁风险→控制→验证。【证据:{binding['locator']}】",
+            }
+        ],
+        boq_focus={"must_cover_keywords": ["钢梁"]},
+        drawing_index=drawing_index,
+        quality_checks=_closed_quality(chapter, "钢梁"),
+    )
+
+    row = out["focus_items"][0]
+    assert row["drawing_locator"] is None
+    assert row["drawing_validation"]["reason"] == "drawing_extract_hash_mismatch"
+
+
 def test_unrelated_items_cannot_share_one_drawing_locator_and_counts_reconcile():
     chapter = "钢结构与电气施工工艺"
     locator = _locator("钢结构图.pdf", "22222222", 2, 80)
@@ -825,7 +1042,7 @@ def test_discipline_only_locator_cannot_be_reused_for_another_item():
             sha8="26262626",
             page=1,
             offset=30,
-            text="电气安装平面布置及回路说明。",
+            text="插座安装平面布置及回路说明。",
             chapter=chapter,
         ),
         quality_checks=_closed_quality(chapter, "插座", "普通灯具"),
@@ -834,12 +1051,37 @@ def test_discipline_only_locator_cannot_be_reused_for_another_item():
     first, second = out["focus_items"]
     assert first["drawing_locator"] == locator
     assert second["drawing_locator"] is None
-    assert (
-        second["drawing_validation"]["reason"]
-        == "drawing_locator_shared_without_item_or_process_match"
-    )
+    assert second["drawing_validation"]["reason"] == "drawing_locator_irrelevant"
     assert out["closed_ok_count"] == 1
     assert out["missing_drawing_locator_count"] == 1
+
+
+def test_chapter_terms_cannot_substitute_for_item_or_process_relevance():
+    chapter = "电气安装施工工艺"
+    locator = _locator("电气总图.pdf", "36363636", 1, 30)
+    out = build_cross_index(
+        boq={"items": [{"name": "普通灯具"}], "stats": {}},
+        sections=[
+            {
+                "title": chapter,
+                "content": f"普通灯具风险→控制→验证。【证据:{locator}】",
+            }
+        ],
+        boq_focus={"must_cover_keywords": ["普通灯具"]},
+        drawing_index=_drawing_index(
+            filename="电气总图.pdf",
+            sha8="36363636",
+            page=1,
+            offset=30,
+            text="电气安装平面布置及回路说明。",
+            chapter=chapter,
+        ),
+        quality_checks=_closed_quality(chapter, "普通灯具"),
+    )
+
+    row = out["focus_items"][0]
+    assert row["drawing_locator"] is None
+    assert row["drawing_validation"]["reason"] == "drawing_locator_chapter_only"
 
 
 def test_missing_drawing_text_or_ocr_fails_closed():

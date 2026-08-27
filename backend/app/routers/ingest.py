@@ -8,6 +8,7 @@ import json
 import logging
 import multiprocessing
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -68,6 +69,8 @@ INGEST_SPOOL_DIR = Path(
 PARSER_VERSION = "2026.08.runtime-v5-source-aware-ocr-cache"
 OCR_POLICY_ORDINARY = "ordinary_bounded"
 OCR_POLICY_DRAWING = "drawing_full_page"
+OCR_POLICY_STANDARD = "standard_full_page"
+OCR_POLICIES_FULL_PAGE = frozenset({OCR_POLICY_DRAWING, OCR_POLICY_STANDARD})
 PARSE_CACHE_TEXT_SIDECAR_BYTES = 256 * 1024
 FILE_ID_SEARCH_ROOTS = (
     Path("backend/data/uploads"),
@@ -168,6 +171,29 @@ except (TypeError, ValueError):
 
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _publish_temp_exclusive(
+    temp_path: Path,
+    out_path: Path,
+    *,
+    write_guard: Callable[..., Any] | None = None,
+) -> bool:
+    """Publish a same-directory temp file without replacing an existing path."""
+
+    try:
+        _guarded_write(write_guard, os.link, temp_path, out_path)
+    except FileExistsError:
+        return False
+    return True
 
 
 def _ext(name: str) -> str:
@@ -322,8 +348,11 @@ def _extract_text_path(ext: str, path: Path) -> dict[str, Any]:
 
 
 def _ocr_cache_policy(source_hint: str | None = None) -> str:
-    if _normalize_source_hint(source_hint) == "drawing_standard":
+    normalized_hint = _normalize_source_hint(source_hint)
+    if normalized_hint == "drawing_standard":
         return OCR_POLICY_DRAWING
+    if normalized_hint == "standard":
+        return OCR_POLICY_STANDARD
     return OCR_POLICY_ORDINARY
 
 
@@ -351,16 +380,30 @@ def _resolve_ingested_files(file_ids: list[str] | None) -> list[tuple[str, Path]
         for root in FILE_ID_SEARCH_ROOTS:
             if not root.exists():
                 continue
-            for candidate in root.rglob(f"{digest[:8]}_*"):
-                if not candidate.is_file():
+            full_named = list(root.rglob(f"{digest}_*"))
+            for candidate in full_named:
+                if candidate.is_symlink() or not candidate.is_file():
                     continue
-                hasher = hashlib.sha256()
-                with candidate.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        hasher.update(chunk)
-                if hasher.hexdigest() == digest:
-                    match = candidate
-                    break
+                if _file_sha256(candidate) != digest:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "CONTENT_ADDRESS_COLLISION",
+                            "file_id": digest,
+                        },
+                    )
+                match = candidate
+                break
+            if match is None:
+                # Read-only compatibility for historical eight-character
+                # names.  Every candidate is byte-verified; new writes never
+                # use this namespace.
+                for candidate in root.rglob(f"{digest[:8]}_*"):
+                    if candidate.is_symlink() or not candidate.is_file():
+                        continue
+                    if _file_sha256(candidate) == digest:
+                        match = candidate
+                        break
             if match is not None:
                 break
         if match is None:
@@ -403,6 +446,95 @@ def _valid_positive_page_count(value: Any) -> int | None:
     return value
 
 
+def _page_text_sha256(
+    text: Any,
+    declared_pages: int | None,
+) -> list[str] | None:
+    page_count = _valid_positive_page_count(declared_pages)
+    if page_count is None or not isinstance(text, str):
+        return None
+    pages = text.split("\f")
+    if len(pages) != page_count:
+        return None
+    return [hashlib.sha256(page.encode("utf-8")).hexdigest() for page in pages]
+
+
+def _full_page_ocr_result_proof(
+    result: Any,
+    declared_pages: int | None,
+) -> dict[str, Any] | None:
+    page_count = _valid_positive_page_count(declared_pages)
+    if page_count is None or getattr(result, "error", None) not in {None, ""}:
+        return None
+    page_texts = getattr(result, "page_texts", None)
+    statuses = getattr(result, "page_statuses", None)
+    image_sha256 = getattr(result, "page_image_sha256", None)
+    source_pages = _valid_positive_page_count(
+        getattr(result, "source_pages", None)
+    )
+    if (
+        not isinstance(page_texts, tuple)
+        or not isinstance(statuses, tuple)
+        or not isinstance(image_sha256, tuple)
+        or len(page_texts) != page_count
+        or len(statuses) != page_count
+        or len(image_sha256) != page_count
+        or source_pages != page_count
+    ):
+        return None
+    normalized_texts = [str(text or "").strip() for text in page_texts]
+    text_sha256 = [
+        hashlib.sha256(text.encode("utf-8")).hexdigest()
+        for text in normalized_texts
+    ]
+    for status, page_text, image_digest in zip(
+        statuses,
+        normalized_texts,
+        image_sha256,
+        strict=True,
+    ):
+        if status not in {"text", "blank"}:
+            return None
+        if status == "text" and not page_text:
+            return None
+        if status == "blank" and page_text:
+            return None
+        if not isinstance(image_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", image_digest
+        ):
+            return None
+    return {
+        "ocr_page_statuses": list(statuses),
+        "ocr_page_image_sha256": list(image_sha256),
+        "ocr_page_text_sha256": text_sha256,
+        "ocr_page_proof_version": "ocr-page-proof-v1",
+        "ocr_source_pages": source_pages,
+        "ocr_error": None,
+        "ocr_blank_pages": [
+            index
+            for index, status in enumerate(statuses, start=1)
+            if status == "blank"
+        ],
+    }
+
+
+def _full_page_pdf_parse_proof_valid(
+    parsed: dict[str, Any],
+    *,
+    expected_policy: str,
+) -> bool:
+    declared_pages = _valid_positive_page_count(parsed.get("pages"))
+    return _parse_cache_policy_valid(
+        {
+            "ocr_policy": expected_policy,
+            "declared_pages": declared_pages,
+            "page_text_count": parsed.get("ocr_page_text_count"),
+        },
+        {"base": parsed},
+        expected_policy=expected_policy,
+    )
+
+
 def _parse_cache_policy_valid(
     data: dict[str, Any],
     parsed: dict[str, Any],
@@ -411,17 +543,21 @@ def _parse_cache_policy_valid(
 ) -> bool:
     if data.get("ocr_policy") != expected_policy:
         return False
-    if expected_policy != OCR_POLICY_DRAWING:
+    if expected_policy not in OCR_POLICIES_FULL_PAGE:
         return True
     base = parsed.get("base")
     if not isinstance(base, dict):
         return False
+    if base.get("doc_type") != "pdf":
+        # A one-page image or native text document is already parsed in full;
+        # source-page coverage fields apply only to multi-page PDF OCR.
+        return True
     declared_pages = _valid_positive_page_count(base.get("pages"))
     cached_declared_pages = _valid_positive_page_count(data.get("declared_pages"))
     ocr_pages = _valid_positive_page_count(base.get("ocr_pages"))
     page_text_count = _valid_positive_page_count(base.get("ocr_page_text_count"))
     cached_page_text_count = _valid_positive_page_count(data.get("page_text_count"))
-    return (
+    common_valid = (
         declared_pages is not None
         and cached_declared_pages == declared_pages
         and ocr_pages == declared_pages
@@ -429,6 +565,67 @@ def _parse_cache_policy_valid(
         and cached_page_text_count == declared_pages
         and base.get("ocr_page_mapping") == "source_page_all"
     )
+    if not common_valid:
+        return common_valid
+    statuses = base.get("ocr_page_statuses")
+    image_sha256 = base.get("ocr_page_image_sha256")
+    text_sha256 = base.get("ocr_page_text_sha256")
+    extract_page_sha256 = base.get("ocr_extract_page_sha256")
+    blank_pages = base.get("ocr_blank_pages")
+    if (
+        base.get("ocr_page_proof_version") != "ocr-page-proof-v1"
+        or _valid_positive_page_count(base.get("ocr_source_pages"))
+        != declared_pages
+        or base.get("ocr_error") not in {None, ""}
+        or not isinstance(statuses, list)
+        or not isinstance(image_sha256, list)
+        or not isinstance(text_sha256, list)
+        or not isinstance(extract_page_sha256, list)
+        or not isinstance(blank_pages, list)
+        or len(statuses) != declared_pages
+        or len(image_sha256) != declared_pages
+        or len(text_sha256) != declared_pages
+        or len(extract_page_sha256) != declared_pages
+    ):
+        return False
+    empty_text_sha256 = hashlib.sha256(b"").hexdigest()
+    for status, image_digest, text_digest in zip(
+        statuses,
+        image_sha256,
+        text_sha256,
+        strict=True,
+    ):
+        if status not in {"text", "blank"}:
+            return False
+        if not isinstance(image_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", image_digest
+        ):
+            return False
+        if not isinstance(text_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", text_digest
+        ):
+            return False
+        if status == "blank" and text_digest != empty_text_sha256:
+            return False
+        if status == "text" and text_digest == empty_text_sha256:
+            return False
+    if any(
+        not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        for digest in extract_page_sha256
+    ):
+        return False
+    if blank_pages != [
+        index
+        for index, status in enumerate(statuses, start=1)
+        if status == "blank"
+    ]:
+        return False
+    extract_text = base.get("extract_text")
+    return not isinstance(extract_text, str) or _page_text_sha256(
+        extract_text,
+        declared_pages,
+    ) == extract_page_sha256
 
 
 def _load_parse_cache(
@@ -464,6 +661,12 @@ def _load_parse_cache(
     if sidecar is None:
         # Compatibility with caches written before extracted text was split
         # from JSON metadata.  They remain valid until naturally replaced.
+        base = result.get("base")
+        if expected_policy in OCR_POLICIES_FULL_PAGE and (
+            not isinstance(base, dict)
+            or not isinstance(base.get("extract_text"), str)
+        ):
+            return None
         return result
     if not isinstance(sidecar, dict):
         return None
@@ -492,6 +695,12 @@ def _load_parse_cache(
     hydrated_base = dict(base)
     hydrated_base["extract_text"] = extracted_text
     result["base"] = hydrated_base
+    if not _parse_cache_policy_valid(
+        data,
+        result,
+        expected_policy=expected_policy,
+    ):
+        return None
     return result
 
 
@@ -535,7 +744,7 @@ def _save_parse_cache(
         "saved_at": time.time(),
         "parsed": parsed_for_disk,
     }
-    if ocr_policy == OCR_POLICY_DRAWING:
+    if ocr_policy in OCR_POLICIES_FULL_PAGE:
         persisted_base = parsed_for_disk.get("base")
         payload["declared_pages"] = (
             _valid_positive_page_count(persisted_base.get("pages"))
@@ -547,12 +756,12 @@ def _save_parse_cache(
             if isinstance(persisted_base, dict)
             else None
         )
-        # Never publish a drawing cache unless it proves complete source-page
-        # coverage.  A later upload must retry OCR instead of reusing a partial
-        # result merely because the file SHA and policy match.
+        # Never publish a drawing/standard cache unless it proves complete
+        # source-page coverage.  A later upload must retry OCR instead of
+        # reusing a partial result merely because the file SHA and policy match.
         if not _parse_cache_policy_valid(
             payload,
-            parsed_for_disk,
+            parsed,
             expected_policy=ocr_policy,
         ):
             return
@@ -653,11 +862,24 @@ async def _persist_upload_file(
         if total_bytes <= 0:
             return None, None, 0
         digest_hex = digest.hexdigest()
-        out_path = target_dir / f"{digest_hex[:8]}_{filename}"
-        if out_path.exists():
-            temp_path.unlink(missing_ok=True)
-        else:
-            _guarded_write(write_guard, temp_path.replace, out_path)
+        out_path = target_dir / f"{digest_hex}_{filename}"
+        published = _publish_temp_exclusive(
+            temp_path,
+            out_path,
+            write_guard=write_guard,
+        )
+        if not published and (
+            out_path.is_symlink()
+            or not out_path.is_file()
+            or _file_sha256(out_path) != digest_hex
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "CONTENT_ADDRESS_COLLISION",
+                    "sha256": digest_hex,
+                },
+            )
         return out_path, digest_hex, total_bytes
     finally:
         try:
@@ -803,16 +1025,18 @@ async def _try_ocr(
     """
     Best-effort OCR with a bounded, source-aware PDF policy.
 
-    Drawing/standard PDFs are OCRed through the page count declared by the
+    Drawing and standard PDFs are OCRed through the page count declared by the
     parser, even when embedded-font extraction produced long but unusable text.
     Other PDFs retain the fast ten-page scanned-document heuristic.
     """
     base = (existing_text or "").strip()
     normalized_hint = _normalize_source_hint(source_hint)
-    full_drawing_ocr = ext == "pdf" and normalized_hint == "drawing_standard"
-    # A drawing can contain plenty of embedded-font gibberish.  Do not treat
-    # length alone as proof that its page text is machine-readable.
-    if len(base) >= 200 and not full_drawing_ocr:
+    full_page_ocr = ext == "pdf" and _ocr_cache_policy(
+        normalized_hint
+    ) in OCR_POLICIES_FULL_PAGE
+    # Drawings and standards can contain plenty of embedded-font gibberish.
+    # Do not treat length alone as proof that page text is machine-readable.
+    if len(base) >= 200 and not full_page_ocr:
         return None
     try:
         from backend.zhifei_autoplan.ocr_runtime import (
@@ -828,7 +1052,7 @@ async def _try_ocr(
         return None
 
     if ext == "pdf":
-        if full_drawing_ocr:
+        if full_page_ocr:
             # Accept only the page count produced by the PDF parser.  Never use
             # an arbitrary string/float/user option as an OCR expansion bound.
             if (
@@ -836,14 +1060,16 @@ async def _try_ocr(
                 or not isinstance(declared_pages, int)
                 or declared_pages <= 0
             ):
-                logger.warning("drawing OCR skipped because declared page count is unavailable")
+                logger.warning(
+                    "full-page OCR skipped because declared page count is unavailable"
+                )
                 return None
             max_pages = declared_pages
             stop_on_catalog = False
         else:
             max_pages = 10
             stop_on_catalog = True
-        if not full_drawing_ocr and not is_text_probably_scanned(
+        if not full_page_ocr and not is_text_probably_scanned(
             base,
             min_han=10,
             min_alnum=30,
@@ -858,17 +1084,22 @@ async def _try_ocr(
             lang=lang,
             stop_on_catalog=stop_on_catalog,
         )
-        if full_drawing_ocr:
+        if full_page_ocr:
             result_pages = _valid_positive_page_count(getattr(res, "pages", None))
             page_texts = getattr(res, "page_texts", None)
             page_text_count = len(page_texts) if isinstance(page_texts, tuple) else None
             if result_pages != declared_pages or page_text_count != declared_pages:
                 logger.warning(
-                    "drawing OCR rejected because source-page coverage is incomplete "
+                    "full-page OCR rejected because source-page coverage is incomplete "
                     "declared_pages=%s result_pages=%s page_text_count=%s",
                     declared_pages,
                     result_pages,
                     page_text_count,
+                )
+                return None
+            if _full_page_ocr_result_proof(res, declared_pages) is None:
+                logger.warning(
+                    "full-page OCR rejected because per-page proof is incomplete"
                 )
                 return None
         return res if res and (res.text or res.page_texts) else None
@@ -1116,9 +1347,18 @@ async def _handle_upload(
                             getattr(ocr_result, "pages", 0) or 0
                         )
                         parsed["ocr_page_text_count"] = len(page_texts)
+                        if _ocr_cache_policy(
+                            normalized_hint
+                        ) in OCR_POLICIES_FULL_PAGE:
+                            proof = _full_page_ocr_result_proof(
+                                ocr_result,
+                                _valid_positive_page_count(parsed.get("pages")),
+                            )
+                            if proof is not None:
+                                parsed.update(proof)
                         if mapped and _ocr_cache_policy(
                             normalized_hint
-                        ) == OCR_POLICY_DRAWING:
+                        ) in OCR_POLICIES_FULL_PAGE:
                             parsed["ocr_page_mapping"] = "source_page_all"
                         else:
                             parsed["ocr_page_mapping"] = (
@@ -1126,6 +1366,19 @@ async def _handle_upload(
                             )
                         if mapped:
                             parsed["extract_text"] = merged
+                            if _ocr_cache_policy(
+                                normalized_hint
+                            ) in OCR_POLICIES_FULL_PAGE:
+                                extract_page_sha256 = _page_text_sha256(
+                                    merged,
+                                    _valid_positive_page_count(
+                                        parsed.get("pages")
+                                    ),
+                                )
+                                if extract_page_sha256 is not None:
+                                    parsed["ocr_extract_page_sha256"] = (
+                                        extract_page_sha256
+                                    )
                     elif isinstance(ocr_result, str):
                         base = str(parsed.get("extract_text") or "").strip()
                         parsed["extract_text"] = (
@@ -1154,6 +1407,30 @@ async def _handle_upload(
                 write_guard=_write_guard,
             )
 
+        full_page_policy = _ocr_cache_policy(normalized_hint)
+        if (
+            ext == "pdf"
+            and full_page_policy in OCR_POLICIES_FULL_PAGE
+            and not _full_page_pdf_parse_proof_valid(
+                parsed,
+                expected_policy=full_page_policy,
+            )
+        ):
+            rejected.append(
+                {
+                    "filename": uf.filename,
+                    "code": (
+                        "STANDARD_FULL_PAGE_OCR_REQUIRED"
+                        if full_page_policy == OCR_POLICY_STANDARD
+                        else "DRAWING_FULL_PAGE_OCR_REQUIRED"
+                    ),
+                    "sha256": digest,
+                    "file_id": digest,
+                    "saved_as": str(out_path),
+                }
+            )
+            continue
+
         meaningful_text = str(parsed.get("extract_text") or "").strip()
         if normalized_hint in {"tender_qa", "boq"} and not meaningful_text:
             rejected.append(
@@ -1175,14 +1452,18 @@ async def _handle_upload(
         preview_warning: dict[str, Any] | None = None
         preview_temp: Path | None = None
         try:
-            preview_name = f"{digest[:8]}_preview.png"
+            preview_name = f"{digest}_preview.png"
             preview_out = preview_dir / preview_name
-            if preview_out.is_file() and preview_out.stat().st_size > 0:
+            if (
+                not preview_out.is_symlink()
+                and preview_out.is_file()
+                and preview_out.stat().st_size > 0
+            ):
                 preview_path = str(preview_out)
                 preview_cache_hit = True
             elif ext in {"png", "jpg", "jpeg"}:
                 preview_temp = preview_dir / (
-                    f".{digest[:8]}.{os.getpid()}.{threading.get_ident()}.preview.tmp"
+                    f".{digest}.{os.getpid()}.{threading.get_ident()}.preview.tmp"
                 )
                 rendered = await asyncio.to_thread(
                     _make_preview_image,
@@ -1190,11 +1471,20 @@ async def _handle_upload(
                     preview_temp,
                 )
                 if rendered:
-                    _guarded_write(_write_guard, preview_temp.replace, preview_out)
-                    preview_path = str(preview_out)
+                    published = _publish_temp_exclusive(
+                        preview_temp,
+                        preview_out,
+                        write_guard=_write_guard,
+                    )
+                    if published or (
+                        not preview_out.is_symlink()
+                        and preview_out.is_file()
+                        and preview_out.stat().st_size > 0
+                    ):
+                        preview_path = str(preview_out)
             elif ext == "pdf":
                 preview_temp = preview_dir / (
-                    f".{digest[:8]}.{os.getpid()}.{threading.get_ident()}.preview.tmp"
+                    f".{digest}.{os.getpid()}.{threading.get_ident()}.preview.tmp"
                 )
                 rendered = await _run_isolated_process(
                     _make_preview_pdf_first_page,
@@ -1204,8 +1494,17 @@ async def _handle_upload(
                     timeout=PARSE_TIMEOUT_SECONDS,
                 )
                 if rendered:
-                    _guarded_write(_write_guard, preview_temp.replace, preview_out)
-                    preview_path = str(preview_out)
+                    published = _publish_temp_exclusive(
+                        preview_temp,
+                        preview_out,
+                        write_guard=_write_guard,
+                    )
+                    if published or (
+                        not preview_out.is_symlink()
+                        and preview_out.is_file()
+                        and preview_out.stat().st_size > 0
+                    ):
+                        preview_path = str(preview_out)
         except JobLeaseLostError:
             raise
         except BrokenProcessPool:
@@ -1249,20 +1548,56 @@ async def _handle_upload(
             }
         if preview_warning is not None:
             warnings.append(preview_warning)
+        preview_sha256 = None
+        if preview_path:
+            try:
+                preview_sha256 = _file_sha256(Path(preview_path))
+            except OSError:
+                preview_path = None
+                preview_cache_hit = False
+                warnings.append(
+                    {
+                        "code": "PDF_PREVIEW_INTEGRITY_UNAVAILABLE",
+                        "message": "PDF 预览文件无法完成摘要校验。",
+                        "filename": str(uf.filename or ""),
+                    }
+                )
 
         extract_path = None
+        extract_text_sha256 = None
         if parsed.get("extract_text") is not None:
-            extract_path = extract_dir / f"{digest[:8]}.txt"
+            extract_text = str(parsed["extract_text"])
+            extract_bytes = extract_text.encode("utf-8")
+            extract_text_sha256 = hashlib.sha256(extract_bytes).hexdigest()
+            # Bind both the source identity and extracted-text identity into the
+            # durable name.  The same source may legitimately yield different
+            # policy-specific extracts (ordinary vs full-page OCR), and neither
+            # variant may overwrite the other.
+            extract_path = extract_dir / (
+                f"{digest}_{extract_text_sha256}.txt"
+            )
             extract_temp = extract_dir / (
-                f".{digest[:8]}.{os.getpid()}.{threading.get_ident()}.extract.tmp"
+                f".{digest}.{os.getpid()}.{threading.get_ident()}.extract.tmp"
             )
             try:
-                await asyncio.to_thread(
-                    extract_temp.write_text,
-                    parsed["extract_text"],
-                    encoding="utf-8",
+                await asyncio.to_thread(extract_temp.write_bytes, extract_bytes)
+                published = _publish_temp_exclusive(
+                    extract_temp,
+                    extract_path,
+                    write_guard=_write_guard,
                 )
-                _guarded_write(_write_guard, extract_temp.replace, extract_path)
+                if not published and (
+                    extract_path.is_symlink()
+                    or not extract_path.is_file()
+                    or _file_sha256(extract_path) != extract_text_sha256
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "EXTRACT_CONTENT_COLLISION",
+                            "sha256": digest,
+                        },
+                    )
             finally:
                 extract_temp.unlink(missing_ok=True)
             parsed.pop("extract_text", None)
@@ -1282,7 +1617,9 @@ async def _handle_upload(
             "cache_hit": cache_hit,
             "preview_cache_hit": preview_cache_hit,
             "extract_saved_as": str(extract_path) if extract_path else None,
+            "extract_text_sha256": extract_text_sha256,
             "preview_saved_as": preview_path,
+            "preview_sha256": preview_sha256,
             **parsed,
             "parsed_type": parsed_type,
             "parsed_meta": parsed_meta,
@@ -1316,12 +1653,12 @@ async def _handle_upload(
             status_code=422,
             detail={"code": "ALL_FILES_REJECTED", "rejected": rejected},
         )
-    if normalized_hint in {"tender_qa", "boq"} and rejected:
+    if normalized_hint in {"tender_qa", "boq", "standard"} and rejected:
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "MANDATORY_SOURCE_REJECTED",
-                "message": "招标、补疑或工程量清单存在未解析文件，已阻止进入生成。",
+                "message": "强制资料存在未解析或未完成全页 OCR 的文件，已阻止进入生成。",
                 "accepted": records,
                 "rejected": rejected,
             },
@@ -1658,7 +1995,11 @@ def _run_ingest_job(
         for index, item in enumerate(initial_rejected, start=1)
         if isinstance(item, dict)
     )
-    mandatory = _normalize_source_hint(options.get("source_hint")) in {"tender_qa", "boq"}
+    mandatory = _normalize_source_hint(options.get("source_hint")) in {
+        "tender_qa",
+        "boq",
+        "standard",
+    }
     try:
         if _cancel_requested():
             _mark_cancelled(completed=0)

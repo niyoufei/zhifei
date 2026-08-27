@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping
-
+from typing import Any
 
 _STANDARD_KEYWORDS = (
     "企业标准",
@@ -41,9 +41,9 @@ def normalize_source_hint(source_hint: Any) -> str:
         "quantity": "boq",
         "drawing": "drawing_standard",
         "cad": "drawing_standard",
-        "standard": "drawing_standard",
+        "standard": "standard",
         "图纸": "drawing_standard",
-        "标准": "drawing_standard",
+        "标准": "standard",
         "photo": "site_photo",
         "site_photo": "site_photo",
         "现场照片": "site_photo",
@@ -57,22 +57,26 @@ def classify_document_tags(
     parsed_type: Any,
     *,
     source_hint: Any = None,
-) -> List[str]:
+) -> list[str]:
     name = str(filename or "").strip().lower()
     extension = str(ext or "").strip().lower().lstrip(".")
     parsed = str(parsed_type or "").strip().lower()
     hint = normalize_source_hint(source_hint)
     is_site_photo = hint == "site_photo"
-    is_standard = any(keyword in name for keyword in _STANDARD_KEYWORDS)
+    is_standard = hint == "standard" or any(
+        keyword in name for keyword in _STANDARD_KEYWORDS
+    )
     is_explicit_drawing = any(keyword in name for keyword in _DRAWING_KEYWORDS)
 
-    tags: List[str] = []
+    tags: list[str] = []
     if hint == "tender_qa":
         tags.extend(["tender", "qa"])
     elif hint == "boq":
         tags.append("boq")
     elif hint == "site_photo":
         tags.append("site_photo")
+    elif hint == "standard":
+        tags.append("standard")
 
     if any(keyword in name for keyword in ("logo", "标志", "标识", "徽标")):
         tags.append("logo")
@@ -102,7 +106,7 @@ def classify_document_tags(
     if not is_site_photo and not is_standard and extension in {"png", "jpg", "jpeg"}:
         tags.append("drawing")
 
-    result: List[str] = []
+    result: list[str] = []
     seen: set[str] = set()
     for tag in tags:
         value = str(tag).strip()
@@ -113,18 +117,25 @@ def classify_document_tags(
     return result
 
 
-def effective_record_tags(record: Mapping[str, Any] | None) -> List[str]:
+def effective_record_tags(record: Mapping[str, Any] | None) -> list[str]:
     rec = record if isinstance(record, Mapping) else {}
     existing = rec.get("tags") if isinstance(rec.get("tags"), list) else []
     filename = str(rec.get("filename") or "")
     ext = str(rec.get("ext") or Path(filename).suffix.lstrip("."))
+    source_hint = normalize_source_hint(
+        rec.get("source_hint") or rec.get("library_scope")
+    )
+    if source_hint == "standard":
+        # Historical standard imports could contain a stale drawing tag from
+        # the former combined hint.  Explicit standard scope owns the record.
+        existing = [tag for tag in existing if str(tag).strip() != "drawing"]
     inferred = classify_document_tags(
         filename,
         ext,
         rec.get("parsed_type"),
-        source_hint=rec.get("source_hint") or rec.get("library_scope"),
+        source_hint=source_hint,
     )
-    result: List[str] = []
+    result: list[str] = []
     seen: set[str] = set()
     for tag in [*existing, *inferred]:
         value = str(tag).strip()

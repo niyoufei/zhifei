@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from pathlib import Path
 from typing import Any
 
 from backend.zhifei_autoplan.boq_focus_policy import (
@@ -170,6 +171,51 @@ def _index_chapter_bindings(index_obj: dict[str, Any] | None) -> dict[str, list[
         if chapter and locator:
             out.setdefault(chapter, []).append(dict(binding))
     return out
+
+
+def _index_focus_drawing_bindings(
+    boq_focus: dict[str, Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Index deterministic item-specific bindings without trusting them."""
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    raw = (boq_focus or {}).get("drawing_bindings")
+    for binding in raw if isinstance(raw, list) else []:
+        if not isinstance(binding, dict):
+            continue
+        focus_key = boq_focus_name_key(binding.get("focus_item"))
+        locator = str(binding.get("locator") or "").strip()
+        if focus_key and locator:
+            out.setdefault(focus_key, []).append(dict(binding))
+    return out
+
+
+def _validate_focus_binding_relation(
+    binding: dict[str, Any],
+    *,
+    name: str,
+    chapter: str,
+    project_id: str | None,
+) -> tuple[bool, dict[str, Any]]:
+    relation = binding.get("source_relation")
+    if not isinstance(relation, dict):
+        return False, {"reason": "focus_binding_source_relation_missing"}
+    if str(relation.get("type") or "").strip() != "boq_focus_item_drawing":
+        return False, {"reason": "focus_binding_source_relation_invalid"}
+    if boq_focus_name_key(binding.get("focus_item")) != boq_focus_name_key(name):
+        return False, {"reason": "focus_binding_item_mismatch"}
+    if boq_focus_name_key(relation.get("focus_item")) != boq_focus_name_key(name):
+        return False, {"reason": "focus_binding_relation_item_mismatch"}
+    binding_chapter = str(binding.get("chapter") or "").strip()
+    relation_chapter = str(relation.get("chapter") or "").strip()
+    if binding_chapter != chapter or relation_chapter != chapter:
+        return False, {"reason": "focus_binding_chapter_mismatch"}
+    if project_id:
+        binding_project = str(binding.get("project_id") or "").strip()
+        relation_project = str(relation.get("project_id") or "").strip()
+        if binding_project != project_id or relation_project != project_id:
+            return False, {"reason": "focus_binding_project_mismatch"}
+    return True, {"reason": "validated"}
 
 
 def _compact_text(value: Any) -> str:
@@ -590,6 +636,68 @@ def _validate_drawing_locator(
     if not matched_text or window_text[relative_start:relative_end] != matched_text:
         return False, {"reason": "binding_matched_text_mismatch", "filename": filename, "page": page}
 
+    # Binding hashes attest only to the binding object.  Re-read the current
+    # indexed extract and reverse-check every offset against those trusted
+    # bytes so a self-consistent forged window cannot become formal evidence.
+    extract_ref = str(drawing.get("extract_saved_as") or "").strip()
+    expected_bytes_hash = str(drawing.get("extract_bytes_sha256") or "").strip().lower()
+    expected_text_hash = str(drawing.get("extract_text_sha256") or "").strip().lower()
+    if (
+        not extract_ref
+        or re.fullmatch(r"[0-9a-f]{64}", expected_bytes_hash) is None
+        or re.fullmatch(r"[0-9a-f]{64}", expected_text_hash) is None
+    ):
+        return False, {
+            "reason": "drawing_extract_reference_missing",
+            "filename": filename,
+            "page": page,
+        }
+    try:
+        extract_path = Path(extract_ref)
+        if not extract_path.is_file():
+            return False, {
+                "reason": "drawing_extract_reference_missing",
+                "filename": filename,
+                "page": page,
+            }
+        extract_bytes = extract_path.read_bytes()
+    except OSError:
+        return False, {
+            "reason": "drawing_extract_read_failed",
+            "filename": filename,
+            "page": page,
+        }
+    extract_text = extract_bytes.decode("utf-8", errors="ignore")
+    if (
+        hashlib.sha256(extract_bytes).hexdigest() != expected_bytes_hash
+        or hashlib.sha256(extract_text.encode("utf-8")).hexdigest()
+        != expected_text_hash
+    ):
+        return False, {
+            "reason": "drawing_extract_hash_mismatch",
+            "filename": filename,
+            "page": page,
+        }
+    actual_page_text = extract_text[start_offset:end_offset]
+    if hashlib.sha256(actual_page_text.encode("utf-8")).hexdigest() != anchor_hash:
+        return False, {
+            "reason": "drawing_page_extract_hash_mismatch",
+            "filename": filename,
+            "page": page,
+        }
+    if extract_text[window_start:window_end] != window_text:
+        return False, {
+            "reason": "drawing_match_window_extract_mismatch",
+            "filename": filename,
+            "page": page,
+        }
+    if extract_text[match_start:match_end] != matched_text:
+        return False, {
+            "reason": "drawing_matched_text_extract_mismatch",
+            "filename": filename,
+            "page": page,
+        }
+
     # Filename, chapter scope and discipline metadata may rank candidates but
     # never prove relevance.  Formal relevance comes solely from the bounded
     # text window around the recorded offset on the anchored page.
@@ -604,9 +712,13 @@ def _validate_drawing_locator(
     matched_terms = list(
         dict.fromkeys([*matched_item_terms, *matched_process_terms, *matched_chapter_terms])
     )
-    if not matched_terms:
+    if not matched_item_terms and not matched_process_terms:
         return False, {
-            "reason": "drawing_locator_irrelevant",
+            "reason": (
+                "drawing_locator_chapter_only"
+                if matched_chapter_terms
+                else "drawing_locator_irrelevant"
+            ),
             "filename": filename,
             "sha256": locator_sha256,
             "page": page,
@@ -865,6 +977,7 @@ def build_cross_index(
             closure_map[boq_focus_name_key(name)] = item
 
     draw_bind_by_chapter = _index_chapter_bindings(drawing_index)
+    draw_bind_by_focus = _index_focus_drawing_bindings(boq_focus)
     std_loc_by_chapter = _index_chapter_locators(standard_index)
 
     drawing_project_id = str((drawing_index or {}).get("project_id") or "").strip()
@@ -1003,18 +1116,32 @@ def build_cross_index(
         if drawing_requirement["status"] == "not_applicable":
             drawing_validation = {"ok": True, "reason": "not_applicable"}
         elif chapter:
-            drawing_candidates: list[tuple[str, dict[str, Any] | None]] = []
+            drawing_candidates: list[tuple[str, dict[str, Any] | None, str]] = []
+            for binding in draw_bind_by_focus.get(boq_focus_name_key(name), []):
+                locator = str(binding.get("locator") or "").strip()
+                if locator:
+                    drawing_candidates.append((locator, binding, "focus"))
             for binding in draw_bind_by_chapter.get(chapter, []):
                 locator = str(binding.get("locator") or "").strip()
                 if locator:
-                    drawing_candidates.append((locator, binding))
+                    drawing_candidates.append((locator, binding, "chapter"))
             for locator in near_locs:
-                if locator and all(existing != locator for existing, _ in drawing_candidates):
-                    drawing_candidates.append((locator, None))
+                if locator:
+                    drawing_candidates.append((locator, None, "content"))
 
             rejected: list[dict[str, Any]] = []
             relevance_values: list[Any] = [name, proc_name, chapter]
-            for locator, binding in drawing_candidates:
+            for locator, binding, candidate_source in drawing_candidates:
+                if candidate_source == "focus" and isinstance(binding, dict):
+                    relation_ok, relation_detail = _validate_focus_binding_relation(
+                        binding,
+                        name=name,
+                        chapter=chapter,
+                        project_id=pid,
+                    )
+                    if not relation_ok:
+                        rejected.append({"locator": locator, **relation_detail})
+                        continue
                 valid, detail = _validate_drawing_locator(
                     locator,
                     catalog=drawing_catalog,
@@ -1036,7 +1163,14 @@ def build_cross_index(
                     }
                 if valid:
                     drawing_loc = locator
-                    drawing_validation = {"ok": True, **detail}
+                    drawing_validation = {
+                        "ok": True,
+                        **detail,
+                        "binding_basis": (
+                            str((binding or {}).get("binding_basis") or "").strip()
+                            or candidate_source
+                        ),
+                    }
                     accepted_drawing_locator_claims.setdefault(locator, []).append(name)
                     break
                 rejected.append({"locator": locator, **detail})

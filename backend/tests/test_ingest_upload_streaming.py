@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -184,6 +185,12 @@ def test_drawing_pdf_ocr_uses_all_declared_pages_without_catalog_stop(
             pages=27,
             lang="chi_sim+eng",
             page_texts=tuple("页" for _ in range(27)),
+            page_statuses=tuple("text" for _ in range(27)),
+            page_image_sha256=tuple(
+                hashlib.sha256(f"drawing-page-{page}".encode()).hexdigest()
+                for page in range(1, 28)
+            ),
+            source_pages=27,
         )
 
     monkeypatch.setattr(ocr_runtime, "ocr_pdf_path", _ocr_pdf_path)
@@ -284,6 +291,45 @@ def test_drawing_pdf_ocr_rejects_short_page_text_sequence(
             "乱码嵌入字体" * 100,
             source_hint="drawing_standard",
             declared_pages=3,
+        )
+    )
+
+    assert result is None
+
+
+def test_drawing_pdf_ocr_rejects_failed_page_even_when_page_count_matches(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "drawing-failed-page.pdf"
+    source.write_bytes(b"%PDF-test")
+    monkeypatch.setattr(ocr_runtime, "is_tesseract_available", lambda: True)
+    monkeypatch.setattr(ocr_runtime, "guess_ocr_lang", lambda **_kwargs: "chi_sim+eng")
+    monkeypatch.setattr(
+        ocr_runtime,
+        "ocr_pdf_path",
+        lambda *_args, **_kwargs: ocr_runtime.OcrResult(
+            text="\f第二页",
+            pages=2,
+            lang="chi_sim+eng",
+            error="page_ocr_incomplete",
+            page_texts=("", "第二页"),
+            page_statuses=("failed", "text"),
+            page_image_sha256=(
+                "",
+                hashlib.sha256(b"drawing-page-2").hexdigest(),
+            ),
+            source_pages=2,
+        ),
+    )
+
+    result = asyncio.run(
+        ingest_router._try_ocr(
+            source,
+            "pdf",
+            "乱码嵌入字体" * 100,
+            source_hint="drawing",
+            declared_pages=2,
         )
     )
 

@@ -1,12 +1,40 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
+
+
+def _passing_legacy_export_gate() -> dict[str, Any]:
+    names = (
+        "independent_content_quality",
+        "plan_consistency",
+        "verified_standards",
+        "boq_cross_index_closure",
+        "formal_project_parameters",
+        "formal_parameter_body_binding",
+        "independent_model_review",
+    )
+    gate: dict[str, Any] = {
+        "schema_version": "delivery-quality-gate-v1",
+        "delivery_allowed": True,
+        "blocker_count": 0,
+        "checks": [{"name": name, "pass": True} for name in names],
+    }
+    gate["decision_digest"] = hashlib.sha256(
+        json.dumps(
+            gate,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+    ).hexdigest()
+    return gate
 
 
 def _forbidden_call(label: str):
@@ -16,13 +44,78 @@ def _forbidden_call(label: str):
     return fail
 
 
+@pytest.mark.asyncio
+async def test_legacy_export_refuses_ungated_generated_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.routers import zhifei_autoplan as legacy
+
+    monkeypatch.chdir(tmp_path)
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "autoplan_generated.json").write_text(
+        json.dumps({"variants": [{"sections": []}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(legacy, "_auth_user", lambda _token: {"id": "u1"})
+    monkeypatch.setattr(legacy, "_charge", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        legacy,
+        "export_autoplan_docx",
+        _forbidden_call("ungated legacy export"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await legacy.export_docx(authorization="token")
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "LEGACY_EXPORT_FORMAL_GATE_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_legacy_export_accepts_digest_bound_formal_variant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.routers import zhifei_autoplan as legacy
+
+    monkeypatch.chdir(tmp_path)
+    build = tmp_path / "build"
+    build.mkdir()
+    variant = {
+        "project_id": "P1",
+        "delivery_scope": "document",
+        "delivery_ready": True,
+        "delivery_quality_gate": _passing_legacy_export_gate(),
+        "sections": [{"title": "工程概况", "content": "正式正文"}],
+    }
+    (build / "autoplan_generated.json").write_text(
+        json.dumps({"variants": [variant]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    exported: list[dict[str, Any]] = []
+    monkeypatch.setattr(legacy, "_auth_user", lambda _token: {"id": "u1"})
+    monkeypatch.setattr(legacy, "_charge", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(legacy, "_audit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        legacy,
+        "export_autoplan_docx",
+        lambda payload, _path: exported.append(payload),
+    )
+
+    result = await legacy.export_docx(authorization="token")
+
+    assert result["ok"] is True
+    assert exported == [variant]
+
+
 def test_compose_never_implicitly_starts_autoplan_or_a_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Legacy auto flags and default credentials cannot turn /compose into AI."""
 
-    from backend.app import main
     from backend import (
         compose_engine_service,
         kg_context_service,
@@ -30,6 +123,7 @@ def test_compose_never_implicitly_starts_autoplan_or_a_model(
         project_profile_service,
         region_upgrade_service,
     )
+    from backend.app import main
     from backend.app.routers import actions_bridge, zhifei_autoplan
     from backend.zhifei_autoplan import orchestrator
     from backend.zhifei_autoplan.utils.llm_client import LLMClient
@@ -161,7 +255,7 @@ async def test_optimize_requires_fresh_server_admission_and_only_uses_exact_admi
     monkeypatch.setattr(provider_runtime, "build_server_text_slots", lambda **_kwargs: [server_text])
     monkeypatch.setattr(provider_runtime, "resolve_document_render_slot", lambda: document_slot)
     monkeypatch.setattr(provider_runtime, "resolve_automation_slot", lambda: None)
-    monkeypatch.setattr(provider_runtime, "resolve_image_slots", lambda: [])
+    monkeypatch.setattr(provider_runtime, "resolve_image_slots", list)
 
     monkeypatch.setattr(legacy, "_auth_user", lambda _authorization: {"id": "offline-user"})
     monkeypatch.setattr(legacy, "_charge", lambda *_args, **_kwargs: None)
@@ -342,7 +436,7 @@ async def test_review_apply_two_ai_rounds_share_one_fresh_admission_and_render_s
         ),
     )
     monkeypatch.setattr(provider_runtime, "resolve_automation_slot", lambda: None)
-    monkeypatch.setattr(provider_runtime, "resolve_image_slots", lambda: [])
+    monkeypatch.setattr(provider_runtime, "resolve_image_slots", list)
 
     admission_calls: list[object] = []
 
@@ -371,7 +465,7 @@ async def test_review_apply_two_ai_rounds_share_one_fresh_admission_and_render_s
         lambda _job: ("succeeded", 7),
     )
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
 
     rebuild_calls: list[int] = []
 
@@ -535,7 +629,9 @@ async def test_review_apply_admission_failure_is_stable_503_before_any_llm(
 ) -> None:
     from backend.app.routers import actions_bridge
     from backend.zhifei_autoplan import review_revision
-    from backend.zhifei_autoplan.professional_document_renderer import ProfessionalRenderError
+    from backend.zhifei_autoplan.professional_document_renderer import (
+        ProfessionalRenderError,
+    )
 
     raw_failure_secret = "sk-ant-review-raw-failure-secret-123456789"
     target = {

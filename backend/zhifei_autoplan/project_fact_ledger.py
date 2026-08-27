@@ -8,6 +8,10 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from backend.zhifei_autoplan.project_parameter_evidence import (
+    validate_project_parameter_evidence,
+)
+
 SCHEMA_VERSION = "project-fact-ledger-v1"
 
 FACT_STATUSES = ("verified", "derived", "approved", "provisional", "missing")
@@ -77,6 +81,61 @@ _TENDER_DURATION_RE = re.compile(
     r"(?P<value>\d+(?:\.\d+)?)\s*(?:日历天|天|日)",
     re.IGNORECASE,
 )
+_TRACEABLE_APPROVAL_FIELDS = frozenset(FORMAL_REQUIRED_FIELDS)
+_FILE_LOCATOR_RE = re.compile(
+    r"\.(?:pdf|docx?|xlsx?|xls|csv|ods|txt|dwg)(?:#|::).+",
+    re.IGNORECASE,
+)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+_QUALITY_LOCATOR_RE = re.compile(
+    r"^(?P<file>[^#\r\n]+\.(?:pdf|docx?|xlsx?|xls|csv|ods|txt|dwg))"
+    r"#p(?P<page>[1-9]\d*)_(?P<sha256>[0-9a-fA-F]{64})@(?P<offset>\d+)$",
+    re.IGNORECASE,
+)
+_APPROVED_AT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+_APPROVAL_RECEIPT_FIELDS = (
+    "receipt_id",
+    "status",
+    "project_id",
+    "field",
+    "value_digest",
+    "summary",
+    "approved_by",
+    "approved_at",
+)
+_QUALITY_EVIDENCE_FIELDS = (
+    "document_sha256",
+    "extract_text_sha256",
+    "page",
+    "page_text_sha256",
+    "offset",
+    "start",
+    "end",
+    "page_start",
+    "page_end",
+    "page_start_offset",
+    "page_end_offset",
+    "page_match_start",
+    "page_match_end",
+    "match_text_sha256",
+)
+_QUALITY_OPERATOR_ALIASES = {
+    ">=": "≥",
+    "=>": "≥",
+    "≥": "≥",
+    "<=": "≤",
+    "=<": "≤",
+    "≤": "≤",
+    ">": ">",
+    "<": "<",
+    "=": "=",
+    "==": "=",
+}
+_GENERIC_PROCESS_SCOPES = frozenset(
+    {"全局", "通用", "所有工序", "全部工序", "本项目", "工程整体", "按工序"}
+)
 
 
 def _json_default(value: Any) -> str:
@@ -123,6 +182,299 @@ def _normalize_unit(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
+def _is_generic_locator(value: Any) -> bool:
+    locator = str(value or "").strip()
+    return not locator or locator == "metadata" or locator.startswith(
+        ("payload.", "project_fact_sources.")
+    )
+
+
+def _fact_value_digest(field: str, value: Any, unit: Any = "") -> str:
+    normalized_value: Any
+    if field == "quality_threshold":
+        quality = _normalize_quality_threshold(value)
+        normalized_value = quality[0] if quality is not None else _normalize_scalar(value)
+    else:
+        normalized_value = _normalize_scalar(value)
+    return _sha256(
+        {
+            "field": str(field or "").strip(),
+            "value": normalized_value,
+            "unit": _normalize_unit(unit),
+        }
+    )
+
+
+def _raw_fact_parts(raw: Any) -> tuple[Any, str, Mapping[str, Any], Mapping[str, Any]]:
+    if not isinstance(raw, Mapping) or "value" not in raw:
+        return raw, "", {}, {}
+    evidence = raw.get("evidence") if isinstance(raw.get("evidence"), Mapping) else {}
+    receipt = raw.get("approval_receipt")
+    if not isinstance(receipt, Mapping):
+        receipt = raw.get("confirmation_receipt")
+    return (
+        raw.get("value"),
+        _normalize_unit(raw.get("unit")),
+        evidence,
+        receipt if isinstance(receipt, Mapping) else {},
+    )
+
+
+def _traceable_file_evidence(raw: Any) -> tuple[dict[str, Any], bool]:
+    _, _, evidence, _ = _raw_fact_parts(raw)
+    locator = str(evidence.get("locator") or "").strip()
+    file_name = str(evidence.get("file_name") or "").strip()
+    document_sha256 = str(
+        evidence.get("document_sha256") or evidence.get("source_sha256") or ""
+    ).strip().lower()
+    locator_file = locator.split("#", 1)[0].split("::", 1)[0]
+    valid = bool(
+        not _is_generic_locator(locator)
+        and _FILE_LOCATOR_RE.search(locator) is not None
+        and _SHA256_RE.fullmatch(document_sha256) is not None
+        and (not file_name or locator_file == file_name)
+    )
+    return _sanitize_evidence(evidence), valid
+
+
+def _normalize_approval_receipt(
+    *,
+    field: str,
+    raw: Any,
+    expected_project_id: str,
+) -> tuple[dict[str, Any], bool]:
+    value, unit, _, receipt = _raw_fact_parts(raw)
+    normalized = {
+        key: _normalize_unit(receipt.get(key)) for key in _APPROVAL_RECEIPT_FIELDS
+    }
+    expected_value_digest = _fact_value_digest(field, value, unit)
+    receipt_project_id = normalized["project_id"]
+    valid = bool(
+        all(normalized.values())
+        and bool(expected_project_id)
+        and normalized["status"].lower() == "approved"
+        and normalized["field"] == field
+        and _SHA256_RE.fullmatch(normalized["value_digest"]) is not None
+        and normalized["value_digest"].lower() == expected_value_digest
+        and _APPROVED_AT_RE.fullmatch(normalized["approved_at"]) is not None
+        and receipt_project_id == expected_project_id
+    )
+    normalized["status"] = normalized["status"].lower()
+    normalized["value_digest"] = normalized["value_digest"].lower()
+    normalized["receipt_digest"] = _sha256(normalized)
+    return normalized, valid
+
+
+def _normalize_formal_approval(
+    *,
+    field: str,
+    raw: Any,
+    expected_project_id: str,
+) -> dict[str, Any]:
+    if isinstance(raw, Mapping) and "value" in raw:
+        normalized = copy.deepcopy(dict(raw))
+    else:
+        normalized = {"value": copy.deepcopy(raw)}
+    receipt, receipt_ok = _normalize_approval_receipt(
+        field=field,
+        raw=normalized,
+        expected_project_id=expected_project_id,
+    )
+    _, evidence_ok = _traceable_file_evidence(normalized)
+    normalized["approval_receipt"] = receipt
+    normalized.pop("confirmation_receipt", None)
+    normalized["status"] = "approved" if receipt_ok and evidence_ok else "provisional"
+    return normalized
+
+
+def _quality_item_evidence(raw_item: Mapping[str, Any]) -> dict[str, Any]:
+    nested = raw_item.get("evidence")
+    nested_evidence = nested if isinstance(nested, Mapping) else {}
+    evidence: dict[str, Any] = {}
+    for key in _QUALITY_EVIDENCE_FIELDS:
+        raw_value = raw_item.get(key)
+        if raw_value is None:
+            raw_value = nested_evidence.get(key)
+        if raw_value is not None and str(raw_value).strip() != "":
+            evidence[key] = _normalize_scalar(raw_value)
+    return evidence
+
+
+def _quality_item_evidence_ready(
+    *, locator: str, evidence: Mapping[str, Any]
+) -> bool:
+    match = _QUALITY_LOCATOR_RE.fullmatch(locator)
+    if match is None:
+        return False
+    document_sha256 = str(evidence.get("document_sha256") or "").strip().lower()
+    page_text_sha256 = str(evidence.get("page_text_sha256") or "").strip().lower()
+    extract_text_sha256 = str(
+        evidence.get("extract_text_sha256") or ""
+    ).strip().lower()
+    match_text_sha256 = str(evidence.get("match_text_sha256") or "").strip().lower()
+    try:
+        page = int(evidence.get("page"))
+        offset = int(evidence.get("offset"))
+    except (TypeError, ValueError):
+        return False
+    if (
+        _SHA256_RE.fullmatch(document_sha256) is None
+        or _SHA256_RE.fullmatch(extract_text_sha256) is None
+        or _SHA256_RE.fullmatch(page_text_sha256) is None
+        or _SHA256_RE.fullmatch(match_text_sha256) is None
+        or page != int(match.group("page"))
+        or offset != int(match.group("offset"))
+        or document_sha256 != match.group("sha256").lower()
+    ):
+        return False
+    for start_key, end_key in (("page_start", "page_end"),):
+        if start_key not in evidence and end_key not in evidence:
+            continue
+        try:
+            start = int(evidence.get(start_key))
+            end = int(evidence.get(end_key))
+        except (TypeError, ValueError):
+            return False
+        if start < 0 or end <= start:
+            return False
+    try:
+        end = int(evidence.get("end"))
+        page_start_offset = int(evidence.get("page_start_offset"))
+        page_end_offset = int(evidence.get("page_end_offset"))
+        page_match_start = int(evidence.get("page_match_start"))
+        page_match_end = int(evidence.get("page_match_end"))
+    except (TypeError, ValueError):
+        return False
+    if (
+        end <= offset
+        or page_start_offset < 0
+        or page_end_offset <= page_start_offset
+        or not page_start_offset <= offset < end <= page_end_offset
+        or page_match_start != offset - page_start_offset
+        or page_match_end != end - page_start_offset
+        or page_match_end <= page_match_start
+    ):
+        return False
+    if "start" in evidence:
+        try:
+            if int(evidence.get("start")) != offset:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _validated_parameter_evidence_quality(
+    report: Mapping[str, Any], *, expected_project_id: str
+) -> Mapping[str, Any] | None:
+    validation = validate_project_parameter_evidence(report)
+    if validation.get("ok") is not True:
+        return None
+    quality = report.get("quality_threshold")
+    if not isinstance(quality, Mapping):
+        return None
+    report_project_id = str(report.get("project_id") or "").strip()
+    if not expected_project_id or report_project_id != expected_project_id:
+        return None
+    value = quality.get("value")
+    if not isinstance(value, Mapping):
+        return None
+    items = value.get("items") if isinstance(value.get("items"), list) else []
+    try:
+        matched_item_count = int(report.get("matched_item_count"))
+    except (TypeError, ValueError):
+        return None
+    if (
+        str(quality.get("status") or "").strip().lower() != "derived"
+        or matched_item_count != len(items)
+        or not items
+    ):
+        return None
+    return quality
+
+
+def _normalize_quality_threshold(value: Any) -> tuple[dict[str, Any], bool] | None:
+    """Normalize a per-process threshold bundle without creating a global rule."""
+    if not isinstance(value, Mapping):
+        return None
+    if str(value.get("mode") or "").strip().lower() != "process_bound":
+        return None
+    raw_items = value.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        return None
+
+    normalized_items: list[dict[str, Any]] = []
+    seen_scopes: set[tuple[str, str]] = set()
+    all_items_ready = True
+    for raw_item in raw_items:
+        if not isinstance(raw_item, Mapping):
+            return None
+        process = _normalize_unit(raw_item.get("process"))
+        metric = _normalize_unit(raw_item.get("metric"))
+        operator = _QUALITY_OPERATOR_ALIASES.get(
+            str(raw_item.get("operator") or "").strip()
+        )
+        threshold_value = _normalize_scalar(raw_item.get("value"))
+        if (
+            not process
+            or process in _GENERIC_PROCESS_SCOPES
+            or not metric
+            or operator is None
+            or isinstance(threshold_value, (bool, list, Mapping))
+            or threshold_value in (None, "")
+        ):
+            return None
+        scope = (process, metric)
+        if scope in seen_scopes:
+            return None
+        seen_scopes.add(scope)
+
+        status = str(raw_item.get("status") or "missing").strip().lower()
+        if status not in FACT_STATUSES:
+            status = "missing"
+        source = _normalize_unit(
+            raw_item.get("source") or raw_item.get("source_type")
+        )
+        evidence = raw_item.get("evidence")
+        locator = _normalize_unit(
+            raw_item.get("locator")
+            or (evidence.get("locator") if isinstance(evidence, Mapping) else "")
+        )
+        item_evidence = _quality_item_evidence(raw_item)
+        item_ready = (
+            status in FORMAL_ACCEPTED_STATUSES
+            and bool(source)
+            and _quality_item_evidence_ready(
+                locator=locator,
+                evidence=item_evidence,
+            )
+        )
+        all_items_ready = all_items_ready and item_ready
+        core = {
+            "process": process,
+            "metric": metric,
+            "operator": operator,
+            "value": threshold_value,
+            "unit": _normalize_unit(raw_item.get("unit")),
+            "status": status,
+            "source": source,
+            "locator": locator,
+            **item_evidence,
+        }
+        item_id = _normalize_unit(raw_item.get("id") or raw_item.get("item_id"))
+        core["id"] = item_id or _sha256(core)[:16]
+        normalized_items.append(core)
+
+    normalized_items.sort(
+        key=lambda item: (
+            str(item["id"]),
+            str(item["process"]),
+            str(item["metric"]),
+        )
+    )
+    return {"mode": "process_bound", "items": normalized_items}, all_items_ready
+
+
 def _sanitize_evidence(value: Any, *, default_locator: str = "") -> dict[str, Any]:
     evidence = value if isinstance(value, Mapping) else {}
     allowed = (
@@ -133,6 +485,12 @@ def _sanitize_evidence(value: Any, *, default_locator: str = "") -> dict[str, An
         "document_sha256",
         "start",
         "end",
+        "page_text_sha256",
+        "page_start",
+        "page_end",
+        "offset",
+        "match_text_sha256",
+        "derivation_receipt",
     )
     result: dict[str, Any] = {}
     for key in allowed:
@@ -158,19 +516,34 @@ def _normalize_fact_record(field: str, raw: Any) -> dict[str, Any] | None:
         unit = _normalize_unit(raw.get("unit"))
         confidence = raw.get("confidence")
         evidence = raw.get("evidence")
+        approval_receipt = raw.get("approval_receipt")
+        if not isinstance(approval_receipt, Mapping):
+            approval_receipt = raw.get("confirmation_receipt")
         status = str(raw.get("status") or "").strip().lower()
     else:
         value = raw
         unit = ""
         confidence = None
         evidence = None
+        approval_receipt = None
         status = ""
-    value = _normalize_scalar(value)
+    forced_status = ""
+    if key == "quality_threshold":
+        normalized_quality = _normalize_quality_threshold(value)
+        if normalized_quality is None:
+            return None
+        value, quality_ready = normalized_quality
+        if not quality_ready:
+            forced_status = "provisional"
+    else:
+        value = _normalize_scalar(value)
     if value is None or value == "" or value == [] or value == {}:
         return None
     record: dict[str, Any] = {"field": key, "value": value, "unit": unit}
     if status in FACT_STATUSES:
         record["status"] = status
+    if forced_status:
+        record["forced_status"] = forced_status
     if confidence is not None:
         try:
             normalized_confidence = float(confidence)
@@ -180,6 +553,8 @@ def _normalize_fact_record(field: str, raw: Any) -> dict[str, Any] | None:
             record["confidence"] = max(0.0, min(1.0, normalized_confidence))
     if isinstance(evidence, Mapping):
         record["evidence"] = _sanitize_evidence(evidence)
+    if isinstance(approval_receipt, Mapping):
+        record["approval_receipt"] = _normalize_scalar(approval_receipt)
     return record
 
 
@@ -193,6 +568,8 @@ def _fact_status(source_type: str, explicit_status: Any = None) -> str:
     if source_type in {"system_default", "case_library"}:
         return "provisional"
     if source_type == "approved_resolution":
+        if requested in {"provisional", "missing"}:
+            return "provisional"
         return "approved"
     if source_type in {"clarification", "tender", "reviewed_design"}:
         return "verified"
@@ -239,7 +616,9 @@ def build_project_fact_ledger(sources: Iterable[Mapping[str, Any]]) -> dict[str,
         for record in _iter_source_facts(source):
             fact_count += 1
             evidence = record.pop("evidence", None) or source_evidence
-            status = _fact_status(source_type, record.pop("status", None))
+            forced_status = str(record.pop("forced_status", "")).strip()
+            explicit_status = record.pop("status", None)
+            status = forced_status or _fact_status(source_type, explicit_status)
             candidate = {
                 **record,
                 "status": status,
@@ -393,17 +772,58 @@ def _tender_duration_sources(tender: Mapping[str, Any]) -> list[dict[str, Any]]:
             raw_value = float(match.group("value"))
             value: int | float = int(raw_value) if raw_value.is_integer() else raw_value
             file_name = str(span.get("file_name") or "")
+            display_file_name = file_name.replace("\\", "/").rsplit("/", 1)[-1]
             source_type = (
                 "clarification"
                 if any(marker in file_name for marker in ("答疑", "澄清", "补疑"))
                 else "tender"
             )
-            locator = f"tender_matrix.items[{item_index}].source_spans[{span_index}]"
+            document_sha256 = str(
+                span.get("document_sha256") or span.get("source_sha256") or ""
+            ).strip().lower()
+            page_text_sha256 = str(span.get("page_text_sha256") or "").strip().lower()
+            try:
+                page = int(span.get("page"))
+                start = int(span.get("start"))
+                end = int(span.get("end"))
+            except (TypeError, ValueError):
+                page, start, end = 0, -1, -1
+            if (
+                display_file_name
+                and _SHA256_RE.fullmatch(document_sha256)
+                and _SHA256_RE.fullmatch(page_text_sha256)
+                and page >= 1
+                and start >= 0
+                and end > start
+            ):
+                locator = (
+                    f"{display_file_name}#p{page}_{document_sha256}@{start}"
+                )
+            else:
+                locator = (
+                    f"tender_matrix.items[{item_index}]"
+                    f".source_spans[{span_index}]"
+                )
             evidence = {
                 key: span.get(key)
-                for key in ("file_name", "page", "start", "end", "snippet")
+                for key in (
+                    "file_name",
+                    "page",
+                    "start",
+                    "end",
+                    "snippet",
+                    "document_sha256",
+                    "source_sha256",
+                    "page_text_sha256",
+                    "page_start",
+                    "page_end",
+                )
                 if span.get(key) is not None
             }
+            if display_file_name:
+                evidence["file_name"] = display_file_name
+            if start >= 0:
+                evidence["offset"] = start
             evidence["locator"] = locator
             sources.append(
                 {
@@ -428,19 +848,48 @@ def build_project_fact_ledger_from_inputs(
     payload: Mapping[str, Any] | None,
     tender: Mapping[str, Any] | None,
     boq_wbs_cpm: Mapping[str, Any] | None,
+    project_parameter_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload_data = dict(payload or {})
     tender_data = dict(tender or {})
     cpm_data = dict(boq_wbs_cpm or {})
     sources: list[dict[str, Any]] = []
+    project_id = str(payload_data.get("project_id") or "").strip()
+
+    parameter_evidence_data = dict(project_parameter_evidence or {})
+    quality_threshold = _validated_parameter_evidence_quality(
+        parameter_evidence_data,
+        expected_project_id=project_id,
+    )
+    if isinstance(quality_threshold, Mapping):
+        sources.append(
+            {
+                "source_id": "project-parameter-evidence",
+                "source_type": "reviewed_design",
+                "facts": {"quality_threshold": dict(quality_threshold)},
+                "evidence": {
+                    "locator": "project_parameter_evidence.quality_threshold"
+                },
+            }
+        )
 
     approved = _facts_mapping(payload_data.get("approved_project_fact_resolutions"))
     if approved:
+        normalized_approved: dict[str, Any] = {}
+        for field, raw in approved.items():
+            if field not in _TRACEABLE_APPROVAL_FIELDS:
+                normalized_approved[field] = raw
+                continue
+            normalized_approved[field] = _normalize_formal_approval(
+                field=field,
+                raw=raw,
+                expected_project_id=project_id,
+            )
         sources.append(
             {
                 "source_id": "approved-project-fact-resolutions",
                 "source_type": "approved_resolution",
-                "facts": approved,
+                "facts": normalized_approved,
                 "evidence": {"locator": "payload.approved_project_fact_resolutions"},
             }
         )
@@ -511,11 +960,21 @@ def build_project_fact_ledger_from_inputs(
     if project_code:
         user_facts.setdefault("project_code", project_code)
     if user_facts:
+        normalized_user_facts: dict[str, Any] = {}
+        for field, raw in user_facts.items():
+            if field not in _TRACEABLE_APPROVAL_FIELDS:
+                normalized_user_facts[field] = raw
+                continue
+            normalized_user_facts[field] = _normalize_formal_approval(
+                field=field,
+                raw=raw,
+                expected_project_id=project_id,
+            )
         sources.append(
             {
                 "source_id": "run-project-input",
                 "source_type": "user_input",
-                "facts": user_facts,
+                "facts": normalized_user_facts,
                 "evidence": {"locator": "payload.project_facts"},
             }
         )
@@ -543,12 +1002,35 @@ def build_project_fact_ledger_from_inputs(
     if critical_path:
         boq_facts["critical_path_names"] = critical_path
     if boq_facts:
+        schedule_input_readiness = (
+            summary.get("schedule_input_readiness")
+            if isinstance(summary.get("schedule_input_readiness"), Mapping)
+            else {}
+        )
+        derivation_receipt_core = {
+            "project_id": project_id,
+            "status": str(schedule_input_readiness.get("status") or "").strip().lower(),
+            "locator": str(schedule_input_readiness.get("locator") or "").strip(),
+            "ready": schedule_input_readiness.get("ready") is True,
+            "checks": _normalize_scalar(schedule_input_readiness.get("checks") or {}),
+            "schedule_fact_eligible": schedule_fact_eligible,
+            "schedule_fact_reasons": _normalize_scalar(
+                summary.get("schedule_fact_reasons") or []
+            ),
+        }
+        derivation_receipt = {
+            **derivation_receipt_core,
+            "receipt_digest": _sha256(derivation_receipt_core),
+        }
         sources.append(
             {
                 "source_id": "boq-deterministic-schedule",
                 "source_type": "boq",
                 "facts": boq_facts,
-                "evidence": {"locator": "boq_wbs_cpm.summary"},
+                "evidence": {
+                    "locator": "boq_wbs_cpm.summary",
+                    "derivation_receipt": derivation_receipt,
+                },
             }
         )
 
@@ -562,7 +1044,11 @@ def build_project_fact_ledger_from_inputs(
                 "evidence": {"locator": "payload.system_default_project_facts"},
             }
         )
-    return build_project_fact_ledger(sources)
+    ledger = build_project_fact_ledger(sources)
+    ledger.pop("ledger_digest", None)
+    ledger["project_id"] = project_id or None
+    ledger["ledger_digest"] = _sha256(ledger)
+    return ledger
 
 
 def project_fact_prompt_requirements(ledger: Mapping[str, Any]) -> list[str]:
@@ -579,6 +1065,24 @@ def project_fact_prompt_requirements(ledger: Mapping[str, Any]) -> list[str]:
         if status not in FORMAL_ACCEPTED_STATUSES:
             continue
         value = row.get("value")
+        if (
+            field == "quality_threshold"
+            and isinstance(value, Mapping)
+            and value.get("mode") == "process_bound"
+        ):
+            items = value.get("items") if isinstance(value.get("items"), list) else []
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                lines.append(
+                    "工序质量阈值："
+                    f"工序={item.get('process')}；指标={item.get('metric')}；"
+                    f"判定={item.get('operator')}{item.get('value')}"
+                    f"{item.get('unit') or ''}"
+                    f"【状态:{item.get('status')};来源:{item.get('source')};"
+                    f"证据:{item.get('locator')}】"
+                )
+            continue
         if isinstance(value, list):
             rendered = "→".join(str(x) for x in value)
         elif isinstance(value, Mapping):

@@ -11,7 +11,7 @@ from backend.zhifei_autoplan.boq_focus_policy import (
     normalize_boq_focus_items,
     normalize_boq_focus_name,
 )
-from backend.zhifei_autoplan.evidence import best_ingested_hit
+from backend.zhifei_autoplan.evidence import best_drawing_hit, best_ingested_hit
 from backend.zhifei_autoplan.project_fact_ledger import (
     FORMAL_ACCEPTED_STATUSES,
     validate_project_fact_ledger,
@@ -39,6 +39,12 @@ _STOP_TOKENS = {
     "环保",
 }
 _EVIDENCE_SRC_RE = re.compile(r"【证据:(?P<src>[^】]{2,200})】")
+_FULL_DRAWING_LOCATOR_RE = re.compile(
+    r"^(?P<filename>.+)#p(?P<page>[1-9]\d*)_(?P<sha256>[0-9a-fA-F]{64})@(?P<offset>\d+)$"
+)
+_DRAWING_LOCATOR_LINE_RE = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)图纸定位：[^\r\n]*(?P<newline>\r?\n|$)"
+)
 _HAZARDOUS_MATERIAL_BASELINE_MARKER = "【危险品材料统一管理基线】"
 _PENDING_QUANT_CONTROLS = {
     "频次": "待依据经批准项目制度确认",
@@ -62,7 +68,16 @@ def _format_fact_value(fact: dict[str, Any]) -> str:
     return f"{value}【证据:{locator}】" if value and locator else value
 
 
-def _source_bound_quant_controls(project_fact_ledger: dict[str, Any] | None) -> dict[str, str]:
+def _without_evidence_annotations(value: Any) -> str:
+    return _EVIDENCE_SRC_RE.sub("", str(value or "")).strip()
+
+
+def _source_bound_quant_controls(
+    project_fact_ledger: dict[str, Any] | None,
+    *,
+    focus_item: str = "",
+    process_hint: str = "",
+) -> dict[str, str]:
     """Use only formally accepted project facts; never promote registry defaults."""
 
     controls = dict(_PENDING_QUANT_CONTROLS)
@@ -77,7 +92,6 @@ def _source_bound_quant_controls(project_fact_ledger: dict[str, Any] | None) -> 
     )
     bindings = {
         "risk_inspection_frequency": "频次",
-        "quality_threshold": "阈值",
         "deviation_action_deadline": "偏差处置时限",
     }
     for field, label in bindings.items():
@@ -89,6 +103,51 @@ def _source_bound_quant_controls(project_fact_ledger: dict[str, Any] | None) -> 
         rendered = _format_fact_value(fact)
         if rendered:
             controls[label] = rendered
+
+    quality_fact = facts.get("quality_threshold")
+    if not isinstance(quality_fact, dict):
+        return controls
+    if str(quality_fact.get("status") or "").strip() not in FORMAL_ACCEPTED_STATUSES:
+        return controls
+    bundle = quality_fact.get("value")
+    if (
+        not isinstance(bundle, dict)
+        or str(bundle.get("mode") or "").strip().lower() != "process_bound"
+    ):
+        return controls
+    target_keys = {
+        key
+        for key in (
+            boq_focus_name_key(focus_item),
+            boq_focus_name_key(process_hint),
+        )
+        if key
+    }
+    if not target_keys:
+        return controls
+    rendered_thresholds: list[str] = []
+    rows = bundle.get("items") if isinstance(bundle.get("items"), list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "").strip() not in FORMAL_ACCEPTED_STATUSES:
+            continue
+        if boq_focus_name_key(row.get("process")) not in target_keys:
+            continue
+        source = str(row.get("source") or "").strip()
+        locator = str(row.get("locator") or "").strip()
+        metric = str(row.get("metric") or "").strip()
+        operator = str(row.get("operator") or "").strip()
+        value = row.get("value")
+        value_text = "" if value is None else str(value).strip()
+        unit = str(row.get("unit") or "").strip()
+        if not source or not locator or not metric or not operator or not value_text:
+            continue
+        rendered_thresholds.append(
+            f"{metric}{operator}{value_text}{unit}【证据:{locator}】"
+        )
+    if rendered_thresholds:
+        controls["阈值"] = "；".join(dict.fromkeys(rendered_thresholds))
     return controls
 
 
@@ -168,6 +227,71 @@ def _evidence_has_any(text: str, names_set: set[str]) -> bool:
         if base in names_set:
             return True
     return False
+
+
+def _focus_drawing_binding_from_hit(
+    hit: dict[str, Any] | None,
+    *,
+    focus_item: str,
+    chapter: str,
+    project_id: str,
+) -> dict[str, Any] | None:
+    """Preserve the reversible hit contract for the formal cross-index gate."""
+
+    if not isinstance(hit, dict):
+        return None
+    locator = str(hit.get("locator") or "").strip()
+    match = _FULL_DRAWING_LOCATOR_RE.fullmatch(locator)
+    if not match:
+        return None
+    filename = str(hit.get("filename") or "").strip()
+    sha256 = str(hit.get("sha256") or "").strip().lower()
+    try:
+        page = int(hit.get("page"))
+        offset = int(hit.get("offset"))
+    except (TypeError, ValueError):
+        return None
+    if (
+        filename != str(match.group("filename") or "").strip()
+        or sha256 != str(match.group("sha256") or "").lower()
+        or page != int(match.group("page"))
+        or offset != int(match.group("offset"))
+        or not str(hit.get("page_boundary_status") or "").startswith("reliable_")
+        or not isinstance(hit.get("match_window"), dict)
+    ):
+        return None
+
+    normalized_item = normalize_boq_focus_name(focus_item)
+    normalized_chapter = str(chapter or "").strip()
+    normalized_project = str(project_id or "").strip()
+    if not normalized_item or not normalized_chapter or not normalized_project:
+        return None
+    return {
+        "focus_item": normalized_item,
+        "chapter": normalized_chapter,
+        "project_id": normalized_project,
+        "locator": locator,
+        "filename": filename,
+        "sha256": sha256,
+        "page": page,
+        "offset": offset,
+        "snippet": hit.get("snippet"),
+        "matched_token": hit.get("matched_token"),
+        "matched_text": hit.get("matched_text"),
+        "match_start": hit.get("match_start"),
+        "match_end": hit.get("match_end"),
+        "match_window": dict(hit.get("match_window") or {}),
+        "page_text_sha256": hit.get("page_text_sha256"),
+        "page_summary": hit.get("page_summary"),
+        "page_boundary_status": hit.get("page_boundary_status"),
+        "binding_basis": "focus_item_specific_extract_hit",
+        "source_relation": {
+            "type": "boq_focus_item_drawing",
+            "focus_item": normalized_item,
+            "chapter": normalized_chapter,
+            "project_id": normalized_project,
+        },
+    }
 
 
 def _item_is_closed_in_text(name: str, text: str, window: int = 420, max_mentions: int = 10) -> bool:
@@ -403,21 +527,36 @@ def _build_focus_card(
             verify_parts.append("材料消耗与经批准定额逐项核对并形成盘点记录")
         verify = "+".join(verify_parts[:4])
 
-    operational_fields = (
-        f"；频次={quant['频次']}；阈值={quant['阈值']}；责任岗位=质量员+施工员"
-        f"；记录=《重点项过程检查台账》；偏差处置时限={quant['偏差处置时限']}"
+    operational_frequency = _without_evidence_annotations(quant["频次"])
+    operational_threshold = _without_evidence_annotations(quant["阈值"])
+    operational_deadline = _without_evidence_annotations(
+        quant["偏差处置时限"]
     )
     rline = (
         f"风险：{risk}；控制：{control}；验证：{verify}"
-        f"{operational_fields}。【证据:{evidence_src}】"
+        f"；过程控制频次（{name}）={operational_frequency}"
+        f"；过程控制阈值（{name}）={operational_threshold}"
+        f"；过程责任岗位（{name}）=质量员+施工员"
+        f"；过程记录（{name}）=《重点项过程检查台账》"
+        f"；过程闭环（{name}）偏差处置时限={operational_deadline}"
+        f"。【证据:{evidence_src}】"
     )
     trace_line = (
         f"风险：{name}的批次、构件或验收记录无法反查；"
         f"控制：{name}在进场、施工、验收三阶段使用同一清单编码并逐批核对；"
         f"验证：逐批反查{name}编码且按已确认阈值验收"
-        f"{operational_fields}。【证据:{evidence_src}】"
+        f"；追溯核验频次（{name}）={operational_frequency}"
+        f"；追溯验收阈值（{name}）={operational_threshold}"
+        f"；追溯责任岗位（{name}）=质量员+材料员"
+        f"；追溯记录（{name}）=《重点项编码追溯台账》"
+        f"；追溯闭环（{name}）偏差处置时限={operational_deadline}"
+        f"。【证据:{evidence_src}】"
     )
-    parts = [f"- {head}", f"  {qline}"]
+    parts = [
+        f"- {head}",
+        f"  {qline}",
+        f"  闭环参数（{name}）：偏差处置时限={quant['偏差处置时限']}。",
+    ]
     if dwg_line:
         parts.append(f"  {dwg_line}")
     if std_line:
@@ -495,7 +634,7 @@ def ensure_boq_focus_item_cards(
     # Keep ``params`` in the call shape for compatibility, but a mutable
     # registry is not an authoritative project-fact source.
     _ = params
-    quant = _source_bound_quant_controls(project_fact_ledger)
+    baseline_quant = _source_bound_quant_controls(project_fact_ledger)
     details = _parse_focus_lines(boq_focus.get("lines") or [])
     items = (boq_data or {}).get("items") if isinstance(boq_data, dict) else None
     items = items if isinstance(items, list) else []
@@ -588,6 +727,7 @@ def ensure_boq_focus_item_cards(
 
     injected: list[str] = []
     changed = False
+    drawing_hits_by_key: dict[str, dict[str, Any]] = {}
 
     host_idx = _pick_host_section_index(sections)
     blocks_by_idx: dict[int, list[str]] = {}
@@ -595,26 +735,37 @@ def ensure_boq_focus_item_cards(
     hazardous_baseline_target_idx: int | None = None
     for name in focus_items:
         process_hint = _process_hint_for_item(name)
+        quant = _source_bound_quant_controls(
+            project_fact_ledger,
+            focus_item=name,
+            process_hint=process_hint,
+        )
         cats = _cats_for(name)
         is_hazardous_focus = "危险品材料" in set(cats)
         hazardous_focus_present = hazardous_focus_present or is_hazardous_focus
         dwg_loc = None
+        dwg_hit = None
         std_loc = None
         if project_id and drawing_names:
             try:
-                hit = best_ingested_hit(
-                    f"{name} {process_hint} 图纸",
+                hit = best_drawing_hit(
+                    f"{name} {process_hint}",
                     limit=10,
                     prefer_filename_keywords=["图", "图纸", "施工图", "平面", "剖面", "大样", "节点"],
                     project_id=project_id,
                     require_tags=["drawing"],
                     exclude_tags=["logo"],
                 )
-                if hit and hit.get("locator"):
+                if hit and _FULL_DRAWING_LOCATOR_RE.fullmatch(str(hit.get("locator") or "").strip()):
+                    dwg_hit = dict(hit)
                     dwg_loc = str(hit.get("locator"))
+                    item_key = boq_focus_name_key(name)
+                    if item_key:
+                        drawing_hits_by_key[item_key] = dwg_hit
             # Evidence lookup failures leave the required drawing locator
             # absent, which is reported by the formal closure gate.
             except Exception:  # noqa: BLE001
+                dwg_hit = None
                 dwg_loc = None
         if project_id and standard_names:
             try:
@@ -644,8 +795,22 @@ def ensure_boq_focus_item_cards(
                 block = txt[bs:be]
                 inserts: list[str] = []
                 if dwg_loc and drawing_names:
-                    dset = {str(x).strip() for x in drawing_names if str(x).strip()}
-                    if ("图纸定位：" not in block) and (not _evidence_has_any(block, dset)):
+                    locator_line = _DRAWING_LOCATOR_LINE_RE.search(block)
+                    if locator_line and dwg_loc not in locator_line.group(0):
+                        replacement = (
+                            f"{locator_line.group('indent')}图纸定位：{dwg_loc}；"
+                            f"校核点=构件位置/尺寸/标高/做法。【证据:{dwg_loc}】"
+                            f"{locator_line.group('newline')}"
+                        )
+                        block = (
+                            block[: locator_line.start()]
+                            + replacement
+                            + block[locator_line.end() :]
+                        )
+                        txt = txt[:bs] + block + txt[be:]
+                        sec["content"] = txt
+                        changed = True
+                    elif not locator_line and dwg_loc not in block:
                         inserts.append(f"  图纸定位：{dwg_loc}；校核点=构件位置/尺寸/标高/做法。【证据:{dwg_loc}】")
                 if std_loc and standard_names:
                     sset = {str(x).strip() for x in standard_names if str(x).strip()}
@@ -655,6 +820,20 @@ def ensure_boq_focus_item_cards(
                     sec["content"] = txt[:le] + "\n" + "\n".join(inserts) + txt[le:]
                     changed = True
                 break
+
+        # Card identity and typed-evidence closure are separate concerns.  A
+        # missing drawing/standard hit must keep formal delivery on HOLD, but
+        # rerunning deterministic supplementation must never append a second
+        # card for the same BoQ item.
+        existing_card_section_idx: int | None = None
+        for section_idx, sec in enumerate(sections):
+            if _find_focus_card_span(str(sec.get("content") or ""), name):
+                existing_card_section_idx = section_idx
+                break
+        if existing_card_section_idx is not None:
+            if is_hazardous_focus and hazardous_baseline_target_idx is None:
+                hazardous_baseline_target_idx = existing_card_section_idx
+            continue
 
         # Search other sections to avoid duplication.
         already_ok = False
@@ -733,7 +912,7 @@ def ensure_boq_focus_item_cards(
         target = sections[target_idx]
         baseline = _build_hazardous_material_baseline(
             evidence_src=evidence_src,
-            quant=quant,
+            quant=baseline_quant,
         )
         target_text = str(target.get("content") or "").rstrip()
         target["content"] = (target_text + "\n\n" + baseline).strip() + "\n"
@@ -751,5 +930,47 @@ def ensure_boq_focus_item_cards(
             text = (text.rstrip() + "\n\n" + "\n".join(blocks) + "\n").strip() + "\n"
         sec["content"] = text
         changed = True
+
+    # Keep the full page-window identity beside the human-readable card.  The
+    # cross-index consumes this structure and independently reverse-validates
+    # it against the current drawing catalog; a locator string alone is never
+    # promoted to formal evidence.
+    if project_id:
+        focus_drawing_bindings: list[dict[str, Any]] = []
+        for name in focus_items:
+            item_key = boq_focus_name_key(name)
+            hit = drawing_hits_by_key.get(item_key)
+            if not hit:
+                continue
+            chapter = ""
+            for sec in sections:
+                section_text = str(sec.get("content") or "")
+                if _find_focus_card_span(section_text, name):
+                    chapter = str(sec.get("title") or "").strip()
+                    break
+            if not chapter:
+                for sec in sections:
+                    if boq_focus_name_in_text(name, str(sec.get("content") or "")):
+                        chapter = str(sec.get("title") or "").strip()
+                        break
+            binding = _focus_drawing_binding_from_hit(
+                hit,
+                focus_item=name,
+                chapter=chapter,
+                project_id=str(project_id),
+            )
+            if binding:
+                focus_drawing_bindings.append(binding)
+
+        existing_bindings = (
+            boq_focus.get("drawing_bindings")
+            if isinstance(boq_focus.get("drawing_bindings"), list)
+            else []
+        )
+        if (
+            focus_drawing_bindings or "drawing_bindings" in boq_focus
+        ) and existing_bindings != focus_drawing_bindings:
+            boq_focus["drawing_bindings"] = focus_drawing_bindings
+            changed = True
 
     return changed, injected

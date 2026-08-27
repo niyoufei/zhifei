@@ -13,6 +13,49 @@ from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
 _FORMAL_FACT_STATUSES = frozenset({"verified", "derived", "approved"})
 _SOURCE_NEUTRAL_PARAMETER = "待依据图纸/规范/批准制度确认"
+_CONSTRAINT_PLACEHOLDERS = {
+    "frequency": "频次待依据项目事实台账/批准制度确认",
+    "deadline": "时限待依据项目事实台账/批准制度确认",
+    "threshold": "阈值待依据项目事实台账/图纸规范确认",
+}
+_CONSTRAINT_PATTERNS = (
+    (
+        "frequency",
+        re.compile(
+            r"(?<![0-9A-Za-z])(?:"
+            r"每(?:日|天|周|月|季度|班|工序|批(?:次)?|段|车|单)\s*"
+            r"\d+(?:\.\d+)?\s*次|"
+            r"\d+(?:\.\d+)?\s*次\s*(?:[/／]\s*"
+            r"(?:日|天|周|月|季度|班|工序|批(?:次)?|段|车|单)|"
+            r"每\s*(?:日|天|周|月|季度|班|工序|批(?:次)?|段|车|单))"
+            r")(?![0-9A-Za-z])",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "deadline",
+        re.compile(
+            r"(?<![0-9A-Za-z])(?:≤|≥|<=|>=|<|>)?\s*"
+            r"\d+(?:\.\d+)?\s*"
+            r"(?:hours?|hrs?|h|小时|minutes?|mins?|min|分钟)"
+            r"(?:内|以内)?(?![0-9A-Za-z])",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "threshold",
+        re.compile(
+            r"(?<![0-9A-Za-z])(?:≤|≥|<=|>=|<|>)\s*"
+            r"\d+(?:\.\d+)?\s*"
+            r"(?:%|％|mm|cm|dB|MPa|kPa|Pa|℃|°C|m|天|日)?"
+            r"(?![0-9A-Za-z])",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_PROTECTED_TRACE_MARKER_RE = re.compile(
+    r"(【(?:证据|要求|要求绑定|经验值):[^】]*】)"
+)
 
 
 def _source_bound_project_facts(context: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -50,6 +93,11 @@ def _source_bound_project_facts(context: dict[str, Any]) -> dict[str, dict[str, 
 def _render_fact_value(facts: dict[str, dict[str, Any]], field: str) -> str:
     row = facts.get(field) if isinstance(facts.get(field), dict) else {}
     value = row.get("value")
+    # Structured facts (notably process-bound quality thresholds) must never
+    # be flattened into a Python/JSON dictionary string and reused as one
+    # project-wide scalar.  They are rendered item-by-item below.
+    if isinstance(value, (dict, list, tuple)):
+        return ""
     if value is None or str(value).strip() == "":
         return ""
     rendered = str(value).strip()
@@ -59,9 +107,80 @@ def _render_fact_value(facts: dict[str, dict[str, Any]], field: str) -> str:
     return rendered
 
 
+def _process_bound_quality_items(
+    facts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    row = facts.get("quality_threshold")
+    value = row.get("value") if isinstance(row, dict) else None
+    if not isinstance(value, dict) or value.get("mode") != "process_bound":
+        return []
+    accepted: list[dict[str, Any]] = []
+    for raw in value.get("items") if isinstance(value.get("items"), list) else []:
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("status") or "").strip().lower()
+        evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+        locator = str(raw.get("locator") or evidence.get("locator") or "").strip()
+        process = str(raw.get("process") or "").strip()
+        metric = str(raw.get("metric") or "").strip()
+        value_item = raw.get("value")
+        if (
+            status not in _FORMAL_FACT_STATUSES
+            or not locator
+            or not process
+            or not metric
+            or value_item in (None, "", [], {})
+        ):
+            continue
+        item = dict(raw)
+        item["locator"] = locator
+        accepted.append(item)
+    return accepted
+
+
+def _quality_item_line(item: dict[str, Any]) -> str:
+    process = str(item.get("process") or "").strip()
+    metric = str(item.get("metric") or "").strip()
+    operator = str(item.get("operator") or "=").strip()
+    value = str(item.get("value") or "").strip()
+    unit = str(item.get("unit") or "").strip()
+    locator = str(item.get("locator") or "").strip()
+    return f"{process}：{metric}{operator}{value}{unit}【证据:{locator}】"
+
+
+def _chapter_uses_quality_facts(title: str) -> bool:
+    return any(
+        token in str(title or "")
+        for token in ("质量", "验收", "整改", "偏差", "施工方法", "施工工艺", "施工方案", "主要施工")
+    )
+
+
+def _quality_items_for_chapter(
+    title: str,
+    facts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    items = _process_bound_quality_items(facts)
+    if not items:
+        return []
+    chapter = re.sub(r"\s+", "", str(title or ""))
+    if _chapter_uses_quality_facts(chapter):
+        return items
+    matched = []
+    for item in items:
+        process = re.sub(r"\s+", "", str(item.get("process") or ""))
+        if process and (process in chapter or chapter in process):
+            matched.append(item)
+    return matched
+
+
 def _fallback_defaults(
     facts: dict[str, dict[str, Any]],
-) -> tuple[dict[str, str], dict[str, str], dict[str, str], set[str]]:
+) -> tuple[
+    dict[str, str],
+    dict[str, str],
+    dict[str, str],
+    dict[str, set[str]],
+]:
     frequency = _render_fact_value(facts, "risk_inspection_frequency")
     threshold = _render_fact_value(facts, "quality_threshold")
     deadline = _render_fact_value(facts, "deviation_action_deadline")
@@ -74,7 +193,10 @@ def _fallback_defaults(
         "阈值": threshold or neutral,
         "间距": neutral,
         "厚度": neutral,
-        "时长": deadline or neutral,
+        # A deviation-remediation deadline is not a generic construction
+        # duration.  Reusing it for every chapter would turn a source-bound
+        # quality procedure into a fabricated production parameter.
+        "时长": neutral,
         "人数": resource_peak or neutral,
         "设备型号": neutral,
     }
@@ -91,22 +213,97 @@ def _fallback_defaults(
         "昼间噪声阈值": neutral,
         "夜间噪声阈值": neutral,
     }
-    accepted_values = {
-        value
-        for value in (
-            frequency,
-            threshold,
-            deadline,
-            resource_peak,
-            planned_duration,
-            critical_interval,
-        )
-        if value
+    authorizations = {
+        "frequency": _constraint_variants(frequency, category="frequency"),
+        "deadline": _constraint_variants(deadline, category="deadline"),
+        "threshold": _constraint_variants(threshold, category="threshold"),
+        "all": {
+            _canonical_constraint_token(value)
+            for value in (
+                frequency,
+                threshold,
+                deadline,
+                resource_peak,
+                planned_duration,
+                critical_interval,
+            )
+            if value
+        },
     }
-    return quant, card, qse, accepted_values
+    for item in _process_bound_quality_items(facts):
+        quality_value = (
+            f"{item.get('operator') or '='}{item.get('value')}"
+            f"{item.get('unit') or ''}"
+        )
+        authorizations["threshold"].update(
+            _constraint_variants(quality_value, category="threshold")
+        )
+        authorizations["all"].add(
+            _canonical_constraint_token(quality_value)
+        )
+    return quant, card, qse, authorizations
 
 
-def _neutralize_fallback_defaults(text: str, accepted_values: set[str]) -> str:
+def _canonical_constraint_token(value: Any) -> str:
+    text = re.sub(r"\s+", "", str(value or "")).lower()
+    return (
+        text.replace("／", "/")
+        .replace("％", "%")
+        .replace("<=", "≤")
+        .replace("=<", "≤")
+        .replace(">=", "≥")
+        .replace("=>", "≥")
+        .replace("hours", "h")
+        .replace("hour", "h")
+        .replace("hrs", "h")
+        .replace("hr", "h")
+        .replace("小时", "h")
+        .replace("minutes", "min")
+        .replace("minute", "min")
+        .replace("mins", "min")
+        .replace("分钟", "min")
+        .replace("/天", "/日")
+    )
+
+
+def _constraint_variants(value: Any, *, category: str) -> set[str]:
+    text = str(value or "")
+    variants = {_canonical_constraint_token(text)} if text.strip() else set()
+    for rule_category, pattern in _CONSTRAINT_PATTERNS:
+        if rule_category != category:
+            continue
+        variants.update(
+            _canonical_constraint_token(match.group(0))
+            for match in pattern.finditer(text)
+        )
+    return {value for value in variants if value}
+
+
+def _constraint_is_authorized(
+    value: str,
+    *,
+    category: str,
+    authorizations: dict[str, set[str]],
+) -> bool:
+    token = _canonical_constraint_token(value)
+    return bool(token and token in authorizations.get(category, set()))
+
+
+def _legacy_value_is_authorized(
+    legacy: str,
+    authorizations: dict[str, set[str]],
+) -> bool:
+    normalized = _canonical_constraint_token(legacy)
+    return any(
+        accepted and (normalized in accepted or accepted in normalized)
+        for accepted in authorizations.get("all", set())
+    )
+
+
+def _neutralize_fallback_defaults(
+    text: str,
+    authorizations: dict[str, set[str]],
+) -> str:
     replacements = {
         "20t挖机1台": "设备型号待依据施工方案/批准资源计划确认",
         "20t挖机": "设备型号待依据施工方案/批准资源计划确认",
@@ -133,16 +330,41 @@ def _neutralize_fallback_defaults(text: str, accepted_values: set[str]) -> str:
     result = str(text or "")
     for legacy in sorted(replacements, key=len, reverse=True):
         replacement = replacements[legacy]
-        if any(
-            legacy in value or value in legacy for value in accepted_values
-        ):
+        if _legacy_value_is_authorized(legacy, authorizations):
             continue
         result = re.sub(
             rf"(?<!\d){re.escape(legacy)}(?!\d)",
             replacement,
             result,
         )
-    return result
+
+    def _neutralize_segment(segment: str) -> str:
+        sanitized = segment
+        for category, pattern in _CONSTRAINT_PATTERNS:
+            placeholder = _CONSTRAINT_PLACEHOLDERS[category]
+
+            def _replacement(
+                match: re.Match[str],
+                bound_category: str = category,
+                bound_placeholder: str = placeholder,
+            ) -> str:
+                value = match.group(0)
+                if _constraint_is_authorized(
+                    value,
+                    category=bound_category,
+                    authorizations=authorizations,
+                ):
+                    return value
+                return bound_placeholder
+
+            sanitized = pattern.sub(_replacement, sanitized)
+        return sanitized
+
+    parts = _PROTECTED_TRACE_MARKER_RE.split(result)
+    return "".join(
+        part if _PROTECTED_TRACE_MARKER_RE.fullmatch(part) else _neutralize_segment(part)
+        for part in parts
+    )
 
 
 def compact_chapter_summary(title: str, content: Any, *, maximum: int = 800) -> str:
@@ -521,14 +743,39 @@ class SectionWriter:
             "quality_threshold": "质量阈值",
             "deviation_action_deadline": "偏差处置时限",
         }
-        accepted_lines = [
-            f"{label}={_render_fact_value(accepted_facts, field)}"
-            for field, label in fact_labels.items()
-            if _render_fact_value(accepted_facts, field)
-        ]
+        quality_context = _chapter_uses_quality_facts(title)
+        accepted_lines = []
+        for field, label in fact_labels.items():
+            if field in {"quality_threshold", "deviation_action_deadline"} and not quality_context:
+                continue
+            rendered = _render_fact_value(accepted_facts, field)
+            if rendered:
+                accepted_lines.append(f"{label}={rendered}")
         if accepted_lines:
             common_param_lines.append("已核验项目参数：" + "；".join(accepted_lines))
         chapter_param_lines = []
+        quality_items = _quality_items_for_chapter(title, accepted_facts)
+        if quality_items:
+            chapter_param_lines.append(
+                "工序绑定质量阈值（只能用于对应工序，禁止泛化为全项目统一阈值）："
+            )
+            chapter_param_lines.extend(
+                f"  - {_quality_item_line(item)}" for item in quality_items
+            )
+        deadline_fact = accepted_facts.get("deviation_action_deadline")
+        if quality_context and isinstance(deadline_fact, dict):
+            deadline = _render_fact_value(accepted_facts, "deviation_action_deadline")
+            evidence = (
+                deadline_fact.get("evidence")
+                if isinstance(deadline_fact.get("evidence"), dict)
+                else {}
+            )
+            deadline_locator = str(evidence.get("locator") or "").strip()
+            if deadline and deadline_locator:
+                chapter_param_lines.append(
+                    "不合格项整改闭环：整改时限="
+                    f"{deadline}【证据:{deadline_locator}】；该时限不得作为一般工序时长。"
+                )
         if labor_hint and _render_fact_value(accepted_facts, "resource_peak"):
             skill_ratio = labor_hint.get("skill_ratio") if isinstance(labor_hint.get("skill_ratio"), dict) else {}
             trade_ratio = labor_hint.get("trade_ratio") if isinstance(labor_hint.get("trade_ratio"), dict) else {}
@@ -588,9 +835,13 @@ class SectionWriter:
                 rendered = str(value or "")
             return rendered[:maximum]
 
+        chapter_facts = dict(accepted_facts)
+        if not quality_context:
+            chapter_facts.pop("quality_threshold", None)
+            chapter_facts.pop("deviation_action_deadline", None)
         project_fact_text = (
-            _json_block({"facts": accepted_facts})
-            if accepted_facts
+            _json_block({"facts": chapter_facts})
+            if chapter_facts
             else "（无已核验项目事实）"
         )
         word_format_rules = context.get("word_format_rules")
@@ -774,6 +1025,28 @@ Word排版规范：{word_format_text}
         )
         # Keep a stable heading for downstream checks/tests.
         lines.append("【量化指标】" + metric_line)
+        quality_items = _quality_items_for_chapter(title, accepted_facts)
+        for item in quality_items:
+            lines.append("【工序绑定质量阈值】" + _quality_item_line(item))
+        if _chapter_uses_quality_facts(title):
+            deadline_fact = accepted_facts.get("deviation_action_deadline")
+            if isinstance(deadline_fact, dict):
+                deadline = _render_fact_value(
+                    accepted_facts, "deviation_action_deadline"
+                )
+                deadline_evidence = (
+                    deadline_fact.get("evidence")
+                    if isinstance(deadline_fact.get("evidence"), dict)
+                    else {}
+                )
+                deadline_locator = str(
+                    deadline_evidence.get("locator") or ""
+                ).strip()
+                if deadline and deadline_locator:
+                    lines.append(
+                        "【不合格项整改闭环】整改时限="
+                        f"{deadline}【证据:{deadline_locator}】；不得将该时限用作一般工序时长。"
+                    )
         for exp in [str(x).strip() for x in (context.get("graph_experience_values") or []) if str(x).strip()][:3]:
             lines.append(f"【经验值:同类工程】{exp}")
 

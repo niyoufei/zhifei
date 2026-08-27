@@ -58,13 +58,39 @@ _GENERIC_REGISTRY_DEFAULT_PATTERNS = {
     "excavator_allocation": r"(?<!\d)20\s*t\s*挖机\s*[（(]?\s*1\s*台\s*[）)]?",
     "work_segment_duration": r"(?<!\d)4\s*h\s*/\s*作业段(?!\w)",
 }
-_TRACEABLE_LOCATOR_RE = re.compile(
-    r"#p\d+_[0-9a-f]{6,}@\d+|(?:approved|批准|审查合格|reviewed_design)",
+_FULL_PARAMETER_LOCATOR_RE = re.compile(
+    r"^(?P<file>[^#\r\n]+\.(?:pdf|docx?|xlsx?|xls|csv|ods|txt|dwg))"
+    r"#p(?P<page>[1-9]\d*)_(?P<sha256>[0-9a-fA-F]{64})@(?P<offset>\d+)$",
     re.IGNORECASE,
+)
+_FILE_PARAMETER_LOCATOR_RE = re.compile(
+    r"^[^#\r\n]+\.(?:pdf|docx?|xlsx?|xls|csv|ods|txt|dwg)(?:#|::).+",
+    re.IGNORECASE,
+)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+_APPROVED_AT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+_APPROVAL_RECEIPT_FIELDS = (
+    "receipt_id",
+    "status",
+    "project_id",
+    "field",
+    "value_digest",
+    "summary",
+    "approved_by",
+    "approved_at",
+)
+_DERIVATION_CHECKS = frozenset(
+    {
+        "productivity_units_verified",
+        "resource_allocations_verified",
+        "dependencies_verified",
+    }
 )
 
 
-def _canonical_digest(value: dict[str, Any]) -> str:
+def _canonical_digest(value: Any) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -90,6 +116,207 @@ def _same_value(left: Any, right: Any) -> bool:
     return _canonical_digest({"value": left}) == _canonical_digest({"value": right})
 
 
+def _evidence_digest_valid(evidence: dict[str, Any]) -> bool:
+    claimed = str(evidence.get("evidence_digest") or "").strip().lower()
+    payload = {key: value for key, value in evidence.items() if key != "evidence_digest"}
+    return bool(_SHA256_RE.fullmatch(claimed) and claimed == _canonical_digest(payload))
+
+
+def _file_evidence_errors(
+    evidence: dict[str, Any], *, require_text_anchor: bool
+) -> list[str]:
+    errors: list[str] = []
+    locator = str(evidence.get("locator") or "").strip()
+    document_sha256 = str(
+        evidence.get("document_sha256") or evidence.get("source_sha256") or ""
+    ).strip().lower()
+    file_name = str(evidence.get("file_name") or "").strip()
+    locator_file = locator.split("#", 1)[0].split("::", 1)[0]
+    if _FILE_PARAMETER_LOCATOR_RE.fullmatch(locator) is None:
+        errors.append("file_locator_invalid")
+    if _SHA256_RE.fullmatch(document_sha256) is None:
+        errors.append("document_sha256_invalid")
+    if file_name and locator_file != file_name:
+        errors.append("file_name_locator_mismatch")
+    if not _evidence_digest_valid(evidence):
+        errors.append("evidence_digest_invalid")
+    if require_text_anchor:
+        page_text_sha256 = str(evidence.get("page_text_sha256") or "").strip()
+        try:
+            page = int(evidence.get("page"))
+        except (TypeError, ValueError):
+            page = 0
+        has_global_range = False
+        try:
+            start = int(evidence.get("start"))
+            end = int(evidence.get("end"))
+            has_global_range = start >= 0 and end > start
+        except (TypeError, ValueError):
+            pass
+        try:
+            offset = int(evidence.get("offset"))
+            has_offset = offset >= 0
+        except (TypeError, ValueError):
+            has_offset = False
+        if page < 1:
+            errors.append("page_invalid")
+        if _SHA256_RE.fullmatch(page_text_sha256) is None:
+            errors.append("page_text_sha256_invalid")
+        if not has_global_range and not has_offset:
+            errors.append("text_offset_invalid")
+    return errors
+
+
+def _approval_receipt_errors(
+    field: str,
+    fact: dict[str, Any],
+    *,
+    expected_project_id: str,
+) -> list[str]:
+    receipt = (
+        fact.get("approval_receipt")
+        if isinstance(fact.get("approval_receipt"), dict)
+        else {}
+    )
+    errors: list[str] = []
+    if any(not str(receipt.get(key) or "").strip() for key in _APPROVAL_RECEIPT_FIELDS):
+        errors.append("approval_receipt_incomplete")
+        return errors
+    if str(receipt.get("status") or "").strip().lower() != "approved":
+        errors.append("approval_receipt_not_approved")
+    if str(receipt.get("field") or "").strip() != field:
+        errors.append("approval_receipt_field_mismatch")
+    if (
+        not expected_project_id
+        or str(receipt.get("project_id") or "").strip() != expected_project_id
+    ):
+        errors.append("approval_receipt_project_mismatch")
+    expected_value_digest = _canonical_digest(
+        {
+            "field": field,
+            "value": fact.get("value"),
+            "unit": str(fact.get("unit") or "").strip(),
+        }
+    )
+    claimed_value_digest = str(receipt.get("value_digest") or "").strip().lower()
+    if claimed_value_digest != expected_value_digest:
+        errors.append("approval_receipt_value_mismatch")
+    if _APPROVED_AT_RE.fullmatch(str(receipt.get("approved_at") or "").strip()) is None:
+        errors.append("approval_receipt_time_invalid")
+    receipt_payload = {
+        key: receipt.get(key) for key in _APPROVAL_RECEIPT_FIELDS
+    }
+    claimed_receipt_digest = str(receipt.get("receipt_digest") or "").strip().lower()
+    if (
+        _SHA256_RE.fullmatch(claimed_receipt_digest) is None
+        or claimed_receipt_digest != _canonical_digest(receipt_payload)
+    ):
+        errors.append("approval_receipt_digest_invalid")
+    return errors
+
+
+def _derivation_receipt_errors(
+    fact: dict[str, Any], *, expected_project_id: str
+) -> list[str]:
+    evidence = fact.get("evidence") if isinstance(fact.get("evidence"), dict) else {}
+    receipt = (
+        evidence.get("derivation_receipt")
+        if isinstance(evidence.get("derivation_receipt"), dict)
+        else {}
+    )
+    errors: list[str] = []
+    checks = receipt.get("checks") if isinstance(receipt.get("checks"), dict) else {}
+    if receipt.get("ready") is not True or receipt.get("schedule_fact_eligible") is not True:
+        errors.append("derivation_receipt_not_ready")
+    if str(receipt.get("status") or "").strip().lower() not in {"verified", "approved"}:
+        errors.append("derivation_receipt_status_invalid")
+    if (
+        not expected_project_id
+        or str(receipt.get("project_id") or "").strip() != expected_project_id
+    ):
+        errors.append("derivation_receipt_project_mismatch")
+    locator = str(receipt.get("locator") or "").strip()
+    if not locator or locator.startswith(("payload.", "project_fact_sources.")):
+        errors.append("derivation_receipt_locator_invalid")
+    if set(checks) != _DERIVATION_CHECKS or not all(
+        checks.get(name) is True for name in _DERIVATION_CHECKS
+    ):
+        errors.append("derivation_receipt_checks_invalid")
+    if receipt.get("schedule_fact_reasons") not in ([], ()):
+        errors.append("derivation_receipt_reasons_present")
+    payload = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    claimed = str(receipt.get("receipt_digest") or "").strip().lower()
+    if _SHA256_RE.fullmatch(claimed) is None or claimed != _canonical_digest(payload):
+        errors.append("derivation_receipt_digest_invalid")
+    if not _evidence_digest_valid(evidence):
+        errors.append("evidence_digest_invalid")
+    return errors
+
+
+def _formal_fact_source_errors(
+    field: str,
+    fact: dict[str, Any],
+    *,
+    expected_project_id: str,
+) -> list[str]:
+    status = str(fact.get("status") or "").strip().lower()
+    source_type = str(fact.get("source_type") or "").strip().lower()
+    evidence = fact.get("evidence") if isinstance(fact.get("evidence"), dict) else {}
+    errors: list[str] = []
+    if field == "quality_threshold":
+        if source_type == "reviewed_design":
+            expected = _canonical_digest(fact.get("value"))
+            claimed = str(evidence.get("source_sha256") or "").strip().lower()
+            if status != "verified":
+                errors.append("source_status_mismatch")
+            if claimed != expected:
+                errors.append("quality_bundle_digest_mismatch")
+            if not _evidence_digest_valid(evidence):
+                errors.append("evidence_digest_invalid")
+            return errors
+        if source_type in {"approved_resolution", "user_input"}:
+            if status != "approved":
+                errors.append("source_status_mismatch")
+            errors.extend(_file_evidence_errors(evidence, require_text_anchor=False))
+            errors.extend(
+                _approval_receipt_errors(
+                    field,
+                    fact,
+                    expected_project_id=expected_project_id,
+                )
+            )
+            return errors
+        errors.append("formal_source_invalid")
+        return errors
+    if source_type in {"tender", "clarification", "reviewed_design"}:
+        if status != "verified":
+            errors.append("source_status_mismatch")
+        errors.extend(_file_evidence_errors(evidence, require_text_anchor=True))
+    elif source_type == "boq":
+        if status != "derived" or fact.get("source_id") != "boq-deterministic-schedule":
+            errors.append("source_status_mismatch")
+        errors.extend(
+            _derivation_receipt_errors(
+                fact,
+                expected_project_id=expected_project_id,
+            )
+        )
+    elif source_type in {"approved_resolution", "user_input"}:
+        if status != "approved":
+            errors.append("source_status_mismatch")
+        errors.extend(_file_evidence_errors(evidence, require_text_anchor=False))
+        errors.extend(
+            _approval_receipt_errors(
+                field,
+                fact,
+                expected_project_id=expected_project_id,
+            )
+        )
+    else:
+        errors.append("formal_source_invalid")
+    return list(dict.fromkeys(errors))
+
+
 def _normalized_text(value: Any) -> str:
     return (
         re.sub(r"\s+", "", str(value or ""))
@@ -102,6 +329,11 @@ def _normalized_text(value: Any) -> str:
 
 def _fact_value_tokens(field: str, fact: dict[str, Any]) -> list[str]:
     value = fact.get("value")
+    if field == "quality_threshold" and isinstance(value, dict):
+        # Process-bound thresholds are validated item-by-item below.  Treating
+        # the bundle's JSON encoding as a body token would allow a serialized
+        # dictionary to satisfy the formal gate without any usable statement.
+        return []
     if isinstance(value, (list, dict)):
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     else:
@@ -112,6 +344,174 @@ def _fact_value_tokens(field: str, fact: dict[str, Any]) -> list[str]:
     if field == "planned_duration_days" and unit in {"天", "日"}:
         tokens.append(_normalized_text(f"{rendered}日历天"))
     return [token for token in dict.fromkeys(tokens) if token]
+
+
+def _process_quality_bundle_check(fact: dict[str, Any]) -> dict[str, Any]:
+    value = fact.get("value")
+    errors: list[dict[str, str]] = []
+    items_out: list[dict[str, str]] = []
+    if not isinstance(value, dict) or value.get("mode") != "process_bound":
+        return {
+            "ok": False,
+            "errors": [{"item_id": "quality_threshold", "reason": "process_bound_bundle_required"}],
+            "items": [],
+        }
+    raw_items = value.get("items") if isinstance(value.get("items"), list) else []
+    if not raw_items:
+        return {
+            "ok": False,
+            "errors": [{"item_id": "quality_threshold", "reason": "bundle_items_missing"}],
+            "items": [],
+        }
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_items):
+        if not isinstance(raw, dict):
+            errors.append({"item_id": f"item-{index + 1}", "reason": "item_invalid"})
+            continue
+        item_id = str(raw.get("id") or "").strip()
+        process = str(raw.get("process") or "").strip()
+        metric = str(raw.get("metric") or "").strip()
+        operator = str(raw.get("operator") or "").strip()
+        item_value = raw.get("value")
+        unit = str(raw.get("unit") or "").strip()
+        status = str(raw.get("status") or "").strip().lower()
+        source = str(raw.get("source") or "").strip()
+        evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+        locator = str(raw.get("locator") or evidence.get("locator") or "").strip()
+        locator_match = _FULL_PARAMETER_LOCATOR_RE.fullmatch(locator)
+        document_sha256 = str(
+            raw.get("document_sha256") or evidence.get("document_sha256") or ""
+        ).strip().lower()
+        extract_text_sha256 = str(
+            raw.get("extract_text_sha256")
+            or evidence.get("extract_text_sha256")
+            or ""
+        ).strip().lower()
+        page_text_sha256 = str(
+            raw.get("page_text_sha256") or evidence.get("page_text_sha256") or ""
+        ).strip().lower()
+        match_text_sha256 = str(
+            raw.get("match_text_sha256") or evidence.get("match_text_sha256") or ""
+        ).strip().lower()
+        reasons: list[str] = []
+        if not item_id:
+            reasons.append("id_missing")
+        elif item_id in seen:
+            reasons.append("id_duplicate")
+        else:
+            seen.add(item_id)
+        if not process:
+            reasons.append("process_missing")
+        if not metric:
+            reasons.append("metric_missing")
+        if operator not in {"=", ">=", "≥", "<=", "≤", ">", "<"}:
+            reasons.append("operator_invalid")
+        if item_value in (None, "", [], {}):
+            reasons.append("value_missing")
+        if status not in _FORMAL_PARAMETER_STATUSES:
+            reasons.append("status_invalid")
+        if not source:
+            reasons.append("source_missing")
+        if locator_match is None:
+            reasons.append("locator_invalid")
+        if _SHA256_RE.fullmatch(document_sha256) is None:
+            reasons.append("document_sha256_invalid")
+        if _SHA256_RE.fullmatch(extract_text_sha256) is None:
+            reasons.append("extract_text_sha256_invalid")
+        if _SHA256_RE.fullmatch(page_text_sha256) is None:
+            reasons.append("page_text_sha256_invalid")
+        if _SHA256_RE.fullmatch(match_text_sha256) is None:
+            reasons.append("match_text_sha256_invalid")
+        try:
+            page = int(raw.get("page", evidence.get("page")))
+            offset = int(raw.get("offset", evidence.get("offset")))
+            end = int(raw.get("end", evidence.get("end")))
+            page_start_offset = int(
+                raw.get("page_start_offset", evidence.get("page_start_offset"))
+            )
+            page_end_offset = int(
+                raw.get("page_end_offset", evidence.get("page_end_offset"))
+            )
+            page_match_start = int(
+                raw.get("page_match_start", evidence.get("page_match_start"))
+            )
+            page_match_end = int(
+                raw.get("page_match_end", evidence.get("page_match_end"))
+            )
+        except (TypeError, ValueError):
+            reasons.append("reversible_offsets_invalid")
+        else:
+            if (
+                locator_match is None
+                or page != int(locator_match.group("page"))
+                or offset != int(locator_match.group("offset"))
+                or document_sha256 != locator_match.group("sha256").lower()
+            ):
+                reasons.append("locator_evidence_mismatch")
+            if (
+                end <= offset
+                or page_start_offset < 0
+                or page_end_offset <= page_start_offset
+                or not page_start_offset <= offset < end <= page_end_offset
+                or page_match_start != offset - page_start_offset
+                or page_match_end != end - page_start_offset
+                or page_match_end <= page_match_start
+            ):
+                reasons.append("reversible_offsets_invalid")
+        if reasons:
+            errors.extend(
+                {"item_id": item_id or f"item-{index + 1}", "reason": reason}
+                for reason in reasons
+            )
+            continue
+        rendered_value = f"{operator}{item_value}{unit}"
+        items_out.append(
+            {
+                "id": item_id,
+                "process": process,
+                "metric": metric,
+                "value_token": _normalized_text(rendered_value),
+                "locator": _normalized_text(locator),
+            }
+        )
+    return {"ok": not errors and len(items_out) == len(raw_items), "errors": errors, "items": items_out}
+
+
+def _process_quality_body_check(
+    fact: dict[str, Any],
+    normalized_body: str,
+) -> dict[str, Any]:
+    bundle = _process_quality_bundle_check(fact)
+    missing: list[str] = []
+    unlocated: list[str] = []
+    for item in bundle["items"]:
+        process = _normalized_text(item["process"])
+        metric = _normalized_text(item["metric"])
+        value_token = str(item["value_token"])
+        locator = str(item["locator"])
+        bound = False
+        statement_seen = False
+        start = 0
+        while process and (position := normalized_body.find(process, start)) >= 0:
+            vicinity = normalized_body[
+                max(0, position - 120) : position + len(process) + 720
+            ]
+            if metric in vicinity and value_token in vicinity:
+                statement_seen = True
+                if f"证据:{locator}" in vicinity:
+                    bound = True
+                    break
+            start = position + len(process)
+        if not bound:
+            missing.append(item["id"])
+            if statement_seen:
+                unlocated.append(item["id"])
+    return {
+        "ok": bool(bundle["ok"] and not missing and not unlocated),
+        "bundle_errors": list(bundle["errors"]),
+        "missing_items": missing,
+        "unlocated_items": unlocated,
+    }
 
 
 def _formal_parameter_body_check(
@@ -131,6 +531,12 @@ def _formal_parameter_body_check(
     conflicting_defaults: list[dict[str, str]] = []
     unlocated_statements: list[str] = []
     unverified_registry_defaults: list[dict[str, str]] = []
+    process_quality_check: dict[str, Any] = {
+        "ok": False,
+        "bundle_errors": [],
+        "missing_items": [],
+        "unlocated_items": [],
+    }
 
     accepted_fact_bindings: list[tuple[str, str]] = []
     for fact in facts.values():
@@ -151,19 +557,29 @@ def _formal_parameter_body_check(
         tokens = _fact_value_tokens(field, fact)
         bound = False
         statement_seen = False
-        for token in tokens:
-            start = 0
-            while token and (position := normalized_body.find(token, start)) >= 0:
-                before = normalized_body[max(0, position - 140) : position]
-                vicinity = normalized_body[
-                    max(0, position - 180) : position + len(token) + 360
-                ]
-                labelled = any(label in before[-120:] or label in vicinity[:180] for label in labels)
-                if labelled:
-                    statement_seen = True
-                    if locator and f"证据:{locator}" in vicinity:
-                        bound = True
-                start = position + len(token)
+        if field == "quality_threshold" and isinstance(fact.get("value"), dict):
+            process_quality_check = _process_quality_body_check(
+                fact, normalized_body
+            )
+            bound = bool(process_quality_check.get("ok"))
+            statement_seen = bool(
+                process_quality_check.get("missing_items")
+                or process_quality_check.get("unlocated_items")
+            )
+        else:
+            for token in tokens:
+                start = 0
+                while token and (position := normalized_body.find(token, start)) >= 0:
+                    before = normalized_body[max(0, position - 140) : position]
+                    vicinity = normalized_body[
+                        max(0, position - 180) : position + len(token) + 360
+                    ]
+                    labelled = any(label in before[-120:] or label in vicinity[:180] for label in labels)
+                    if labelled:
+                        statement_seen = True
+                        if locator and f"证据:{locator}" in vicinity:
+                            bound = True
+                    start = position + len(token)
         if not bound:
             missing_bindings.append(field)
             if statement_seen:
@@ -201,18 +617,15 @@ def _formal_parameter_body_check(
             vicinity = _normalized_text(
                 body[max(0, match.start() - 220) : match.end() + 360]
             )
-            evidence_locators = [
-                _normalized_text(value)
-                for value in re.findall(r"【证据:([^】]{1,260})】", vicinity)
-                if str(value).strip()
-            ]
-            traceable = any(_TRACEABLE_LOCATOR_RE.search(value) for value in evidence_locators)
             approved_fact_bound = any(
                 token == matched_token
                 and f"证据:{locator}" in vicinity
                 for token, locator in accepted_fact_bindings
             )
-            if not traceable and not approved_fact_bound:
+            # An unrelated drawing/BoQ locator nearby cannot promote a
+            # registry default into a project fact.  The exact value must be
+            # present in the accepted ledger and bound to that fact's locator.
+            if not approved_fact_bound:
                 unverified_registry_defaults.append(
                     {"name": name, "value": _normalized_text(match.group(0))}
                 )
@@ -232,6 +645,7 @@ def _formal_parameter_body_check(
         "unlocated_statements": sorted(set(unlocated_statements)),
         "conflicting_defaults": conflicting_defaults,
         "unverified_registry_defaults": unverified_registry_defaults,
+        "process_quality_bundle": process_quality_check,
     }
 
 
@@ -250,6 +664,7 @@ def _formal_project_parameter_check(
         else {}
     )
     facts = ledger.get("facts") if isinstance(ledger.get("facts"), dict) else {}
+    ledger_project_id = str(ledger.get("project_id") or "").strip()
     required_fields = [
         str(value).strip()
         for value in (readiness.get("required_fields") or [])
@@ -275,6 +690,13 @@ def _formal_project_parameter_check(
     unresolved_fields: list[str] = []
     invalid_statuses: list[dict[str, str]] = []
     receipt_mismatches: list[dict[str, str]] = []
+    source_evidence_errors: list[dict[str, Any]] = []
+    quality_fact = (
+        facts.get("quality_threshold")
+        if isinstance(facts.get("quality_threshold"), dict)
+        else {}
+    )
+    structured_quality_validation = _process_quality_bundle_check(quality_fact)
     for field in required_fields:
         fact = facts.get(field) if isinstance(facts.get(field), dict) else {}
         receipt = resolved_by_field.get(field, {})
@@ -283,6 +705,15 @@ def _formal_project_parameter_check(
         locator = _fact_locator(fact)
         if status not in _FORMAL_PARAMETER_STATUSES:
             invalid_statuses.append({"field": field, "status": status or "missing"})
+        source_errors = _formal_fact_source_errors(
+            field,
+            fact,
+            expected_project_id=ledger_project_id,
+        )
+        if source_errors:
+            source_evidence_errors.append(
+                {"field": field, "reasons": source_errors}
+            )
         if field not in ready_fields or value in (None, "", [], {}):
             unresolved_fields.append(field)
         if not receipt:
@@ -344,6 +775,7 @@ def _formal_project_parameter_check(
     ok = bool(
         receipt_available
         and ledger_validation.get("ok") is True
+        and bool(ledger_project_id)
         and digest_bound
         and report.get("formal_ready") is True
         and report.get("ok") is True
@@ -365,12 +797,16 @@ def _formal_project_parameter_check(
         and not (readiness.get("provisional_fields") or [])
         and not unresolved_fields
         and not invalid_statuses
+        and not source_evidence_errors
         and not receipt_mismatches
+        and structured_quality_validation.get("ok") is True
     )
     return {
         "pass": ok,
         "available": receipt_available,
         "ledger_validation_ok": ledger_validation.get("ok") is True,
+        "project_identity_bound": bool(ledger_project_id),
+        "project_id": ledger_project_id or None,
         "ledger_validation_errors": list(ledger_validation.get("errors") or []),
         "receipt_digest_bound": digest_bound,
         "required_contract_ok": required_contract_ok,
@@ -384,7 +820,9 @@ def _formal_project_parameter_check(
         "ledger_unresolved_fields": ledger_unresolved,
         "unresolved_fields": sorted(set(unresolved_fields)),
         "invalid_statuses": invalid_statuses,
+        "source_evidence_errors": source_evidence_errors,
         "receipt_mismatches": receipt_mismatches,
+        "structured_quality_validation": structured_quality_validation,
         "report_formal_ready": report.get("formal_ready") is True,
         "ledger_formal_ready": readiness.get("ready") is True,
     }

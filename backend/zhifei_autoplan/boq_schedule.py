@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import math
 import copy
-from typing import Any, Dict, List
+import math
+from typing import Any
 
 from backend.zhifei_autoplan.enterprise_params import pick_productivity
 from backend.zhifei_autoplan.schedule_cpm import run_cpm
-
 
 DEFAULT_PROCESS_ORDER = [
     "土方开挖",
@@ -39,14 +38,14 @@ def _f(v: Any, default: float = 0.0) -> float:
     try:
         value = float(v)
         return value if math.isfinite(value) else float(default)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return float(default)
 
 
 def _schedule_quantity(v: Any) -> float | None:
     try:
         value = float(v)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(value) or value <= 0 or value > MAX_SCHEDULE_QUANTITY:
         return None
@@ -58,14 +57,14 @@ def _quantity_is_anomalous(v: Any) -> bool:
         return False
     try:
         value = float(v)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return True
     if value == 0:
         return False
     return not math.isfinite(value) or value < 0 or value > MAX_SCHEDULE_QUANTITY
 
 
-def sanitize_boq_for_generation(boq_data: Dict[str, Any] | None) -> Dict[str, Any]:
+def sanitize_boq_for_generation(boq_data: dict[str, Any] | None) -> dict[str, Any]:
     """Return a generation-safe copy while retaining non-numeric source facts.
 
     Uploaded source files and the persisted parse receipt are never rewritten.
@@ -127,7 +126,7 @@ def sanitize_boq_for_generation(boq_data: Dict[str, Any] | None) -> Dict[str, An
     return result
 
 
-def _norm_process_name(item: Dict[str, Any]) -> str:
+def _norm_process_name(item: dict[str, Any]) -> str:
     p = item.get("process") if isinstance(item.get("process"), dict) else {}
     name = str(p.get("name") or "").strip()
     if name:
@@ -153,15 +152,17 @@ def _norm_process_name(item: Dict[str, Any]) -> str:
     return "通用施工工序"
 
 
-def _extract_resource_count(item: Dict[str, Any]) -> float:
+def _extract_resource_count(item: dict[str, Any]) -> float:
     resources = item.get("resources") if isinstance(item.get("resources"), list) else []
     if not resources:
         return 1.0
     return float(max(1, len(resources)))
 
 
-def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[Dict[str, Any]]:
-    groups: Dict[str, Dict[str, Any]] = {}
+def _group_to_wbs(
+    items: list[dict[str, Any]], profile: dict[str, Any]
+) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
     for it in items:
         pname = _norm_process_name(it)
         grp = groups.setdefault(
@@ -197,7 +198,7 @@ def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[
             if name:
                 grp["samples"].append(name)
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     order_map = {name: i for i, name in enumerate(DEFAULT_PROCESS_ORDER)}
     for pname, g in groups.items():
         prod = pick_productivity(profile, pname)
@@ -220,7 +221,7 @@ def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[
                 "quantity": round(qty, 3),
                 "total_price": round(float(g.get("total_price") or 0.0), 2),
                 "resource_units": round(float(g.get("resource_units") or 0.0), 3),
-                "resource_names": sorted(list(g.get("resource_names") or [])),
+                "resource_names": sorted(g.get("resource_names") or []),
                 "samples": list(g.get("samples") or []),
                 "excluded_quantity_count": int(g.get("excluded_quantity_count") or 0),
                 "duration_basis": duration_basis,
@@ -235,11 +236,11 @@ def _group_to_wbs(items: List[Dict[str, Any]], profile: Dict[str, Any]) -> List[
     return rows
 
 
-def _build_activity_graph(wbs_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    activities: List[Dict[str, Any]] = []
+def _build_activity_graph(wbs_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    activities: list[dict[str, Any]] = []
     for i, row in enumerate(wbs_rows):
         aid = f"WBS-{i + 1:03d}"
-        deps: List[str] = []
+        deps: list[str] = []
         if i > 0:
             deps.append(f"WBS-{i:03d}")
         activities.append(
@@ -260,11 +261,58 @@ def _build_activity_graph(wbs_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return activities
 
 
+def _schedule_input_readiness(boq: dict[str, Any]) -> dict[str, Any]:
+    """Validate the evidence receipt required before CPM values become facts.
+
+    A BoQ can support deterministic diagnostics without proving activity-level
+    productivity units, resource allocations, or dependencies.  Those three
+    inputs must therefore be explicitly verified or approved and bound to a
+    traceable locator before duration, resource peak, or critical interval may
+    enter the immutable project-fact ledger.
+    """
+
+    receipt = (
+        boq.get("schedule_input_receipt")
+        if isinstance(boq.get("schedule_input_receipt"), dict)
+        else {}
+    )
+    evidence = (
+        receipt.get("evidence")
+        if isinstance(receipt.get("evidence"), dict)
+        else {}
+    )
+    status = str(receipt.get("status") or "").strip().lower()
+    locator = str(receipt.get("locator") or evidence.get("locator") or "").strip()
+    checks = {
+        "productivity_units_verified": receipt.get("productivity_units_verified")
+        is True,
+        "resource_allocations_verified": receipt.get("resource_allocations_verified")
+        is True,
+        "dependencies_verified": receipt.get("dependencies_verified") is True,
+    }
+    reasons = [
+        f"schedule_{name.removesuffix('_verified')}_unverified"
+        for name, ready in checks.items()
+        if not ready
+    ]
+    if status not in {"verified", "approved"}:
+        reasons.append("schedule_input_receipt_unapproved")
+    if not locator:
+        reasons.append("schedule_input_locator_missing")
+    return {
+        "ready": not reasons,
+        "status": status or "missing",
+        "locator": locator,
+        "checks": checks,
+        "reasons": reasons,
+    }
+
+
 def build_boq_wbs_cpm(
-    boq_data: Dict[str, Any] | None,
+    boq_data: dict[str, Any] | None,
     *,
-    enterprise_profile: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
+    enterprise_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Deterministic chain:
     清单 -> 工序聚类 -> WBS -> 资源估算 -> CPM/关键线路.
@@ -299,6 +347,7 @@ def build_boq_wbs_cpm(
     excluded_quantity_count = sum(
         int(row.get("excluded_quantity_count") or 0) for row in wbs_rows
     )
+    schedule_input_readiness = _schedule_input_readiness(boq)
 
     critical_names = []
     cp_ids = cpm.get("critical_path") if isinstance(cpm.get("critical_path"), list) else []
@@ -308,14 +357,19 @@ def build_boq_wbs_cpm(
         if nm:
             critical_names.append(nm)
 
-    schedule_fact_reasons: List[str] = []
+    schedule_fact_reasons: list[str] = []
     if duration_days <= 0:
         schedule_fact_reasons.append("derived_duration_missing")
     elif duration_days > MAX_DERIVED_SCHEDULE_FACT_DAYS:
         schedule_fact_reasons.append("derived_duration_implausible")
+    if excluded_quantity_count:
+        schedule_fact_reasons.append("boq_quantity_exclusions_present")
+    if any(row.get("duration_basis") != "validated_quantity" for row in wbs_rows):
+        schedule_fact_reasons.append("schedule_duration_fallback_used")
+    schedule_fact_reasons.extend(schedule_input_readiness["reasons"])
 
     summary = {
-        "process_count": int(len(wbs_rows)),
+        "process_count": len(wbs_rows),
         "total_quantity": round(total_quantity, 3),
         "total_price": round(total_price, 2),
         "estimated_duration_days": round(duration_days, 3),
@@ -323,6 +377,7 @@ def build_boq_wbs_cpm(
         "critical_interval_days": _f(cpm.get("critical_interval_days"), 0.0),
         "critical_path_names": critical_names,
         "excluded_quantity_count": excluded_quantity_count,
+        "schedule_input_readiness": schedule_input_readiness,
         "schedule_fact_eligible": not schedule_fact_reasons,
         "schedule_fact_reasons": schedule_fact_reasons,
     }
@@ -346,6 +401,13 @@ def build_boq_wbs_cpm(
                 "code": "BOQ_DERIVED_SCHEDULE_IMPLAUSIBLE",
                 "estimated_duration_days": round(duration_days, 3),
                 "fact_limit_days": MAX_DERIVED_SCHEDULE_FACT_DAYS,
+            }
+        )
+    if not schedule_input_readiness["ready"]:
+        warnings.append(
+            {
+                "code": "BOQ_SCHEDULE_FACT_INPUTS_UNVERIFIED",
+                "reasons": list(schedule_input_readiness["reasons"]),
             }
         )
 

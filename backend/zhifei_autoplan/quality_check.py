@@ -405,12 +405,16 @@ def _check_officialese_by_section(sections: list[dict[str, Any]]):
     return results
 
 
-def _normalize_sentence_unit(fragment: str) -> str:
-    """Normalize one sentence without erasing its evidence identity.
+def _normalize_sentence_unit(
+    fragment: str,
+    *,
+    include_evidence: bool = False,
+) -> str:
+    """Normalize prose for repetition checks or evidence-safe remediation.
 
-    Two conclusions with identical prose but different page/anchor locators are
-    independent evidence bindings.  Keeping a canonical evidence set in the
-    identity prevents repetition cleanup from deleting either binding.
+    Repetition scoring intentionally ignores locators: changing only a page or
+    hash must not make copied prose appear unique.  Auto-remediation opts into
+    the evidence-bound identity so distinct source bindings are never deleted.
     """
 
     raw = str(fragment or "")
@@ -421,7 +425,7 @@ def _normalize_sentence_unit(fragment: str) -> str:
     normalized = re.sub(r"\s+", "", normalized).strip("，,：:")
     if len(normalized) < 20:
         return ""
-    if evidence_sources:
+    if include_evidence and evidence_sources:
         normalized += "【证据集合:" + "|".join(evidence_sources) + "】"
     return normalized
 
@@ -1450,7 +1454,7 @@ def _apply_exact_repetition_remediation(
     if not samples_by_title:
         return set()
 
-    seen: set[str] = set()
+    seen_evidence_bound: set[str] = set()
     changed_ids: set[int] = set()
     sentence_split_re = re.compile(r"([。！？!?；;\n]+)")
     for section in sections or []:
@@ -1466,9 +1470,17 @@ def _apply_exact_repetition_remediation(
             fragment = parts[index]
             separator = parts[index + 1] if index + 1 < len(parts) else ""
             normalized = _normalize_sentence_unit(fragment)
-            duplicate = bool(normalized and normalized in removable and normalized in seen)
-            if normalized:
-                seen.add(normalized)
+            evidence_bound = _normalize_sentence_unit(
+                fragment,
+                include_evidence=True,
+            )
+            duplicate = bool(
+                normalized
+                and normalized in removable
+                and evidence_bound in seen_evidence_bound
+            )
+            if evidence_bound:
+                seen_evidence_bound.add(evidence_bound)
             if duplicate:
                 removed += 1
                 # Preserve a line boundary so adjacent Markdown records cannot
@@ -1514,6 +1526,12 @@ def _accepted_project_fact(
     if not locator:
         return ""
     value = row.get("value")
+    # Process-bound quality evidence is a bundle, not a scalar fallback.  It
+    # must be consumed by the matching process writer and formal delivery
+    # validator; stringifying it here would leak one threshold across every
+    # chapter.
+    if isinstance(value, (dict, list, tuple)):
+        return ""
     if value is None or str(value).strip() == "":
         return ""
     unit = str(row.get("unit") or "").strip()
@@ -1538,7 +1556,9 @@ def _remediation_defaults(
         "阈值": threshold or neutral,
         "间距": neutral,
         "厚度": neutral,
-        "时长": deadline or neutral,
+        # A source-bound nonconformity-remediation deadline cannot be reused
+        # as the duration of an arbitrary construction operation.
+        "时长": neutral,
         "人数": resource_peak or neutral,
         "设备型号": neutral,
     }
@@ -2332,8 +2352,8 @@ def ensure_local_export_mandatory_content(sections: list[dict[str, Any]]) -> lis
                 (
                     "【劳保用品配置矩阵】\n"
                     "- 作业类别｜劳保用品｜配置标准｜发放频次｜检查频次｜责任岗位｜验收记录\n"
-                    "- 现场通用作业｜安全帽、反光背心、防护手套｜1套/人｜进场发放｜1次/日｜安全员｜《劳保用品发放与检查台账》\n"
-                    "- 专项作业｜按本章风险和作业条件配置专用防护用品｜1套/人｜作业前发放｜1次/班｜安全员、班组长｜《专项作业防护用品检查表》"
+                    "- 现场通用作业｜安全帽、反光背心、防护手套｜按批准配置标准｜进场发放｜按已批准制度执行｜安全员｜《劳保用品发放与检查台账》\n"
+                    "- 专项作业｜按本章风险和作业条件配置专用防护用品｜按批准配置标准｜作业前发放｜按已批准制度执行｜安全员、班组长｜《专项作业防护用品检查表》"
                 ),
             )
         )
@@ -2344,7 +2364,7 @@ def ensure_local_export_mandatory_content(sections: list[dict[str, Any]]) -> lis
                 (
                     "【关键工序控制点表】\n"
                     "- 工序｜风险｜控制参数｜检查频次｜责任岗位｜验收标准｜记录\n"
-                    "- 本章关键工序｜施工参数偏离招标、清单或图纸要求｜引用本章已绑定参数，不另造项目参数｜首件1次/工序、过程巡检2次/日｜工长、质量员｜符合本章证据及验收要求｜《关键工序控制点检查表》"
+                    "- 本章关键工序｜施工参数偏离招标、清单或图纸要求｜引用本章已绑定参数，不另造项目参数｜按本章已绑定且批准的检查频次执行｜工长、质量员｜符合本章证据及验收要求｜《关键工序控制点检查表》"
                 ),
             )
         )

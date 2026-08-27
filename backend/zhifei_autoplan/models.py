@@ -23,6 +23,11 @@ class SourceSpan(BaseModel):
     start: int
     end: int
     snippet: str
+    document_sha256: str | None = None
+    source_sha256: str | None = None
+    page_text_sha256: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
 
 
 class TenderIndexItem(BaseModel):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import shutil
@@ -22,6 +23,14 @@ class OcrResult:
     # locators must never renumber later pages merely because an earlier page
     # contained no machine-readable text.
     page_texts: tuple[str, ...] = ()
+    # Per-page proof distinguishes successful OCR text, proven blank pages,
+    # unreadable non-blank pages, and renderer/OCR failures.  Empty text alone
+    # is never accepted as proof of a blank source page.
+    page_statuses: tuple[str, ...] = ()
+    page_image_sha256: tuple[str, ...] = ()
+    # Total pages reported by the PDF renderer before ``max_pages`` is applied.
+    # Strict full-page callers use this to detect a truncated declaration.
+    source_pages: int | None = None
 
 
 def is_tesseract_available() -> bool:
@@ -69,6 +78,36 @@ def _preprocess_pil_for_ocr(im):
         return im
 
 
+def _image_sha256(image) -> str:
+    """Hash rendered pixels so a blank/text page status has source proof."""
+
+    try:
+        mode = str(getattr(image, "mode", ""))
+        size = tuple(getattr(image, "size", ()))
+        pixels = image.tobytes()
+    except (AttributeError, OSError, TypeError, ValueError):
+        return ""
+    payload = f"{mode}:{size}".encode() + b"\0" + pixels
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _is_proven_blank_image(image) -> bool:
+    """Return True only for a rendered page with a negligible ink ratio."""
+
+    try:
+        grayscale = image.convert("L")
+        histogram = grayscale.histogram()
+        total = sum(int(value) for value in histogram)
+        if total <= 0:
+            return False
+        # Pixels below 245 are treated as ink.  A tiny amount of raster noise
+        # is tolerated, but a non-blank page with failed OCR remains unreadable.
+        ink = sum(int(value) for value in histogram[:245])
+        return (ink / total) <= 0.0001
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 def ocr_pdf_path(
     pdf_path: str,
     max_pages: int = 12,
@@ -100,6 +139,8 @@ def ocr_pdf_path(
         return OcrResult(text="", pages=0, lang=use_lang, error=f"pdf_open_failed:{e!r}")
 
     out_parts: list[str] = []
+    page_statuses: list[str] = []
+    page_image_sha256: list[str] = []
     pages_done = 0
     try:
         total = len(pdf)
@@ -107,10 +148,19 @@ def ocr_pdf_path(
             try:
                 page = pdf[i]
                 bitmap = page.render(scale=float(scale or 2.0))
-                im = bitmap.to_pil()
-                im = _preprocess_pil_for_ocr(im)
-                txt = pytesseract.image_to_string(im, lang=use_lang)
-                out_parts.append(str(txt or "").strip())
+                source_image = bitmap.to_pil()
+                image_sha256 = _image_sha256(source_image)
+                ocr_image = _preprocess_pil_for_ocr(source_image)
+                txt = pytesseract.image_to_string(ocr_image, lang=use_lang)
+                page_text = str(txt or "").strip()
+                out_parts.append(page_text)
+                page_image_sha256.append(image_sha256)
+                if page_text:
+                    page_statuses.append("text")
+                elif image_sha256 and _is_proven_blank_image(source_image):
+                    page_statuses.append("blank")
+                else:
+                    page_statuses.append("unreadable")
                 pages_done += 1
                 if stop_on_catalog:
                     joined = "\n".join(out_parts)
@@ -128,6 +178,8 @@ def ocr_pdf_path(
                     type(exc).__name__,
                 )
                 out_parts.append("")
+                page_statuses.append("failed")
+                page_image_sha256.append("")
                 pages_done += 1
                 continue
     finally:
@@ -145,8 +197,15 @@ def ocr_pdf_path(
         text=text,
         pages=pages_done,
         lang=use_lang,
-        error=None,
+        error=(
+            "page_ocr_incomplete"
+            if any(status in {"failed", "unreadable"} for status in page_statuses)
+            else None
+        ),
         page_texts=tuple(out_parts),
+        page_statuses=tuple(page_statuses),
+        page_image_sha256=tuple(page_image_sha256),
+        source_pages=total,
     )
 
 

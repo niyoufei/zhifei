@@ -9,7 +9,11 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from backend.zhifei_autoplan.evidence import format_hit_locator, search_ingested_docs
+from backend.zhifei_autoplan.evidence import (
+    best_drawing_hit,
+    format_hit_locator,
+    search_ingested_docs,
+)
 
 
 class TestSearchIngestedDocs:
@@ -508,3 +512,73 @@ class TestSearchIngestedDocs:
         assert hit["match_window"]["text"].startswith("钢梁安装")
         assert hit["page_text_sha256"]
         assert hit["page_summary"]
+
+
+def test_best_drawing_hit_excludes_generic_only_matches(tmp_path):
+    generic_extract = tmp_path / "generic.txt"
+    generic_extract.write_text("详见图纸，其余做法参见图纸说明。", encoding="utf-8")
+    specific_extract = tmp_path / "specific.txt"
+    specific_extract.write_text("钢梁安装构件位置与连接做法。", encoding="utf-8")
+    component_extract = tmp_path / "component.txt"
+    component_extract.write_text("节点板连接做法及焊缝尺寸。", encoding="utf-8")
+    audit_file = tmp_path / "ingest.jsonl"
+    audit_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "filename": "generic.pdf",
+                        "sha256": "1" * 64,
+                        "pages": 1,
+                        "extract_saved_as": str(generic_extract),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "filename": "specific.pdf",
+                        "sha256": "2" * 64,
+                        "pages": 1,
+                        "extract_saved_as": str(specific_extract),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "filename": "component.pdf",
+                        "sha256": "3" * 64,
+                        "pages": 1,
+                        "extract_saved_as": str(component_extract),
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with patch("backend.zhifei_autoplan.evidence.Path") as mock_path:
+        def path_side_effect(value):
+            if "ingest.jsonl" in str(value):
+                return audit_file
+            return Path(value)
+
+        mock_path.side_effect = path_side_effect
+        hit = best_drawing_hit("钢梁 钢梁安装 图纸")
+        component_hit = best_drawing_hit("节点板 图纸")
+        generic_only = [
+            best_drawing_hit(query)
+            for query in (
+                "图纸",
+                "图纸施工方案",
+                "施工方案",
+                "施工图纸节点大样说明",
+                "详见图纸 图纸说明",
+            )
+        ]
+
+    assert hit is not None
+    assert hit["filename"] == "specific.pdf"
+    assert hit["matched_token"] == "钢梁"
+    assert component_hit is not None
+    assert component_hit["filename"] == "component.pdf"
+    assert component_hit["matched_token"] == "节点板"
+    assert generic_only == [None] * 5

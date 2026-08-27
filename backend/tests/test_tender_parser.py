@@ -5,21 +5,21 @@ TenderParser 单元测试
 
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import threading
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.zhifei_autoplan.parsers.tender_parser import TenderParser, Section
 from backend.zhifei_autoplan.models import (
     TenderDimension,
-    TenderIndexMatrix,
     TenderIndexItem,
-    SourceSpan,
+    TenderIndexMatrix,
 )
-
+from backend.zhifei_autoplan.parsers.tender_parser import Section, TenderParser
+from backend.zhifei_autoplan.project_fact_ledger import (
+    build_project_fact_ledger_from_inputs,
+)
 
 # ==============================================================================
 # Fixtures
@@ -112,7 +112,7 @@ class TestChapterRequirements:
         title = "质量管理与验收"
         fragment = "每提供 1 个得 2 分，本项满分 4"
         executable = "施工单位应编制材料复验计划并明确验收责任人"
-        text = "\n".join([title, fragment, executable])
+        text = f"{title}\n{fragment}\n{executable}"
         parser._extract_outline = lambda _text: (
             [title],
             {"source": "test", "global_requirements": []},
@@ -527,10 +527,8 @@ class TestReadPdf:
         mock_pdf.__exit__ = MagicMock(return_value=None)
 
         with patch("pdfplumber.open", return_value=mock_pdf):
-            path, text = parser._read_pdf("/path/to/file.pdf")
-            assert "第1页内容" in text
-            assert "第2页内容" in text
-            assert "第3页内容" in text
+            _path, text = parser._read_pdf("/path/to/file.pdf")
+            assert text == "第1页内容\f第2页内容\f第3页内容"
 
     def test_read_pdf_empty_page(self, parser):
         """读取空页面"""
@@ -543,7 +541,7 @@ class TestReadPdf:
         mock_pdf.__exit__ = MagicMock(return_value=None)
 
         with patch("pdfplumber.open", return_value=mock_pdf):
-            path, text = parser._read_pdf("/path/to/file.pdf")
+            _path, text = parser._read_pdf("/path/to/file.pdf")
             assert text == ""
 
     def test_read_pdf_mixed_pages(self, parser):
@@ -561,9 +559,108 @@ class TestReadPdf:
         mock_pdf.__exit__ = MagicMock(return_value=None)
 
         with patch("pdfplumber.open", return_value=mock_pdf):
-            path, text = parser._read_pdf("/path/to/file.pdf")
-            assert "有内容" in text
-            assert "又有内容" in text
+            _path, text = parser._read_pdf("/path/to/file.pdf")
+            assert text == "有内容\f\f又有内容"
+
+    def test_projects_p92_procedural_deadline_with_reversible_locator(
+        self, parser, tmp_path
+    ):
+        source = tmp_path / "招标文件.pdf"
+        source_bytes = b"content-addressed-test-pdf"
+        source.write_bytes(source_bytes)
+        pages = [f"第{page}页普通条款" for page in range(1, 93)]
+        pages[90] = "隐蔽工程检查通知应提前48小时提交，不合格项另行通知。"
+        pages[91] = (
+            "承包人在收到监理人发出的《不合格分项报告》或监理通知单后，"
+            "必须在监\n理人规定时间内按要求完成整改，并申请复验。"
+        )
+        text = "\f".join(pages)
+
+        matrix = parser._build_matrix_from_texts([(str(source), text)])
+
+        fact = matrix.extraction_meta["project_facts"][
+            "deviation_action_deadline"
+        ]
+        evidence = fact["evidence"]
+        target = "在监理人规定时间内按要求完成整改"
+        source_target = "在监\n理人规定时间内按要求完成整改"
+        document_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        page_text_sha256 = hashlib.sha256(pages[91].encode("utf-8")).hexdigest()
+        expected_start = text.index(source_target)
+        assert fact["value"] == target
+        assert fact["unit"] == ""
+        assert fact["status"] == "verified"
+        assert evidence["page"] == 92
+        assert evidence["document_sha256"] == document_sha256
+        assert evidence["page_text_sha256"] == page_text_sha256
+        assert evidence["start"] == expected_start
+        assert evidence["page_start"] == pages[91].index(source_target)
+        assert evidence["locator"] == (
+            f"招标文件.pdf#document_sha256={document_sha256}"
+            f"&page=92&page_text_sha256={page_text_sha256}"
+            f"&offset={expected_start}"
+        )
+        assert "48" not in fact["value"]
+
+    def test_directory_schedule_heading_cannot_hide_verified_150_day_fact(
+        self,
+        parser,
+        tmp_path,
+    ):
+        source = tmp_path / "招标文件.pdf"
+        source_bytes = b"tender-duration-source"
+        source.write_bytes(source_bytes)
+        pages = [
+            "目录\n第五章 确保工期的技术组织措施\n第六章 进度计划",
+            "2.8 计划工期：150 日历天。投标人应据此编制总进度计划。",
+        ]
+        text = "\f".join(pages)
+
+        matrix = parser._build_matrix_from_texts([(str(source), text)])
+        fact = matrix.extraction_meta["project_facts"][
+            "planned_duration_days"
+        ]
+        evidence = fact["evidence"]
+        document_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        page_text_sha256 = hashlib.sha256(pages[1].encode("utf-8")).hexdigest()
+        expected_start = text.index("计划工期：150 日历天")
+
+        assert fact["value"] == 150
+        assert fact["unit"] == "天"
+        assert fact["status"] == "verified"
+        assert evidence["page"] == 2
+        assert evidence["document_sha256"] == document_sha256
+        assert evidence["page_text_sha256"] == page_text_sha256
+        assert evidence["start"] == expected_start
+        assert evidence["page_start"] == pages[1].index(
+            "计划工期：150 日历天"
+        )
+
+        schedule_item = next(
+            item
+            for item in matrix.items
+            if item.dimension == TenderDimension.SCHEDULE
+        )
+        duration_span = next(
+            span
+            for span in schedule_item.source_spans
+            if "150 日历天" in span.snippet
+        )
+        assert duration_span.page == 2
+        assert duration_span.page_text_sha256 == page_text_sha256
+
+        ledger = build_project_fact_ledger_from_inputs(
+            payload={"project_id": "P-150-DAYS"},
+            tender=matrix.model_dump(mode="json"),
+            boq_wbs_cpm={},
+        )
+        ledger_fact = ledger["facts"]["planned_duration_days"]
+        assert ledger_fact["value"] == 150
+        assert ledger_fact["unit"] == "天"
+        assert ledger_fact["status"] == "verified"
+        assert ledger_fact["evidence"]["page"] == 2
+        assert ledger_fact["evidence"]["document_sha256"] == document_sha256
+        assert ledger_fact["evidence"]["page_text_sha256"] == page_text_sha256
 
 
 # ==============================================================================
@@ -669,26 +766,36 @@ class TestExtractIndexMatrix:
         assert quality_item.weight <= 1.0
 
     @pytest.mark.asyncio
-    async def test_source_spans_created(self, parser):
+    async def test_source_spans_created(self, parser, tmp_path):
         """创建源文件位置引用"""
         sections = [Section("质量", "质量要求", [])]
-        sources = [("/path/tender.pdf", "这是质量标准文本")]
+        source = tmp_path / "tender.pdf"
+        source.write_bytes(b"tender-source")
+        sources = [(str(source), "这是质量标准文本")]
         result = await parser._extract_index_matrix(sections, sources)
 
         quality_item = next(i for i in result if i.dimension == TenderDimension.QUALITY)
         assert len(quality_item.source_spans) > 0
         span = quality_item.source_spans[0]
-        assert span.file_name == "/path/tender.pdf"
+        assert span.file_name == str(source)
+        expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        assert span.document_sha256 == expected_sha256
+        assert span.source_sha256 == expected_sha256
 
     @pytest.mark.asyncio
-    async def test_source_spans_limit(self, parser):
+    async def test_source_spans_limit(self, parser, tmp_path):
         """源文件引用最多 5 个"""
         sections = [Section("质量", "质量要求", [])]
         # 创建大量源文件
-        sources = [(f"/path/file{i}.pdf", "质量标准") for i in range(10)]
+        sources = []
+        for index in range(10):
+            source = tmp_path / f"file{index}.pdf"
+            source.write_bytes(f"source-{index}".encode())
+            sources.append((str(source), "质量标准"))
         result = await parser._extract_index_matrix(sections, sources)
 
         quality_item = next(i for i in result if i.dimension == TenderDimension.QUALITY)
+        assert quality_item.source_spans
         assert len(quality_item.source_spans) <= 5
 
     @pytest.mark.asyncio

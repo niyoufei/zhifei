@@ -899,6 +899,8 @@ class ActionsQualityCheckRequest(BaseModel):
 
 class ActionsExportRequest(BaseModel):
     topic: str
+    source_job_id: str | None = None
+    variant: int = 1
     project_id: str | None = None
     style: dict | None = None
     outline: list[str] = []
@@ -1565,18 +1567,52 @@ def _save_outputs(
                 ensure_ascii=False,
             )
         )
-    blocked = [
-        {
-            "variant": index,
-            "decision_digest": (row.get("delivery_quality_gate") or {}).get("decision_digest"),
-            "blockers": (row.get("delivery_quality_gate") or {}).get("blockers") or [],
-        }
-        for index, row in enumerate(results, start=1)
-        if isinstance(row, dict)
-        and isinstance(row.get("delivery_quality_gate"), dict)
-        and not bool((row.get("delivery_quality_gate") or {}).get("delivery_allowed"))
-    ]
-    if blocked and not preview_only:
+    blocked: list[dict[str, Any]] = []
+    if not preview_only:
+        if not results:
+            blocked.append(
+                {
+                    "variant": 0,
+                    "decision_digest": None,
+                    "blockers": [],
+                    "reasons": ["variant_set_empty"],
+                }
+            )
+        for index, row in enumerate(results, start=1):
+            gate = (
+                row.get("delivery_quality_gate")
+                if isinstance(row, dict)
+                and isinstance(row.get("delivery_quality_gate"), dict)
+                else None
+            )
+            reasons: list[str] = []
+            if not isinstance(row, dict):
+                reasons.append("variant_invalid")
+            if gate is None:
+                reasons.append("delivery_gate_missing")
+            else:
+                if gate.get("delivery_allowed") is not True:
+                    reasons.append("delivery_not_allowed")
+                if not export_docx_core.delivery_gate_digest_is_valid(gate):
+                    reasons.append("decision_digest_invalid")
+            if reasons:
+                blocked.append(
+                    {
+                        "variant": index,
+                        "decision_digest": (
+                            gate.get("decision_digest")
+                            if isinstance(gate, dict)
+                            else None
+                        ),
+                        "blockers": (
+                            gate.get("blockers") or []
+                            if isinstance(gate, dict)
+                            else []
+                        ),
+                        "reasons": reasons,
+                    }
+                )
+    if blocked:
         raise RuntimeError(
             json.dumps(
                 {
@@ -2734,6 +2770,15 @@ def _formal_delivery_state(
         return False, "variant_scope_mismatch"
     if any(row.get("delivery_ready") is not True for row in variants):
         return False, "delivery_not_ready"
+    if any(
+        not export_docx_core.delivery_gate_digest_is_valid(
+            row.get("delivery_quality_gate")
+        )
+        or (row.get("delivery_quality_gate") or {}).get("delivery_allowed")
+        is not True
+        for row in variants
+    ):
+        return False, "delivery_gate_invalid"
     if not isinstance(result, dict):
         return False, "delivery_result_invalid"
     if str(result.get("delivery_profile") or "").strip() != "sonnet5_professional_word":
@@ -4101,8 +4146,58 @@ async def actions_export_docx(
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
+    source_job_id = str(req.source_job_id or "").strip()
+    if not source_job_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "FORMAL_SOURCE_JOB_REQUIRED",
+                "message": "直接导出必须绑定已通过正式交付门的源任务。",
+            },
+        )
+    source_job, source_result, _source_data, variants = (
+        _load_done_job_variants(source_job_id)
+    )
+    _require_formal_document_mutation(source_job, source_result, variants)
+    variant_number = _require_variant_number(req.variant, len(variants))
+    source_variant = variants[variant_number - 1]
+    if not isinstance(source_variant, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FORMAL_SOURCE_VARIANT_INVALID"},
+        )
+    source_gate = source_variant.get("delivery_quality_gate")
+    source_gate = source_gate if isinstance(source_gate, dict) else {}
+    decision_digest = str(source_gate.get("decision_digest") or "").strip()
+    if (
+        source_gate.get("delivery_allowed") is not True
+        or not export_docx_core.delivery_gate_digest_is_valid(source_gate)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FORMAL_SOURCE_DECISION_INVALID"},
+        )
+    try:
+        source_sections_digest = export_docx_core.canonical_sections_digest(
+            source_variant.get("sections")
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FORMAL_SOURCE_SECTIONS_INVALID"},
+        ) from exc
+    raw_request = dict(source_variant)
+    raw_request.update(
+        {
+            "generate_images": False,
+            "_formal_source_verified": True,
+            "_formal_source_job_id": source_job_id,
+            "_formal_source_delivery_decision_digest": decision_digest,
+            "_formal_source_sections_digest": source_sections_digest,
+        }
+    )
     return export_docx_core.execute_export_docx_request(
-        raw_request=req.model_dump(),
+        raw_request=raw_request,
         workspace_dir=str(workspace_dir or "."),
         save_outputs_fn=_save_outputs,
     )

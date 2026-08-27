@@ -4,6 +4,36 @@ from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
 from backend.zhifei_autoplan.project_fact_ledger import build_project_fact_ledger
 
 
+def _quality_threshold_bundle():
+    return {
+        "mode": "process_bound",
+        "items": [
+            {
+                "id": "wall-compaction",
+                "process": "围墙基础回填",
+                "metric": "压实系数",
+                "operator": ">=",
+                "value": 0.97,
+                "unit": "",
+                "status": "verified",
+                "source": "施工图",
+                "locator": f"3 围墙.pdf#p1_{'a' * 64}@530",
+                "document_sha256": "a" * 64,
+                "extract_text_sha256": "b" * 64,
+                "page": 1,
+                "page_text_sha256": "c" * 64,
+                "offset": 530,
+                "end": 545,
+                "page_start_offset": 0,
+                "page_end_offset": 900,
+                "page_match_start": 530,
+                "page_match_end": 545,
+                "match_text_sha256": "d" * 64,
+            }
+        ],
+    }
+
+
 def _probe(ledger, *, requirements=None):
     return probe_missing_parameters(
         topic="示例项目",
@@ -69,8 +99,10 @@ def test_enterprise_defaults_are_provisional_and_not_auto_filled():
     by_field = {row["field"]: row for row in result["provisional"]}
     assert by_field["resource_peak"]["proposed_value"] == "80人"
     assert by_field["risk_inspection_frequency"]["proposed_value"] == "2次/日"
-    assert by_field["quality_threshold"]["proposed_value"] == "偏差≤5mm"
     assert by_field["deviation_action_deadline"]["proposed_value"] == "偏差处置时限≤4h"
+    missing_by_field = {row["field"]: row for row in result["missing"]}
+    assert missing_by_field["quality_threshold"]["status"] == "missing"
+    assert missing_by_field["quality_threshold"]["proposed_value"] is None
     assert all(row["usable_for_formal_delivery"] is False for row in result["provisional"])
     assert not any(row["field"] == "planned_duration_days" for row in result["provisional"])
 
@@ -100,8 +132,8 @@ def test_approved_complete_ledger_is_formal_ready():
                     "resource_peak": {"value": 80, "unit": "人"},
                     "critical_interval_days": {"value": 3, "unit": "天"},
                     "risk_inspection_frequency": "2次/日",
-                    "quality_threshold": "按工序图纸及规范",
-                    "deviation_action_deadline": "4小时",
+                    "quality_threshold": _quality_threshold_bundle(),
+                    "deviation_action_deadline": "在监理人规定时间内按要求完成整改",
                 },
             }
         ]
@@ -114,3 +146,51 @@ def test_approved_complete_ledger_is_formal_ready():
     assert result["missing"] == []
     assert result["provisional"] == []
     assert len(result["resolved"]) == 6
+
+
+def test_structured_quality_threshold_and_procedural_deadline_are_resolved():
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "tender-and-drawings",
+                "source_type": "tender",
+                "facts": {
+                    "quality_threshold": _quality_threshold_bundle(),
+                    "deviation_action_deadline": (
+                        "在监理人规定时间内按要求完成整改"
+                    ),
+                },
+                "evidence": {"locator": "招标文件.pdf#p92_sha@67018"},
+            }
+        ]
+    )
+
+    result = _probe(ledger)
+    resolved = {row["field"]: row for row in result["resolved"]}
+    assert resolved["quality_threshold"]["value"]["mode"] == "process_bound"
+    assert resolved["quality_threshold"]["value"]["items"][0]["process"] == (
+        "围墙基础回填"
+    )
+    assert resolved["deviation_action_deadline"]["value"] == (
+        "在监理人规定时间内按要求完成整改"
+    )
+    assert "deviation_action_deadline" not in result["blocked_fields"]
+
+
+def test_global_quality_scalar_cannot_resolve_formal_parameter():
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "approved",
+                "source_type": "approved_resolution",
+                "facts": {"quality_threshold": "偏差≤5mm"},
+            }
+        ]
+    )
+
+    result = _probe(ledger)
+
+    assert not any(
+        row["field"] == "quality_threshold" for row in result["resolved"]
+    )
+    assert "quality_threshold" in result["blocked_fields"]

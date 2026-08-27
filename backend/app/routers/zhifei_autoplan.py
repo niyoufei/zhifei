@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -1606,14 +1607,66 @@ async def export_docx(authorization: str | None = Header(default=None)):
     data = json.loads(json_path.read_text(encoding="utf-8"))
     docx_files = []
     if isinstance(data, dict) and isinstance(data.get("variants"), list) and data["variants"]:
+        required_checks = {
+            "independent_content_quality",
+            "plan_consistency",
+            "verified_standards",
+            "boq_cross_index_closure",
+            "formal_project_parameters",
+            "formal_parameter_body_binding",
+            "independent_model_review",
+        }
+        for variant in data["variants"]:
+            if not isinstance(variant, dict):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "LEGACY_EXPORT_FORMAL_GATE_REQUIRED"},
+                )
+            gate = variant.get("delivery_quality_gate")
+            gate = gate if isinstance(gate, dict) else {}
+            claimed_digest = str(gate.get("decision_digest") or "").strip()
+            digest_payload = {
+                key: value
+                for key, value in gate.items()
+                if key != "decision_digest"
+            }
+            computed_digest = hashlib.sha256(
+                json.dumps(
+                    digest_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
+            passed_checks = {
+                str(check.get("name") or "")
+                for check in checks
+                if isinstance(check, dict) and check.get("pass") is True
+            }
+            if (
+                str(variant.get("delivery_scope") or "").strip() != "document"
+                or variant.get("delivery_ready") is not True
+                or not str(variant.get("project_id") or "").strip()
+                or gate.get("delivery_allowed") is not True
+                or gate.get("blocker_count") != 0
+                or claimed_digest != computed_digest
+                or not required_checks.issubset(passed_checks)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "LEGACY_EXPORT_FORMAL_GATE_REQUIRED"},
+                )
         for i, variant in enumerate(data["variants"]):
             out_docx = Path("build") / f"autoplan_generated_v{i + 1}.docx"
             export_autoplan_docx(variant, str(out_docx))
             docx_files.append(str(out_docx))
     else:
-        out_docx = Path("build") / "autoplan_generated_v1.docx"
-        export_autoplan_docx_from_file(str(json_path), str(out_docx))
-        docx_files.append(str(out_docx))
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LEGACY_EXPORT_FORMAL_GATE_REQUIRED"},
+        )
     _audit("export_docx", user_id=user["id"], detail={"docx": docx_files})
     return {"ok": True, "docx": docx_files}
 

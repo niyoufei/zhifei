@@ -57,10 +57,64 @@ def test_boq_schedule_excludes_outlier_without_losing_valid_quantity() -> None:
     assert result["summary"]["excluded_quantity_count"] == 1
     assert result["summary"]["total_quantity"] == 120.0
     assert result["summary"]["estimated_duration_days"] == 12.0
-    assert result["summary"]["schedule_fact_eligible"] is True
-    assert result["schedule_input_warnings"] == [
-        {"code": "BOQ_QUANTITY_OUTLIER_EXCLUDED", "count": 1}
+    assert result["summary"]["schedule_fact_eligible"] is False
+    assert "boq_quantity_exclusions_present" in result["summary"][
+        "schedule_fact_reasons"
     ]
+    assert any(
+        row["code"] == "BOQ_QUANTITY_OUTLIER_EXCLUDED"
+        for row in result["schedule_input_warnings"]
+    )
+
+
+def test_verified_schedule_inputs_are_required_before_cpm_values_become_facts() -> None:
+    result = build_boq_wbs_cpm(
+        {
+            "items": [
+                {
+                    "name": "混凝土工程",
+                    "quantity": 120,
+                    "unit": "m3",
+                    "resources": [{"name": "混凝土工", "quantity": 8, "unit": "人"}],
+                }
+            ],
+            "schedule_input_receipt": {
+                "status": "approved",
+                "locator": "approved:schedule-inputs/receipt-001",
+                "productivity_units_verified": True,
+                "resource_allocations_verified": True,
+                "dependencies_verified": True,
+            },
+        },
+        enterprise_profile={
+            "productivity": {"混凝土浇筑": {"value": 10, "unit": "m3/天"}}
+        },
+    )
+
+    readiness = result["summary"]["schedule_input_readiness"]
+    assert readiness["ready"] is True
+    assert readiness["status"] == "approved"
+    assert result["summary"]["schedule_fact_eligible"] is True
+    assert result["summary"]["schedule_fact_reasons"] == []
+
+
+def test_plausible_cpm_without_input_receipt_remains_diagnostic_only() -> None:
+    result = build_boq_wbs_cpm(
+        {"items": [{"name": "混凝土工程", "quantity": 120, "unit": "m3"}]},
+        enterprise_profile={
+            "productivity": {"混凝土浇筑": {"value": 10, "unit": "m3/天"}}
+        },
+    )
+
+    assert result["summary"]["estimated_duration_days"] == 12.0
+    assert result["summary"]["schedule_fact_eligible"] is False
+    assert "schedule_input_receipt_unapproved" in result["summary"][
+        "schedule_fact_reasons"
+    ]
+    assert any(
+        row["code"] == "BOQ_SCHEDULE_FACT_INPUTS_UNVERIFIED"
+        for row in result["schedule_input_warnings"]
+    )
 
 
 def test_generation_view_sanitizes_prompt_stats_without_rewriting_source() -> None:

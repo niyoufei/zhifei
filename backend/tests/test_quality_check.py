@@ -642,7 +642,8 @@ class TestApplyRemediation:
         assert "用户批准原文保留2次/日" in content
         assert "频次：3次/班" in content
         assert "阈值：偏差≤3mm" in content
-        assert "时长：6小时" in content
+        assert "时长：待依据图纸/规范/批准制度确认" in content
+        assert "时长：6小时" not in content
         assert "人数：72人" in content
         assert "4h/作业段" not in content
         assert "8人/班" not in content
@@ -715,6 +716,10 @@ class TestEnsureLocalExportMandatoryContent:
         assert "劳保用品配置矩阵" in sections[1]["content"]
         assert "关键工序控制点表" in sections[1]["content"]
         assert "不另造项目参数" in sections[1]["content"]
+        assert "按本章已绑定且批准的检查频次执行" in sections[1]["content"]
+        assert "1次/日" not in sections[1]["content"]
+        assert "1次/班" not in sections[1]["content"]
+        assert "2次/日" not in sections[1]["content"]
 
     def test_is_idempotent(self):
         sections = [{"title": "安全措施", "content": "风险与措施。"}]
@@ -953,7 +958,35 @@ class TestStrictQualityGate:
                     "source_type": "approved_resolution",
                     "facts": {
                         "risk_inspection_frequency": "3次/班",
-                        "quality_threshold": "偏差≤3mm",
+                        "quality_threshold": {
+                            "mode": "process_bound",
+                            "items": [
+                                {
+                                    "id": "aluminum-baffle-spacing",
+                                    "process": "铝方通吊顶(顶棚四)",
+                                    "metric": "安装偏差",
+                                    "operator": "≤",
+                                    "value": 3,
+                                    "unit": "mm",
+                                    "status": "approved",
+                                    "source": "approved_resolution",
+                                    "locator": (
+                                        f"吊顶确认图.pdf#p2_{'a' * 64}@42"
+                                    ),
+                                    "document_sha256": "a" * 64,
+                                    "extract_text_sha256": "b" * 64,
+                                    "page": 2,
+                                    "page_text_sha256": "c" * 64,
+                                    "offset": 42,
+                                    "end": 58,
+                                    "page_start_offset": 0,
+                                    "page_end_offset": 500,
+                                    "page_match_start": 42,
+                                    "page_match_end": 58,
+                                    "match_text_sha256": "d" * 64,
+                                }
+                            ],
+                        },
                         "deviation_action_deadline": "6小时",
                     },
                     "evidence": {"locator": "确认单.pdf#p2_deadbeef@20"},
@@ -972,7 +1005,7 @@ class TestStrictQualityGate:
             sections,
         )
 
-        assert result["ok"] is True
+        assert result["ok"] is True, result
         assert result["items"][0]["reason"] == "ok"
         assert result["items"][0]["hit_sections"][0]["mentions_checked"] >= 1
 
@@ -1096,7 +1129,7 @@ class TestStrictQualityGate:
         issue = next(row for row in result["issue_list"] if row["type"] == "repetitive_content")
         assert issue["repetition_scope"] == "same_chapter_template"
 
-    def test_strict_mode_does_not_merge_same_prose_with_distinct_page_locators(self):
+    def test_strict_mode_flags_same_prose_even_with_distinct_page_locators(self):
         prose_a = "钢梁吊装前复核构件编号和安装轴线，复核结果写入构件安装检查记录"
         prose_b = "连接节点施工前核验板厚和螺栓批次，核验结果写入节点检查记录"
         sections = [
@@ -1118,8 +1151,8 @@ class TestStrictQualityGate:
 
         result = run_quality_checks(None, [], sections, strict=True)
 
-        assert result["repetition_control"]["ok"] is True
-        assert not any(
+        assert result["repetition_control"]["ok"] is False
+        assert any(
             item["type"] == "repetitive_content" for item in result["issue_list"]
         )
 

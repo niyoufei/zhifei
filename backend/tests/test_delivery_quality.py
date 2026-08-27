@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
-from backend.zhifei_autoplan.project_fact_ledger import build_project_fact_ledger
+from backend.zhifei_autoplan.project_fact_ledger import (
+    build_project_fact_ledger,
+    build_project_fact_ledger_from_inputs,
+)
 
 _FORMAL_FIELDS = (
     "planned_duration_days",
@@ -11,32 +17,110 @@ _FORMAL_FIELDS = (
     "quality_threshold",
     "deviation_action_deadline",
 )
+_PROJECT_ID = "P-FORMAL-GATE"
+
+
+def _digest(value) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _reseal_ledger(ledger: dict) -> None:
+    payload = {key: value for key, value in ledger.items() if key != "ledger_digest"}
+    ledger["ledger_digest"] = _digest(payload)
+
+
+def _reseal_evidence(evidence: dict) -> None:
+    payload = {key: value for key, value in evidence.items() if key != "evidence_digest"}
+    evidence["evidence_digest"] = _digest(payload)
+
+
+def _quality_item() -> dict:
+    return {
+        "id": "wall-foundation-compaction",
+        "process": "围墙基础持力层压实",
+        "metric": "压实系数",
+        "operator": "≥",
+        "value": 0.97,
+        "unit": "",
+        "status": "verified",
+        "source": "reviewed_design",
+        "locator": f"围墙图.pdf#p1_{'a' * 64}@42",
+        "document_sha256": "a" * 64,
+        "extract_text_sha256": "b" * 64,
+        "page": 1,
+        "page_text_sha256": "c" * 64,
+        "offset": 42,
+        "end": 58,
+        "page_start_offset": 0,
+        "page_end_offset": 500,
+        "page_match_start": 42,
+        "page_match_end": 58,
+        "match_text_sha256": "d" * 64,
+    }
+
+
+def _approved_fact(field: str, value, unit: str = "") -> dict:
+    file_name = f"批准参数-{field}.pdf"
+    document_sha256 = hashlib.sha256(field.encode("utf-8")).hexdigest()
+    return {
+        "value": value,
+        "unit": unit,
+        "evidence": {
+            "file_name": file_name,
+            "document_sha256": document_sha256,
+            "locator": f"{file_name}#p1_{document_sha256}@10",
+        },
+        "approval_receipt": {
+            "receipt_id": f"APR-{field}",
+            "status": "approved",
+            "project_id": _PROJECT_ID,
+            "field": field,
+            "value_digest": _digest(
+                {"field": field, "value": value, "unit": unit}
+            ),
+            "summary": f"批准 {field} 的正式项目值",
+            "approved_by": "项目负责人",
+            "approved_at": "2026-08-27T10:00:00+08:00",
+        },
+    }
 
 
 def _formal_parameter_receipts() -> tuple[dict, dict]:
-    statuses = ("verified", "derived", "approved", "verified", "derived", "approved")
-    values = (180, 80, 3, "2次/日", "偏差≤5mm", "4h")
-    ledger = build_project_fact_ledger(
-        [
-            {
-                "source_id": "test-project-facts",
-                "source_type": "user_input",
-                "facts": {
-                    field: {
-                        "value": value,
-                        "unit": "",
-                        "status": status,
-                        "evidence": {"locator": f"test.{field}"},
-                    }
-                    for field, value, status in zip(_FORMAL_FIELDS, values, statuses)
-                },
-                "evidence": {"locator": "test.project_facts"},
-            }
-        ]
+    quality_bundle = {
+        "mode": "process_bound",
+        "items": [_quality_item()],
+    }
+    values = (180, 80, 3, "2次/日", quality_bundle, "4h")
+    approved = {
+        field: _approved_fact(field, value)
+        for field, value in zip(_FORMAL_FIELDS, values)
+    }
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={
+            "project_id": _PROJECT_ID,
+            "approved_project_fact_resolutions": approved,
+        },
+        tender={},
+        boq_wbs_cpm={},
     )
+    return _parameter_report(ledger), ledger
+
+
+def _parameter_report(ledger: dict) -> dict:
     resolved = []
+    missing = []
     for field in _FORMAL_FIELDS:
-        fact = ledger["facts"][field]
+        fact = ledger.get("facts", {}).get(field)
+        if not isinstance(fact, dict):
+            missing.append({"field": field, "key": field})
+            continue
         resolved.append(
             {
                 "field": field,
@@ -48,19 +132,18 @@ def _formal_parameter_receipts() -> tuple[dict, dict]:
                 "locator": fact["evidence"]["locator"],
             }
         )
-    report = {
+    return {
         "schema_version": "missing-parameter-probe-v2",
-        "ok": True,
-        "formal_ready": True,
+        "ok": not missing,
+        "formal_ready": not missing,
         "accepted_statuses": ["approved", "derived", "verified"],
         "resolved": resolved,
-        "missing": [],
+        "missing": missing,
         "provisional": [],
         "blocked_fields": [],
         "auto_fill": {},
         "project_fact_ledger_digest": ledger["ledger_digest"],
     }
-    return report, ledger
 
 
 def _bound_sections(ledger: dict) -> list[dict]:
@@ -76,9 +159,17 @@ def _bound_sections(ledger: dict) -> list[dict]:
     for field in _FORMAL_FIELDS:
         fact = ledger["facts"][field]
         locator = fact["evidence"]["locator"]
-        lines.append(
-            f"{labels[field]}={fact['value']}{fact['unit']}【证据:{locator}】"
-        )
+        if field == "quality_threshold":
+            for item in fact["value"]["items"]:
+                lines.append(
+                    f"质量阈值 {item['process']}：{item['metric']}"
+                    f"{item['operator']}{item['value']}{item['unit']}"
+                    f"【证据:{item['locator']}】"
+                )
+        else:
+            lines.append(
+                f"{labels[field]}={fact['value']}{fact['unit']}【证据:{locator}】"
+            )
     return [{"title": "项目参数", "content": "\n".join(lines)}]
 
 
@@ -121,6 +212,100 @@ def test_professional_delivery_gate_passes_complete_evidence_chain():
     assert gate["delivery_allowed"] is True
     assert gate["blocker_count"] == 0
     assert len(gate["decision_digest"]) == 64
+
+
+def test_professional_delivery_gate_rejects_scalar_project_wide_quality_threshold():
+    _, original = _formal_parameter_receipts()
+    facts = {
+        field: {
+            "value": original["facts"][field]["value"],
+            "unit": original["facts"][field]["unit"],
+        }
+        for field in _FORMAL_FIELDS
+    }
+    facts["quality_threshold"] = {"value": "偏差≤5mm", "unit": ""}
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "approved-facts",
+                "source_type": "approved_resolution",
+                "facts": facts,
+                "evidence": {"locator": "approved.parameters"},
+            }
+        ]
+    )
+    kwargs = _base_kwargs()
+    kwargs["project_fact_ledger"] = ledger
+    kwargs["project_parameters"] = _parameter_report(ledger)
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(
+        row for row in gate["checks"] if row["name"] == "formal_project_parameters"
+    )
+    assert gate["delivery_allowed"] is False
+    assert check["structured_quality_validation"]["errors"] == [
+        {
+            "item_id": "quality_threshold",
+            "reason": "process_bound_bundle_required",
+        }
+    ]
+
+
+def test_professional_delivery_gate_rejects_duplicate_or_untraceable_quality_items():
+    _, original = _formal_parameter_receipts()
+    valid_item = dict(
+        original["facts"]["quality_threshold"]["value"]["items"][0]
+    )
+    invalid_item = dict(valid_item)
+    invalid_item["process"] = "车辆消毒池防水混凝土"
+    invalid_item["metric"] = "强度等级"
+    invalid_item["value"] = "C25"
+    invalid_item["locator"] = "图纸.pdf#p1_deadbeef@1"
+    facts = {
+        field: {
+            "value": original["facts"][field]["value"],
+            "unit": original["facts"][field]["unit"],
+        }
+        for field in _FORMAL_FIELDS
+    }
+    facts["quality_threshold"] = {
+        "value": {
+            "mode": "process_bound",
+            "items": [valid_item, invalid_item],
+        },
+        "unit": "",
+    }
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "approved-facts",
+                "source_type": "approved_resolution",
+                "facts": facts,
+                "evidence": {"locator": "approved.parameters"},
+            }
+        ]
+    )
+    kwargs = _base_kwargs()
+    kwargs["project_fact_ledger"] = ledger
+    kwargs["project_parameters"] = _parameter_report(ledger)
+    kwargs["sections"] = _bound_sections(ledger)
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(
+        row for row in gate["checks"] if row["name"] == "formal_project_parameters"
+    )
+    reasons = {
+        row["reason"]
+        for row in check["structured_quality_validation"]["errors"]
+    }
+    assert gate["delivery_allowed"] is False
+    assert reasons == {
+        "id_duplicate",
+        "locator_invalid",
+        "locator_evidence_mismatch",
+    }
 
 
 def test_professional_delivery_gate_fails_closed_without_parameter_receipts():
@@ -177,10 +362,145 @@ def test_professional_delivery_gate_rejects_receipt_locator_mismatch():
     ]
 
 
+def test_formal_gate_rejects_user_input_without_confirmation_receipt():
+    kwargs = _base_kwargs()
+    ledger = kwargs["project_fact_ledger"]
+    fact = ledger["facts"]["resource_peak"]
+    fact["source_type"] = "user_input"
+    fact["source_id"] = "run-project-input"
+    fact.pop("approval_receipt", None)
+    _reseal_ledger(ledger)
+    kwargs["project_parameters"] = _parameter_report(ledger)
+    kwargs["sections"] = _bound_sections(ledger)
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(
+        row for row in gate["checks"] if row["name"] == "formal_project_parameters"
+    )
+    by_field = {row["field"]: row["reasons"] for row in check["source_evidence_errors"]}
+    assert gate["delivery_allowed"] is False
+    assert "approval_receipt_incomplete" in by_field["resource_peak"]
+
+
+def test_formal_gate_rejects_unbound_project_identity():
+    kwargs = _base_kwargs()
+    ledger = kwargs["project_fact_ledger"]
+    ledger["project_id"] = None
+    _reseal_ledger(ledger)
+    kwargs["project_parameters"] = _parameter_report(ledger)
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(
+        row for row in gate["checks"] if row["name"] == "formal_project_parameters"
+    )
+    assert gate["delivery_allowed"] is False
+    assert check["project_identity_bound"] is False
+    assert {
+        row["field"] for row in check["source_evidence_errors"]
+    } == set(_FORMAL_FIELDS)
+
+
+def test_formal_gate_rejects_generic_payload_locator_even_with_approval_receipt():
+    kwargs = _base_kwargs()
+    ledger = kwargs["project_fact_ledger"]
+    fact = ledger["facts"]["critical_interval_days"]
+    fact["evidence"]["locator"] = (
+        "payload.approved_project_fact_resolutions.critical_interval_days"
+    )
+    _reseal_evidence(fact["evidence"])
+    _reseal_ledger(ledger)
+    kwargs["project_parameters"] = _parameter_report(ledger)
+    kwargs["sections"] = _bound_sections(ledger)
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(
+        row for row in gate["checks"] if row["name"] == "formal_project_parameters"
+    )
+    by_field = {row["field"]: row["reasons"] for row in check["source_evidence_errors"]}
+    assert gate["delivery_allowed"] is False
+    assert "file_locator_invalid" in by_field["critical_interval_days"]
+
+
+def test_formal_gate_rejects_derived_schedule_fact_without_derivation_receipt():
+    kwargs = _base_kwargs()
+    ledger = kwargs["project_fact_ledger"]
+    fact = ledger["facts"]["resource_peak"]
+    fact["status"] = "derived"
+    fact["source_type"] = "boq"
+    fact["source_id"] = "boq-deterministic-schedule"
+    fact.pop("approval_receipt", None)
+    fact["evidence"] = {"locator": "boq_wbs_cpm.summary"}
+    _reseal_evidence(fact["evidence"])
+    readiness = ledger["formal_parameter_readiness"]
+    readiness["ready_fields"] = list(_FORMAL_FIELDS)
+    readiness["ready"] = True
+    _reseal_ledger(ledger)
+    kwargs["project_parameters"] = _parameter_report(ledger)
+    kwargs["sections"] = _bound_sections(ledger)
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(
+        row for row in gate["checks"] if row["name"] == "formal_project_parameters"
+    )
+    by_field = {row["field"]: row["reasons"] for row in check["source_evidence_errors"]}
+    assert gate["delivery_allowed"] is False
+    assert "derivation_receipt_not_ready" in by_field["resource_peak"]
+    assert "derivation_receipt_digest_invalid" in by_field["resource_peak"]
+
+
+def test_formal_gate_accepts_digest_bound_schedule_derivation_receipt():
+    kwargs = _base_kwargs()
+    derived = build_project_fact_ledger_from_inputs(
+        payload={"project_id": _PROJECT_ID},
+        tender={},
+        boq_wbs_cpm={
+            "summary": {
+                "estimated_duration_days": 180,
+                "resource_peak": 80,
+                "critical_interval_days": 3,
+                "schedule_fact_eligible": True,
+                "schedule_fact_reasons": [],
+                "schedule_input_readiness": {
+                    "ready": True,
+                    "status": "approved",
+                    "locator": "approved:schedule-inputs/receipt-001",
+                    "checks": {
+                        "productivity_units_verified": True,
+                        "resource_allocations_verified": True,
+                        "dependencies_verified": True,
+                    },
+                    "reasons": [],
+                },
+            }
+        },
+    )
+    ledger = kwargs["project_fact_ledger"]
+    for field in ("resource_peak", "critical_interval_days"):
+        ledger["facts"][field] = derived["facts"][field]
+    _reseal_ledger(ledger)
+    kwargs["project_parameters"] = _parameter_report(ledger)
+    kwargs["sections"] = _bound_sections(ledger)
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(
+        row for row in gate["checks"] if row["name"] == "formal_project_parameters"
+    )
+    assert check["source_evidence_errors"] == []
+    assert gate["delivery_allowed"] is True
+
+
 def test_professional_delivery_gate_rejects_unbound_parameter_body_statement():
     kwargs = _base_kwargs()
+    locator = kwargs["project_fact_ledger"]["facts"]["planned_duration_days"][
+        "evidence"
+    ]["locator"]
     kwargs["sections"][0]["content"] = kwargs["sections"][0]["content"].replace(
-        "【证据:test.planned_duration_days】", "", 1
+        f"【证据:{locator}】", "", 1
     )
 
     gate = build_delivery_quality_gate(**kwargs)
@@ -200,7 +520,25 @@ def test_professional_delivery_gate_rejects_stale_defaults_conflicting_with_ledg
         "resource_peak": (96, "人"),
         "critical_interval_days": (6, "天"),
         "risk_inspection_frequency": ("逐班", ""),
-        "quality_threshold": ("按工序允许偏差表", ""),
+        "quality_threshold": (
+            {
+                "mode": "process_bound",
+                "items": [
+                    {
+                        "id": "wall-foundation-compaction",
+                        "process": "围墙基础持力层压实",
+                        "metric": "压实系数",
+                        "operator": ">=",
+                        "value": 0.98,
+                        "unit": "",
+                        "status": "approved",
+                        "source": "approved_resolution",
+                        "locator": f"批准图.pdf#p2_{'b' * 64}@80",
+                    }
+                ],
+            },
+            "",
+        ),
         "deviation_action_deadline": ("6小时", ""),
     }
     rebuilt = build_project_fact_ledger(

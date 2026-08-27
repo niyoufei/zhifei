@@ -74,6 +74,7 @@ def _formal_delivery_fixture(
     variant_ids: tuple[int, ...] = (1,),
 ) -> tuple[dict, dict, list[dict]]:
     from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
+    from backend.zhifei_autoplan.export_docx_service import canonical_export_digest
 
     sources: list[str] = []
     professional: list[str] = []
@@ -109,11 +110,23 @@ def _formal_delivery_fixture(
         focus_xlsx.append(str(ancillary_paths["focus_xlsx"]))
         score_overview_xlsx.append(str(ancillary_paths["score_overview_xlsx"]))
         expert_review_docx.append(str(ancillary_paths["expert_review_docx"]))
+        delivery_gate = {
+            "schema_version": "delivery-quality-gate-v1",
+            "strict": True,
+            "delivery_allowed": True,
+            "checks": [],
+            "blocker_count": 0,
+            "warning_count": 0,
+            "blockers": [],
+            "warnings": [],
+        }
+        delivery_gate["decision_digest"] = canonical_export_digest(delivery_gate)
         variants.append(
             {
                 "variant_id": variant_id,
                 "delivery_scope": "document",
                 "delivery_ready": True,
+                "delivery_quality_gate": delivery_gate,
                 "sections": [],
                 "quality_checks": {"issue_list": [], "auto_revision_suggestions": []},
             }
@@ -184,6 +197,12 @@ def test_formal_delivery_state_requires_sealed_exact_professional_artifacts(
     failed_job = dict(job, status="failed")
     assert actions_bridge._formal_delivery_state(failed_job, result, variants)[1] == (
         "job_not_succeeded"
+    )
+
+    tampered_gate = copy.deepcopy(variants)
+    tampered_gate[0]["delivery_quality_gate"]["delivery_allowed"] = False
+    assert actions_bridge._formal_delivery_state(job, result, tampered_gate)[1] == (
+        "delivery_gate_invalid"
     )
 
 
@@ -418,7 +437,6 @@ async def test_professional_rerender_is_unique_and_stale_cas_cannot_overwrite(
 
     def stale_transition(_job_id, **kwargs):
         cas_calls.append(kwargs)
-        return None
 
     monkeypatch.setattr(
         actions_bridge,
@@ -428,15 +446,18 @@ async def test_professional_rerender_is_unique_and_stale_cas_cannot_overwrite(
     monkeypatch.setattr(actions_bridge, "render_professional_document", fake_render)
     monkeypatch.setattr(actions_bridge, "transition_job", stale_transition)
 
-    with patch.dict("os.environ", {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False):
-        with pytest.raises(HTTPException) as exc_info:
-            await actions_bridge.actions_professional_render(
-                actions_bridge.ActionsProfessionalRenderRequest(
-                    job_id=job_id,
-                    variant=1,
-                ),
-                x_actions_key="test-actions-key",
-            )
+    with patch.dict(
+        "os.environ",
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ), pytest.raises(HTTPException) as exc_info:
+        await actions_bridge.actions_professional_render(
+            actions_bridge.ActionsProfessionalRenderRequest(
+                job_id=job_id,
+                variant=1,
+            ),
+            x_actions_key="test-actions-key",
+        )
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["code"] == "STALE_PROMOTION"
@@ -557,12 +578,15 @@ async def test_rollback_route_validates_snapshot_before_any_candidate_write(
         revision_id="REV-invalid",
         expected_result_version=result_version(variants),
     )
-    with patch.dict("os.environ", {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False):
-        with pytest.raises(HTTPException) as exc_info:
-            await actions_bridge.actions_review_rollback(
-                request,
-                x_actions_key="test-actions-key",
-            )
+    with patch.dict(
+        "os.environ",
+        {"ZF_ACTIONS_KEY": "test-actions-key"},
+        clear=False,
+    ), pytest.raises(HTTPException) as exc_info:
+        await actions_bridge.actions_review_rollback(
+            request,
+            x_actions_key="test-actions-key",
+        )
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["code"] == "ROLLBACK_SNAPSHOT_INVALID"

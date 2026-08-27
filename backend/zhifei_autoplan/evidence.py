@@ -26,6 +26,63 @@ def _tokenize_query(query: str) -> list[str]:
     return uniq
 
 
+_GENERIC_DRAWING_MATCH_TOKENS = {
+    "工程",
+    "施工",
+    "施工工艺",
+    "施工方法",
+    "施工方案",
+    "技术措施",
+    "安装",
+    "作业",
+    "工艺",
+    "工序",
+    "流程",
+    "通用",
+    "图纸",
+    "图",
+    "详见图纸",
+    "施工图纸",
+    "施工图",
+    "图纸说明",
+    "详图",
+    "大样",
+    "节点",
+    "详见",
+    "说明",
+    "做法",
+    "材料",
+    "项目",
+}
+
+
+def _drawing_specific_query(query: str) -> str:
+    """Drop tokens that can only prove that a document is drawing-like.
+
+    A drawing lookup must be anchored by an item/process term.  Generic words
+    such as ``图纸`` and ``详见图纸`` may be useful filename hints, but they
+    must never become the matched evidence token.
+    """
+
+    def _fully_decomposable_as_generic(token: str) -> bool:
+        normalized = token.casefold()
+        reachable = [False] * (len(normalized) + 1)
+        reachable[0] = True
+        for start in range(len(normalized)):
+            if not reachable[start]:
+                continue
+            for generic in _GENERIC_DRAWING_MATCH_TOKENS:
+                if normalized.startswith(generic.casefold(), start):
+                    reachable[start + len(generic)] = True
+        return reachable[-1]
+
+    tokens: list[str] = []
+    for token in _tokenize_query(query):
+        if not _fully_decomposable_as_generic(token):
+            tokens.append(token)
+    return " ".join(tokens)
+
+
 @lru_cache(maxsize=8)
 def _load_audit_records(audit_path: str, mtime_ns: int) -> list[dict]:
     # Cache parsed audit records for repeated searches during one autoplan run.
@@ -170,20 +227,25 @@ def search_ingested_docs(
     project_id: str | None = None,
     require_tags: Iterable[str] | None = None,
     exclude_tags: Iterable[str] | None = None,
+    audit_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    audit_path = Path("backend/data/audit/ingest.jsonl")
-    if not audit_path.exists():
+    resolved_audit_path = (
+        Path(audit_path)
+        if audit_path is not None and str(audit_path).strip()
+        else Path("backend/data/audit/ingest.jsonl")
+    )
+    if not resolved_audit_path.exists():
         return []
     uniq = _tokenize_query(query)
     if not uniq:
         return []
     hits: list[dict[str, Any]] = []
     try:
-        mtime_ns = int(os.stat(audit_path).st_mtime_ns)
+        mtime_ns = int(os.stat(resolved_audit_path).st_mtime_ns)
     except OSError:
         mtime_ns = 0
     pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
-    for rec in _load_audit_records(str(audit_path), mtime_ns):
+    for rec in _load_audit_records(str(resolved_audit_path), mtime_ns):
         if pid is not None and str(rec.get("project_id") or "").strip() != pid:
             continue
         if not _tags_match(
@@ -244,6 +306,7 @@ def best_ingested_hit(
     project_id: str | None = None,
     require_tags: Iterable[str] | None = None,
     exclude_tags: Iterable[str] | None = None,
+    audit_path: str | Path | None = None,
 ) -> dict[str, Any] | None:
     """
     Pick the best hit for a query. Used for auto-citing BoQ items and for evidence traceability remediation.
@@ -254,6 +317,7 @@ def best_ingested_hit(
         project_id=project_id,
         require_tags=require_tags,
         exclude_tags=exclude_tags,
+        audit_path=audit_path,
     )
     if not hits:
         return None
@@ -284,6 +348,36 @@ def best_ingested_hit(
     out = dict(best)
     out["locator"] = format_hit_locator(best)
     return out
+
+
+def best_drawing_hit(
+    query: str,
+    limit: int = 8,
+    prefer_filename_keywords: Iterable[str] | None = None,
+    project_id: str | None = None,
+    require_tags: Iterable[str] | None = None,
+    exclude_tags: Iterable[str] | None = None,
+    audit_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return a drawing hit only when a non-generic query token matched.
+
+    This intentionally delegates identity/page-window construction and score
+    ordering to :func:`best_ingested_hit`; only the candidate query is
+    narrowed.  If every token is generic, the lookup fails closed.
+    """
+
+    specific_query = _drawing_specific_query(query)
+    if not specific_query:
+        return None
+    return best_ingested_hit(
+        specific_query,
+        limit=limit,
+        prefer_filename_keywords=prefer_filename_keywords,
+        project_id=project_id,
+        require_tags=require_tags,
+        exclude_tags=exclude_tags,
+        audit_path=audit_path,
+    )
 
 
 def list_ingested_filenames_by_tag(

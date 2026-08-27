@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.routers.actions_bridge import _save_outputs
-
+from backend.zhifei_autoplan import export_docx_service
 
 pytestmark = pytest.mark.usefixtures("allow_legacy_export_contract")
 
@@ -53,6 +53,19 @@ def test_save_outputs_includes_new_artifacts(tmp_path: Path, monkeypatch):
             "summary": {"paragraph_count": 1},
         },
         "boq_wbs_cpm": {"summary": {"project_duration_days": 30, "resource_peak": 20, "critical_interval_days": 3}},
+    }
+    gate_core = {
+        "schema_version": "delivery-quality-gate-v1",
+        "delivery_allowed": True,
+        "checks": [],
+        "blocker_count": 0,
+        "blockers": [],
+    }
+    variant["delivery_quality_gate"] = {
+        **gate_core,
+        "decision_digest": export_docx_service.canonical_export_digest(
+            gate_core
+        ),
     }
 
     out = _save_outputs("actions_test", [variant])

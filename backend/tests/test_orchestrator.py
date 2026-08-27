@@ -1,6 +1,7 @@
 """Unit tests for backend/zhifei_autoplan/orchestrator.py"""
 
 import asyncio
+import hashlib
 import json
 import sys
 import types
@@ -11,6 +12,7 @@ import pytest
 
 from backend.zhifei_autoplan.execution_control import ExecutionBudgetExceededError
 from backend.zhifei_autoplan.orchestrator import (
+    _build_source_input_receipt,
     _build_weights_and_penalties,
     _chapter_deadline_seconds,
     _is_critical_review_chapter,
@@ -44,6 +46,28 @@ def test_long_chapter_deadline_allows_one_bounded_continuation() -> None:
             {"chapter_deadline_seconds": 1200}, target_pages=16
         )
         == 900
+    )
+
+
+def test_source_input_receipt_is_project_bound_and_tamper_evident() -> None:
+    tender = {"project_name": "项目A", "planned_duration_days": 150}
+    boq = {"items": [{"name": "钢梁", "quantity": 59.214, "unit": "t"}]}
+
+    receipt = _build_source_input_receipt(
+        project_id="P-SOURCE",
+        tender=tender,
+        boq=boq,
+    )
+
+    assert receipt["schema_version"] == "autoplan-source-input-v1"
+    assert receipt["project_id"] == "P-SOURCE"
+    assert len(receipt["tender_digest"]) == 64
+    assert len(receipt["boq_digest"]) == 64
+    assert len(receipt["receipt_digest"]) == 64
+    assert receipt != _build_source_input_receipt(
+        project_id="P-SOURCE",
+        tender=tender,
+        boq={"items": [{"name": "钢梁", "quantity": 59214, "unit": "t"}]},
     )
 
 
@@ -133,6 +157,79 @@ def _passing_quality_result() -> dict:
             "quality_gate": {"pass": True, "blocking_issues": []},
             "issues": [],
         },
+    }
+
+
+def _digest(value) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _approved_formal_fact(
+    *,
+    project_id: str,
+    field: str,
+    value,
+    unit: str = "",
+) -> dict:
+    file_name = f"批准参数-{field}.pdf"
+    document_sha256 = hashlib.sha256(field.encode("utf-8")).hexdigest()
+    return {
+        "value": value,
+        "unit": unit,
+        "evidence": {
+            "file_name": file_name,
+            "document_sha256": document_sha256,
+            "locator": f"{file_name}#p1_{document_sha256}@10",
+        },
+        "approval_receipt": {
+            "receipt_id": f"APR-{field}",
+            "status": "approved",
+            "project_id": project_id,
+            "field": field,
+            "value_digest": _digest(
+                {"field": field, "value": value, "unit": unit}
+            ),
+            "summary": f"批准 {field} 的正式项目值",
+            "approved_by": "项目负责人",
+            "approved_at": "2026-08-27T10:00:00+08:00",
+        },
+    }
+
+
+def _formal_quality_bundle() -> dict:
+    return {
+        "mode": "process_bound",
+        "items": [
+            {
+                "id": "foundation-concrete-grade",
+                "process": "基础混凝土",
+                "metric": "强度等级",
+                "operator": "=",
+                "value": "C30",
+                "unit": "",
+                "status": "approved",
+                "source": "user_input",
+                "locator": f"批准参数.pdf#p1_{'a' * 64}@42",
+                "document_sha256": "a" * 64,
+                "extract_text_sha256": "b" * 64,
+                "page": 1,
+                "page_text_sha256": "c" * 64,
+                "offset": 42,
+                "end": 58,
+                "page_start_offset": 0,
+                "page_end_offset": 500,
+                "page_match_start": 42,
+                "page_match_end": 58,
+                "match_text_sha256": "d" * 64,
+            }
+        ],
     }
 
 
@@ -449,20 +546,51 @@ class TestRunAutoplan:
         self,
         mock_dependencies,
     ):
+        project_id = "P-ORCHESTRATOR-FORMAL"
+        quality_bundle = _formal_quality_bundle()
+        approved = {
+            "planned_duration_days": _approved_formal_fact(
+                project_id=project_id,
+                field="planned_duration_days",
+                value=180,
+                unit="天",
+            ),
+            "resource_peak": _approved_formal_fact(
+                project_id=project_id,
+                field="resource_peak",
+                value=80,
+                unit="人",
+            ),
+            "critical_interval_days": _approved_formal_fact(
+                project_id=project_id,
+                field="critical_interval_days",
+                value=3,
+                unit="天",
+            ),
+            "risk_inspection_frequency": _approved_formal_fact(
+                project_id=project_id,
+                field="risk_inspection_frequency",
+                value="2次/日",
+            ),
+            "quality_threshold": _approved_formal_fact(
+                project_id=project_id,
+                field="quality_threshold",
+                value=quality_bundle,
+            ),
+            "deviation_action_deadline": _approved_formal_fact(
+                project_id=project_id,
+                field="deviation_action_deadline",
+                value="4h",
+            ),
+        }
         result = await run_autoplan(
             {
+                "project_id": project_id,
                 "delivery_scope": "document",
                 "quality_strict": False,
                 "outline": ["工程概况"],
                 "generate_images": False,
-                "project_facts": {
-                    "planned_duration_days": 180,
-                    "resource_peak": 80,
-                    "critical_interval_days": 3,
-                    "risk_inspection_frequency": "2次/日",
-                    "quality_threshold": "偏差≤5mm",
-                    "deviation_action_deadline": "4h",
-                },
+                "approved_project_fact_resolutions": approved,
             }
         )
 
@@ -534,6 +662,135 @@ class TestRunAutoplan:
         assert writer_ctx["project_fact_ledger_digest"] == ledger["ledger_digest"]
         assert writer_ctx["project_fact_snapshot"]["ledger_digest"] == ledger["ledger_digest"]
         assert writer_ctx["project_fact_snapshot"]["facts"]["project_code"]["value"] == "TENDER-01"
+
+    @pytest.mark.asyncio
+    async def test_ineligible_schedule_reasons_reach_writer_and_facts_fail_closed(
+        self,
+        mock_dependencies,
+    ):
+        """Canonical CPM diagnostics survive sanitizing without promoting facts."""
+        schedule_fact_reasons = [
+            "derived_duration_implausible",
+            "schedule_input_locator_missing",
+        ]
+        boq_wbs_cpm = {
+            "ok": True,
+            "wbs": [],
+            "activities": [],
+            "cpm": {},
+            "schedule_input_warnings": [],
+            "summary": {
+                "estimated_duration_days": 9999,
+                "resource_peak": 321,
+                "critical_interval_days": 7,
+                "critical_path_names": ["异常关键工序"],
+                "schedule_fact_eligible": False,
+                "schedule_fact_reasons": schedule_fact_reasons,
+            },
+        }
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.build_boq_wbs_cpm",
+            return_value=boq_wbs_cpm,
+        ):
+            result = await run_autoplan(
+                {
+                    "project_id": "P-INELIGIBLE-SCHEDULE",
+                    "outline": ["施工进度"],
+                    "generate_images": False,
+                }
+            )
+
+        writer_ctx = mock_dependencies["writer"].write.call_args.args[1]
+        assert writer_ctx["boq_wbs_cpm_summary"] == {
+            "schedule_fact_eligible": False,
+            "schedule_fact_reasons": schedule_fact_reasons,
+        }
+        facts = result["project_fact_ledger"]["facts"]
+        assert "planned_duration_days" not in facts
+        assert "resource_peak" not in facts
+        assert "critical_interval_days" not in facts
+        assert result["missing_parameters"]["formal_ready"] is False
+        blocker_codes = {
+            row["code"] for row in result["delivery_quality_gate"]["blockers"]
+        }
+        assert "DELIVERY_PROJECT_PARAMETERS_UNRESOLVED" in blocker_codes
+
+    @pytest.mark.asyncio
+    async def test_project_parameter_evidence_is_returned_and_enters_fact_ledger(
+        self,
+        mock_dependencies,
+    ):
+        """Deterministic drawing evidence is observable and ledger-bound."""
+        item = {
+            "id": "wall-foundation-compaction",
+            "process": "围墙基础持力层压实",
+            "metric": "压实系数",
+            "operator": "≥",
+            "value": 0.97,
+            "unit": "",
+            "status": "verified",
+            "source": "reviewed_design",
+            "locator": f"围墙.pdf#p1_{'a' * 64}@12",
+            "document_sha256": "a" * 64,
+            "extract_text_sha256": "e" * 64,
+            "page": 1,
+            "page_text_sha256": "b" * 64,
+            "offset": 12,
+            "end": 28,
+            "page_start_offset": 0,
+            "page_end_offset": 500,
+            "page_match_start": 12,
+            "page_match_end": 28,
+            "match_text_sha256": "c" * 64,
+        }
+        bundle = {"mode": "process_bound", "items": [item]}
+        bundle_digest = _digest(bundle)
+        evidence = {
+            "schema_version": "project-parameter-evidence-v1",
+            "project_id": "P-EVIDENCE",
+            "status": "PASS_PROJECT_PARAMETER_EVIDENCE",
+            "ready": True,
+            "quality_threshold": {
+                "value": bundle,
+                "unit": "",
+                "status": "derived",
+                "confidence": 1.0,
+                "evidence": {
+                    "locator": "project_parameter_evidence.quality_threshold",
+                    "source_sha256": bundle_digest,
+                },
+            },
+            "quality_threshold_bundle_digest": bundle_digest,
+            "matched_item_count": 1,
+            "required_item_count": 1,
+            "required_item_ids": [item["id"]],
+            "missing_required_item_ids": [],
+            "unexpected_item_ids": [],
+            "coverage_complete": True,
+            "conflicts": [],
+        }
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.build_project_parameter_evidence",
+            return_value=evidence,
+        ) as mock_builder:
+            result = await run_autoplan(
+                {
+                    "project_id": "P-EVIDENCE",
+                    "outline": ["质量管理"],
+                    "quality_strict": False,
+                    "dry_run": True,
+                    "generate_images": False,
+                }
+            )
+
+        assert result["project_parameter_evidence"] == evidence
+        fact = result["project_fact_ledger"]["facts"]["quality_threshold"]
+        assert fact["source_id"] == "project-parameter-evidence"
+        assert fact["value"]["items"][0]["locator"] == item["locator"]
+        mock_builder.assert_called_once()
+        assert mock_builder.call_args.kwargs["project_id"] == "P-EVIDENCE"
 
     @pytest.mark.asyncio
     async def test_outline_sections(self, mock_dependencies):
@@ -1179,7 +1436,11 @@ class TestRunAutoplan:
 
         expected_chapters = len(result.get("sections") or [])
         names = [event.get("event") for event in events]
+        assert "project_parameter_evidence_ready" in names
         assert "project_facts_ready" in names
+        assert names.index("project_parameter_evidence_ready") < names.index(
+            "project_facts_ready"
+        )
         assert names.index("project_facts_ready") < names.index("chapters_ready")
         assert names.count("chapter_started") == expected_chapters
         assert names.count("chapter_completed") == expected_chapters

@@ -30,6 +30,21 @@ def _has_pattern(text: str, pattern: str) -> bool:
         return False
 
 
+def _is_process_bound_quality_threshold(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if str(value.get("mode") or "").strip().lower() != "process_bound":
+        return False
+    items = value.get("items")
+    return isinstance(items, list) and bool(items) and all(
+        isinstance(item, Mapping)
+        and bool(str(item.get("process") or "").strip())
+        and bool(str(item.get("metric") or "").strip())
+        and bool(str(item.get("locator") or "").strip())
+        for item in items
+    )
+
+
 def probe_missing_parameters(
     *,
     topic: str,
@@ -99,14 +114,20 @@ def probe_missing_parameters(
             "field": "quality_threshold",
             "key": "质量阈值",
             "pattern": r"(?:阈值|偏差|合格率)[^\d]{0,8}(?:≤|>=|≥|<|>)?\s*\d+(?:\.\d+)?\s*(mm|%|MPa)?",
-            "fallback": str(risk_defaults.get("threshold") or "偏差≤5mm"),
+            # A global enterprise tolerance is not a project fact.  Quality
+            # thresholds are admitted only as process-bound evidence bundles.
+            "fallback": "",
             "reason": "验收判定缺少阈值",
             "question": "请确认质量阈值",
         },
         {
             "field": "deviation_action_deadline",
             "key": "偏差处置时限",
-            "pattern": r"(?:偏差处置|整改|复验|复核).{0,10}(?:\d+(?:\.\d+)?\s*(h|小时|天)|时限)",
+            "pattern": (
+                r"(?:在监理人规定时间内按要求完成整改|"
+                r"(?:偏差处置|整改|复验|复核).{0,10}"
+                r"(?:\d+(?:\.\d+)?\s*(h|小时|天)|时限))"
+            ),
             "fallback": str(risk_defaults.get("deviation_action") or "偏差处置时限≤4h"),
             "reason": "闭环缺少时限约束",
             "question": "请确认偏差处置时限",
@@ -123,7 +144,15 @@ def probe_missing_parameters(
         key = str(c.get("key") or "参数")
         fact = facts.get(field) if isinstance(facts, Mapping) else None
         status = str(fact.get("status") or "") if isinstance(fact, Mapping) else ""
-        if isinstance(fact, Mapping) and status in FORMAL_ACCEPTED_STATUSES:
+        value_is_usable = field != "quality_threshold" or (
+            isinstance(fact, Mapping)
+            and _is_process_bound_quality_threshold(fact.get("value"))
+        )
+        if (
+            isinstance(fact, Mapping)
+            and status in FORMAL_ACCEPTED_STATUSES
+            and value_is_usable
+        ):
             evidence = fact.get("evidence") if isinstance(fact.get("evidence"), Mapping) else {}
             resolved.append(
                 {

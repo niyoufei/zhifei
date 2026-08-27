@@ -371,13 +371,60 @@ class TestFallback:
 
         assert "频次：3次/班" in result
         assert "阈值：偏差≤3mm" in result
-        assert "时长：6小时" in result
+        assert "时长：待依据图纸/规范/批准制度确认" in result
+        assert "整改时限=6小时" in result
+        assert "时长：6小时" not in result
         assert "人数：72人" in result
         assert "2次/日" not in result
         assert "偏差≤5mm" not in result
         assert "4h/作业段" not in result
         assert "8人/班" not in result
         assert "20t挖机" not in result
+
+    def test_process_bound_quality_bundle_is_rendered_per_process_not_as_dict(self):
+        writer = SectionWriter()
+        locator = f"围墙图.pdf#p1_{'a' * 64}@42"
+        ledger = {
+            "facts": {
+                "quality_threshold": {
+                    "value": {
+                        "mode": "process_bound",
+                        "items": [
+                            {
+                                "id": "wall-foundation-compaction",
+                                "process": "围墙基础持力层压实",
+                                "metric": "压实系数",
+                                "operator": ">=",
+                                "value": 0.97,
+                                "unit": "",
+                                "status": "verified",
+                                "source": "reviewed_design",
+                                "locator": locator,
+                            }
+                        ],
+                    },
+                    "status": "derived",
+                    "evidence": {"locator": "project_parameter_evidence.quality_threshold"},
+                }
+            }
+        }
+
+        quality_prompt = writer._build_prompt(
+            "质量管理与验收", {"project_fact_ledger": ledger}
+        )
+        unrelated_prompt = writer._build_prompt(
+            "施工进度计划", {"project_fact_ledger": ledger}
+        )
+        fallback = writer._fallback(
+            "质量管理与验收", {"project_fact_ledger": ledger}
+        )
+
+        expected = f"围墙基础持力层压实：压实系数>=0.97【证据:{locator}】"
+        assert expected in quality_prompt
+        assert expected in fallback
+        assert "围墙基础持力层压实" not in unrelated_prompt
+        assert "{'mode':" not in quality_prompt
+        assert '"mode":"process_bound"' not in unrelated_prompt
 
     def test_fallback_preserves_an_approved_value_equal_to_old_default(self):
         writer = SectionWriter()
@@ -394,6 +441,78 @@ class TestFallback:
         result = writer._fallback("安全管理", {"project_fact_ledger": ledger})
 
         assert "频次：2次/日" in result
+
+    def test_fallback_neutralizes_unapproved_constraints_from_its_own_templates(self):
+        writer = SectionWriter()
+
+        matrix_content = writer._fallback(
+            "质量安全环保管理", {"logic_template": {"id": "C"}}
+        )
+        redline_content = writer._fallback(
+            "安全管理", {"logic_template": {"id": "D"}}
+        )
+
+        for unapproved in ("1次/周", "2次/日", "48h", "≤55dB"):
+            assert unapproved not in matrix_content
+        for unapproved in ("10min", "2h", "24h"):
+            assert unapproved not in redline_content
+        assert "频次待依据项目事实台账/批准制度确认" in matrix_content
+        assert "阈值待依据项目事实台账/图纸规范确认" in matrix_content
+        assert "时限待依据项目事实台账/批准制度确认" in redline_content
+
+    def test_fallback_preserves_only_exact_source_bound_constraint_values(self):
+        writer = SectionWriter()
+        digest = "a" * 64
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "1次/周",
+                    "status": "approved",
+                    "evidence": {"locator": f"风险制度.pdf#p2_{digest}@20"},
+                },
+                "deviation_action_deadline": {
+                    "value": "24h",
+                    "status": "approved",
+                    "evidence": {"locator": f"整改制度.pdf#p3_{digest}@30"},
+                },
+                "quality_threshold": {
+                    "value": {
+                        "mode": "process_bound",
+                        "items": [
+                            {
+                                "id": "night-noise-limit",
+                                "process": "夜间施工噪声控制",
+                                "metric": "噪声限值",
+                                "operator": "≤",
+                                "value": 55,
+                                "unit": "dB",
+                                "status": "verified",
+                                "source": "reviewed_design",
+                                "locator": f"环保图.pdf#p4_{digest}@40",
+                            }
+                        ],
+                    },
+                    "status": "derived",
+                    "evidence": {
+                        "locator": "project_parameter_evidence.quality_threshold"
+                    },
+                },
+            }
+        }
+
+        content = writer._fallback(
+            "质量安全环保管理",
+            {"logic_template": {"id": "C"}, "project_fact_ledger": ledger},
+        )
+
+        assert "频次：1次/周" in content
+        assert "整改时限=24h" in content
+        assert (
+            "夜间施工噪声控制：噪声限值≤55dB"
+            f"【证据:环保图.pdf#p4_{digest}@40】"
+        ) in content
+        for unapproved in ("2次/日", "48h", "10min"):
+            assert unapproved not in content
 
     def test_fallback_can_use_doc_evidence_as_source(self):
         """Fallback may use doc_evidence as a traceable evidence source."""
@@ -483,6 +602,65 @@ class TestWrite:
             assert legacy not in content
         assert "待依据" in content
         assert result["generation_mode"] == "llm"
+
+    @pytest.mark.asyncio
+    async def test_llm_output_neutralizes_unlisted_numeric_constraints_systemically(self):
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = {
+            "text": (
+                "风险检查频次1次/周；一般风险24h关闭；"
+                "夜间噪声≤55dB。"
+                f"【证据:环保制度.pdf#p1_{'b' * 64}@12】"
+            ),
+            "provider": "openai",
+            "model": "test-model",
+        }
+
+        result = await SectionWriter(llm=mock_llm).write("安全环保管理", {})
+
+        content = result["content"]
+        for unapproved in ("1次/周", "24h", "≤55dB"):
+            assert unapproved not in content
+        assert "频次待依据项目事实台账/批准制度确认" in content
+        assert "时限待依据项目事实台账/批准制度确认" in content
+        assert "阈值待依据项目事实台账/图纸规范确认" in content
+        assert f"【证据:环保制度.pdf#p1_{'b' * 64}@12】" in content
+
+    @pytest.mark.asyncio
+    async def test_similar_approved_values_do_not_authorize_different_constraints(self):
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = {
+            "text": "检查1次/周；一般风险24h关闭；夜间噪声≤55dB。",
+            "provider": "openai",
+            "model": "test-model",
+        }
+        digest = "c" * 64
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "1次/班",
+                    "status": "approved",
+                    "evidence": {"locator": f"风险制度.pdf#p1_{digest}@10"},
+                },
+                "deviation_action_deadline": {
+                    "value": "6h",
+                    "status": "approved",
+                    "evidence": {"locator": f"整改制度.pdf#p2_{digest}@20"},
+                },
+                "quality_threshold": {
+                    "value": "≤50dB",
+                    "status": "verified",
+                    "evidence": {"locator": f"环保图.pdf#p3_{digest}@30"},
+                },
+            }
+        }
+
+        result = await SectionWriter(llm=mock_llm).write(
+            "安全环保管理", {"project_fact_ledger": ledger}
+        )
+
+        for unapproved in ("1次/周", "24h", "≤55dB"):
+            assert unapproved not in result["content"]
 
     @pytest.mark.asyncio
     async def test_write_with_empty_llm_response_uses_fallback(self):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -93,6 +94,9 @@ from backend.zhifei_autoplan.project_fact_ledger import (
     build_project_fact_ledger_from_inputs,
     project_fact_prompt_requirements,
     validate_project_fact_ledger,
+)
+from backend.zhifei_autoplan.project_parameter_evidence import (
+    build_project_parameter_evidence,
 )
 from backend.zhifei_autoplan.project_types import (
     detect_project_type,
@@ -594,6 +598,32 @@ def _deep_merge_dict(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]
         else:
             out[k] = v
     return out
+
+
+def _canonical_source_digest(value: Any) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_source_input_receipt(
+    *,
+    project_id: str | None,
+    tender: dict[str, Any],
+    boq: dict[str, Any],
+) -> dict[str, Any]:
+    core = {
+        "schema_version": "autoplan-source-input-v1",
+        "project_id": str(project_id or "").strip(),
+        "tender_digest": _canonical_source_digest(tender),
+        "boq_digest": _canonical_source_digest(boq),
+    }
+    return {**core, "receipt_digest": _canonical_source_digest(core)}
 
 
 def _build_boq_focus(boq: dict[str, Any]) -> dict[str, Any]:
@@ -1293,6 +1323,11 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
     if style_source == "tender_override":
         tender_globals.append("字体/字号/行距/页边距等版式参数必须严格按招标文件要求执行，不得改写。")
     boq_source = payload.get("boq_data") or load_boq_data(project_id=project_id) or {}
+    source_input_receipt = _build_source_input_receipt(
+        project_id=str(project_id or "").strip() or None,
+        tender=tender if isinstance(tender, dict) else {},
+        boq=boq_source if isinstance(boq_source, dict) else {},
+    )
     _emit_progress(
         "boq_schedule_started",
         item_count=(
@@ -1315,8 +1350,8 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         # presenting an implausible derived duration as a usable project fact.
         cpm_summary = {
             "schedule_fact_eligible": False,
-            "schedule_fact_ineligibility_reasons": list(
-                raw_cpm_summary.get("schedule_fact_ineligibility_reasons") or []
+            "schedule_fact_reasons": list(
+                raw_cpm_summary.get("schedule_fact_reasons") or []
             ),
         }
     boq = sanitize_boq_for_generation(boq_source)
@@ -1325,10 +1360,43 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         process_count=len(boq_wbs_cpm.get("wbs") or []),
         warning_count=len(boq_wbs_cpm.get("schedule_input_warnings") or []),
     )
+    parameter_project_id = str(
+        project_id
+        or (tender.get("project_id") if isinstance(tender, dict) else "")
+        or (tender.get("project_code") if isinstance(tender, dict) else "")
+        or ""
+    ).strip()
+    try:
+        project_parameter_evidence = build_project_parameter_evidence(
+            project_id=parameter_project_id,
+            tender=tender if isinstance(tender, dict) else {},
+            audit_path=reference_library_audit_path,
+        )
+    except Exception as exc:  # noqa: BLE001 - evidence failure stays an explicit HOLD.
+        project_parameter_evidence = {
+            "schema_version": "project-parameter-evidence-v1",
+            "project_id": parameter_project_id or None,
+            "status": "HOLD_PROJECT_PARAMETER_EVIDENCE_BUILD_ERROR",
+            "ready": False,
+            "quality_threshold": None,
+            "matched_item_count": 0,
+            "conflicts": [],
+            "error_type": type(exc).__name__,
+        }
+    _emit_progress(
+        "project_parameter_evidence_ready",
+        status=project_parameter_evidence.get("status"),
+        ready=bool(project_parameter_evidence.get("ready")),
+        matched_item_count=int(
+            project_parameter_evidence.get("matched_item_count") or 0
+        ),
+        conflict_count=len(project_parameter_evidence.get("conflicts") or []),
+    )
     project_fact_ledger = build_project_fact_ledger_from_inputs(
         payload=payload,
         tender=tender if isinstance(tender, dict) else {},
         boq_wbs_cpm=boq_wbs_cpm if isinstance(boq_wbs_cpm, dict) else {},
+        project_parameter_evidence=project_parameter_evidence,
     )
     project_fact_validation = validate_project_fact_ledger(project_fact_ledger)
     if strict_quality and not project_fact_validation.get("ok"):
@@ -4086,6 +4154,8 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         "standard_citation_sanitization": standard_citation_sanitization,
         "boq_focus": boq_focus,
         "boq_wbs_cpm": boq_wbs_cpm,
+        "source_input_receipt": source_input_receipt,
+        "project_parameter_evidence": project_parameter_evidence,
         "project_fact_ledger": project_fact_ledger,
         "project_fact_validation": project_fact_validation,
         "missing_parameters": missing_param_probe,

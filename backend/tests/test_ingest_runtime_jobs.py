@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from concurrent.futures.process import BrokenProcessPool
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from backend.app.routers import ingest as ingest_router
 from backend.zhifei_autoplan.ocr_runtime import OcrResult
@@ -61,7 +63,7 @@ def _isolate_workspace(monkeypatch, tmp_path: Path) -> Path:
 
 
 def test_full_sha_cache_skips_second_parse(monkeypatch, tmp_path: Path) -> None:
-    _isolate_workspace(monkeypatch, tmp_path)
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
     calls = 0
     original = ingest_router._extract_text_path
 
@@ -78,6 +80,93 @@ def test_full_sha_cache_skips_second_parse(monkeypatch, tmp_path: Path) -> None:
     assert first["cache_hits"] == 0
     assert second["cache_hits"] == 1
     assert second["saved"][0]["file_id"] == first["saved"][0]["file_id"]
+    saved = first["saved"][0]
+    digest = hashlib.sha256(b"cached text").hexdigest()
+    assert Path(saved["saved_as"]).name == f"{digest}_a.txt"
+    assert Path(saved["extract_saved_as"]).name == (
+        f"{digest}_{saved['extract_text_sha256']}.txt"
+    )
+    assert saved["extract_text_sha256"] == hashlib.sha256(b"cached text").hexdigest()
+    audit = ingest_router.json.loads(
+        (workspace / "audit" / "ingest.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert audit["extract_text_sha256"] == saved["extract_text_sha256"]
+
+
+def test_upload_rejects_existing_full_sha_path_with_wrong_bytes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    payload = b"content-addressed-source"
+    digest = hashlib.sha256(payload).hexdigest()
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    collision = workspace / "uploads" / day / f"{digest}_source.txt"
+    collision.parent.mkdir(parents=True, exist_ok=True)
+    collision.write_bytes(b"different-bytes")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            ingest_router._handle_upload(
+                [_Upload(payload, "source.txt")],
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "CONTENT_ADDRESS_COLLISION"
+    assert collision.read_bytes() == b"different-bytes"
+
+
+def test_upload_rejects_existing_full_sha_extract_with_wrong_digest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    payload = b"expected extracted text"
+    digest = hashlib.sha256(payload).hexdigest()
+    expected_extract_digest = hashlib.sha256(payload).hexdigest()
+    collision = workspace / "extracts" / (
+        f"{digest}_{expected_extract_digest}.txt"
+    )
+    collision.parent.mkdir(parents=True, exist_ok=True)
+    collision.write_bytes(b"different-extract")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            ingest_router._handle_upload(
+                [_Upload(payload, "source.txt")],
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "EXTRACT_CONTENT_COLLISION"
+    assert collision.read_bytes() == b"different-extract"
+
+
+def test_file_id_resolution_verifies_full_path_and_keeps_legacy_read_compatibility(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "uploads"
+    root.mkdir()
+    monkeypatch.setattr(ingest_router, "FILE_ID_SEARCH_ROOTS", (root,))
+    legacy_payload = b"legacy-content"
+    legacy_digest = hashlib.sha256(legacy_payload).hexdigest()
+    legacy_path = root / f"{legacy_digest[:8]}_legacy.pdf"
+    legacy_path.write_bytes(legacy_payload)
+
+    assert ingest_router.resolve_ingested_file_ids([legacy_digest]) == [
+        str(legacy_path)
+    ]
+
+    bad_payload = b"expected-content"
+    bad_digest = hashlib.sha256(bad_payload).hexdigest()
+    (root / f"{bad_digest}_collision.pdf").write_bytes(b"wrong-content")
+    with pytest.raises(HTTPException) as exc_info:
+        ingest_router.resolve_ingested_file_ids([bad_digest])
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "CONTENT_ADDRESS_COLLISION"
 
 
 def test_parse_cache_spills_extracted_text_to_validated_sidecar(monkeypatch, tmp_path: Path) -> None:
@@ -231,10 +320,29 @@ def test_drawing_cache_requires_ocr_for_every_declared_page(
         "base": {
             "doc_type": "pdf",
             "pages": 27,
+            "ocr_source_pages": 27,
             "ocr_pages": 27,
             "ocr_page_text_count": 27,
             "ocr_page_mapping": "source_page_all",
-            "extract_text": "完整图纸 OCR",
+            "extract_text": "\f".join(
+                f"第{page}页图纸 OCR" for page in range(1, 28)
+            ),
+            "ocr_page_statuses": ["text"] * 27,
+            "ocr_page_image_sha256": [
+                hashlib.sha256(f"drawing-image-{page}".encode()).hexdigest()
+                for page in range(1, 28)
+            ],
+            "ocr_page_text_sha256": [
+                hashlib.sha256(f"第{page}页图纸 OCR".encode()).hexdigest()
+                for page in range(1, 28)
+            ],
+            "ocr_extract_page_sha256": [
+                hashlib.sha256(f"第{page}页图纸 OCR".encode()).hexdigest()
+                for page in range(1, 28)
+            ],
+            "ocr_page_proof_version": "ocr-page-proof-v1",
+            "ocr_error": None,
+            "ocr_blank_pages": [],
         },
         "parsed_type": None,
         "parsed_meta": None,
@@ -274,6 +382,180 @@ def test_drawing_cache_requires_ocr_for_every_declared_page(
         source_hint="cad",
     ) is None
 
+    failed_page_digest = hashlib.sha256(b"drawing-failed-page-cache").hexdigest()
+    failed_page = {
+        **complete,
+        "base": {
+            **complete["base"],
+            "ocr_page_statuses": ["failed", *(["text"] * 26)],
+            "ocr_page_image_sha256": [
+                "",
+                *complete["base"]["ocr_page_image_sha256"][1:],
+            ],
+            "ocr_error": "page_ocr_incomplete",
+        },
+    }
+    ingest_router._save_parse_cache(
+        failed_page_digest,
+        failed_page,
+        source_hint="drawing",
+    )
+    assert not ingest_router._parse_cache_path(
+        failed_page_digest,
+        "drawing",
+    ).exists()
+
+
+def test_standard_cache_is_full_page_and_isolated_from_drawing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "cache")
+    digest = hashlib.sha256(b"standard-full-page-cache").hexdigest()
+    complete = {
+        "base": {
+            "doc_type": "pdf",
+            "pages": 4,
+            "ocr_source_pages": 4,
+            "ocr_pages": 4,
+            "ocr_page_text_count": 4,
+            "ocr_page_mapping": "source_page_all",
+            "extract_text": "\f".join(f"第{page}页" for page in range(1, 5)),
+            "ocr_page_statuses": ["text"] * 4,
+            "ocr_page_image_sha256": [
+                hashlib.sha256(f"image-{page}".encode()).hexdigest()
+                for page in range(1, 5)
+            ],
+            "ocr_page_text_sha256": [
+                hashlib.sha256(f"第{page}页".encode()).hexdigest()
+                for page in range(1, 5)
+            ],
+            "ocr_extract_page_sha256": [
+                hashlib.sha256(f"第{page}页".encode()).hexdigest()
+                for page in range(1, 5)
+            ],
+            "ocr_page_proof_version": "ocr-page-proof-v1",
+            "ocr_error": None,
+            "ocr_blank_pages": [],
+        },
+        "parsed_type": None,
+        "parsed_meta": None,
+    }
+
+    ingest_router._save_parse_cache(digest, complete, source_hint="standard")
+
+    assert ingest_router._ocr_cache_policy("标准") == (
+        ingest_router.OCR_POLICY_STANDARD
+    )
+    assert ingest_router._load_parse_cache(digest, source_hint="standard") == complete
+    assert ingest_router._parse_cache_path(
+        digest,
+        "standard",
+    ) != ingest_router._parse_cache_path(digest, "drawing_standard")
+    assert ingest_router._load_parse_cache(
+        digest,
+        source_hint="drawing_standard",
+    ) is None
+
+    incomplete_digest = hashlib.sha256(b"standard-partial-cache").hexdigest()
+    incomplete = {
+        **complete,
+        "base": {
+            **complete["base"],
+            "ocr_pages": 3,
+            "ocr_page_text_count": 3,
+        },
+    }
+    ingest_router._save_parse_cache(
+        incomplete_digest,
+        incomplete,
+        source_hint="standard",
+    )
+    assert not ingest_router._parse_cache_path(
+        incomplete_digest,
+        "standard",
+    ).exists()
+
+    text_digest = hashlib.sha256(b"standard-native-text").hexdigest()
+    native_text = {
+        "base": {
+            "doc_type": "docx",
+            "pages": None,
+            "extract_text": "已完整解析的企业标准正文",
+        },
+        "parsed_type": None,
+        "parsed_meta": None,
+    }
+    ingest_router._save_parse_cache(
+        text_digest,
+        native_text,
+        source_hint="standard",
+    )
+    assert ingest_router._load_parse_cache(
+        text_digest,
+        source_hint="standard",
+    ) == native_text
+
+
+def test_try_ocr_standard_pdf_uses_declared_full_page_bound(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from backend.zhifei_autoplan import ocr_runtime
+
+    observed: dict[str, Any] = {}
+
+    def _ocr_pdf_path(
+        _path: str,
+        *,
+        max_pages: int,
+        scale: float,
+        lang: str,
+        stop_on_catalog: bool,
+    ) -> OcrResult:
+        observed.update(
+            {
+                "max_pages": max_pages,
+                "scale": scale,
+                "lang": lang,
+                "stop_on_catalog": stop_on_catalog,
+            }
+        )
+        return OcrResult(
+            text="第1页\f\f第3页",
+            pages=3,
+            lang="chi_sim+eng",
+            page_texts=("第1页", "", "第3页"),
+            page_statuses=("text", "blank", "text"),
+            page_image_sha256=tuple(
+                hashlib.sha256(f"image-{page}".encode()).hexdigest()
+                for page in range(1, 4)
+            ),
+            source_pages=3,
+        )
+
+    monkeypatch.setattr(ocr_runtime, "is_tesseract_available", lambda: True)
+    monkeypatch.setattr(ocr_runtime, "guess_ocr_lang", lambda **_kwargs: "chi_sim+eng")
+    monkeypatch.setattr(ocr_runtime, "ocr_pdf_path", _ocr_pdf_path)
+
+    result = asyncio.run(
+        ingest_router._try_ocr(
+            tmp_path / "standard.pdf",
+            "pdf",
+            "内嵌字体文本" * 100,
+            source_hint="standard",
+            declared_pages=3,
+        )
+    )
+
+    assert isinstance(result, OcrResult)
+    assert observed == {
+        "max_pages": 3,
+        "scale": 2.2,
+        "lang": "chi_sim+eng",
+        "stop_on_catalog": False,
+    }
+
 
 def test_handle_upload_reparses_same_pdf_when_ocr_policy_changes(
     monkeypatch,
@@ -309,6 +591,12 @@ def test_handle_upload_reparses_same_pdf_when_ocr_policy_changes(
             pages=pages,
             lang="chi_sim+eng",
             page_texts=tuple(f"第{index + 1}页" for index in range(pages)),
+            page_statuses=tuple("text" for _ in range(pages)),
+            page_image_sha256=tuple(
+                hashlib.sha256(f"image-{index + 1}".encode()).hexdigest()
+                for index in range(pages)
+            ),
+            source_pages=3,
         )
 
     monkeypatch.setattr(ingest_router, "_extract_text_path_bounded", _parse)
@@ -346,6 +634,8 @@ def test_handle_upload_reparses_same_pdf_when_ocr_policy_changes(
     assert drawing["saved"][0]["ocr_pages"] == 3
     assert drawing["saved"][0]["ocr_page_text_count"] == 3
     assert drawing["saved"][0]["ocr_page_mapping"] == "source_page_all"
+    assert drawing["saved"][0]["ocr_page_statuses"] == ["text"] * 3
+    assert len(drawing["saved"][0]["ocr_extract_page_sha256"]) == 3
     assert drawing_cached["cache_hits"] == 1
     assert drawing_cached["saved"][0]["ocr_pages"] == 3
     assert drawing_cached["saved"][0]["ocr_page_mapping"] == "source_page_all"
@@ -354,6 +644,136 @@ def test_handle_upload_reparses_same_pdf_when_ocr_policy_changes(
         ingest_router.OCR_POLICY_ORDINARY,
         ingest_router.OCR_POLICY_DRAWING,
     ]
+
+
+def test_handle_upload_standard_uses_full_page_ocr_and_standard_tag_only(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_workspace(monkeypatch, tmp_path)
+    observed: list[tuple[str | None, int | None]] = []
+
+    async def _parse(ext: str, _path: Path, _total_bytes: int) -> dict[str, Any]:
+        assert ext == "pdf"
+        return {
+            "doc_type": "pdf",
+            "pages": 3,
+            "text_bytes": 2,
+            "extract_text": "\f\f",
+        }
+
+    async def _ocr(
+        _path: Path,
+        _ext: str,
+        _text: str | None,
+        *,
+        source_hint: str | None = None,
+        declared_pages: int | None = None,
+    ) -> OcrResult:
+        observed.append((source_hint, declared_pages))
+        return OcrResult(
+            text="第1页\f\f第3页",
+            pages=3,
+            lang="chi_sim+eng",
+            page_texts=("第1页", "", "第3页"),
+            page_statuses=("text", "blank", "text"),
+            page_image_sha256=tuple(
+                hashlib.sha256(f"image-{page}".encode()).hexdigest()
+                for page in range(1, 4)
+            ),
+            source_pages=3,
+        )
+
+    monkeypatch.setattr(ingest_router, "_extract_text_path_bounded", _parse)
+    monkeypatch.setattr(ingest_router, "_try_ocr", _ocr)
+    monkeypatch.setattr(
+        ingest_router,
+        "_run_isolated_process",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=None),
+    )
+
+    result = asyncio.run(
+        ingest_router._handle_upload(
+            [_Upload(b"standard-pdf-content", "结构施工图.pdf")],
+            source_hint="standard",
+            project_id="p1",
+        )
+    )
+
+    saved = result["saved"][0]
+    assert observed == [("standard", 3)]
+    assert saved["ocr_cache_policy"] == ingest_router.OCR_POLICY_STANDARD
+    assert saved["ocr_pages"] == 3
+    assert saved["ocr_page_text_count"] == 3
+    assert saved["ocr_page_mapping"] == "source_page_all"
+    assert saved["ocr_page_proof_version"] == "ocr-page-proof-v1"
+    assert saved["ocr_source_pages"] == 3
+    assert saved["ocr_page_statuses"] == ["text", "blank", "text"]
+    assert saved["ocr_blank_pages"] == [2]
+    assert len(saved["ocr_extract_page_sha256"]) == 3
+    assert saved["extract_text_sha256"] == hashlib.sha256(
+        Path(saved["extract_saved_as"]).read_bytes()
+    ).hexdigest()
+    assert Path(saved["saved_as"]).name.startswith(f"{saved['sha256']}_")
+    assert Path(saved["extract_saved_as"]).name == (
+        f"{saved['sha256']}_{saved['extract_text_sha256']}.txt"
+    )
+    assert saved["tags"] == ["standard"]
+
+
+@pytest.mark.parametrize(
+    ("source_hint", "expected_code"),
+    [
+        ("standard", "STANDARD_FULL_PAGE_OCR_REQUIRED"),
+        ("drawing", "DRAWING_FULL_PAGE_OCR_REQUIRED"),
+    ],
+)
+def test_handle_upload_rejects_failed_full_page_ocr_proof(
+    monkeypatch,
+    tmp_path: Path,
+    source_hint: str,
+    expected_code: str,
+) -> None:
+    _isolate_workspace(monkeypatch, tmp_path)
+
+    async def _parse(ext: str, _path: Path, _total_bytes: int) -> dict[str, Any]:
+        assert ext == "pdf"
+        return {
+            "doc_type": "pdf",
+            "pages": 2,
+            "text_bytes": 1,
+            "extract_text": "\f",
+        }
+
+    async def _ocr(*_args: Any, **_kwargs: Any) -> OcrResult:
+        return OcrResult(
+            text="\f第二页",
+            pages=2,
+            lang="chi_sim+eng",
+            error="page_ocr_incomplete",
+            page_texts=("", "第二页"),
+            page_statuses=("failed", "text"),
+            page_image_sha256=(
+                "",
+                hashlib.sha256(b"second-page").hexdigest(),
+            ),
+            source_pages=2,
+        )
+
+    monkeypatch.setattr(ingest_router, "_extract_text_path_bounded", _parse)
+    monkeypatch.setattr(ingest_router, "_try_ocr", _ocr)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            ingest_router._handle_upload(
+                [_Upload(b"failed-full-page-pdf", "source.pdf")],
+                source_hint=source_hint,
+            )
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "ALL_FILES_REJECTED"
+    assert exc_info.value.detail["rejected"][0]["code"] == expected_code
 
 
 def test_parse_cache_keeps_small_extracted_text_inline(monkeypatch, tmp_path: Path) -> None:
@@ -377,7 +797,7 @@ def test_pdf_preview_reuses_content_addressed_thumbnail(monkeypatch, tmp_path: P
     workspace = _isolate_workspace(monkeypatch, tmp_path)
     content = b"cached-pdf-content"
     digest = hashlib.sha256(content).hexdigest()
-    preview = workspace / "previews" / f"{digest[:8]}_preview.png"
+    preview = workspace / "previews" / f"{digest}_preview.png"
     preview.parent.mkdir(parents=True, exist_ok=True)
     preview.write_bytes(b"existing-preview")
     monkeypatch.setattr(
@@ -404,6 +824,9 @@ def test_pdf_preview_reuses_content_addressed_thumbnail(monkeypatch, tmp_path: P
     saved = result["saved"][0]
     assert saved["preview_saved_as"] == str(preview)
     assert saved["preview_cache_hit"] is True
+    assert saved["preview_sha256"] == hashlib.sha256(
+        b"existing-preview"
+    ).hexdigest()
     assert result["warnings"] == []
 
 

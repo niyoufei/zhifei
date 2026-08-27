@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 
 from backend.zhifei_autoplan.project_fact_ledger import (
     build_project_fact_ledger,
@@ -8,6 +10,96 @@ from backend.zhifei_autoplan.project_fact_ledger import (
     project_fact_prompt_requirements,
     validate_project_fact_ledger,
 )
+
+_TEST_DOCUMENT_SHA256 = "a" * 64
+_TEST_PROJECT_ID = "P-FORMAL-001"
+
+
+def _digest(value) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _approved_file_fact(field, value, *, unit: str = "", file_name: str, anchor: str):
+    return {
+        "value": value,
+        "unit": unit,
+        "evidence": {
+            "file_name": file_name,
+            "document_sha256": _TEST_DOCUMENT_SHA256,
+            "locator": f"{file_name}#{anchor}",
+        },
+        "approval_receipt": {
+            "receipt_id": f"APR-{field}",
+            "status": "approved",
+            "project_id": _TEST_PROJECT_ID,
+            "field": field,
+            "value_digest": _digest(
+                {"field": field, "value": value, "unit": unit}
+            ),
+            "summary": f"批准 {field} 的项目正式值",
+            "approved_by": "项目负责人",
+            "approved_at": "2026-08-27T09:30:00+08:00",
+        },
+    }
+
+
+def _process_bound_quality_threshold():
+    return {
+        "mode": "process_bound",
+        "items": [
+            {
+                "id": "pool-concrete",
+                "process": "车辆消毒池结构",
+                "metric": "混凝土强度等级",
+                "operator": "≥",
+                "value": "C25",
+                "unit": "",
+                "status": "verified",
+                "source": "reviewed_design",
+                "locator": f"车辆消毒池.pdf#p6_{'b' * 64}@2003",
+                "document_sha256": "b" * 64,
+                "extract_text_sha256": "c" * 64,
+                "page": 6,
+                "page_text_sha256": "d" * 64,
+                "offset": 2003,
+                "end": 2020,
+                "page_start_offset": 1800,
+                "page_end_offset": 2400,
+                "page_match_start": 203,
+                "page_match_end": 220,
+                "match_text_sha256": "e" * 64,
+            },
+            {
+                "id": "wall-compaction",
+                "process": "围墙基础回填",
+                "metric": "压实系数",
+                "operator": "≥",
+                "value": 0.97,
+                "unit": "",
+                "status": "verified",
+                "source": "reviewed_design",
+                "locator": f"3 围墙.pdf#p1_{'f' * 64}@530",
+                "document_sha256": "f" * 64,
+                "extract_text_sha256": "1" * 64,
+                "page": 1,
+                "page_text_sha256": "2" * 64,
+                "offset": 530,
+                "end": 545,
+                "page_start_offset": 0,
+                "page_end_offset": 900,
+                "page_match_start": 530,
+                "page_match_end": 545,
+                "match_text_sha256": "3" * 64,
+            },
+        ],
+    }
 
 
 def test_higher_priority_fact_wins_and_records_override():
@@ -208,6 +300,52 @@ def test_tender_source_span_restores_verified_150_day_duration_with_locator():
     }
 
 
+def test_tender_project_fact_preserves_procedural_deadline_evidence():
+    page_text_sha256 = "b" * 64
+    locator = (
+        "招标文件.pdf#document_sha256="
+        f"{_TEST_DOCUMENT_SHA256}&page=92"
+        f"&page_text_sha256={page_text_sha256}&offset=67018"
+    )
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={},
+        tender={
+            "extraction_meta": {
+                "project_facts": {
+                    "deviation_action_deadline": {
+                        "value": "在监理人规定时间内按要求完成整改",
+                        "unit": "",
+                        "status": "verified",
+                        "evidence": {
+                            "file_name": "招标文件.pdf",
+                            "page": 92,
+                            "document_sha256": _TEST_DOCUMENT_SHA256,
+                            "page_text_sha256": page_text_sha256,
+                            "start": 67018,
+                            "end": 67036,
+                            "page_start": 212,
+                            "page_end": 230,
+                            "locator": locator,
+                            "snippet": "必须在监理人规定时间内按要求完成整改",
+                        },
+                    }
+                }
+            }
+        },
+        boq_wbs_cpm={},
+    )
+
+    fact = ledger["facts"]["deviation_action_deadline"]
+    assert fact["value"] == "在监理人规定时间内按要求完成整改"
+    assert fact["status"] == "verified"
+    assert fact["evidence"]["page"] == 92
+    assert fact["evidence"]["document_sha256"] == _TEST_DOCUMENT_SHA256
+    assert fact["evidence"]["page_text_sha256"] == page_text_sha256
+    assert fact["evidence"]["locator"] == locator
+    assert "snippet" not in fact["evidence"]
+    assert len(fact["evidence"]["snippet_sha256"]) == 64
+
+
 def test_system_defaults_are_provisional_and_never_enter_prompt_requirements():
     ledger = build_project_fact_ledger_from_inputs(
         payload={
@@ -227,17 +365,380 @@ def test_system_defaults_are_provisional_and_never_enter_prompt_requirements():
     assert all("总工期=120" not in line for line in project_fact_prompt_requirements(ledger))
 
 
+def test_process_bound_quality_threshold_is_normalized_without_global_scope():
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "reviewed-drawings",
+                "source_type": "reviewed_design",
+                "facts": {"quality_threshold": _process_bound_quality_threshold()},
+            }
+        ]
+    )
+
+    fact = ledger["facts"]["quality_threshold"]
+    assert fact["status"] == "verified"
+    assert fact["value"]["mode"] == "process_bound"
+    assert [item["process"] for item in fact["value"]["items"]] == [
+        "车辆消毒池结构",
+        "围墙基础回填",
+    ]
+    assert {item["operator"] for item in fact["value"]["items"]} == {"≥"}
+    assert all(item["process"] != "全局" for item in fact["value"]["items"])
+    prompt_lines = project_fact_prompt_requirements(ledger)
+    assert any(
+        "工序=围墙基础回填；指标=压实系数；判定=≥0.97" in line
+        for line in prompt_lines
+    )
+    assert any(
+        "工序=车辆消毒池结构；指标=混凝土强度等级；判定=≥C25" in line
+        for line in prompt_lines
+    )
+    assert not any("项目事实：质量阈值=" in line for line in prompt_lines)
+
+
+def test_deterministic_project_parameter_evidence_enters_ledger_as_reviewed_design():
+    bundle = _process_bound_quality_threshold()
+    bundle_digest = _digest(bundle)
+    required_item_ids = sorted(item["id"] for item in bundle["items"])
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={"project_id": _TEST_PROJECT_ID},
+        tender={},
+        boq_wbs_cpm={},
+        project_parameter_evidence={
+            "schema_version": "project-parameter-evidence-v1",
+            "project_id": _TEST_PROJECT_ID,
+            "status": "PASS_PROJECT_PARAMETER_EVIDENCE",
+            "ready": True,
+            "coverage_complete": True,
+            "conflicts": [],
+            "required_item_ids": required_item_ids,
+            "matched_item_count": len(required_item_ids),
+            "quality_threshold_bundle_digest": bundle_digest,
+            "quality_threshold": {
+                "value": bundle,
+                "unit": "",
+                "status": "derived",
+                "evidence": {
+                    "locator": "project_parameter_evidence.quality_threshold",
+                    "source_sha256": bundle_digest,
+                },
+            }
+        },
+    )
+
+    fact = ledger["facts"]["quality_threshold"]
+    assert fact["source_id"] == "project-parameter-evidence"
+    assert fact["source_type"] == "reviewed_design"
+    assert fact["status"] == "verified"
+    assert len(fact["value"]["items"]) == 2
+    assert "quality_threshold" in ledger["formal_parameter_readiness"][
+        "ready_fields"
+    ]
+
+
+def test_global_scalar_quality_threshold_is_not_admitted_as_project_fact():
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "approved",
+                "source_type": "approved_resolution",
+                "facts": {"quality_threshold": "偏差≤5mm"},
+            }
+        ]
+    )
+
+    assert "quality_threshold" not in ledger["facts"]
+    assert "quality_threshold" in ledger["formal_parameter_readiness"]["missing_fields"]
+
+
+def test_quality_bundle_with_unlocated_item_remains_provisional():
+    bundle = _process_bound_quality_threshold()
+    bundle["items"][0]["locator"] = ""
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "approved",
+                "source_type": "approved_resolution",
+                "facts": {"quality_threshold": bundle},
+            }
+        ]
+    )
+
+    assert ledger["facts"]["quality_threshold"]["status"] == "provisional"
+    assert "quality_threshold" in ledger["formal_parameter_readiness"][
+        "provisional_fields"
+    ]
+
+
+def test_unlocated_sensitive_approved_values_are_downgraded_and_hold():
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={
+            "approved_project_fact_resolutions": {
+                "resource_peak": {
+                    "value": 80,
+                    "unit": "人",
+                    "evidence": {
+                        "document_sha256": _TEST_DOCUMENT_SHA256,
+                        "locator": (
+                            "payload.approved_project_fact_resolutions.resource_peak"
+                        ),
+                    },
+                },
+                "critical_interval_days": {"value": 3, "unit": "天"},
+                "risk_inspection_frequency": "2次/日",
+            }
+        },
+        tender={},
+        boq_wbs_cpm={},
+    )
+
+    for field in (
+        "resource_peak",
+        "critical_interval_days",
+        "risk_inspection_frequency",
+    ):
+        assert ledger["facts"][field]["status"] == "provisional"
+        assert field in ledger["formal_parameter_readiness"]["provisional_fields"]
+    assert ledger["formal_parameter_readiness"]["ready"] is False
+
+
+def test_plain_payload_formal_facts_remain_provisional_but_identity_is_approved():
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={
+            "project_id": _TEST_PROJECT_ID,
+            "project_facts": {
+                "project_name": "养殖场建设项目",
+                "project_code": "AF-001",
+                "planned_duration_days": {"value": 150, "unit": "天"},
+                "resource_peak": {"value": 80, "unit": "人"},
+                "critical_interval_days": {"value": 3, "unit": "天"},
+                "risk_inspection_frequency": "2次/日",
+                "quality_threshold": _process_bound_quality_threshold(),
+                "deviation_action_deadline": "4小时",
+            },
+        },
+        tender={},
+        boq_wbs_cpm={},
+    )
+
+    assert ledger["facts"]["project_name"]["status"] == "approved"
+    assert ledger["facts"]["project_code"]["status"] == "approved"
+    assert set(ledger["formal_parameter_readiness"]["provisional_fields"]) == {
+        "planned_duration_days",
+        "resource_peak",
+        "critical_interval_days",
+        "risk_inspection_frequency",
+        "quality_threshold",
+        "deviation_action_deadline",
+    }
+    assert ledger["formal_parameter_readiness"]["ready"] is False
+
+
+def test_payload_formal_fact_can_only_advance_with_file_and_confirmation_receipt():
+    resource_peak = _approved_file_fact(
+        "resource_peak",
+        80,
+        unit="人",
+        file_name="批准资源计划.xlsx",
+        anchor="sheet=资源计划&cell=B12",
+    )
+    ledger = build_project_fact_ledger_from_inputs(
+        payload={
+            "project_id": _TEST_PROJECT_ID,
+            "project_facts": {"resource_peak": resource_peak},
+        },
+        tender={},
+        boq_wbs_cpm={},
+    )
+
+    fact = ledger["facts"]["resource_peak"]
+    assert fact["source_type"] == "user_input"
+    assert fact["status"] == "approved"
+    assert fact["approval_receipt"]["field"] == "resource_peak"
+    assert len(fact["approval_receipt"]["receipt_digest"]) == 64
+
+
+def test_approved_resolution_requires_value_bound_receipt_and_file_evidence():
+    valid = _approved_file_fact(
+        "resource_peak",
+        80,
+        unit="人",
+        file_name="批准资源计划.xlsx",
+        anchor="sheet=资源计划&cell=B12",
+    )
+    missing_receipt = copy.deepcopy(valid)
+    missing_receipt.pop("approval_receipt")
+    generic_locator = copy.deepcopy(valid)
+    generic_locator["evidence"]["locator"] = (
+        "payload.approved_project_fact_resolutions.resource_peak"
+    )
+    stale_value_receipt = copy.deepcopy(valid)
+    stale_value_receipt["value"] = 81
+    cross_project_receipt = copy.deepcopy(valid)
+    cross_project_receipt["approval_receipt"]["project_id"] = "P-OTHER"
+
+    for raw in (
+        missing_receipt,
+        generic_locator,
+        stale_value_receipt,
+        cross_project_receipt,
+    ):
+        ledger = build_project_fact_ledger_from_inputs(
+            payload={
+                "project_id": _TEST_PROJECT_ID,
+                "approved_project_fact_resolutions": {"resource_peak": raw},
+            },
+            tender={},
+            boq_wbs_cpm={},
+        )
+        assert ledger["facts"]["resource_peak"]["status"] == "provisional"
+        assert "resource_peak" in ledger["formal_parameter_readiness"][
+            "provisional_fields"
+        ]
+
+    unidentified = build_project_fact_ledger_from_inputs(
+        payload={"approved_project_fact_resolutions": {"resource_peak": valid}},
+        tender={},
+        boq_wbs_cpm={},
+    )
+    assert unidentified["project_id"] is None
+    assert unidentified["facts"]["resource_peak"]["status"] == "provisional"
+
+
+def test_project_parameter_evidence_hold_or_digest_mismatch_never_enters_ledger():
+    bundle = _process_bound_quality_threshold()
+    digest = _digest(bundle)
+    required_ids = sorted(item["id"] for item in bundle["items"])
+    report = {
+        "schema_version": "project-parameter-evidence-v1",
+        "project_id": _TEST_PROJECT_ID,
+        "status": "PASS_PROJECT_PARAMETER_EVIDENCE",
+        "ready": True,
+        "coverage_complete": True,
+        "conflicts": [],
+        "required_item_ids": required_ids,
+        "matched_item_count": len(required_ids),
+        "quality_threshold_bundle_digest": digest,
+        "quality_threshold": {
+            "value": bundle,
+            "unit": "",
+            "status": "derived",
+            "evidence": {
+                "locator": "project_parameter_evidence.quality_threshold",
+                "source_sha256": digest,
+            },
+        },
+    }
+
+    for mutation in ("hold", "digest"):
+        candidate = copy.deepcopy(report)
+        if mutation == "hold":
+            candidate["status"] = "HOLD_PROJECT_PARAMETER_EVIDENCE_CONFLICT"
+            candidate["ready"] = False
+            candidate["conflicts"] = [{"id": required_ids[0]}]
+        else:
+            candidate["quality_threshold_bundle_digest"] = "f" * 64
+        ledger = build_project_fact_ledger_from_inputs(
+            payload={"project_id": _TEST_PROJECT_ID},
+            tender={},
+            boq_wbs_cpm={},
+            project_parameter_evidence=candidate,
+        )
+        assert "quality_threshold" not in ledger["facts"]
+        assert "quality_threshold" in ledger["formal_parameter_readiness"][
+            "missing_fields"
+        ]
+
+
+def test_quality_bundle_preserves_reversible_evidence_and_rejects_mismatch():
+    bundle = _process_bound_quality_threshold()
+    ledger = build_project_fact_ledger(
+        [
+            {
+                "source_id": "reviewed-drawings",
+                "source_type": "reviewed_design",
+                "facts": {"quality_threshold": bundle},
+            }
+        ]
+    )
+    item = ledger["facts"]["quality_threshold"]["value"]["items"][0]
+    for key in (
+        "document_sha256",
+        "extract_text_sha256",
+        "page",
+        "page_text_sha256",
+        "offset",
+        "end",
+        "page_start_offset",
+        "page_end_offset",
+        "page_match_start",
+        "page_match_end",
+        "match_text_sha256",
+    ):
+        assert item[key] == bundle["items"][0][key]
+
+    mismatched = copy.deepcopy(bundle)
+    mismatched["items"][0]["document_sha256"] = "9" * 64
+    rejected = build_project_fact_ledger(
+        [
+            {
+                "source_id": "reviewed-drawings",
+                "source_type": "reviewed_design",
+                "facts": {"quality_threshold": mismatched},
+            }
+        ]
+    )
+    assert rejected["facts"]["quality_threshold"]["status"] == "provisional"
+
+
 def test_all_confirmed_formal_parameters_are_ready():
     approved = {
-        "planned_duration_days": {"value": 150, "unit": "天"},
-        "resource_peak": {"value": 80, "unit": "人"},
-        "critical_interval_days": {"value": 3, "unit": "天"},
-        "risk_inspection_frequency": "2次/日",
-        "quality_threshold": "按工序图纸及规范",
-        "deviation_action_deadline": "4小时",
+        "planned_duration_days": _approved_file_fact(
+            "planned_duration_days",
+            150,
+            unit="天",
+            file_name="批准总控计划.pdf",
+            anchor="page=3&item=合同工期",
+        ),
+        "resource_peak": _approved_file_fact(
+            "resource_peak",
+            80,
+            unit="人",
+            file_name="批准资源计划.xlsx",
+            anchor="sheet=资源计划&cell=B12",
+        ),
+        "critical_interval_days": _approved_file_fact(
+            "critical_interval_days",
+            3,
+            unit="天",
+            file_name="批准网络计划.pdf",
+            anchor="page=12&item=关键线路",
+        ),
+        "risk_inspection_frequency": _approved_file_fact(
+            "risk_inspection_frequency",
+            "2次/日",
+            file_name="批准风险制度.docx",
+            anchor="section=5.2",
+        ),
+        "quality_threshold": _approved_file_fact(
+            "quality_threshold",
+            _process_bound_quality_threshold(),
+            file_name="批准质量标准.pdf",
+            anchor="page=8&item=工序验收标准",
+        ),
+        "deviation_action_deadline": _approved_file_fact(
+            "deviation_action_deadline",
+            "4小时",
+            file_name="批准质量制度.docx",
+            anchor="section=7.4",
+        ),
     }
     ledger = build_project_fact_ledger_from_inputs(
-        payload={"approved_project_fact_resolutions": approved},
+        payload={
+            "project_id": _TEST_PROJECT_ID,
+            "approved_project_fact_resolutions": approved,
+        },
         tender={},
         boq_wbs_cpm={},
     )
