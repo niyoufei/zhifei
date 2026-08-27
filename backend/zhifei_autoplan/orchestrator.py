@@ -293,7 +293,6 @@ def _build_chapter_validation_quality_gate(
         "risk_triplet",
         "logic_template_adherence",
         "quantitative",
-        "required_topics_detail",
         "evidence_traceability",
         "standard_evidence",
     ):
@@ -302,6 +301,24 @@ def _build_chapter_validation_quality_gate(
         checks.append({"name": key, "pass": passed})
         if not passed:
             blocker_codes.append(f"CHAPTER_CHECK_{key.upper()}_BLOCKED")
+
+    # This check is intentionally document-wide: it asks whether every special
+    # topic appears somewhere in the complete document. A bounded validation
+    # of one tender chapter must not fail because another chapter owns a topic.
+    document_topic_check = (
+        quality.get("required_topics_detail")
+        if isinstance(quality.get("required_topics_detail"), dict)
+        else {}
+    )
+    checks.append(
+        {
+            "name": "required_topics_detail",
+            "pass": None,
+            "observed_pass": document_topic_check.get("ok") is True,
+            "scope": "document",
+            "deferred": True,
+        }
+    )
 
     review = (
         quality.get("independent_content_review")

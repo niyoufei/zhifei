@@ -81,6 +81,23 @@ def test_public_runtime_error_preserves_delivery_blocker_codes() -> None:
     assert "provider_error" not in json.dumps(result, ensure_ascii=False)
 
 
+def test_public_runtime_error_preserves_chapter_validation_blocker_codes() -> None:
+    result = actions_bridge._public_runtime_error(
+        ValueError(
+            "CHAPTER_VALIDATION_QUALITY_BLOCKED：章节真实模型验证质量门未通过："
+            "CHAPTER_CHECK_RISK_TRIPLET_BLOCKED、"
+            "CHAPTER_SECTION_QUALITY_BLOCKED"
+        )
+    )
+
+    assert result["code"] == "CHAPTER_VALIDATION_QUALITY_BLOCKED"
+    assert [row["code"] for row in result["failures"]] == [
+        "CHAPTER_CHECK_RISK_TRIPLET_BLOCKED",
+        "CHAPTER_SECTION_QUALITY_BLOCKED",
+    ]
+    assert all(row["retryable"] is False for row in result["failures"])
+
+
 def test_public_runtime_error_deduplicates_known_delivery_codes_without_leaking_unknowns() -> None:
     result = actions_bridge._public_runtime_error(
         ValueError(

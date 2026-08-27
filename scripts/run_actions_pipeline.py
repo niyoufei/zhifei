@@ -288,6 +288,11 @@ def main() -> int:
         default="document",
         help="Formal document delivery or bounded real-model chapter validation",
     )
+    ap.add_argument(
+        "--resume-from-job-id",
+        default="",
+        help="Resume a compatible failed/cancelled job from its sealed checkpoint",
+    )
     ap.add_argument("--quality-strict", action="store_true", default=True, help="Enable strict quality checks")
     ap.add_argument("--no-quality-strict", dest="quality_strict", action="store_false", help="Disable strict quality checks")
     ap.add_argument("--auto-remediate", action="store_true", default=True, help="Enable auto remediation")
@@ -378,6 +383,9 @@ def main() -> int:
         "generate_images": bool(args.generate_images),
         "dry_run": bool(args.dry_run),
     }
+    resume_from_job_id = str(args.resume_from_job_id or "").strip()
+    if resume_from_job_id:
+        gen["resume_from_job_id"] = resume_from_job_id
     if args.provider or args.model or args.api_key:
         print("[WARN] 已忽略客户端模型路由或密钥；生成仅使用后端已准入供应商。")
     gen = _server_routed_generation_payload(gen)

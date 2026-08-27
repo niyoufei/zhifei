@@ -345,6 +345,53 @@ _DELIVERY_BLOCKER_GUIDANCE: Dict[str, tuple[str, str]] = {
     ),
 }
 
+_CHAPTER_VALIDATION_BLOCKER_GUIDANCE: Dict[str, tuple[str, str]] = {
+    "CHAPTER_CHECK_STRUCTURE_BLOCKED": (
+        "所选章节结构不完整。",
+        "请补齐所选章节及其正文后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_OFFICIALESE_BLOCKED": (
+        "所选章节存在空泛或公文化表达。",
+        "请改为可执行动作、参数、频次和验收标准后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_RISK_TRIPLET_BLOCKED": (
+        "所选章节的风险、控制和验证闭环未被完整识别。",
+        "请补齐风险、控制、验证和记录后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_LOGIC_TEMPLATE_ADHERENCE_BLOCKED": (
+        "所选章节未遵循选定的章节逻辑模板。",
+        "请按模板锚点重组章节后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_QUANTITATIVE_BLOCKED": (
+        "所选章节缺少必要的量化工程参数。",
+        "请补齐数值、单位、频次或阈值后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_REQUIRED_TOPICS_DETAIL_BLOCKED": (
+        "专项主题细则不完整。",
+        "请在正式全文的责任章节补齐专项主题；单章验证不会据此阻断。",
+    ),
+    "CHAPTER_CHECK_EVIDENCE_TRACEABILITY_BLOCKED": (
+        "所选章节的关键结论缺少可反查证据。",
+        "请补齐来源定位后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_STANDARD_EVIDENCE_BLOCKED": (
+        "所选章节的规范依据未通过核验。",
+        "请修正规范名称、编号、版本或来源后从检查点恢复。",
+    ),
+    "CHAPTER_SECTION_QUALITY_BLOCKED": (
+        "所选章节的独立内容评分低于章节阈值。",
+        "请按独立内容审核意见修订后从检查点恢复。",
+    ),
+    "CHAPTER_AGENT_CONTRACT_BLOCKED": (
+        "所选章节未满足责任 Agent 的输出合同。",
+        "请补齐责任字段和验收闭环后从检查点恢复。",
+    ),
+    "CHAPTER_MODEL_REVIEW_BLOCKED": (
+        "独立模型复核未给出通过结论。",
+        "请完成模型复核或修订冲突内容后从检查点恢复。",
+    ),
+}
+
 
 def _public_runtime_error(error: Any) -> Dict[str, Any]:
     """Return a stable, bounded error object without repr/prompt leakage."""
@@ -539,6 +586,28 @@ def _public_runtime_error(error: Any) -> Dict[str, Any]:
                             "code": blocker_code,
                             "message": _DELIVERY_BLOCKER_GUIDANCE[blocker_code][0],
                             "action": _DELIVERY_BLOCKER_GUIDANCE[blocker_code][1],
+                            "retryable": False,
+                            "severity": "error",
+                        }
+                        for blocker_code in dict.fromkeys(blocker_codes)
+                    ]
+            elif code == "CHAPTER_VALIDATION_QUALITY_BLOCKED":
+                blocker_codes = [
+                    value
+                    for value in re.findall(r"CHAPTER_[A-Z_]+_BLOCKED", raw)
+                    if value in _CHAPTER_VALIDATION_BLOCKER_GUIDANCE
+                ]
+                if blocker_codes:
+                    result["failures"] = [
+                        {
+                            "error": blocker_code,
+                            "code": blocker_code,
+                            "message": _CHAPTER_VALIDATION_BLOCKER_GUIDANCE[
+                                blocker_code
+                            ][0],
+                            "action": _CHAPTER_VALIDATION_BLOCKER_GUIDANCE[
+                                blocker_code
+                            ][1],
                             "retryable": False,
                             "severity": "error",
                         }

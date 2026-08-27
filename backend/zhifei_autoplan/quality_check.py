@@ -172,6 +172,12 @@ RISK_TRIPLET_RE = re.compile(
     r"风险[:：]\s*(?P<risk>[^。\n；;]+).*?(?:控制|措施)[:：]\s*(?P<control>[^。\n；;]+).*?验证[:：]\s*(?P<verify>[^。\n；;]+)",
     re.DOTALL,
 )
+RISK_TRIPLET_ARROW_RE = re.compile(
+    r"风险\s*(?:→|->)\s*(?:控制|措施)\s*(?:→|->)\s*验证[:：]\s*"
+    r"(?P<risk>[^。\n；;→]+?)\s*(?:→|->)\s*"
+    r"(?P<control>[^。\n；;→]+?)\s*(?:→|->)\s*"
+    r"(?P<verify>[^。\n；;]+)",
+)
 QUANT_KEYS = ["频次", "阈值", "间距", "厚度", "时长", "人数", "设备型号"]
 QUANT_UNIT_RE = re.compile(
     r"\d+(?:\.\d+)?\s*(?:mm|cm|m|km|kg|t|h|小时|天|d|min|分钟|次|人|台|套|%|MPa|kN|mm2|m2|m3|dB|db|ug/m3|μg/m3|m/s|℃)",
@@ -265,7 +271,11 @@ def _find_phrase_hits(text: str, phrases: List[str], span: int = 18) -> List[Dic
 
 def _extract_risk_triplets(text: str) -> List[Dict[str, str]]:
     triplets: List[Dict[str, str]] = []
-    for m in RISK_TRIPLET_RE.finditer(text or ""):
+    matches = [
+        *RISK_TRIPLET_RE.finditer(text or ""),
+        *RISK_TRIPLET_ARROW_RE.finditer(text or ""),
+    ]
+    for m in sorted(matches, key=lambda item: (item.start(), item.end())):
         risk = (m.group("risk") or "").strip()
         control = (m.group("control") or "").strip()
         verify = (m.group("verify") or "").strip()

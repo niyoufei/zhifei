@@ -20,6 +20,7 @@ from backend.zhifei_autoplan.quality_check import (
     _check_template_style,
     _check_required_topics,
     _check_required_topics_detail,
+    _extract_risk_triplets,
     _check_boq_focus_item_closure,
     _check_boq_focus_item_typed_evidence,
     apply_remediation,
@@ -49,6 +50,21 @@ class TestNormalizeText:
 
     def test_no_changes_needed(self):
         assert _normalize_text("helloworld") == "helloworld"
+
+
+def test_extract_risk_triplets_accepts_arrow_header_format() -> None:
+    text = (
+        "风险→控制→验证：螺栓受潮致扭矩漂移"
+        "→密封储存并记录库房湿度"
+        "→终拧扭矩抽检10%合格并形成校准记录。"
+    )
+
+    triplets = _extract_risk_triplets(text)
+
+    assert len(triplets) == 1
+    assert triplets[0]["risk"] == "螺栓受潮致扭矩漂移"
+    assert triplets[0]["control"] == "密封储存并记录库房湿度"
+    assert "终拧扭矩抽检10%" in triplets[0]["verify"]
 
 
 # ========== _count_evidence ==========

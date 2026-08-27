@@ -131,6 +131,46 @@ def test_chapter_validation_quality_gate_uses_section_not_document_score() -> No
     assert gate["pass"] is True
 
 
+def test_chapter_validation_defers_document_wide_topic_completeness() -> None:
+    quality = {
+        key: {"ok": True}
+        for key in (
+            "structure",
+            "officialese",
+            "risk_triplet",
+            "logic_template_adherence",
+            "quantitative",
+            "evidence_traceability",
+            "standard_evidence",
+        )
+    }
+    quality["required_topics_detail"] = {"ok": False}
+    quality["independent_content_review"] = {
+        "section_threshold": 60,
+        "by_section": [{"title": "第一章", "score": 83, "status": "pass"}],
+    }
+
+    gate = _build_chapter_validation_quality_gate(
+        quality=quality,
+        contract_checks={"ok": True},
+        delivery_quality_gate={
+            "checks": [{"name": "independent_model_review", "pass": True}]
+        },
+    )
+
+    assert gate["pass"] is True
+    topic_check = next(
+        row for row in gate["checks"] if row["name"] == "required_topics_detail"
+    )
+    assert topic_check == {
+        "name": "required_topics_detail",
+        "pass": None,
+        "observed_pass": False,
+        "scope": "document",
+        "deferred": True,
+    }
+
+
 def test_chapter_validation_quality_gate_fails_low_section_or_model_review() -> None:
     gate = _build_chapter_validation_quality_gate(
         quality={

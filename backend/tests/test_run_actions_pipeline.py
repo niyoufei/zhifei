@@ -14,6 +14,7 @@ def _run_main(
     generate_images: bool,
     dry_run: bool = False,
     download: bool = False,
+    resume_from_job_id: str = "",
 ) -> tuple[int, dict]:
     generation_payload: dict = {}
 
@@ -51,6 +52,8 @@ def _run_main(
         argv.append("--dry-run")
     if generate_images:
         argv.append("--generate-images")
+    if resume_from_job_id:
+        argv.extend(["--resume-from-job-id", resume_from_job_id])
 
     monkeypatch.setattr(run_actions_pipeline, "_post_json", _post_json)
     monkeypatch.setattr(run_actions_pipeline, "_get_json", _get_json)
@@ -78,6 +81,18 @@ def test_main_keeps_legacy_done_and_supports_image_opt_in(monkeypatch):
 
     assert result == 0
     assert payload["generate_images"] is True
+
+
+def test_main_sends_explicit_resume_job_id(monkeypatch):
+    result, payload = _run_main(
+        monkeypatch,
+        status="succeeded",
+        generate_images=False,
+        resume_from_job_id="a" * 32,
+    )
+
+    assert result == 0
+    assert payload["resume_from_job_id"] == "a" * 32
 
 
 def test_dry_run_downloads_json_only(monkeypatch):
