@@ -372,6 +372,31 @@ def _build_chapter_validation_quality_gate(
     }
 
 
+def _build_consistency_review_prompt(
+    consistency_material: List[str],
+    *,
+    delivery_scope: str,
+) -> str:
+    scope = _normalize_delivery_scope(delivery_scope)
+    if scope == "chapter_validation":
+        scope_instruction = (
+            "仅复核所选章节自身及所选章节之间的一致性；"
+            "不得因为其他招标章节未提供而扣分或判定全文缺失。"
+        )
+    else:
+        scope_instruction = "对所提供的完整招标目录正文执行全文一致性复核。"
+    return (
+        "你是施工组织设计终审专家。"
+        f"{scope_instruction}"
+        "重点检查工期、资源峰值、关键线路、质量验收、安全责任和规范引用是否前后冲突。"
+        "不得补造事实。输出必须满足以下机器判定合同："
+        "第一行只能是“DECISION: PASS”或“DECISION: BLOCK”；"
+        "仅当不存在实质性冲突时输出 PASS；随后输出简短的问题清单或通过依据。"
+        "\n\n"
+        + "\n\n".join(consistency_material)
+    )[:24000]
+
+
 def _build_weights_and_penalties(tender: Dict[str, Any]) -> tuple[list[str], list[str]]:
     weights = []
     penalties = []
@@ -3142,12 +3167,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             title = str(sec.get("title") or "").strip()
             content = str(sec.get("content") or "").strip()
             consistency_material.append(f"## {title}\n{content[:900]}")
-        consistency_prompt = (
-            "你是施工组织设计终审专家。仅基于以下章节摘要做全文一致性复核，重点检查工期、"
-            "资源峰值、关键线路、质量验收、安全责任和规范引用是否前后冲突。不得补造事实。"
-            "请输出简短的终审问题清单；无冲突时明确写“未发现实质性冲突”。\n\n"
-            + "\n\n".join(consistency_material)
-        )[:24000]
+        consistency_prompt = _build_consistency_review_prompt(
+            consistency_material,
+            delivery_scope=delivery_scope,
+        )
         consistency_text, consistency_audit = await _complete_with_role(consistency_prompt, "review")
         if consistency_text:
             consistency_audit["summary"] = consistency_text[:4000]

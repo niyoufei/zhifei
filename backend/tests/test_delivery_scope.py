@@ -10,6 +10,7 @@ from backend.app.routers.actions_bridge import (
 )
 from backend.zhifei_autoplan.orchestrator import (
     _build_chapter_validation_quality_gate,
+    _build_consistency_review_prompt,
     _normalize_delivery_scope,
     _validate_strict_outline_for_scope,
 )
@@ -169,6 +170,17 @@ def test_chapter_validation_defers_document_wide_topic_completeness() -> None:
         "scope": "document",
         "deferred": True,
     }
+
+
+def test_chapter_validation_consistency_review_is_scope_aware_and_machine_readable() -> None:
+    prompt = _build_consistency_review_prompt(
+        ["## 第一章\n正文摘要"],
+        delivery_scope="chapter_validation",
+    )
+
+    assert "不得因为其他招标章节未提供而扣分" in prompt
+    assert "DECISION: PASS" in prompt
+    assert "DECISION: BLOCK" in prompt
 
 
 def test_chapter_validation_quality_gate_fails_low_section_or_model_review() -> None:

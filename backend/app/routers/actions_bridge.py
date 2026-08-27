@@ -1286,6 +1286,11 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
         mode = "quality_200"
     pages = _planned_total_pages(payload)
     auto_switched = False
+    explicit_validation_non_strict = (
+        str(payload.get("delivery_scope") or "document").strip().lower()
+        == "chapter_validation"
+        and payload.get("quality_strict") is False
+    )
 
     if mode == "quality_200" and pages > 500:
         mode = "hq_speed_500"
@@ -1322,6 +1327,11 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
     payload["generation_mode"] = mode
     payload.setdefault("model_preflight", True)
     payload.setdefault("fail_on_model_exhaustion", True)
+    if explicit_validation_non_strict:
+        # A bounded chapter validation produces JSON diagnostics only and can
+        # honor an explicit non-strict request. Formal document modes remain
+        # unconditionally strict.
+        payload["quality_strict"] = False
     # A dry-run is a connectivity-free diagnostic preview, not a professional
     # delivery attempt.  Keep the real generation modes strict, but do not let
     # their defaults turn an offline preview into a failed delivery-quality
@@ -1337,6 +1347,9 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
         "auto_switched": bool(auto_switched),
         "planned_total_pages": int(pages),
         "dry_run": dry_run,
+        "chapter_validation_non_strict": bool(
+            explicit_validation_non_strict and not dry_run
+        ),
     }
     return payload
 

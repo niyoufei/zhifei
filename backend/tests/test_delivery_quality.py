@@ -52,6 +52,28 @@ def test_professional_delivery_gate_blocks_model_conflict():
     }
 
 
+def test_model_review_accepts_machine_readable_pass_decision():
+    kwargs = _base_kwargs()
+    kwargs["model_review_audit"]["consistency_review"]["summary"] = (
+        "DECISION: PASS\n未发现实质性冲突。"
+    )
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    assert gate["delivery_allowed"] is True
+
+
+def test_model_review_machine_readable_block_overrides_pass_phrase():
+    kwargs = _base_kwargs()
+    kwargs["model_review_audit"]["consistency_review"]["summary"] = (
+        "DECISION: BLOCK\n虽然某些项目未发现实质性冲突，但工期口径不一致。"
+    )
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    assert gate["delivery_allowed"] is False
+
+
 def test_professional_delivery_gate_blocks_incomplete_boq_cross_index():
     kwargs = _base_kwargs()
     kwargs["cross_index"] = {

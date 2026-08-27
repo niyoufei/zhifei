@@ -7,11 +7,13 @@ from typing import Any, Dict, List
 
 
 _SAFE_CONSISTENCY_RE = re.compile(
-    r"(未发现(?:实质性|明显|前后)?冲突|无(?:实质性|明显)?冲突|no\s+(?:material\s+)?conflict)",
+    r"(DECISION\s*:\s*PASS|未发现(?:实质性|明显|前后)?冲突|"
+    r"无(?:实质性|明显)?冲突|no\s+(?:material\s+)?conflict)",
     re.IGNORECASE,
 )
 _CONFLICT_RE = re.compile(
-    r"(存在(?:实质性|明显|前后)?冲突|发现(?:实质性|明显|前后)?冲突|不一致|相互矛盾|"
+    r"(DECISION\s*:\s*BLOCK|存在(?:实质性|明显|前后)?冲突|"
+    r"发现(?:实质性|明显|前后)?冲突|不一致|相互矛盾|"
     r"conflict(?:s|ing)?\s+(?:found|detected)|inconsisten)",
     re.IGNORECASE,
 )
