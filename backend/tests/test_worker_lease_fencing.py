@@ -332,6 +332,121 @@ def test_success_event_is_not_emitted_when_terminal_transition_loses_race(
     assert (job_store.get_job(job_id) or {})["status"] == "running"
 
 
+def test_success_terminal_projects_complete_checkpoint_before_success_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _configure_roots(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["dry_run"] = False
+    job_id = job_store.create_job(payload)
+    terminal_order: list[str] = []
+    real_transition = job_store.transition_job
+
+    async def fake_run_autoplan(_payload_value: dict) -> dict:
+        return {
+            "variant_id": 1,
+            "sections": [{"title": "第一章", "content": "可信正文"}],
+            "generation_checkpoint": {
+                "schema_version": "generation-checkpoint-v3",
+                "binding_digest": "a" * 64,
+                "status": "complete",
+                "saved_chapter_count": 1,
+                "saved_chapter_indexes": [0],
+                "chapters_total": 1,
+            },
+        }
+
+    def transition(*args, **kwargs):
+        transitioned = real_transition(*args, **kwargs)
+        if kwargs.get("status") == "succeeded":
+            terminal_order.append("succeeded_transition")
+            assert transitioned is not None
+            assert transitioned["progress"]["checkpoint"]["status"] == "complete"
+        return transitioned
+
+    def append_event(_job_id: str, event: str, **_fields: object) -> None:
+        if event == "job_succeeded":
+            terminal_order.append("job_succeeded_event")
+            record = job_store.get_job(job_id) or {}
+            assert record["status"] == "succeeded"
+            assert record["progress"]["checkpoint"]["status"] == "complete"
+
+    monkeypatch.setattr(actions_bridge, "run_autoplan", fake_run_autoplan)
+    monkeypatch.setattr(
+        actions_bridge,
+        "_finalize_variant_derivatives",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_save_outputs",
+        lambda *_args, **_kwargs: {
+            "json": "preview.json",
+            "delivery_ready": False,
+        },
+    )
+    monkeypatch.setattr(actions_bridge, "transition_job", transition)
+    monkeypatch.setattr(actions_bridge, "append_runtime_event", append_event)
+
+    actions_bridge.run_actions_generation_job(job_id, payload)
+
+    record = job_store.get_job(job_id) or {}
+    assert record["status"] == "succeeded"
+    assert record["progress"]["checkpoint"] == {
+        "status": "complete",
+        "saved_chapter_count": 1,
+        "scopes": [
+            {
+                "schema_version": "generation-checkpoint-v3",
+                "binding_digest": "a" * 64,
+                "status": "complete",
+                "saved_chapter_count": 1,
+                "saved_chapter_indexes": [0],
+                "chapters_total": 1,
+            }
+        ],
+    }
+    assert terminal_order == ["succeeded_transition", "job_succeeded_event"]
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["draft_complete", "failed_partial", "interrupted_recoverable", "disabled"],
+)
+def test_success_checkpoint_projection_never_promotes_non_complete_scope(
+    status: str,
+) -> None:
+    assert (
+        actions_bridge._successful_checkpoint_projection(
+            [
+                {
+                    "generation_checkpoint": {
+                        "status": status,
+                        "saved_chapter_count": 1,
+                    }
+                }
+            ]
+        )
+        is None
+    )
+
+
+def test_success_checkpoint_projection_aggregates_all_complete_variants() -> None:
+    scopes = [
+        {"status": "complete", "saved_chapter_count": 2, "variant": 1},
+        {"status": "complete", "saved_chapter_count": 3, "variant": 2},
+    ]
+
+    assert actions_bridge._successful_checkpoint_projection(
+        [{"generation_checkpoint": scope} for scope in scopes]
+    ) == {
+        "status": "complete",
+        "saved_chapter_count": 5,
+        "scopes": scopes,
+    }
+
+
 def test_cancel_checkpoint_seal_failure_is_public_and_not_silent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

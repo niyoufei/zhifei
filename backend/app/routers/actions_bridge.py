@@ -713,6 +713,36 @@ def _seal_failed_run_checkpoints(job_id: str) -> Dict[str, Any] | None:
     return projection
 
 
+def _successful_checkpoint_projection(
+    results: List[Dict[str, Any]],
+) -> Dict[str, Any] | None:
+    """Aggregate only fully finalized variant checkpoints for job success."""
+
+    if not results:
+        return None
+    scopes: List[Dict[str, Any]] = []
+    for result in results:
+        checkpoint = (
+            result.get("generation_checkpoint")
+            if isinstance(result, dict)
+            else None
+        )
+        if (
+            not isinstance(checkpoint, dict)
+            or str(checkpoint.get("status") or "").strip().lower() != "complete"
+        ):
+            return None
+        scopes.append(dict(checkpoint))
+    return {
+        "status": "complete",
+        "saved_chapter_count": sum(
+            max(0, int(scope.get("saved_chapter_count") or 0))
+            for scope in scopes
+        ),
+        "scopes": scopes,
+    }
+
+
 def _auth_actions_key(x_actions_key: str | None):
     expected = os.environ.get("ZF_ACTIONS_KEY", "").strip()
     if not expected:
@@ -4935,6 +4965,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             dry_run=is_dry_run,
             delivery_scope=delivery_scope,
         )
+        successful_checkpoint = _successful_checkpoint_projection(results)
         _update_progress(100, completion["stage"], completion["detail"])
         succeeded_transition = transition_job(
             _job_id,
@@ -4951,6 +4982,11 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 "work_state": "idle",
                 "percent": 100,
                 "detail": completion["detail"],
+                **(
+                    {"checkpoint": successful_checkpoint}
+                    if successful_checkpoint is not None
+                    else {}
+                ),
             },
         )
         if succeeded_transition is not None:
