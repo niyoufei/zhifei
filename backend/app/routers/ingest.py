@@ -65,7 +65,7 @@ PARSE_CACHE_DIR = Path(
 INGEST_SPOOL_DIR = Path(
     os.environ.get("ZF_AUTOPLAN_INGEST_SPOOL_DIR", "backend/data/autoplan/ingest_spool")
 )
-PARSER_VERSION = "2026.08.runtime-v3-page-ocr"
+PARSER_VERSION = "2026.08.runtime-v4-drawing-full-page-ocr"
 PARSE_CACHE_TEXT_SIDECAR_BYTES = 256 * 1024
 FILE_ID_SEARCH_ROOTS = (
     Path("backend/data/uploads"),
@@ -716,13 +716,27 @@ def _make_preview_pdf_first_page(src_path: Path, dst_path: Path, scale: float = 
         return None
 
 
-async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> Any | None:
+async def _try_ocr(
+    path: Path,
+    ext: str,
+    existing_text: str | None,
+    *,
+    source_hint: str | None = None,
+    declared_pages: int | None = None,
+) -> Any | None:
     """
-    Best-effort OCR. Only runs when tesseract is installed and extracted text is likely empty.
+    Best-effort OCR with a bounded, source-aware PDF policy.
+
+    Drawing/standard PDFs are OCRed through the page count declared by the
+    parser, even when embedded-font extraction produced long but unusable text.
+    Other PDFs retain the fast ten-page scanned-document heuristic.
     """
     base = (existing_text or "").strip()
-    # If already has meaningful text, skip OCR to keep ingest fast.
-    if len(base) >= 200:
+    normalized_hint = _normalize_source_hint(source_hint)
+    full_drawing_ocr = ext == "pdf" and normalized_hint == "drawing_standard"
+    # A drawing can contain plenty of embedded-font gibberish.  Do not treat
+    # length alone as proof that its page text is machine-readable.
+    if len(base) >= 200 and not full_drawing_ocr:
         return None
     try:
         from backend.zhifei_autoplan.ocr_runtime import (
@@ -738,10 +752,36 @@ async def _try_ocr(path: Path, ext: str, existing_text: str | None) -> Any | Non
         return None
 
     if ext == "pdf":
-        if not is_text_probably_scanned(base, min_han=10, min_alnum=30):
+        if full_drawing_ocr:
+            # Accept only the page count produced by the PDF parser.  Never use
+            # an arbitrary string/float/user option as an OCR expansion bound.
+            if (
+                isinstance(declared_pages, bool)
+                or not isinstance(declared_pages, int)
+                or declared_pages <= 0
+            ):
+                logger.warning("drawing OCR skipped because declared page count is unavailable")
+                return None
+            max_pages = declared_pages
+            stop_on_catalog = False
+        else:
+            max_pages = 10
+            stop_on_catalog = True
+        if not full_drawing_ocr and not is_text_probably_scanned(
+            base,
+            min_han=10,
+            min_alnum=30,
+        ):
             return None
         lang = guess_ocr_lang(prefer_chinese=True)
-        res = await asyncio.to_thread(ocr_pdf_path, str(path), 10, 2.2, lang, True)
+        res = await asyncio.to_thread(
+            ocr_pdf_path,
+            str(path),
+            max_pages=max_pages,
+            scale=2.2,
+            lang=lang,
+            stop_on_catalog=stop_on_catalog,
+        )
         return res if res and (res.text or res.page_texts) else None
 
     if ext in {"png", "jpg", "jpeg"}:
@@ -968,6 +1008,8 @@ async def _handle_upload(
                     out_path,
                     ext,
                     parsed.get("extract_text"),
+                    source_hint=normalized_hint,
+                    declared_pages=parsed.get("pages"),
                 )
                 if ocr_result:
                     if ext == "pdf" and hasattr(ocr_result, "page_texts"):

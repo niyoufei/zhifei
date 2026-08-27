@@ -47,7 +47,12 @@ def _isolate_workspace(monkeypatch, tmp_path: Path) -> Path:
     )
     monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "cache")
 
-    async def _no_ocr(path: Path, ext: str, text: str | None) -> None:
+    async def _no_ocr(
+        path: Path,
+        ext: str,
+        text: str | None,
+        **_kwargs: Any,
+    ) -> None:
         return None
 
     monkeypatch.setattr(ingest_router, "_try_ocr", _no_ocr)
@@ -153,6 +158,38 @@ def test_parse_cache_keeps_legacy_inline_text_compatible(monkeypatch, tmp_path: 
     )
 
     assert ingest_router._load_parse_cache(digest) == parsed
+
+
+def test_parse_cache_does_not_reuse_runtime_v3_ocr_cache(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(ingest_router, "PARSE_CACHE_DIR", tmp_path / "cache")
+    digest = hashlib.sha256(b"drawing-cache-source").hexdigest()
+    old_version = "2026.08.runtime-v3-page-ocr"
+    old_version_digest = hashlib.sha256(old_version.encode("utf-8")).hexdigest()[:12]
+    old_path = ingest_router.PARSE_CACHE_DIR / f"{digest}.{old_version_digest}.json"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_text(
+        ingest_router.json.dumps(
+            {
+                "parser_version": old_version,
+                "sha256": digest,
+                "parsed": {
+                    "base": {
+                        "doc_type": "pdf",
+                        "pages": 27,
+                        "extract_text": "旧版前十页 OCR 结果",
+                    },
+                    "parsed_type": None,
+                    "parsed_meta": None,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert ingest_router.PARSER_VERSION != old_version
+    assert ingest_router._parse_cache_path(digest) != old_path
+    assert ingest_router._load_parse_cache(digest) is None
 
 
 def test_parse_cache_keeps_small_extracted_text_inline(monkeypatch, tmp_path: Path) -> None:

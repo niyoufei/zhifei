@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend.app.routers import ingest as ingest_router
+from backend.zhifei_autoplan import ocr_runtime
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +100,12 @@ def test_handle_upload_streams_large_files_to_disk(monkeypatch, tmp_path: Path) 
         },
     )
 
-    async def _no_ocr(path: Path, ext: str, base_text: str | None) -> None:
+    async def _no_ocr(
+        path: Path,
+        ext: str,
+        base_text: str | None,
+        **_kwargs: object,
+    ) -> None:
         return None
 
     monkeypatch.setattr(ingest_router, "_try_ocr", _no_ocr)
@@ -144,11 +150,112 @@ def _isolate_workspace(monkeypatch, tmp_path: Path) -> Path:
         },
     )
 
-    async def _no_ocr(path: Path, ext: str, base_text: str | None) -> None:
+    async def _no_ocr(
+        path: Path,
+        ext: str,
+        base_text: str | None,
+        **_kwargs: object,
+    ) -> None:
         return None
 
     monkeypatch.setattr(ingest_router, "_try_ocr", _no_ocr)
     return workspace_root
+
+
+def test_drawing_pdf_ocr_uses_all_declared_pages_without_catalog_stop(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+    source = tmp_path / "drawing.pdf"
+    source.write_bytes(b"%PDF-test")
+    monkeypatch.setattr(ocr_runtime, "is_tesseract_available", lambda: True)
+    monkeypatch.setattr(
+        ocr_runtime,
+        "is_text_probably_scanned",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(ocr_runtime, "guess_ocr_lang", lambda **_kwargs: "chi_sim+eng")
+
+    def _ocr_pdf_path(pdf_path: str, **kwargs: object) -> ocr_runtime.OcrResult:
+        calls.append({"pdf_path": pdf_path, **kwargs})
+        return ocr_runtime.OcrResult(
+            text="图纸 OCR",
+            pages=27,
+            lang="chi_sim+eng",
+            page_texts=tuple("页" for _ in range(27)),
+        )
+
+    monkeypatch.setattr(ocr_runtime, "ocr_pdf_path", _ocr_pdf_path)
+
+    result = asyncio.run(
+        ingest_router._try_ocr(
+            source,
+            "pdf",
+            "乱码嵌入字体" * 100,
+            source_hint="drawing",
+            declared_pages=27,
+        )
+    )
+
+    assert result is not None
+    assert calls == [
+        {
+            "pdf_path": str(source),
+            "max_pages": 27,
+            "scale": 2.2,
+            "lang": "chi_sim+eng",
+            "stop_on_catalog": False,
+        }
+    ]
+
+
+def test_ordinary_pdf_ocr_keeps_ten_page_catalog_bounded_policy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+    source = tmp_path / "tender.pdf"
+    source.write_bytes(b"%PDF-test")
+    monkeypatch.setattr(ocr_runtime, "is_tesseract_available", lambda: True)
+    monkeypatch.setattr(
+        ocr_runtime,
+        "is_text_probably_scanned",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(ocr_runtime, "guess_ocr_lang", lambda **_kwargs: "chi_sim+eng")
+
+    def _ocr_pdf_path(pdf_path: str, **kwargs: object) -> ocr_runtime.OcrResult:
+        calls.append({"pdf_path": pdf_path, **kwargs})
+        return ocr_runtime.OcrResult(
+            text="招标文件 OCR",
+            pages=2,
+            lang="chi_sim+eng",
+            page_texts=("第一页", "目录"),
+        )
+
+    monkeypatch.setattr(ocr_runtime, "ocr_pdf_path", _ocr_pdf_path)
+
+    result = asyncio.run(
+        ingest_router._try_ocr(
+            source,
+            "pdf",
+            "",
+            source_hint="tender_qa",
+            declared_pages=99,
+        )
+    )
+
+    assert result is not None
+    assert calls == [
+        {
+            "pdf_path": str(source),
+            "max_pages": 10,
+            "scale": 2.2,
+            "lang": "chi_sim+eng",
+            "stop_on_catalog": True,
+        }
+    ]
 
 
 def test_handle_upload_preserves_chinese_name_and_rejects_duplicate(monkeypatch, tmp_path: Path) -> None:
