@@ -103,6 +103,49 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 _JOB_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _EXECUTION_ID_RE = _JOB_ID_RE
 _RESERVED_RUN_IDS = frozenset({"latest", "current", "index", "lock"})
+_LEGACY_V1_SCHEMA_VERSION = "autoplan-no-model-acceptance-v1"
+_LEGACY_V1_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "code_acceptance",
+        "confirmation_checklist",
+        "created_at",
+        "cross_index",
+        "decision",
+        "drawing_index",
+        "external_blockers",
+        "formal_delivery_gate",
+        "model_calls",
+        "project_fact_ledger",
+        "project_id",
+        "project_parameter_evidence",
+        "provider_probes",
+        "receipt_digest",
+        "release",
+        "run_id",
+        "schedule_derivation",
+        "schema_version",
+        "source_task",
+        "standard_index",
+        "tender_matrix",
+        "tender_sources",
+        "v7_drawing_ingest",
+    }
+)
+_LEGACY_V1_RELEASE_FIELDS = frozenset(
+    {
+        "build_sha",
+        "dirty",
+        "jobs",
+        "manifest_digest",
+        "provider_admission",
+        "release_id",
+        "runtime_digest",
+        "runtime_mode",
+        "source_digest",
+        "supervisor_status",
+        "system_id",
+    }
+)
 _MAX_JSON_BYTES = 64 * 1024 * 1024
 _MAX_AUDIT_BYTES = 512 * 1024 * 1024
 _MAX_EVIDENCE_BYTES = 2 * 1024 * 1024 * 1024
@@ -5099,6 +5142,84 @@ def _read_regular_snapshot_at(
         os.close(descriptor)
 
 
+def _validated_legacy_v1_predecessor_digest(
+    value: Any,
+    *,
+    project_id: str,
+) -> str | None:
+    """Accept a legacy HOLD only as an immutable predecessor, never as evidence."""
+
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != _LEGACY_V1_TOP_LEVEL_FIELDS
+        or value.get("schema_version") != _LEGACY_V1_SCHEMA_VERSION
+        or str(value.get("project_id") or "").strip() != project_id
+        or value.get("decision") != "HOLD"
+        or value.get("model_calls") != 0
+        or value.get("provider_probes") != 0
+        or not receipt_digest_is_valid(value)
+    ):
+        return None
+    try:
+        _validate_run_id(value.get("run_id"))
+        _parse_utc_timestamp(value.get("created_at"))
+    except AcceptanceError:
+        return None
+    mapping_fields = (
+        "code_acceptance",
+        "confirmation_checklist",
+        "cross_index",
+        "drawing_index",
+        "formal_delivery_gate",
+        "project_fact_ledger",
+        "project_parameter_evidence",
+        "schedule_derivation",
+        "source_task",
+        "standard_index",
+        "tender_matrix",
+        "v7_drawing_ingest",
+    )
+    if (
+        not all(isinstance(value.get(field), Mapping) for field in mapping_fields)
+        or not isinstance(value.get("external_blockers"), list)
+        or not isinstance(value.get("tender_sources"), list)
+    ):
+        return None
+    release = value.get("release")
+    if not isinstance(release, Mapping) or set(release) != _LEGACY_V1_RELEASE_FIELDS:
+        return None
+    manifest_digest = str(release.get("manifest_digest") or "").strip().lower()
+    source_digest = str(release.get("source_digest") or "").strip().lower()
+    runtime_digest = str(release.get("runtime_digest") or "").strip().lower()
+    release_id = str(release.get("release_id") or "").strip()
+    build_sha = str(release.get("build_sha") or "").strip().lower()
+    jobs = release.get("jobs")
+    admission = release.get("provider_admission")
+    if (
+        any(
+            _SHA256_RE.fullmatch(digest) is None
+            for digest in (manifest_digest, source_digest, runtime_digest)
+        )
+        or release_id != f"release-{source_digest[:24]}"
+        or re.fullmatch(r"[0-9a-f]{40}", build_sha) is None
+        or release.get("system_id") != "docgen-system"
+        or release.get("runtime_mode") != "sealed_release"
+        or release.get("supervisor_status") != "healthy"
+        or release.get("dirty") is not False
+        or not isinstance(jobs, Mapping)
+        or set(jobs) != {"active", "queued", "running"}
+        or any(jobs.get(field) != 0 for field in ("active", "queued", "running"))
+        or not isinstance(admission, Mapping)
+        or admission.get("admitted") is not False
+        or admission.get("generation_allowed") is not False
+        or not isinstance(admission.get("configured"), bool)
+        or not isinstance(admission.get("degraded"), bool)
+        or not str(admission.get("state") or "").strip()
+    ):
+        return None
+    return str(value["receipt_digest"]).strip().lower()
+
+
 def _capture_latest_state(
     *,
     data_root: Path,
@@ -5130,9 +5251,19 @@ def _capture_latest_state(
                 "ACCEPTANCE_LATEST_INVALID", "latest回执权限无效"
             )
         parsed = _decode_json(snapshot)
+        current_validation = validate_acceptance_receipt(parsed)
+        legacy_predecessor_digest: str | None = None
+        if not current_validation.get("ok"):
+            legacy_predecessor_digest = _validated_legacy_v1_predecessor_digest(
+                parsed,
+                project_id=project_id,
+            )
         if (
-            not validate_acceptance_receipt(parsed).get("ok")
-            or str(parsed.get("project_id") or "").strip() != project_id
+            str(parsed.get("project_id") or "").strip() != project_id
+            or (
+                not current_validation.get("ok")
+                and legacy_predecessor_digest is None
+            )
         ):
             raise AcceptanceError(
                 "ACCEPTANCE_LATEST_INVALID", "既有latest回执无法验证"
@@ -5156,7 +5287,11 @@ def _capture_latest_state(
                 "ACCEPTANCE_LATEST_INVALID", "latest未绑定同字节不可变历史回执"
             )
         active.verify_namespace()
-        return snapshot.sha256, str(parsed.get("receipt_digest") or "")
+        return (
+            snapshot.sha256,
+            legacy_predecessor_digest
+            or str(parsed.get("receipt_digest") or ""),
+        )
     finally:
         if owned_handle:
             active.close()

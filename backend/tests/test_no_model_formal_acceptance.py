@@ -340,6 +340,53 @@ def _receipt(
     return {**core, "receipt_digest": canonical_digest(core)}
 
 
+def _legacy_v1_hold_receipt(*, project_id: str, run_id: str) -> dict[str, Any]:
+    source_digest = "a" * 64
+    core: dict[str, Any] = {
+        "schema_version": "autoplan-no-model-acceptance-v1",
+        "run_id": run_id,
+        "created_at": "2026-08-27T21:40:22.346585Z",
+        "project_id": project_id,
+        "decision": "HOLD",
+        "model_calls": 0,
+        "provider_probes": 0,
+        "release": {
+            "system_id": "docgen-system",
+            "release_id": f"release-{source_digest[:24]}",
+            "manifest_digest": "b" * 64,
+            "source_digest": source_digest,
+            "runtime_digest": "c" * 64,
+            "build_sha": "d" * 40,
+            "dirty": False,
+            "runtime_mode": "sealed_release",
+            "supervisor_status": "healthy",
+            "jobs": {"active": 0, "queued": 0, "running": 0},
+            "provider_admission": {
+                "configured": True,
+                "admitted": False,
+                "generation_allowed": False,
+                "degraded": False,
+                "state": "stale_route",
+            },
+        },
+        "code_acceptance": {},
+        "confirmation_checklist": {},
+        "cross_index": {},
+        "drawing_index": {},
+        "external_blockers": [],
+        "formal_delivery_gate": {},
+        "project_fact_ledger": {},
+        "project_parameter_evidence": {},
+        "schedule_derivation": {},
+        "source_task": {},
+        "standard_index": {},
+        "tender_matrix": {},
+        "tender_sources": [],
+        "v7_drawing_ingest": {},
+    }
+    return {**core, "receipt_digest": canonical_digest(core)}
+
+
 def _receipt_registry_authority(receipt: dict[str, Any]) -> dict[str, Any]:
     release = receipt["release"]
     registry = receipt["inputs"]["official_registry"]
@@ -3520,6 +3567,76 @@ def test_latest_must_match_same_project_immutable_receipt(tmp_path: Path) -> Non
     with pytest.raises(AcceptanceError) as error:
         _capture_latest_state(
             data_root=prepared.data_root,
+            project_id="P-1",
+            output_root=None,
+        )
+
+    assert error.value.code == "ACCEPTANCE_LATEST_INVALID"
+
+
+def test_collect_binds_strict_legacy_v1_hold_as_immutable_predecessor(
+    tmp_path: Path,
+) -> None:
+    data_root, registry_path, release, current = _collect_fixture(tmp_path)
+    output_dir = acceptance._acceptance_output_directory(
+        data_root=data_root,
+        project_id="P-1",
+        output_root=None,
+    )
+    output_dir.mkdir(parents=True)
+    legacy = _legacy_v1_hold_receipt(project_id="P-1", run_id="legacy-v1-hold")
+    raw = json.dumps(legacy, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    immutable = output_dir / "legacy-v1-hold.json"
+    latest = output_dir / "latest.json"
+    immutable.write_bytes(raw)
+    immutable.chmod(0o400)
+    latest.write_bytes(raw)
+    latest.chmod(0o600)
+
+    prepared = acceptance.collect_acceptance_snapshot(
+        project_id="P-1",
+        data_root=data_root,
+        registry_path=registry_path,
+        release_identity=release,
+        release_witnesses=[current],
+        release_validator=lambda: dict(release),
+        run_id="v2-successor",
+        generated_at="2026-08-28T08:00:00Z",
+    )
+
+    assert prepared.receipt["supersedes_receipt_digest"] == legacy["receipt_digest"]
+
+
+@pytest.mark.parametrize("mutation", ("pass_decision", "bad_digest"))
+def test_legacy_v1_predecessor_rejects_non_hold_or_invalid_digest(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    data_root, _registry_path, _release, _current = _collect_fixture(tmp_path)
+    output_dir = acceptance._acceptance_output_directory(
+        data_root=data_root,
+        project_id="P-1",
+        output_root=None,
+    )
+    output_dir.mkdir(parents=True)
+    legacy = _legacy_v1_hold_receipt(project_id="P-1", run_id="legacy-v1-bad")
+    if mutation == "pass_decision":
+        legacy["decision"] = "PASS"
+        core = {key: value for key, value in legacy.items() if key != "receipt_digest"}
+        legacy["receipt_digest"] = canonical_digest(core)
+    else:
+        legacy["receipt_digest"] = "0" * 64
+    raw = json.dumps(legacy, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    immutable = output_dir / "legacy-v1-bad.json"
+    latest = output_dir / "latest.json"
+    immutable.write_bytes(raw)
+    immutable.chmod(0o400)
+    latest.write_bytes(raw)
+    latest.chmod(0o600)
+
+    with pytest.raises(AcceptanceError) as error:
+        _capture_latest_state(
+            data_root=data_root,
             project_id="P-1",
             output_root=None,
         )
