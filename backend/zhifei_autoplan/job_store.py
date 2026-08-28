@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-import json
 import ast
 import fcntl
+import json
 import os
 import re
 import shutil
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Callable, Dict, Any, Iterable, Iterator, Optional, TypeVar
-
+from typing import Any, TypeVar
 
 JOB_DIR = Path(os.environ.get("ZF_AUTOPLAN_JOB_DIR", "backend/data/autoplan/jobs"))
 INGEST_SPOOL_DIR = Path(
@@ -54,7 +54,7 @@ class JobLeaseLostError(RuntimeError):
 
 
 def _lease_matches(
-    record: Dict[str, Any],
+    record: dict[str, Any],
     *,
     attempt_id: str | None,
     owner_instance_id: str | None,
@@ -72,15 +72,19 @@ def _lease_matches(
     )
 
 
-def _revoke_lease(record: Dict[str, Any], *, reason: str) -> None:
+def _revoke_lease(record: dict[str, Any], *, reason: str) -> None:
     attempt_id = str(record.get("attempt_id") or "").strip()
     owner_instance_id = str(record.get("owner_instance_id") or "").strip()
     if attempt_id:
         record["last_attempt_id"] = attempt_id
     if owner_instance_id:
         record["last_owner_instance_id"] = owner_instance_id
+    attempt_revision = record.get("attempt_revision")
+    if isinstance(attempt_revision, int) and not isinstance(attempt_revision, bool):
+        record["last_job_revision"] = attempt_revision
     record["attempt_id"] = None
     record["owner_instance_id"] = None
+    record["attempt_revision"] = None
     record["lease_revoked_at"] = time.time()
     record["lease_revoke_reason"] = str(reason or "state_transition")[:120]
 
@@ -140,18 +144,18 @@ def _exclusive_store_lock() -> Iterator[None]:
                 os.close(descriptor)
 
 
-def _read_job_unlocked(job_id: str) -> Optional[Dict[str, Any]]:
+def _read_job_unlocked(job_id: str) -> dict[str, Any] | None:
     path = JOB_DIR / f"{job_id}.json"
     if not path.exists():
         return None
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return record if isinstance(record, dict) else None
 
 
-def _merge_fields(record: Dict[str, Any], values: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_fields(record: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
     for key, value in values.items():
         if key in {"progress", "agent_runtime", "result"} and isinstance(value, dict):
             merged = dict(record.get(key) or {})
@@ -162,12 +166,12 @@ def _merge_fields(record: Dict[str, Any], values: Dict[str, Any]) -> Dict[str, A
     return record
 
 
-def _bump_revision(record: Dict[str, Any]) -> None:
+def _bump_revision(record: dict[str, Any]) -> None:
     record["revision"] = max(0, int(record.get("revision") or 0)) + 1
     record["updated_at"] = time.time()
 
 
-def create_job(payload: Dict[str, Any], user_id: int | None = None) -> str:
+def create_job(payload: dict[str, Any], user_id: int | None = None) -> str:
     job_id = uuid.uuid4().hex
     rec = {
         "job_id": job_id,
@@ -183,6 +187,7 @@ def create_job(payload: Dict[str, Any], user_id: int | None = None) -> str:
         # acquire a fresh, unpredictable fencing token before doing any work.
         "attempt_id": None,
         "owner_instance_id": None,
+        "attempt_revision": None,
     }
     _write_job(rec)
     return job_id
@@ -192,7 +197,7 @@ def acquire_job_lease(
     job_id: str,
     *,
     owner_instance_id: str | None = None,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Atomically claim queued work and mint a new worker fencing token.
 
     A queued cancellation is also claimable so the worker can seal any
@@ -222,6 +227,7 @@ def acquire_job_lease(
             return None
         rec["attempt_id"] = uuid.uuid4().hex
         rec["owner_instance_id"] = owner
+        rec["attempt_revision"] = max(0, int(rec.get("revision") or 0)) + 1
         rec["lease_acquired_at"] = time.time()
         rec.pop("lease_revoked_at", None)
         rec.pop("lease_revoke_reason", None)
@@ -262,7 +268,7 @@ def run_with_job_lease(
     owner_instance_id: str,
     callback: Callable[..., _LeaseResult],
     callback_args: tuple[Any, ...] = (),
-    callback_kwargs: Dict[str, Any] | None = None,
+    callback_kwargs: dict[str, Any] | None = None,
     allowed_statuses: Iterable[str] = LEASE_ACTIVE_STATUSES,
 ) -> _LeaseResult:
     """Run one durable side effect while holding the verified lease fence.
@@ -288,7 +294,7 @@ def run_with_job_lease(
         return callback(*(callback_args or ()), **dict(callback_kwargs or {}))
 
 
-def update_job(job_id: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
+def update_job(job_id: str, **kwargs: Any) -> dict[str, Any] | None:
     valid_job_id = _valid_job_id(job_id)
     if valid_job_id is None:
         raise ValueError("invalid job_id")
@@ -308,7 +314,7 @@ def merge_job(
     expected_attempt_id: str | None = None,
     expected_owner_instance_id: str | None = None,
     **kwargs: Any,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Merge nested runtime fields without erasing prior progress evidence."""
 
     valid_job_id = _valid_job_id(job_id)
@@ -318,13 +324,15 @@ def merge_job(
         rec = _read_job_unlocked(valid_job_id)
         if rec is None:
             return None
-        if expected_attempt_id is not None or expected_owner_instance_id is not None:
-            if not _lease_matches(
+        if (
+            expected_attempt_id is not None
+            or expected_owner_instance_id is not None
+        ) and not _lease_matches(
                 rec,
                 attempt_id=expected_attempt_id,
                 owner_instance_id=expected_owner_instance_id,
             ):
-                return None
+            return None
         _merge_fields(rec, kwargs)
         _bump_revision(rec)
         _write_job_unlocked(rec)
@@ -341,7 +349,7 @@ def transition_job(
     expected_owner_instance_id: str | None = None,
     revoke_lease: bool = False,
     **kwargs: Any,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Atomically apply an allowed transition without resurrecting a record."""
 
     valid_job_id = _valid_job_id(job_id)
@@ -360,13 +368,15 @@ def transition_job(
             return None
         if expected_revision is not None and int(rec.get("revision") or 0) != int(expected_revision):
             return None
-        if expected_attempt_id is not None or expected_owner_instance_id is not None:
-            if not _lease_matches(
+        if (
+            expected_attempt_id is not None
+            or expected_owner_instance_id is not None
+        ) and not _lease_matches(
                 rec,
                 attempt_id=expected_attempt_id,
                 owner_instance_id=expected_owner_instance_id,
             ):
-                return None
+            return None
         _merge_fields(rec, kwargs)
         rec["status"] = target
         if revoke_lease:
@@ -380,12 +390,12 @@ def heartbeat_job(
     job_id: str,
     *,
     activity: str | None = None,
-    progress_updates: Dict[str, Any] | None = None,
-    agent_runtime_updates: Dict[str, Any] | None = None,
+    progress_updates: dict[str, Any] | None = None,
+    agent_runtime_updates: dict[str, Any] | None = None,
     expected_attempt_id: str | None = None,
     expected_owner_instance_id: str | None = None,
     allowed_statuses: Iterable[str] = LEASE_ACTIVE_STATUSES,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Merge a liveness heartbeat without reviving a terminal job.
 
     Heartbeats intentionally preserve the latest business progress.  They only
@@ -400,14 +410,16 @@ def heartbeat_job(
         rec = _read_job_unlocked(valid_job_id)
         if not rec:
             return None
-        if expected_attempt_id is not None or expected_owner_instance_id is not None:
-            if not _lease_matches(
+        if (
+            expected_attempt_id is not None
+            or expected_owner_instance_id is not None
+        ) and not _lease_matches(
                 rec,
                 attempt_id=expected_attempt_id,
                 owner_instance_id=expected_owner_instance_id,
                 allowed_statuses=allowed_statuses,
             ):
-                return None
+            return None
         if str(rec.get("status") or "").strip().lower() not in ACTIVE_STATUSES:
             return rec
 
@@ -516,7 +528,7 @@ def reconcile_stale_jobs(
                     ),
                     "scopes": scopes,
                 }
-        except Exception as checkpoint_error:
+        except Exception as checkpoint_error:  # noqa: BLE001 - seal failures become evidence.
             checkpoint_projection = {
                 "status": "interruption_seal_failed",
                 "saved_chapter_count": 0,
@@ -561,14 +573,16 @@ def _legacy_public_error(value: Any) -> dict[str, Any]:
     if raw.startswith("RuntimeError(") and raw.endswith(")"):
         inner = raw[len("RuntimeError(") : -1].strip()
         try:
-            candidates.insert(0, str(ast.literal_eval(inner)))
-        except Exception:
-            pass
+            decoded = ast.literal_eval(inner)
+        except (SyntaxError, ValueError):
+            decoded = None
+        if decoded is not None:
+            candidates.insert(0, str(decoded))
     for candidate in candidates:
         try:
             parsed = json.loads(candidate)
-        except Exception:
-            continue
+        except (TypeError, ValueError):
+            parsed = None
         if isinstance(parsed, dict):
             failures = []
             for item in (parsed.get("failures") or [])[:50]:
@@ -595,7 +609,7 @@ def _legacy_public_error(value: Any) -> dict[str, Any]:
     }
 
 
-def _failed_job_public_error(job: Dict[str, Any]) -> dict[str, Any]:
+def _failed_job_public_error(job: dict[str, Any]) -> dict[str, Any]:
     existing_error = job.get("error")
     if isinstance(existing_error, dict) and str(existing_error.get("code") or "").strip():
         public_error = {
@@ -613,9 +627,9 @@ def _failed_job_public_error(job: Dict[str, Any]) -> dict[str, Any]:
 
 def _legacy_checkpoint_seal_failure(
     job_id: str,
-    job: Dict[str, Any],
+    job: dict[str, Any],
     exc: BaseException,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Persist fail-closed evidence for one legacy checkpoint seal failure."""
 
     reason_code = str(
@@ -705,7 +719,7 @@ def _legacy_checkpoint_seal_failure(
     )
 
 
-def reconcile_failed_job_evidence(job_id: str) -> Dict[str, Any]:
+def reconcile_failed_job_evidence(job_id: str) -> dict[str, Any]:
     """Normalize one historical failed job without modifying saved sections."""
 
     job = get_job(job_id)
@@ -803,19 +817,19 @@ def reconcile_legacy_failed_jobs(*, limit: int = 100_000) -> list[str]:
             continue
         try:
             repaired = reconcile_failed_job_evidence(job_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - isolate one malformed legacy job.
             # Startup repair is per-job.  A malformed namespace or a concurrent
             # record disappearance must never prevent the API from starting.
             try:
                 repaired = _legacy_checkpoint_seal_failure(job_id, job, exc)
-            except Exception:
+            except Exception:  # noqa: BLE001 - startup repair remains per-job.
                 repaired = None
         if repaired is not None:
             reconciled.append(job_id)
     return reconciled
 
 
-def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+def get_job(job_id: str) -> dict[str, Any] | None:
     valid_job_id = _valid_job_id(job_id)
     if valid_job_id is None:
         return None
@@ -834,11 +848,13 @@ def list_jobs(limit: int = 50, user_id: int | None = None) -> list[dict]:
     for _mtime, p in sorted(candidates, key=lambda item: item[0], reverse=True):
         try:
             rec = json.loads(p.read_text(encoding="utf-8"))
-            if user_id is not None and rec.get("user_id") != user_id:
-                continue
-            jobs.append(rec)
-        except Exception:
+        except (OSError, TypeError, UnicodeError, json.JSONDecodeError):
+            rec = None
+        if not isinstance(rec, dict):
             continue
+        if user_id is not None and rec.get("user_id") != user_id:
+            continue
+        jobs.append(rec)
         if len(jobs) >= limit:
             break
     return jobs
@@ -848,7 +864,7 @@ def cleanup_jobs(older_than_seconds: int = 7 * 24 * 3600) -> int:
     removed = 0
     now = time.time()
     for p in JOB_DIR.glob("*.json"):
-        try:
+        with suppress(OSError, TypeError, UnicodeError, ValueError):
             rec = json.loads(p.read_text(encoding="utf-8"))
             if str(rec.get("status") or "").strip().lower() in ACTIVE_STATUSES:
                 continue
@@ -876,19 +892,13 @@ def cleanup_jobs(older_than_seconds: int = 7 * 24 * 3600) -> int:
                     elif f:
                         _unlink_managed_artifact(f)
                 p.unlink(missing_ok=True)
-                try:
+                with suppress(Exception):
                     from backend.zhifei_autoplan.generation_checkpoint import (
                         cleanup_checkpoint_namespace,
                     )
 
                     cleanup_checkpoint_namespace(str(rec.get("job_id") or ""))
-                except Exception:
-                    # Job retention cleanup remains best-effort; a malformed or
-                    # tampered checkpoint is never loaded by the generator.
-                    pass
                 removed += 1
-        except Exception:
-            continue
     return removed
 
 
@@ -906,7 +916,7 @@ def _managed_artifact_roots() -> list[Path]:
 def _unlink_managed_artifact(value: Any) -> bool:
     try:
         path = Path(str(value)).expanduser().resolve()
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return False
     if not any(path == root or path.is_relative_to(root) for root in _managed_artifact_roots()):
         return False
@@ -917,7 +927,7 @@ def _unlink_managed_artifact(value: Any) -> bool:
         return False
 
 
-def _write_job_unlocked(rec: Dict[str, Any]) -> None:
+def _write_job_unlocked(rec: dict[str, Any]) -> None:
     if not rec.get("job_id"):
         return
     job_id = _valid_job_id(rec.get("job_id"))
@@ -955,6 +965,6 @@ def _write_job_unlocked(rec: Dict[str, Any]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def _write_job(rec: Dict[str, Any]) -> None:
+def _write_job(rec: dict[str, Any]) -> None:
     with _exclusive_store_lock():
         _write_job_unlocked(rec)

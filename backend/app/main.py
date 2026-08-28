@@ -1,19 +1,20 @@
-from fastapi import FastAPI, BackgroundTasks, Header, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import asyncio
-import os, json
+import json
+import os
+import stat
 import subprocess
 import time
-import stat
-from pathlib import Path
-from datetime import datetime
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
+from pathlib import Path
 
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from backend.zhifei_autoplan.local_env import load_local_env
 from compose_engine import Composer
 from utils_write_docx import write_compose_to_docx
-from backend.zhifei_autoplan.local_env import load_local_env
-
 
 load_local_env()
 
@@ -48,7 +49,7 @@ def _git_runtime_identity() -> dict[str, object]:
         try:
             completed = subprocess.run(
                 ["git", *args],
-                cwd=str(Path(".").resolve()),
+                cwd=str(Path.cwd()),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -56,7 +57,7 @@ def _git_runtime_identity() -> dict[str, object]:
                 check=False,
                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return None
         if completed.returncode != 0:
             return None
@@ -147,7 +148,7 @@ def _supervisor_runtime_status() -> dict[str, object]:
             }
         raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
-            raise ValueError("invalid supervisor state")
+            raise TypeError("invalid supervisor state")
         public = {
             key: raw.get(key)
             for key in _SUPERVISOR_PUBLIC_FIELDS
@@ -155,7 +156,7 @@ def _supervisor_runtime_status() -> dict[str, object]:
         }
         public.update({"managed": managed, "available": True})
         return public
-    except Exception:
+    except (OSError, TypeError, UnicodeError, json.JSONDecodeError):
         return {
             "managed": managed,
             "available": False,
@@ -198,16 +199,16 @@ app.add_middleware(
 )
 
 # Routers: ingest/retrieve/publish/score
-from .routers.ingest import router as ingest_router
-from .routers.retrieve import router as retrieve_router
-from .routers.publish_router import router as publish_router
-from .routers.score_router import router as score_router
-from .routers.zhifei_autoplan import router as zhifei_autoplan_router
 from .routers.actions_bridge import router as actions_bridge_router
 from .routers.auth import router as auth_router
+from .routers.ingest import router as ingest_router
+from .routers.kg_read_only_preview import router as kg_read_only_preview_router
 from .routers.local_llm_preview_safe import router as local_llm_preview_safe_router
 from .routers.local_trial_preview_only import router as local_trial_preview_only_router
-from .routers.kg_read_only_preview import router as kg_read_only_preview_router
+from .routers.publish_router import router as publish_router
+from .routers.retrieve import router as retrieve_router
+from .routers.score_router import router as score_router
+from .routers.zhifei_autoplan import router as zhifei_autoplan_router
 
 app.include_router(ingest_router)
 app.include_router(retrieve_router)
@@ -269,15 +270,13 @@ async def _orphan_job_reaper() -> None:
                 _ORPHAN_REAPER_STATE["last_reconciled"] = len(reconciled)
                 _ORPHAN_REAPER_STATE["last_error"] = None
                 for job_id in reconciled:
-                    try:
+                    with suppress(Exception):
                         append_runtime_event(
                             job_id,
                             "stale_job_reconciled",
                             status="interrupted_recoverable",
                         )
-                    except Exception:
-                        pass
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate malformed historical jobs.
                 # One malformed/disappearing historical record must not kill
                 # the permanent reconciliation loop.
                 _ORPHAN_REAPER_STATE["last_run_at"] = time.time()
@@ -298,24 +297,23 @@ def health():
     try:
         if cfg_path.exists():
             cfg_version = json.loads(cfg_path.read_text(encoding="utf-8")).get("config_version")
-    except Exception:
+    except (AttributeError, OSError, UnicodeError, json.JSONDecodeError):
         cfg_version = None
     if cfg_mtime is not None:
-        try:
-            import datetime as _dt
-            cfg_version_auto = _dt.datetime.fromtimestamp(cfg_mtime).strftime("%Y-%m-%d")
-        except Exception:
-            cfg_version_auto = None
+        cfg_version_auto = datetime.fromtimestamp(
+            cfg_mtime, timezone.utc
+        ).strftime("%Y-%m-%d")
     audit_dir = Path("backend/data/audit")
     audit_ready = audit_dir.exists() and audit_dir.is_dir()
     identity = dict(_RUNTIME_IDENTITY_AT_START)
     release_identity = dict(_RELEASE_IDENTITY_AT_START)
     return {
         "ok": True,
+        "process_pid": os.getpid(),
         "version": "autoplan-0.1.0",
         "service": "文档生成系统",
         "system_id": os.environ.get("ZF_SYSTEM_ID", "docgen-system"),
-        "workspace_root": str(Path(".").resolve()),
+        "workspace_root": str(Path.cwd()),
         "config_mtime": cfg_mtime,
         "config_version": cfg_version,
         "config_version_auto": cfg_version_auto,
@@ -377,30 +375,35 @@ async def livez():
 def p0_readiness():
     from backend.zhifei_autoplan.p0_readiness import build_p0_readiness_snapshot
 
-    return build_p0_readiness_snapshot(Path(".").resolve())
+    return build_p0_readiness_snapshot(Path.cwd())
 
 
 @app.get("/capabilities")
 def capabilities(project_id: str | None = None):
+    from pathlib import Path
+
+    from backend.app.routers.zhifei_autoplan import (
+        _job_list_default_fields,
+        _job_list_field_alias,
+    )
+    from backend.zhifei_autoplan.boq_store import load_boq_data
     from backend.zhifei_autoplan.kg_store import get_active_kg
     from backend.zhifei_autoplan.tender_store import load_tender_matrix
-    from backend.zhifei_autoplan.boq_store import load_boq_data
-    from pathlib import Path
-    from backend.app.routers.zhifei_autoplan import _job_list_default_fields, _job_list_field_alias
     roles_cfg = Path("backend/data/autoplan/agent_roles.json")
     cfg_version = None
     cfg_version_auto = None
+    cfg_path = Path("backend/data/autoplan/config.json")
     try:
-        cfg_path = Path("backend/data/autoplan/config.json")
         if cfg_path.exists():
             cfg_version = json.loads(cfg_path.read_text(encoding="utf-8")).get("config_version")
-    except Exception:
+    except (AttributeError, OSError, UnicodeError, json.JSONDecodeError):
         cfg_version = None
     if cfg_path.exists():
         try:
-            import datetime as _dt
-            cfg_version_auto = _dt.datetime.fromtimestamp(cfg_path.stat().st_mtime).strftime("%Y-%m-%d")
-        except Exception:
+            cfg_version_auto = datetime.fromtimestamp(
+                cfg_path.stat().st_mtime, timezone.utc
+            ).strftime("%Y-%m-%d")
+        except OSError:
             cfg_version_auto = None
     return {
         "ok": True,
@@ -432,7 +435,7 @@ def capabilities(project_id: str | None = None):
         },
         "job_list": {
             "default_fields": sorted(_job_list_default_fields()),
-            "field_alias": {k: sorted(list(v)) for k, v in _job_list_field_alias().items()},
+            "field_alias": {k: sorted(v) for k, v in _job_list_field_alias().items()},
         },
         "audit": {
             "logging": True,
@@ -449,22 +452,26 @@ def capabilities(project_id: str | None = None):
 @app.get("/config")
 def config():
     # 仅输出非敏感配置（不返回密钥）
+    from backend.app.routers.zhifei_autoplan import (
+        _job_list_default_fields,
+        _job_list_field_alias,
+    )
     from backend.zhifei_autoplan.utils.llm_client import LLMClient
-    from backend.app.routers.zhifei_autoplan import _job_list_default_fields, _job_list_field_alias
     defaults = LLMClient.load_defaults()
     cfg_version = None
     cfg_version_auto = None
+    cfg_path = Path("backend/data/autoplan/config.json")
     try:
-        cfg_path = Path("backend/data/autoplan/config.json")
         if cfg_path.exists():
             cfg_version = json.loads(cfg_path.read_text(encoding="utf-8")).get("config_version")
-    except Exception:
+    except (AttributeError, OSError, UnicodeError, json.JSONDecodeError):
         cfg_version = None
     if cfg_path.exists():
         try:
-            import datetime as _dt
-            cfg_version_auto = _dt.datetime.fromtimestamp(cfg_path.stat().st_mtime).strftime("%Y-%m-%d")
-        except Exception:
+            cfg_version_auto = datetime.fromtimestamp(
+                cfg_path.stat().st_mtime, timezone.utc
+            ).strftime("%Y-%m-%d")
+        except OSError:
             cfg_version_auto = None
     return {
         "ok": True,
@@ -477,7 +484,7 @@ def config():
         "config_version_auto": cfg_version_auto,
         "job_list": {
             "default_fields": sorted(_job_list_default_fields()),
-            "field_alias": {k: sorted(list(v)) for k, v in _job_list_field_alias().items()},
+            "field_alias": {k: sorted(v) for k, v in _job_list_field_alias().items()},
         },
     }
 
@@ -494,9 +501,9 @@ def update_config_version(version: str | None = None, authorization: str | None 
     if cfg_path.exists():
         try:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, UnicodeError, json.JSONDecodeError):
             cfg = {}
-    cfg["config_version"] = version or datetime.now().strftime("%Y-%m-%d")
+    cfg["config_version"] = version or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
@@ -504,7 +511,7 @@ def update_config_version(version: str | None = None, authorization: str | None 
         audit_dir.mkdir(parents=True, exist_ok=True)
         audit_path = audit_dir / "config.jsonl"
         record = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "action": "config_version_update",
             "config_version": cfg["config_version"],
         }
@@ -514,7 +521,7 @@ def update_config_version(version: str | None = None, authorization: str | None 
             + "\n",
             encoding="utf-8",
         )
-    except Exception:
+    except (OSError, UnicodeError):
         pass
     return {"ok": True, "config_version": cfg["config_version"]}
 
@@ -569,7 +576,8 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
     from backend.project_profile_service import generate_project_profile
     payload = req.dict() if hasattr(req, 'dict') else req.model_dump()
     project_profile = generate_project_profile(payload)
-    import os as _os, json as _json
+    import json as _json
+    import os as _os
     # --- Compose Engine: build sections using KG context (demo) ---
     try:
         from backend.compose_engine_service import build_sections_from_kg
@@ -583,10 +591,8 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
             # propagate sanitized topic into payload/request to prevent downstream Hefei leakage
             if isinstance(payload, dict) and _req_topic:
                 payload['topic'] = _req_topic
-            try:
-                setattr(req, 'topic', _req_topic)
-            except Exception:
-                pass
+            with suppress(Exception):
+                req.topic = _req_topic
         result = {
             'sections': build_sections_from_kg(
                 payload=locals().get('payload'),
@@ -598,7 +604,7 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
                 topic=_req_topic,
             )
         }
-    except Exception as _e:
+    except Exception as _e:  # noqa: BLE001 - preserve the legacy compose fallback.
         _old = locals().get('result')
         if isinstance(_old, dict) and isinstance(_old.get('sections'), list):
             result = _old
@@ -613,7 +619,8 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
     # --- Region Upgrade: resolve 安徽/青天 upgrade rules (trace only) ---
     from backend.region_upgrade_service import resolve_region_upgrade
     upgrade = resolve_region_upgrade(payload, project_profile)
-    import os as _os_up, json as _json_up
+    import json as _json_up
+    import os as _os_up
     _os_up.makedirs('build', exist_ok=True)
     with open('build/region_upgrade.json', 'w', encoding='utf-8') as _f_up:
         _json_up.dump(upgrade, _f_up, ensure_ascii=False, indent=2)
@@ -623,14 +630,16 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
     # --- KG Context: resolve domain + select base packs (traceable) ---
     from backend.kg_context_service import build_kg_context
     kg_context = build_kg_context(payload, project_profile)
-    import os as _os_kg, json as _json_kg
+    import json as _json_kg
+    import os as _os_kg
     _os_kg.makedirs('build', exist_ok=True)
     with open('build/kg_context.json', 'w', encoding='utf-8') as _f_kg:
         _json_kg.dump(kg_context, _f_kg, ensure_ascii=False, indent=2)
     # ----------------------------------------------------------------------
     # enrich project_profile (topic/domain_key/region_key) for traceability
-    try:
-        import os as _os_pp, json as _json_pp
+    with suppress(Exception):
+        import json as _json_pp
+        import os as _os_pp
         _os_pp.makedirs('build', exist_ok=True)
         # normalize project_profile to dict for stable persistence
         if project_profile is None:
@@ -677,11 +686,10 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
 
         with open('build/project_profile.json', 'w', encoding='utf-8') as _f_pp:
             _json_pp.dump(project_profile, _f_pp, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
     from backend.precheck_guard_service import run_precheck_guard
     precheck = run_precheck_guard(payload, project_profile)
-    import os as _os2, json as _json2
+    import json as _json2
+    import os as _os2
     _os2.makedirs('build', exist_ok=True)
     with open('build/precheck_guard.json', 'w', encoding='utf-8') as _f:
         _json2.dump(precheck, _f, ensure_ascii=False, indent=2)
@@ -720,7 +728,7 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
     compose_json_path = "build/compose.json"
 
     # --- Compose Engine override (before compose.json write) ---
-    try:
+    with suppress(Exception):
         from backend.compose_engine_service import build_sections_from_kg
         if not isinstance(locals().get('result'), dict):
             result = {'sections': []}
@@ -733,16 +741,14 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
             outline=getattr(req, 'outline', None),
             topic=getattr(req, 'topic', None),
         )
-    except Exception as _e:
         # keep original result on any failure
-        pass
     # ----------------------------------------------
 
     # --- AI 正文复用（仅读） ---
     # 严禁在 /compose 请求中隐式发起模型调用。生成必须通过受控的
     # /actions/runs 或 /autoplan/generate 入口，先完成证据门和供应商准入。
     # 这里只允许复用已有、已持久化的结果。
-    try:
+    with suppress(Exception):
         from pathlib import Path as _Path
         _auto_json = _Path("build") / "autoplan_generated.json"
         if _auto_json.exists():
@@ -757,14 +763,14 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
                     for s in _auto.get("sections", [])
                     if isinstance(s, dict)
                 ]
-    except Exception:
-        pass
 
     # 证据链摘要（写入 compose.json 便于离线复核）
     try:
-        from backend.zhifei_autoplan.kg_store import get_active_kg as _get_active_kg
-        from backend.zhifei_autoplan.tender_store import load_tender_matrix as _load_tender_matrix
         from backend.zhifei_autoplan.boq_store import load_boq_data as _load_boq_data
+        from backend.zhifei_autoplan.kg_store import get_active_kg as _get_active_kg
+        from backend.zhifei_autoplan.tender_store import (
+            load_tender_matrix as _load_tender_matrix,
+        )
         _ak = _get_active_kg()
         _ingest = Path("backend/data/audit/ingest.jsonl")
         _ingest_cnt = len(_ingest.read_text(encoding="utf-8").splitlines()) if _ingest.exists() else 0
@@ -783,19 +789,20 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
             "ingest_records": _ingest_cnt,
             "selected_packs": [n for n in _sel_names if n],
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 - evidence summary must not block compose output.
         evidence_summary = {"error": "evidence_summary_build_failed"}
 
-    json.dump({
-        "status": "ok",
-        "topic": req.topic,
-        "outline": req.outline,
-        "sections": result["sections"],
-        "style": DocStyle().dict(),
-        "kg_pack": (locals().get("kg_context") or {}).get("kg_pack"),
-        "evidence_summary": evidence_summary,
-        "saved_at": compose_json_path
-    }, open(compose_json_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    with Path(compose_json_path).open("w", encoding="utf-8") as compose_handle:
+        json.dump({
+            "status": "ok",
+            "topic": req.topic,
+            "outline": req.outline,
+            "sections": result["sections"],
+            "style": DocStyle().dict(),
+            "kg_pack": (locals().get("kg_context") or {}).get("kg_pack"),
+            "evidence_summary": evidence_summary,
+            "saved_at": compose_json_path
+        }, compose_handle, ensure_ascii=False, indent=2)
 
     output_docx = write_compose_to_docx(
         result["sections"],
@@ -813,9 +820,10 @@ def compose(req: ComposeRequest, background_tasks: BackgroundTasks):
         "saved_at": compose_json_path
     }
 
-from fastapi.responses import FileResponse
-from pathlib import Path
 import json as _json
+
+from fastapi.responses import FileResponse
+
 
 @app.post("/export")
 def export_doc():
@@ -839,11 +847,13 @@ def export_doc():
     try:
         audit_dir = Path("backend/data/audit")
         audit_dir.mkdir(parents=True, exist_ok=True)
-        from backend.zhifei_autoplan.tender_store import load_tender_matrix as _load_tender_matrix
         from backend.zhifei_autoplan.kg_store import get_active_kg as _get_active_kg
+        from backend.zhifei_autoplan.tender_store import (
+            load_tender_matrix as _load_tender_matrix,
+        )
         ak = _get_active_kg()
         audit = {
-            "ts": datetime.now().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "route": "/export",
             "compose_json": compose_json_path,
             "output_docx": output_path,
@@ -853,7 +863,7 @@ def export_doc():
         }
         with (audit_dir / "export.jsonl").open("a", encoding="utf-8") as f:
             f.write(_json.dumps(audit, ensure_ascii=False) + "\n")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - export audit is best-effort.
         pass
 
     return FileResponse(
@@ -877,8 +887,8 @@ def debug_kg_pack():
     - last_build_pack: read from build/kg_context.json (what the last build actually used)
     - stale: True if they disagree (or if last_build exists but current_config cannot be derived)
     """
-    import json
     import hashlib
+    import json
     from pathlib import Path
 
     root_dir = Path(__file__).resolve().parent.parent  # backend/
@@ -925,7 +935,7 @@ def debug_kg_pack():
                 "created_at": pcfg.get("created_at") if isinstance(pcfg, dict) else None,
             }
             sources["current_config_pack"] = "kg_config.json+manifest"
-        except Exception as e:
+        except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as e:
             errors["current_config_pack"] = str(e)
 
     # 2) last_build_pack (build/kg_context.json)
@@ -936,7 +946,7 @@ def debug_kg_pack():
             data = json.loads(kc_path.read_text(encoding="utf-8"))
             last_build_pack = data.get("kg_pack")
             sources["last_build_pack"] = "build/kg_context.json"
-        except Exception as e:
+        except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as e:
             errors["last_build_pack"] = str(e)
 
     # 3) stale determination
@@ -951,7 +961,7 @@ def debug_kg_pack():
                 current_config_pack.get("active_pack") != last_build_pack.get("active_pack")
                 or current_config_pack.get("manifest_sha256") != last_build_pack.get("manifest_sha256")
             )
-        except Exception:
+        except (AttributeError, TypeError):
             stale = True
 
     return {
@@ -972,6 +982,7 @@ def audit():
 # Retrieve (BM25-lite + trace)
 # ============================
 from pydantic import BaseModel as _RetrieveBaseModel
+
 
 class RetrieveRequest(_RetrieveBaseModel):
     query: str

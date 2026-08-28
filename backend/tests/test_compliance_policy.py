@@ -6,8 +6,12 @@ from backend.zhifei_autoplan.compliance_policy import (
     PROJECT_STANDARD_RECORD_FIELDS,
     audit_standard_citations,
     build_project_applicable_standards_manifest,
+    build_standard_registry_map,
+    canonical_standard_code,
+    extract_standard_codes,
     filter_evidence_to_verified_standard_codes,
     is_verified_standard_metadata,
+    is_versioned_standard_code,
     replace_unverified_standard_citations,
     should_migrate_global_instruction,
     standard_citation_directive,
@@ -20,7 +24,7 @@ def _verified_hit(**overrides):
         "source_name": "建筑工程施工质量验收统一标准",
         "official_source": "https://official.example/GB_50300_2024",
         "effective_status": "active",
-        "current_version": "2024",
+        "current_version": "GB_50300_2024",
         "latest": True,
         "domain_tags": ["房建工程"],
         "clause_no": "5.0.1",
@@ -68,6 +72,13 @@ def test_manifest_rejects_missing_official_source():
 
 def test_verified_metadata_requires_current_version():
     assert is_verified_standard_metadata(_verified_hit(current_version="")) is False
+    assert is_verified_standard_metadata(_verified_hit(current_version="2024")) is False
+    assert (
+        is_verified_standard_metadata(
+            _verified_hit(current_version="GB_50300_2013")
+        )
+        is False
+    )
 
 
 def test_writer_directive_is_an_explicit_allowlist():
@@ -136,3 +147,84 @@ def test_citation_audit_blocks_unverified_code_and_unresolved_conflict():
     reasons = {row["reason"] for row in audit["violations"]}
     assert "standard_not_in_verified_project_manifest" in reasons
     assert "unresolved_standard_conflict" in reasons
+
+
+def test_strict_standard_code_supports_jtg_t_and_optional_gb_space():
+    assert is_versioned_standard_code("JTG/T 3650-2020") is True
+    assert is_versioned_standard_code("JTG/T 3660-2020") is True
+    assert is_versioned_standard_code("GB55037-2022") is True
+    assert canonical_standard_code("GB55037-2022") == canonical_standard_code(
+        "GB 55037-2022"
+    )
+    assert extract_standard_codes(
+        "执行 JTG/T 3650-2020 与 JTG/T 3660-2020。"
+    ) == ["JTG/T 3650-2020", "JTG/T 3660-2020"]
+
+
+def test_strict_standard_code_supports_jtg_volume_and_railway_codes():
+    codes = (
+        "JTG F80/1-2017",
+        "TB 10302-2020",
+        "TB 10304-2020",
+        "TB 10424-2018",
+    )
+    assert all(is_versioned_standard_code(code) for code in codes)
+    assert extract_standard_codes("执行 " + "、".join(codes) + "。") == list(codes)
+    assert canonical_standard_code("JTGF80/1-2017") == canonical_standard_code(
+        "JTG F80/1-2017"
+    )
+
+
+def test_strict_standard_code_rejects_ocr_noise_and_malformed_bodies():
+    for value in (
+        "JTG/T",
+        "JTG/T 3650",
+        "JTG/T 3650-20",
+        "GB BAD1-2022",
+        "GB 12 FOO-2022",
+        "JTG F80/-2017",
+        "JTG F80/ABC-2017",
+        "TB BAD1-2020",
+        "Dll",
+        "HY TR",
+    ):
+        assert is_versioned_standard_code(value) is False
+    assert extract_standard_codes(
+        "TB 10302-2020-X；TB 10302-2020.1；JTG F80/1-2017-X"
+    ) == []
+
+
+def test_identity_without_cover_policy_requires_valid_official_pin():
+    base = _verified_hit(
+        standard_code="GB 55032-2022",
+        current_version="GB 55032-2022",
+        official_identity_without_cover=True,
+    )
+    assert is_verified_standard_metadata(base) is False
+    assert (
+        is_verified_standard_metadata(
+            {
+                **base,
+                "official_document_url": "https://example.gov.cn/gb55032.pdf",
+                "official_content_sha256": "a" * 64,
+            }
+        )
+        is True
+    )
+
+
+def test_registry_duplicate_conflicting_pin_or_identity_policy_is_ambiguous():
+    first = _verified_hit(
+        standard_code="GB 55032-2022",
+        current_version="GB 55032-2022",
+        official_document_url="https://example.gov.cn/a.pdf",
+        official_content_sha256="a" * 64,
+        official_identity_without_cover=True,
+    )
+    for override in (
+        {"official_content_sha256": "b" * 64},
+        {"official_document_url": "https://example.gov.cn/b.pdf"},
+        {"official_identity_without_cover": False},
+    ):
+        registry = build_standard_registry_map([first, {**first, **override}])
+        assert registry["GB_55032_2022"]["_registry_ambiguous"] is True

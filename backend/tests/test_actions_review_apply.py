@@ -524,17 +524,21 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
     current_standard_index = {
         "ok": False,
         "project_id": "P-CURRENT",
+        "official_registry_path": "/trusted/compliance/_official_registry.json",
         "standards": [],
         "text_index_status": "no_standards",
     }
     rebuilt_outlines = {}
+    rebuilt_workspaces = {}
 
     def rebuild_drawing(*args, **kwargs):
         rebuilt_outlines["drawing"] = list(args[1])
+        rebuilt_workspaces["drawing"] = kwargs.get("workspace_dir")
         return current_drawing_index
 
     def rebuild_standard(*args, **kwargs):
         rebuilt_outlines["standard"] = list(args[1])
+        rebuilt_workspaces["standard"] = kwargs.get("workspace_dir")
         return current_standard_index
 
     monkeypatch.setattr(
@@ -581,7 +585,11 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
     }
     actions_bridge._rebuild_postprocessed_artifacts(
         [result],
-        payload={"quality_strict": False, "project_id": "P-CURRENT"},
+        payload={
+            "quality_strict": False,
+            "project_id": "P-CURRENT",
+            "workspace_dir": "/tenant/workspace",
+        },
         report=None,
         params={},
         fail_closed=True,
@@ -597,6 +605,14 @@ def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypa
     assert result["drawing_index"] is current_drawing_index
     assert result["standard_index"] is current_standard_index
     assert captured_gate_kwargs["standard_index"] is current_standard_index
+    assert captured_gate_kwargs["standard_workspace_dir"] == "/tenant/workspace"
+    assert captured_gate_kwargs["standard_compliance_root"] == Path(
+        "/trusted/compliance"
+    )
+    assert rebuilt_workspaces == {
+        "drawing": "/tenant/workspace",
+        "standard": "/tenant/workspace",
+    }
     assert rebuilt_outlines == {
         "drawing": ["质量管理"],
         "standard": ["质量管理"],

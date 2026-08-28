@@ -8,13 +8,16 @@ from pathlib import Path
 from typing import Any
 
 from backend.zhifei_autoplan.compliance_policy import (
+    build_standard_registry_map,
     canonical_standard_code,
     extract_standard_codes,
     is_verified_standard_metadata,
+    is_versioned_standard_code,
 )
 from backend.zhifei_autoplan.compliance_runtime import (
     _compliance_root,
     _load_official_registry,
+    _parse_official_registry_bytes,
 )
 from backend.zhifei_autoplan.evidence import (
     format_hit_locator,
@@ -72,18 +75,16 @@ _GENERIC_QUERY_PARTS = (
 )
 
 
-def list_verified_standard_metadata() -> list[dict[str, Any]]:
-    """Read official metadata without building or mutating the runtime catalog."""
+def list_verified_standard_metadata(
+    compliance_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Read raw official metadata without building or mutating the catalog."""
 
     try:
-        rows = _load_official_registry(_compliance_root())
+        rows = _load_official_registry(_compliance_root(compliance_root))
     except Exception:  # noqa: BLE001 - optional read-only enrichment fails closed
         return []
-    return [
-        dict(row)
-        for row in rows
-        if isinstance(row, dict) and is_verified_standard_metadata(row)
-    ]
+    return [dict(row) for row in rows if isinstance(row, dict)]
 
 
 def _top_keywords(text: str, limit: int = 12) -> list[str]:
@@ -158,12 +159,35 @@ def _unique_standard_codes(value: Any) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for code in extract_standard_codes(value):
+        if not _is_valid_standard_identity_code(code):
+            continue
         canonical = canonical_standard_code(code)
         if not canonical or canonical in seen:
             continue
         seen.add(canonical)
         result.append(code)
     return result
+
+
+def _is_valid_standard_identity_code(value: Any) -> bool:
+    code = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    return bool(code and is_versioned_standard_code(code))
+
+
+def _rejected_standard_codes(value: Any) -> list[str]:
+    rejected: list[str] = []
+    seen: set[str] = set()
+    for code in extract_standard_codes(value):
+        canonical = canonical_standard_code(code)
+        if (
+            not canonical
+            or canonical in seen
+            or _is_valid_standard_identity_code(code)
+        ):
+            continue
+        seen.add(canonical)
+        rejected.append(code)
+    return rejected
 
 
 def _document_standard_identity(
@@ -173,12 +197,15 @@ def _document_standard_identity(
     # Registry identity is deliberately limited to the filename and the title
     # region of the cover.  Codes appearing later in the document remain
     # references and cannot verify this document's identity.
-    cover_text = str(extract_text or "").split("\f", 1)[0][:1600]
+    cover_text = str(extract_text or "").split("\f", 1)[0][:128_000]
     filename_codes = _unique_standard_codes(Path(filename).stem)
     cover_codes = _unique_standard_codes(cover_text)
+    filename_rejected_codes = _rejected_standard_codes(Path(filename).stem)
+    cover_rejected_codes = _rejected_standard_codes(cover_text)
     filename_primary = filename_codes[0] if len(filename_codes) == 1 else None
     cover_primary = cover_codes[0] if len(cover_codes) == 1 else None
     status = "identified"
+    proof_basis: str | None = None
     if len(filename_codes) > 1 or len(cover_codes) > 1:
         primary = None
         status = "primary_identity_ambiguous"
@@ -187,10 +214,17 @@ def _document_standard_identity(
     ) != canonical_standard_code(cover_primary):
         primary = None
         status = "primary_identity_conflict"
+    elif not filename_primary and not cover_primary:
+        primary = None
+        status = "primary_identity_missing"
+    elif not filename_primary or not cover_primary:
+        primary = None
+        status = "primary_identity_conflict"
     else:
-        primary = filename_primary or cover_primary
-        if primary is None:
-            status = "primary_identity_missing"
+        # Preserve the printed cover form after proving its canonical identity
+        # is exactly the same as the path-safe filename form.
+        primary = cover_primary
+        proof_basis = "filename_and_cover"
     all_codes = _unique_standard_codes(
         f"{filename}\n{str(extract_text or '')[:1_000_000]}"
     )
@@ -200,21 +234,20 @@ def _document_standard_identity(
         for code in all_codes
         if canonical_standard_code(code) != primary_canonical
     ]
-    cover_identity_text = cover_text[:600]
-    if primary:
-        primary_offset = cover_text.casefold().find(str(primary).casefold())
-        if primary_offset >= 0:
-            cover_identity_text = cover_text[
-                max(0, primary_offset - 120) : primary_offset + len(primary) + 600
-            ]
     return {
         "primary_code": primary,
         "status": status,
+        "proof_basis": proof_basis,
         "filename_codes": filename_codes,
         "cover_codes": cover_codes,
+        "filename_rejected_codes": filename_rejected_codes,
+        "cover_rejected_codes": cover_rejected_codes,
         "all_codes": all_codes,
         "referenced_codes": referenced_codes,
-        "identity_text": f"{Path(filename).stem}\n{cover_identity_text}",
+        "cover_identity_text": cover_text,
+        "cover_identity_text_sha256": hashlib.sha256(
+            cover_text.encode("utf-8")
+        ).hexdigest(),
     }
 
 
@@ -407,48 +440,117 @@ def _empty_index(
     }
 
 
-def _official_registry_map() -> dict[str, dict[str, Any]]:
+def _official_registry_map(
+    compliance_root: str | Path | None = None,
+) -> dict[str, dict[str, Any]]:
     try:
-        rows = list_verified_standard_metadata()
+        rows = (
+            list_verified_standard_metadata(compliance_root)
+            if compliance_root is not None
+            else list_verified_standard_metadata()
+        )
     except Exception:  # noqa: BLE001 - optional registry enrichment fails closed
         rows = []
-    registry: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        canonical = canonical_standard_code(row.get("standard_code"))
-        if not canonical:
-            continue
-        current = registry.get(canonical)
-        if current is None:
-            registry[canonical] = dict(row)
-            continue
-        if current.get("_registry_ambiguous") is True:
-            continue
-        current_name = _normalized_identity_name(
-            current.get("source_name") or current.get("standard_name")
-        )
-        candidate_name = _normalized_identity_name(
-            row.get("source_name") or row.get("standard_name")
-        )
-        current_version = canonical_standard_code(current.get("current_version"))
-        candidate_version = canonical_standard_code(row.get("current_version"))
-        if (
-            not current_name
-            or not candidate_name
-            or current_name != candidate_name
-            or current_version != candidate_version
-        ):
-            registry[canonical] = {
-                "standard_code": row.get("standard_code"),
-                "_registry_ambiguous": True,
-            }
-            continue
-        if bool(current.get("metadata_only")) and not bool(
-            row.get("metadata_only")
-        ):
-            registry[canonical] = dict(row)
-    return registry
+    return build_standard_registry_map(rows)
+
+
+def _identity_with_official_content_proof(
+    identity: dict[str, Any],
+    registry: dict[str, dict[str, Any]],
+    *,
+    source_sha256: str,
+) -> dict[str, Any]:
+    result = dict(identity)
+    actual_sha256 = str(source_sha256 or "").strip().lower()
+    proof: dict[str, Any] = {
+        "status": "not_declared",
+        "basis": None,
+        "expected_sha256": None,
+        "actual_sha256": actual_sha256 or None,
+        "official_document_url": None,
+    }
+    result["source_hash_proof"] = proof
+    filename_codes = result.get("filename_codes")
+    if not isinstance(filename_codes, list) or len(filename_codes) != 1:
+        proof["status"] = "filename_identity_not_unique"
+        return result
+    filename_code = str(filename_codes[0] or "").strip()
+    matched = registry.get(canonical_standard_code(filename_code))
+    if (
+        not isinstance(matched, dict)
+        or matched.get("_registry_ambiguous") is True
+        or not is_verified_standard_metadata(matched)
+    ):
+        proof["status"] = "registry_unverified"
+        return result
+    expected_sha256 = str(
+        matched.get("official_content_sha256") or ""
+    ).strip().lower()
+    official_document_url = str(
+        matched.get("official_document_url") or ""
+    ).strip()
+    proof.update(
+        {
+            "basis": "official_content_sha256" if expected_sha256 else None,
+            "expected_sha256": expected_sha256 or None,
+            "official_document_url": official_document_url or None,
+        }
+    )
+    if not expected_sha256:
+        return result
+    if _FULL_SHA256_RE.fullmatch(expected_sha256) is None:
+        proof["status"] = "registry_sha256_invalid"
+        return result
+    if _FULL_SHA256_RE.fullmatch(actual_sha256) is None:
+        proof["status"] = "source_sha256_invalid"
+        return result
+    proof["status"] = (
+        "verified" if actual_sha256 == expected_sha256 else "mismatch"
+    )
+    cover_codes = result.get("cover_codes")
+    if (
+        proof["status"] == "verified"
+        and result.get("status") != "identified"
+        and matched.get("official_identity_without_cover") is True
+        and isinstance(cover_codes, list)
+        and not cover_codes
+        and canonical_standard_code(filename_code)
+        == canonical_standard_code(matched.get("standard_code"))
+        and canonical_standard_code(matched.get("current_version"))
+        == canonical_standard_code(filename_code)
+        and str(matched.get("standard_name") or matched.get("source_name") or "").strip()
+        and str(matched.get("official_source") or "").strip().startswith("https://")
+        and official_document_url.startswith("https://")
+    ):
+        # Some government-published official PDFs begin at the preface and do
+        # not contain a cover code.  Exact official bytes plus independently
+        # verified page/document metadata can prove that narrow identity; a
+        # different valid cover code still remains a hard conflict above.
+        result["primary_code"] = filename_code
+        result["status"] = "identified"
+        result["proof_basis"] = "official_page_and_content_sha256"
+        result["official_identity_proof"] = {
+            "official_source": str(matched.get("official_source") or "").strip(),
+            "official_document_url": official_document_url,
+            "official_content_sha256": expected_sha256,
+            "standard_code": str(matched.get("standard_code") or "").strip(),
+            "standard_name": str(
+                matched.get("standard_name") or matched.get("source_name") or ""
+            ).strip(),
+            "current_version": str(matched.get("current_version") or "").strip(),
+        }
+    if (
+        result.get("status") == "identified"
+        and result.get("proof_basis")
+        not in {"filename_and_cover", "official_page_and_content_sha256"}
+    ):
+        # A pinned official byte hash proves provenance, not the standard
+        # identity printed on the document.  Pinned sources must still carry
+        # the same unique, versioned code in both filename and cover text.
+        result["primary_code"] = None
+        result["status"] = "primary_identity_conflict"
+        result["proof_basis"] = None
+    return result
 
 
 def _registry_projection(
@@ -488,14 +590,93 @@ def _registry_projection(
             "metadata_only": None,
             "clause_evidence_eligible": False,
         }
+    official_content_sha256 = str(
+        matched.get("official_content_sha256") or ""
+    ).strip().lower()
+    source_hash_proof = identity.get("source_hash_proof")
+    source_hash_proof = (
+        source_hash_proof if isinstance(source_hash_proof, dict) else {}
+    )
+    source_hash_proof_status = str(
+        source_hash_proof.get("status") or ""
+    ).strip()
+    matched_current_version = str(matched.get("current_version") or "").strip()
+    if canonical_standard_code(matched_current_version) != canonical_standard_code(
+        primary_code
+    ):
+        return {
+            "status": "registry_current_version_mismatch",
+            "standard_code": primary_code,
+            "official_source": str(matched.get("official_source") or "").strip()
+            or None,
+            "effective_status": str(
+                matched.get("effective_status") or ""
+            ).strip()
+            or None,
+            "current_version": matched_current_version or None,
+            "metadata_only": bool(matched.get("metadata_only")),
+            "clause_evidence_eligible": False,
+        }
+    if not is_verified_standard_metadata(matched):
+        return {
+            "status": "registry_metadata_unverified",
+            "standard_code": primary_code,
+            "official_source": str(matched.get("official_source") or "").strip()
+            or None,
+            "official_document_url": str(
+                matched.get("official_document_url") or ""
+            ).strip()
+            or None,
+            "official_content_sha256": official_content_sha256 or None,
+            "source_hash_proof_status": source_hash_proof_status or None,
+            "effective_status": str(
+                matched.get("effective_status") or ""
+            ).strip()
+            or None,
+            "current_version": matched_current_version or None,
+            "metadata_only": bool(matched.get("metadata_only")),
+            "clause_evidence_eligible": False,
+        }
+    if official_content_sha256 and source_hash_proof_status != "verified":
+        status = (
+            "official_content_sha256_mismatch"
+            if source_hash_proof_status == "mismatch"
+            else "official_content_sha256_unverified"
+        )
+        return {
+            "status": status,
+            "standard_code": primary_code,
+            "official_source": str(matched.get("official_source") or "").strip()
+            or None,
+            "official_document_url": str(
+                matched.get("official_document_url") or ""
+            ).strip()
+            or None,
+            "official_content_sha256": official_content_sha256,
+            "source_hash_proof_status": source_hash_proof_status or None,
+            "effective_status": str(
+                matched.get("effective_status") or ""
+            ).strip()
+            or None,
+            "current_version": str(matched.get("current_version") or "").strip()
+            or None,
+            "metadata_only": bool(matched.get("metadata_only")),
+            "clause_evidence_eligible": False,
+        }
     source_name = str(
         matched.get("source_name") or matched.get("standard_name") or ""
     ).strip()
     normalized_source_name = _normalized_identity_name(source_name)
+    proof_basis = str(identity.get("proof_basis") or "")
     normalized_document_identity = _normalized_identity_name(
-        identity.get("identity_text")
+        identity.get("cover_identity_text")
     )
-    if (
+    official_pin_name_verified = bool(
+        proof_basis == "official_page_and_content_sha256"
+        and source_hash_proof_status == "verified"
+        and normalized_source_name
+    )
+    if not official_pin_name_verified and (
         not normalized_source_name
         or normalized_source_name not in normalized_document_identity
     ):
@@ -511,6 +692,7 @@ def _registry_projection(
             "current_version": str(matched.get("current_version") or "").strip()
             or None,
             "metadata_only": bool(matched.get("metadata_only")),
+            "cover_name_status": "mismatch",
             "clause_evidence_eligible": False,
         }
     metadata_only = bool(matched.get("metadata_only"))
@@ -519,10 +701,25 @@ def _registry_projection(
             "verified_metadata_only" if metadata_only else "verified_clause_source"
         ),
         "standard_code": str(matched.get("standard_code") or "").strip() or None,
+        "standard_name": str(
+            matched.get("standard_name") or matched.get("source_name") or ""
+        ).strip()
+        or None,
         "official_source": str(matched.get("official_source") or "").strip() or None,
+        "official_document_url": str(
+            matched.get("official_document_url") or ""
+        ).strip()
+        or None,
+        "official_content_sha256": official_content_sha256 or None,
+        "source_hash_proof_status": source_hash_proof_status or "not_declared",
         "effective_status": str(matched.get("effective_status") or "").strip() or None,
         "current_version": str(matched.get("current_version") or "").strip() or None,
         "metadata_only": metadata_only,
+        "cover_name_status": (
+            "verified_official_pin"
+            if official_pin_name_verified
+            else "verified"
+        ),
         # This field applies to the registry record itself.  The independently
         # ingested PDF may still provide page-anchored text evidence below.
         "clause_evidence_eligible": not metadata_only,
@@ -580,6 +777,10 @@ def build_standard_index(
     outline: list[str],
     project_id: str | None = None,
     workspace_dir: str | Path | None = None,
+    compliance_root: str | Path | None = None,
+    *,
+    audit_lines: tuple[str, ...] | None = None,
+    official_registry_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """Build a project-isolated, page-addressable standard evidence index.
 
@@ -602,35 +803,58 @@ def build_standard_index(
             reason="missing_project_id",
             audit_path=audit_path,
         )
-    if audit_path.is_symlink():
+    if audit_lines is None and audit_path.is_symlink():
         return _empty_index(
             project_id=pid,
             reason="ingest_audit_path_untrusted",
             audit_path=audit_path,
         )
-    if not audit_path.is_file():
+    if audit_lines is None and not audit_path.is_file():
         return _empty_index(
             project_id=pid,
             reason="no_ingest_audit",
             audit_path=audit_path,
         )
 
-    try:
-        lines = audit_path.read_text(
-            encoding="utf-8",
-        ).splitlines()[::-1]
-    except (OSError, UnicodeError):
-        return _empty_index(
-            project_id=pid,
-            reason="ingest_audit_unreadable",
-            audit_path=audit_path,
-        )
+    if audit_lines is not None:
+        lines = list(reversed(audit_lines))
+    else:
+        try:
+            lines = audit_path.read_text(
+                encoding="utf-8",
+            ).splitlines()[::-1]
+        except (OSError, UnicodeError):
+            return _empty_index(
+                project_id=pid,
+                reason="ingest_audit_unreadable",
+                audit_path=audit_path,
+            )
     workspace_root = (
         Path(workspace_dir)
         if workspace_dir is not None and str(workspace_dir).strip()
         else audit_path.parent.parent
     ).resolve(strict=False)
-    registry = _official_registry_map()
+    effective_compliance_root = _compliance_root(compliance_root).resolve(
+        strict=False
+    )
+    registry_path = effective_compliance_root / "_official_registry.json"
+    registry_sha256: str | None = None
+    if official_registry_bytes is not None:
+        registry_sha256 = hashlib.sha256(official_registry_bytes).hexdigest()
+        registry = build_standard_registry_map(
+            _parse_official_registry_bytes(
+                official_registry_bytes,
+                path=registry_path,
+            )
+        )
+    else:
+        try:
+            registry_path.lstat()
+            if registry_path.is_file() and not registry_path.is_symlink():
+                registry_sha256 = hashlib.sha256(registry_path.read_bytes()).hexdigest()
+        except OSError:
+            pass
+        registry = _official_registry_map(effective_compliance_root)
     standards: list[dict[str, Any]] = []
     indexed_sources: list[dict[str, Any]] = []
     seen_content_ids: set[str] = set()
@@ -736,7 +960,11 @@ def build_standard_index(
         ):
             _reject(filename, "page_anchor_coverage_incomplete")
             continue
-        identity = _document_standard_identity(filename, extract_text)
+        identity = _identity_with_official_content_proof(
+            _document_standard_identity(filename, extract_text),
+            registry,
+            source_sha256=sha256,
+        )
         standard_codes = identity.get("all_codes") or []
         registry_metadata = _registry_projection(identity, registry)
         eligible_anchors = [
@@ -744,6 +972,10 @@ def build_standard_index(
             for anchor in page_anchors
             if isinstance(anchor, dict) and anchor.get("evidence_eligible") is True
         ]
+        registry_status = str(registry_metadata.get("status") or "")
+        clause_evidence_eligible = bool(
+            eligible_anchors and registry_status.startswith("verified_")
+        )
         text_status = (
             "indexed"
             if page_anchors and (not standard_pdf or len(page_anchors) == declared_pages)
@@ -758,10 +990,36 @@ def build_standard_index(
             "sha256": sha256,
             "file_id": raw_file_id,
             "pages": record.get("pages"),
-            "standard_code": identity.get("primary_code"),
+            "standard_code": (
+                registry_metadata.get("standard_code")
+                if registry_status.startswith("verified_")
+                else identity.get("primary_code")
+            ),
             "primary_identity_status": identity.get("status"),
+            "primary_identity_proof_basis": identity.get("proof_basis"),
+            "primary_identity_cover_code": (
+                (identity.get("cover_codes") or [None])[0]
+                if len(identity.get("cover_codes") or []) == 1
+                else None
+            ),
+            "cover_identity_text_sha256": identity.get(
+                "cover_identity_text_sha256"
+            ),
+            "cover_page_text_sha256": (
+                page_anchors[0].get("text_sha256")
+                if page_anchors
+                and isinstance(page_anchors[0], dict)
+                and page_anchors[0].get("page") == 1
+                else None
+            ),
+            "cover_name_status": registry_metadata.get("cover_name_status"),
             "standard_codes": standard_codes,
             "referenced_standard_codes": identity.get("referenced_codes") or [],
+            "source_hash_proof": identity.get("source_hash_proof"),
+            "official_identity_proof": identity.get("official_identity_proof"),
+            "source_hash_proof_status": (
+                (identity.get("source_hash_proof") or {}).get("status")
+            ),
             "keywords": _top_keywords(extract_text, limit=10),
             "page_anchors": page_anchors,
             "text_status": text_status,
@@ -769,9 +1027,9 @@ def build_standard_index(
             "official_registry_status": registry_metadata.get("status"),
             "official_source": registry_metadata.get("official_source"),
             "official_registry": registry_metadata,
-            "clause_evidence_eligible": bool(eligible_anchors),
+            "clause_evidence_eligible": clause_evidence_eligible,
             "clause_evidence_source": (
-                "ingested_standard_text" if eligible_anchors else None
+                "ingested_standard_text" if clause_evidence_eligible else None
             ),
             "registry_metadata_used_as_clause_evidence": False,
             "source_integrity_status": "verified",
@@ -901,6 +1159,8 @@ def build_standard_index(
         "ok": index_complete,
         "project_id": pid,
         "audit_path": str(audit_path),
+        "official_registry_path": str(registry_path),
+        "official_registry_sha256": registry_sha256,
         "standards": standards[:40],
         "chapter_bindings": bindings[:30],
         "indexed_standard_count": indexed_standard_count,

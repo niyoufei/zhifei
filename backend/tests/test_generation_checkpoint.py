@@ -17,8 +17,17 @@ from backend.zhifei_autoplan.generation_checkpoint import (
 )
 
 
-def _binding(*, topic: str = "示例工程", delivery_scope: str = "document") -> dict:
+def _binding(
+    *,
+    topic: str = "示例工程",
+    delivery_scope: str = "document",
+    attempt_id: str = "b" * 32,
+) -> dict:
     return build_generation_binding(
+        job_id="a" * 32,
+        attempt_id=attempt_id,
+        owner_instance_id="c" * 32,
+        job_revision=2,
         topic=topic,
         project_id="P-001",
         project_type="房建",
@@ -119,6 +128,17 @@ def test_delivery_scope_is_part_of_generation_binding() -> None:
     assert document["delivery_scope"] == "document"
     assert validation["delivery_scope"] == "chapter_validation"
     assert document["binding_digest"] != validation["binding_digest"]
+
+
+def test_terminal_execution_lineage_is_part_of_generation_binding() -> None:
+    first = _binding(attempt_id="b" * 32)
+    second = _binding(attempt_id="d" * 32)
+
+    assert first["job_id"] == "a" * 32
+    assert first["attempt_id"] == "b" * 32
+    assert first["owner_instance_id"] == "c" * 32
+    assert first["job_revision"] == 2
+    assert first["binding_digest"] != second["binding_digest"]
 
 
 def test_chapter_context_digest_ignores_wall_clock_and_secrets() -> None:

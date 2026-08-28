@@ -131,6 +131,82 @@ def test_standard_index_requires_project_id(tmp_path: Path) -> None:
     assert result["standards"] == []
 
 
+def test_standard_index_uses_supplied_audit_and_registry_bytes_without_reread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    compliance_root = tmp_path / "compliance"
+    compliance_root.mkdir()
+    record = _record(
+        workspace,
+        project_id="P-SNAPSHOT",
+        filename="GB 55037-2022 建筑防火通用规范.pdf",
+        text="封面 GB55037-2022 建筑防火通用规范。\f防火分隔应验收。",
+    )
+    _write_audit(workspace, [])
+    audit_path = workspace / "audit" / "ingest.jsonl"
+    registry_path = compliance_root / "_official_registry.json"
+    registry_payload = {
+        "standards": [
+            {
+                "standard_code": "GB 55037-2022",
+                "source_name": "建筑防火通用规范",
+                "official_source": "https://ha.119.gov.cn/example",
+                "official_document_url": "https://oss.example/gb55037.pdf",
+                "official_content_sha256": record["sha256"],
+                "effective_status": "active",
+                "current_version": "GB 55037-2022",
+                "latest": True,
+            }
+        ]
+    }
+    registry_bytes = json.dumps(
+        registry_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    registry_path.write_text('{"standards": []}', encoding="utf-8")
+    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
+
+    def _forbid_audit_reread(path: Path, *args, **kwargs) -> str:
+        if path == audit_path:
+            raise AssertionError("audit snapshot must not be reread")
+        return original_read_text(path, *args, **kwargs)
+
+    def _forbid_registry_reread(path: Path) -> bytes:
+        if path == registry_path:
+            raise AssertionError("registry snapshot must not be reread")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_text", _forbid_audit_reread)
+    monkeypatch.setattr(Path, "read_bytes", _forbid_registry_reread)
+    result = build_standard_index(
+        "示例项目",
+        ["防火分隔施工"],
+        project_id="P-SNAPSHOT",
+        workspace_dir=workspace,
+        compliance_root=compliance_root,
+        audit_lines=(json.dumps(record, ensure_ascii=False),),
+        official_registry_bytes=registry_bytes,
+    )
+    empty = build_standard_index(
+        "示例项目",
+        [],
+        project_id="P-SNAPSHOT",
+        workspace_dir=workspace,
+        compliance_root=compliance_root,
+        audit_lines=(),
+        official_registry_bytes=registry_bytes,
+    )
+
+    assert result["indexed_standard_count"] == 1
+    assert result["official_registry_sha256"] == _sha256(registry_bytes)
+    assert result["standards"][0]["standard_code"] == "GB 55037-2022"
+    assert empty["indexed_standard_count"] == 0
+
+
 def test_standard_index_is_project_isolated_and_preserves_full_sha_page_anchor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -147,14 +223,14 @@ def test_standard_index_is_project_isolated_and_preserves_full_sha_page_anchor(
     p1 = _record(
         workspace,
         project_id="p1",
-        filename="项目管理规范.pdf",
+        filename="GB_T 50326-2017 项目管理规范.pdf",
         text=f"{first_page}\f{second_page}",
     )
     _write_audit(workspace, [p2, p1])
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        lambda: [_registry_row(metadata_only=True)],
+        lambda _root=None: [_registry_row(metadata_only=True)],
     )
 
     result = build_standard_index(
@@ -175,7 +251,7 @@ def test_standard_index_is_project_isolated_and_preserves_full_sha_page_anchor(
     assert row["standard_code"] == "GB/T 50326-2017"
     assert [anchor["page"] for anchor in row["page_anchors"]] == [1, 2]
     assert row["page_anchors"][1]["locator"].startswith(
-        f"项目管理规范.pdf#p2_{p1['sha256']}@"
+        f"GB_T 50326-2017 项目管理规范.pdf#p2_{p1['sha256']}@"
     )
     assert row["official_registry_status"] == "verified_metadata_only"
     assert row["official_source"].startswith("https://official.example/")
@@ -195,6 +271,396 @@ def test_standard_index_is_project_isolated_and_preserves_full_sha_page_anchor(
     )
 
 
+def test_gb_55037_requires_registry_metadata_and_ingested_pdf_page_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    first_page = (
+        "封面 OCR 噪声 Dll、DL L、HY TR。"
+        "GB 55037-2022 建筑防火通用规范。"
+    )
+    second_page = (
+        "防火分区施工应按已批准方案实施并形成检查记录，"
+        "相关设计引用 GB 50016-2014。"
+    )
+    filename = "GB 55037-2022 建筑防火通用规范.pdf"
+    record = _record(
+        workspace,
+        project_id="p1",
+        filename=filename,
+        text=f"{first_page}\f{second_page}",
+    )
+    _write_audit(workspace, [record])
+    registry_row = {
+        "standard_code": "GB 55037-2022",
+        "source_name": "建筑防火通用规范",
+        "official_source": (
+            "https://ha.119.gov.cn/2025/04-16/3491624.html"
+        ),
+        "effective_status": "现行有效",
+        "current_version": "GB 55037-2022",
+        "latest": True,
+        "metadata_only": True,
+        "official_document_url": (
+            "https://oss.dahe.cn/bdtypt/sbgt-wztipt/typtfile/20250416/"
+            "5aeb7bf9074144b9a3c0ec1901bc10c3.pdf"
+        ),
+        "official_content_sha256": record["sha256"],
+    }
+    monkeypatch.setattr(
+        standard_index,
+        "list_verified_standard_metadata",
+        lambda _root=None: [registry_row],
+    )
+
+    identity = standard_index._document_standard_identity(
+        filename,
+        f"{first_page}\f{second_page}",
+    )
+    assert identity["status"] == "identified"
+    assert identity["primary_code"] == "GB 55037-2022"
+    assert identity["filename_codes"] == ["GB 55037-2022"]
+    assert identity["cover_codes"] == ["GB 55037-2022"]
+    assert identity["cover_rejected_codes"] == []
+    assert identity["all_codes"] == ["GB 55037-2022", "GB 50016-2014"]
+
+    result = build_standard_index(
+        "示例项目",
+        ["防火分区施工方法"],
+        project_id="p1",
+        workspace_dir=workspace,
+    )
+
+    assert result["ok"] is True
+    assert result["official_registry_verified_count"] == 1
+    assert result["metadata_only_registry_count"] == 1
+    row = result["standards"][0]
+    assert row["primary_identity_status"] == "identified"
+    assert row["primary_identity_proof_basis"] == "filename_and_cover"
+    assert row["standard_code"] == "GB 55037-2022"
+    assert row["referenced_standard_codes"] == ["GB 50016-2014"]
+    assert row["source_hash_proof_status"] == "verified"
+    assert row["source_hash_proof"] == {
+        "status": "verified",
+        "basis": "official_content_sha256",
+        "expected_sha256": record["sha256"],
+        "actual_sha256": record["sha256"],
+        "official_document_url": registry_row["official_document_url"],
+    }
+    assert row["official_registry_status"] == "verified_metadata_only"
+    assert row["official_registry"]["source_hash_proof_status"] == "verified"
+    assert row["official_registry"]["clause_evidence_eligible"] is False
+    assert row["clause_evidence_eligible"] is True
+    assert row["clause_evidence_source"] == "ingested_standard_text"
+    assert row["registry_metadata_used_as_clause_evidence"] is False
+    assert [anchor["page"] for anchor in row["page_anchors"]] == [1, 2]
+    binding = result["chapter_bindings"][0]
+    assert binding["page"] == 2
+    assert binding["sha256"] == record["sha256"]
+    assert binding["page_text_sha256"] == row["page_anchors"][1][
+        "text_sha256"
+    ]
+    assert binding["binding_basis"] == (
+        "chapter_specific_ingested_standard_text"
+    )
+
+    mismatched_registry = dict(registry_row)
+    mismatched_registry["official_content_sha256"] = "0" * 64
+    monkeypatch.setattr(
+        standard_index,
+        "list_verified_standard_metadata",
+        lambda _root=None: [mismatched_registry],
+    )
+    mismatched = build_standard_index(
+        "示例项目",
+        ["防火分区施工方法"],
+        project_id="p1",
+        workspace_dir=workspace,
+    )
+    assert mismatched["standards"][0]["primary_identity_status"] == "identified"
+    assert mismatched["standards"][0]["official_registry_status"] == (
+        "official_content_sha256_mismatch"
+    )
+    assert mismatched["standards"][0]["source_hash_proof_status"] == "mismatch"
+    assert mismatched["standards"][0]["clause_evidence_eligible"] is False
+    assert mismatched["standards"][0]["clause_evidence_source"] is None
+    assert mismatched["chapter_bindings"] == []
+    assert mismatched["official_registry_verified_count"] == 0
+
+
+def test_gb_50300_requires_full_cover_and_pinned_source_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    filename = "GB 50300-2013 建筑工程施工质量验收统一标准.pdf"
+    first_page = "封面 GB 50300-2013 建筑工程施工质量验收统一标准。"
+    second_page = "检验批验收应保留可追溯记录。"
+    record = _record(
+        workspace,
+        project_id="p1",
+        filename=filename,
+        text=f"{first_page}\f{second_page}",
+    )
+    _write_audit(workspace, [record])
+    registry_row = _registry_row(
+        standard_code="GB 50300-2013",
+        source_name="建筑工程施工质量验收统一标准",
+    )
+    registry_row.update(
+        {
+            "official_document_url": (
+                "https://zjw.sh.gov.cn/cmsres/34/"
+                "349cab456a80498091dd53105c3b6109/"
+                "7573fa552919c7dbb9ddd603afc4eea0.pdf"
+            ),
+            "official_content_sha256": record["sha256"],
+        }
+    )
+    monkeypatch.setattr(
+        standard_index,
+        "list_verified_standard_metadata",
+        lambda _root=None: [registry_row],
+    )
+
+    identity = standard_index._document_standard_identity(
+        filename,
+        f"{first_page}\f{second_page}",
+    )
+    assert identity["status"] == "identified"
+    assert identity["primary_code"] == "GB 50300-2013"
+    assert identity["filename_codes"] == ["GB 50300-2013"]
+    assert identity["cover_codes"] == ["GB 50300-2013"]
+    assert identity["proof_basis"] == "filename_and_cover"
+    assert identity["referenced_codes"] == []
+
+    result = build_standard_index(
+        "示例项目",
+        [],
+        project_id="p1",
+        workspace_dir=workspace,
+    )
+
+    row = result["standards"][0]
+    assert row["primary_identity_status"] == "identified"
+    assert row["primary_identity_proof_basis"] == "filename_and_cover"
+    assert row["standard_code"] == "GB 50300-2013"
+    assert row["source_hash_proof_status"] == "verified"
+    assert row["official_registry_status"] == "verified_metadata_only"
+    assert row["official_registry"]["current_version"] == "GB 50300-2013"
+
+    base_only_identity = standard_index._document_standard_identity(
+        filename,
+        "封面 GB 50300 建筑工程施工质量验收统一标准。",
+    )
+    base_only_with_hash = standard_index._identity_with_official_content_proof(
+        base_only_identity,
+        {"GB_50300_2013": registry_row},
+        source_sha256=record["sha256"],
+    )
+    assert base_only_with_hash["source_hash_proof"]["status"] == "verified"
+    assert base_only_with_hash["primary_code"] is None
+    assert base_only_with_hash["status"] == "primary_identity_conflict"
+
+    mismatched_hash_registry = dict(registry_row)
+    mismatched_hash_registry["official_content_sha256"] = "0" * 64
+    monkeypatch.setattr(
+        standard_index,
+        "list_verified_standard_metadata",
+        lambda _root=None: [mismatched_hash_registry],
+    )
+    mismatched_hash = build_standard_index(
+        "示例项目",
+        [],
+        project_id="p1",
+        workspace_dir=workspace,
+    )
+    mismatched_hash_row = mismatched_hash["standards"][0]
+    assert mismatched_hash_row["primary_identity_status"] == "identified"
+    assert mismatched_hash_row["official_registry_status"] == (
+        "official_content_sha256_mismatch"
+    )
+    assert mismatched_hash_row["source_hash_proof_status"] == "mismatch"
+
+    mismatched_registry = dict(registry_row)
+    mismatched_registry["current_version"] = "GB 50300-2024"
+    monkeypatch.setattr(
+        standard_index,
+        "list_verified_standard_metadata",
+        lambda _root=None: [mismatched_registry],
+    )
+    mismatch = build_standard_index(
+        "示例项目",
+        [],
+        project_id="p1",
+        workspace_dir=workspace,
+    )
+    assert mismatch["standards"][0]["official_registry_status"] == (
+        "registry_current_version_mismatch"
+    )
+
+
+def test_official_preface_only_pdf_requires_explicit_exact_pin_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    filename = "GB55032-2022 建筑与市政工程施工质量控制通用规范.pdf"
+    record = _record(
+        workspace,
+        project_id="p1",
+        filename=filename,
+        text="前言 建筑与市政工程施工质量控制通用规范。\f质量控制应形成记录。",
+    )
+    _write_audit(workspace, [record])
+    registry_row = _registry_row(
+        standard_code="GB 55032-2022",
+        source_name="建筑与市政工程施工质量控制通用规范",
+    )
+    registry_row.update(
+        {
+            "official_source": (
+                "https://szwb.sz.gov.cn/gwszwfw/zsk/hybz/content/"
+                "post_10878088.html"
+            ),
+            "official_document_url": (
+                "https://szwb.sz.gov.cn/attachment/1/1356/1356241/10878088.pdf"
+            ),
+            "official_content_sha256": record["sha256"],
+            "official_identity_without_cover": True,
+        }
+    )
+    monkeypatch.setattr(
+        standard_index,
+        "list_verified_standard_metadata",
+        lambda _root=None: [registry_row],
+    )
+
+    result = build_standard_index(
+        "示例项目",
+        ["质量控制"],
+        project_id="p1",
+        workspace_dir=workspace,
+    )
+
+    row = result["standards"][0]
+    assert row["standard_code"] == "GB 55032-2022"
+    assert row["primary_identity_status"] == "identified"
+    assert row["primary_identity_proof_basis"] == (
+        "official_page_and_content_sha256"
+    )
+    assert row["source_hash_proof_status"] == "verified"
+    assert row["official_registry_status"] == "verified_metadata_only"
+    assert row["clause_evidence_eligible"] is True
+    assert result["chapter_bindings"]
+
+    no_policy = dict(registry_row)
+    no_policy.pop("official_identity_without_cover")
+    identity = standard_index._document_standard_identity(filename, "前言 正文")
+    without_policy = standard_index._identity_with_official_content_proof(
+        identity,
+        {"GB_55032_2022": no_policy},
+        source_sha256=record["sha256"],
+    )
+    assert without_policy["status"] != "identified"
+
+    conflicting_cover = standard_index._document_standard_identity(
+        filename,
+        "封面 GB 55037-2022 建筑防火通用规范。",
+    )
+    conflict = standard_index._identity_with_official_content_proof(
+        conflicting_cover,
+        {"GB_55032_2022": registry_row},
+        source_sha256=record["sha256"],
+    )
+    assert conflict["status"] == "primary_identity_conflict"
+    assert conflict["primary_code"] is None
+
+    hash_mismatch = standard_index._identity_with_official_content_proof(
+        identity,
+        {"GB_55032_2022": registry_row},
+        source_sha256="0" * 64,
+    )
+    assert hash_mismatch["status"] != "identified"
+    assert hash_mismatch["source_hash_proof"]["status"] == "mismatch"
+
+
+@pytest.mark.parametrize(
+    "cover_text",
+    [
+        "封面 GB 55037-2022 建筑防火通用规范。",
+        "封面 GB 50300-2024 建筑工程施工质量验收统一标准。",
+    ],
+)
+def test_full_filename_identity_conflicts_with_different_base_or_year(
+    cover_text: str,
+) -> None:
+    identity = standard_index._document_standard_identity(
+        "GB 50300-2013 建筑工程施工质量验收统一标准.pdf",
+        cover_text,
+    )
+
+    assert identity["primary_code"] is None
+    assert identity["status"] == "primary_identity_conflict"
+
+
+def test_document_identity_shape_filter_preserves_legal_numeric_codes() -> None:
+    assert standard_index._unique_standard_codes(
+        "Dll DL L HY TR；DL/T 5210.1-2012；JTG D60-2015"
+    ) == ["DL/T 5210.1-2012", "JTG D60-2015"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "cover_text", "source_sha256"),
+    [
+        (
+            "GB 55037-2022 建筑防火通用规范.pdf",
+            "Dll HY TR 建筑防火通用规范。",
+            "a" * 64,
+        ),
+        (
+            "GB 55037-2022 建筑防火通用规范.pdf",
+            "Dll HY TR 建筑防火通用规范。",
+            "b" * 64,
+        ),
+        (
+            "GB 55037-2022 建筑防火通用规范.pdf",
+            "封面 GB 55032-2022 建筑防火通用规范。",
+            "a" * 64,
+        ),
+        (
+            "GB 55032-2022 重命名.pdf",
+            "Dll HY TR 建筑防火通用规范。",
+            "a" * 64,
+        ),
+    ],
+)
+def test_pinned_hash_never_replaces_missing_or_conflicting_cover_identity(
+    filename: str,
+    cover_text: str,
+    source_sha256: str,
+) -> None:
+    registry_row = {
+        "standard_code": "GB 55037-2022",
+        "source_name": "建筑防火通用规范",
+        "official_source": "https://official.example/gb55037",
+        "effective_status": "现行有效",
+        "current_version": "GB 55037-2022",
+        "latest": True,
+        "metadata_only": True,
+        "official_content_sha256": "a" * 64,
+    }
+    identity = standard_index._identity_with_official_content_proof(
+        standard_index._document_standard_identity(filename, cover_text),
+        {"GB_55037_2022": registry_row},
+        source_sha256=source_sha256,
+    )
+
+    assert identity["primary_code"] is None
+    assert identity["status"] == "primary_identity_conflict"
+
+
 def test_metadata_only_registry_cannot_create_clause_evidence_from_blank_page(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -210,7 +676,7 @@ def test_metadata_only_registry_cannot_create_clause_evidence_from_blank_page(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        lambda: [
+        lambda _root=None: [
             _registry_row(
                 standard_code="GB 50326-2017",
                 metadata_only=True,
@@ -227,7 +693,7 @@ def test_metadata_only_registry_cannot_create_clause_evidence_from_blank_page(
 
     assert result["ok"] is True
     row = result["standards"][0]
-    assert row["official_registry_status"] == "verified_metadata_only"
+    assert row["official_registry_status"] == "primary_identity_conflict"
     assert row["official_registry"]["clause_evidence_eligible"] is False
     assert row["clause_evidence_eligible"] is False
     assert len(row["page_anchors"]) == 1
@@ -245,14 +711,14 @@ def test_standard_index_accepts_explicit_blank_proof_with_complete_page_coverage
     record = _record(
         workspace,
         project_id="p1",
-        filename="项目管理规范.pdf",
+        filename="GB_T 50326-2017 项目管理规范.pdf",
         text="封面 GB/T 50326-2017 建设工程项目管理规范。\f",
     )
     _write_audit(workspace, [record])
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        lambda: [_registry_row()],
+        lambda _root=None: [_registry_row()],
     )
 
     result = build_standard_index(
@@ -315,7 +781,7 @@ def test_standard_index_rejects_incomplete_or_failed_full_page_ocr_proof(
     record = _record(
         workspace,
         project_id="p1",
-        filename="项目管理规范.pdf",
+        filename="GB_T 50326-2017 项目管理规范.pdf",
         text="封面 GB/T 50326-2017 建设工程项目管理规范。\f第二页正文",
     )
     mutate(record)
@@ -323,7 +789,7 @@ def test_standard_index_rejects_incomplete_or_failed_full_page_ocr_proof(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        list,
+        lambda _root=None: [],
     )
 
     result = build_standard_index(
@@ -346,7 +812,7 @@ def test_standard_index_rejects_partial_page_anchor_even_with_valid_hashes(
     record = _record(
         workspace,
         project_id="p1",
-        filename="项目管理规范.pdf",
+        filename="GB_T 50326-2017 项目管理规范.pdf",
         text="封面 GB/T 50326-2017 建设工程项目管理规范。\f第二页正文",
     )
     extract_path = Path(record["extract_saved_as"])
@@ -361,7 +827,7 @@ def test_standard_index_rejects_partial_page_anchor_even_with_valid_hashes(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        list,
+        lambda _root=None: [],
     )
 
     result = build_standard_index(
@@ -398,7 +864,7 @@ def test_standard_index_rejects_short_or_mismatched_identity(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        list,
+        lambda _root=None: [],
     )
 
     result = build_standard_index(
@@ -439,7 +905,7 @@ def test_standard_index_rejects_source_and_extract_tamper(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        list,
+        lambda _root=None: [],
     )
 
     result = build_standard_index(
@@ -499,7 +965,7 @@ def test_standard_index_rejects_external_and_short_prefix_paths(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        list,
+        lambda _root=None: [],
     )
 
     result = build_standard_index(
@@ -533,7 +999,7 @@ def test_standard_index_rejects_cross_workspace_audit_record(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        list,
+        lambda _root=None: [],
     )
 
     result = build_standard_index(
@@ -563,7 +1029,7 @@ def test_standard_index_rejects_raw_standard_drawing_double_tag(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        list,
+        lambda _root=None: [],
     )
 
     result = build_standard_index(
@@ -585,7 +1051,7 @@ def test_reference_code_in_body_cannot_verify_current_document(
     record = _record(
         workspace,
         project_id="p1",
-        filename="项目管理规范.pdf",
+        filename="GB_T 50326-2017 项目管理规范.pdf",
         text=(
             "封面 GB/T 50326-2017 建设工程项目管理规范。"
             "\f参考文献：JGJ 18-2012 钢筋焊接及验收规程。"
@@ -595,7 +1061,7 @@ def test_reference_code_in_body_cannot_verify_current_document(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        lambda: [
+        lambda _root=None: [
             _registry_row(
                 standard_code="JGJ 18-2012",
                 source_name="钢筋焊接及验收规程",
@@ -625,14 +1091,14 @@ def test_registry_source_name_must_match_primary_document_identity(
     record = _record(
         workspace,
         project_id="p1",
-        filename="项目管理规范.pdf",
+        filename="GB_T 50326-2017 项目管理规范.pdf",
         text="封面 GB/T 50326-2017 建设工程项目管理规范。",
     )
     _write_audit(workspace, [record])
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        lambda: [_registry_row(source_name="混凝土结构工程施工规范")],
+        lambda _root=None: [_registry_row(source_name="混凝土结构工程施工规范")],
     )
 
     result = build_standard_index(
@@ -664,7 +1130,7 @@ def test_ambiguous_cover_or_registry_identity_fails_closed(
     ambiguous_registry = _record(
         workspace,
         project_id="p1",
-        filename="项目管理规范.pdf",
+        filename="GB_T 50326-2017 项目管理规范.pdf",
         text="封面 GB/T 50326-2017 建设工程项目管理规范。",
         source_bytes=b"different-primary-document",
     )
@@ -672,7 +1138,7 @@ def test_ambiguous_cover_or_registry_identity_fails_closed(
     monkeypatch.setattr(
         standard_index,
         "list_verified_standard_metadata",
-        lambda: [
+        lambda _root=None: [
             _registry_row(),
             _registry_row(source_name="冲突名称"),
         ],
@@ -692,6 +1158,6 @@ def test_ambiguous_cover_or_registry_identity_fails_closed(
     assert rows["规范合集.pdf"]["official_registry_status"] == (
         "primary_identity_ambiguous"
     )
-    assert rows["项目管理规范.pdf"]["official_registry_status"] == (
+    assert rows["GB_T 50326-2017 项目管理规范.pdf"]["official_registry_status"] == (
         "registry_identity_ambiguous"
     )

@@ -3,9 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any
 
-from backend.zhifei_autoplan.compliance_policy import canonical_standard_code
+from backend.zhifei_autoplan.compliance_policy import (
+    audit_standard_citations,
+    canonical_standard_code,
+    is_versioned_standard_code,
+)
 from backend.zhifei_autoplan.evidence import validate_ingest_evidence_set_receipt
 from backend.zhifei_autoplan.project_fact_ledger import (
     FORMAL_REQUIRED_FIELDS,
@@ -264,6 +269,7 @@ def _formal_fact_source_errors(
     fact: dict[str, Any],
     *,
     expected_project_id: str,
+    audit_lines: tuple[str, ...] | None = None,
 ) -> list[str]:
     status = str(fact.get("status") or "").strip().lower()
     source_type = str(fact.get("source_type") or "").strip().lower()
@@ -288,6 +294,7 @@ def _formal_fact_source_errors(
             receipt_validation = validate_ingest_evidence_set_receipt(
                 evidence_set_receipt,
                 expected_project_id=expected_project_id,
+                audit_lines=audit_lines,
             )
             receipt_source_sha256s = {
                 str(row.get("source_sha256") or "").strip().lower()
@@ -319,6 +326,7 @@ def _formal_fact_source_errors(
                 validate_project_parameter_fact_against_current_evidence(
                     fact,
                     expected_project_id=expected_project_id,
+                    audit_lines=audit_lines,
                 )
             )
             if current_evidence_validation.get("ok") is not True:
@@ -704,6 +712,8 @@ def _formal_parameter_body_check(
 def _formal_project_parameter_check(
     parameter_report: dict[str, Any] | None,
     project_fact_ledger: dict[str, Any] | None,
+    *,
+    audit_lines: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Revalidate the bound receipt instead of trusting caller summary booleans."""
 
@@ -769,6 +779,7 @@ def _formal_project_parameter_check(
             field,
             fact,
             expected_project_id=ledger_project_id,
+            audit_lines=audit_lines,
         )
         if source_errors:
             source_evidence_errors.append(
@@ -892,11 +903,64 @@ def _formal_project_parameter_check(
     }
 
 
+def _formal_standard_index_projection(value: Any) -> dict[str, Any]:
+    index = value if isinstance(value, dict) else {}
+    fields = (
+        "ok",
+        "project_id",
+        "audit_path",
+        "official_registry_path",
+        "official_registry_sha256",
+        "standards",
+        "chapter_bindings",
+        "chapter_binding_status",
+        "indexed_standard_count",
+        "official_registry_verified_count",
+        "metadata_only_registry_count",
+        "integrity_rejection_count",
+        "integrity_rejections",
+        "invalid_identity_count",
+        "missing_text_or_ocr_count",
+        "locator_unavailable_count",
+        "text_index_status",
+        "clause_evidence_policy",
+    )
+    return {field: index.get(field) for field in fields}
+
+
+def _rebuild_current_standard_index(
+    *,
+    project_id: str,
+    workspace_dir: str | Path,
+    outline: list[str],
+    compliance_root: str | Path | None,
+    audit_lines: tuple[str, ...] | None = None,
+    official_registry_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    from backend.zhifei_autoplan.standard_index import build_standard_index
+
+    return build_standard_index(
+        "",
+        outline,
+        project_id=project_id,
+        workspace_dir=workspace_dir,
+        compliance_root=compliance_root,
+        audit_lines=audit_lines,
+        official_registry_bytes=official_registry_bytes,
+    )
+
+
 def _formal_standard_evidence_check(
     standard_audit: dict[str, Any] | None,
     standard_index: dict[str, Any] | None,
     *,
     expected_project_id: str,
+    trusted_workspace_dir: str | Path | None,
+    trusted_compliance_root: str | Path | None,
+    outline: list[str],
+    sections: list[dict[str, Any]],
+    audit_lines: tuple[str, ...] | None = None,
+    official_registry_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """Require current, project-bound independent standard text evidence."""
 
@@ -913,6 +977,75 @@ def _formal_standard_evidence_check(
     violations = raw_violations if isinstance(raw_violations, list) else []
     raw_audit_codes = audit.get("verified_standard_codes")
     audit_codes: set[str] = set()
+    trusted_rebuild_digest: str | None = None
+    trusted_citation_audit: dict[str, Any] | None = None
+    supplied_projection_digest = _canonical_digest(
+        _formal_standard_index_projection(index)
+    )
+
+    if trusted_workspace_dir is None or not str(trusted_workspace_dir).strip():
+        reasons.append("trusted_standard_workspace_missing")
+    elif trusted_compliance_root is None or not str(trusted_compliance_root).strip():
+        reasons.append("trusted_standard_registry_missing")
+    elif not expected_project_id:
+        reasons.append("trusted_standard_project_missing")
+    else:
+        try:
+            trusted_index = _rebuild_current_standard_index(
+                project_id=expected_project_id,
+                workspace_dir=trusted_workspace_dir,
+                outline=outline,
+                compliance_root=trusted_compliance_root,
+                audit_lines=audit_lines,
+                official_registry_bytes=official_registry_bytes,
+            )
+            trusted_rebuild_digest = _canonical_digest(
+                _formal_standard_index_projection(trusted_index)
+            )
+            if trusted_rebuild_digest != supplied_projection_digest:
+                reasons.append("standard_index_trusted_rebuild_mismatch")
+            trusted_manifest_rows: list[dict[str, Any]] = []
+            for trusted_row in trusted_index.get("standards") or []:
+                if not isinstance(trusted_row, dict):
+                    continue
+                registry = (
+                    trusted_row.get("official_registry")
+                    if isinstance(trusted_row.get("official_registry"), dict)
+                    else {}
+                )
+                code = str(trusted_row.get("standard_code") or "").strip()
+                if (
+                    not is_versioned_standard_code(code)
+                    or not str(
+                        trusted_row.get("official_registry_status") or ""
+                    ).startswith("verified_")
+                    or trusted_row.get("primary_identity_status") != "identified"
+                    or trusted_row.get("source_integrity_status") != "verified"
+                    or trusted_row.get("clause_evidence_eligible") is not True
+                ):
+                    continue
+                trusted_manifest_rows.append(
+                    {
+                        "standard_code_and_name": {
+                            "code": code,
+                            "name": str(registry.get("standard_name") or "").strip(),
+                        },
+                        "conflicts_and_priority": {
+                            "conflicts": list(registry.get("conflicts") or []),
+                            "priority": str(registry.get("priority") or "").strip(),
+                        },
+                    }
+                )
+            trusted_citation_audit = audit_standard_citations(
+                sections,
+                {"verified_standards": trusted_manifest_rows},
+            )
+            if trusted_citation_audit.get("verified_standard_count", 0) <= 0:
+                reasons.append("trusted_standard_citation_allowlist_missing")
+            if trusted_citation_audit.get("ok") is not True:
+                reasons.append("trusted_standard_citation_violations_present")
+        except Exception:  # noqa: BLE001 - external evidence rebuild fails closed
+            reasons.append("standard_index_trusted_rebuild_failed")
 
     if not audit_is_object:
         reasons.append("standard_citation_audit_invalid")
@@ -960,6 +1093,13 @@ def _formal_standard_evidence_check(
         reasons.append("standard_citation_audit_failed")
     if not index:
         reasons.append("standard_index_missing")
+    registry_path = Path(str(index.get("official_registry_path") or ""))
+    if not registry_path.is_absolute():
+        reasons.append("official_registry_path_invalid")
+    if _SHA256_RE.fullmatch(
+        str(index.get("official_registry_sha256") or "").strip().lower()
+    ) is None:
+        reasons.append("official_registry_sha256_invalid")
     if not expected_project_id or project_id != expected_project_id:
         reasons.append("standard_index_project_mismatch")
     if index.get("ok") is not True:
@@ -1012,6 +1152,12 @@ def _formal_standard_evidence_check(
             errors.append("official_registry_unverified")
         if str(row.get("primary_identity_status") or "").strip() != "identified":
             errors.append("primary_standard_identity_unverified")
+        identity_basis = str(row.get("primary_identity_proof_basis") or "")
+        if identity_basis not in {
+            "filename_and_cover",
+            "official_page_and_content_sha256",
+        }:
+            errors.append("primary_identity_cover_proof_missing")
         raw_standard_codes = row.get("standard_codes")
         if not isinstance(raw_standard_codes, list):
             errors.append("standard_codes_invalid")
@@ -1033,6 +1179,51 @@ def _formal_standard_evidence_check(
             errors.append("standard_code_missing")
         elif primary_code not in listed_codes:
             errors.append("primary_standard_code_not_listed")
+        if not is_versioned_standard_code(primary_value):
+            errors.append("primary_standard_version_missing")
+        cover_code = row.get("primary_identity_cover_code")
+        if identity_basis == "filename_and_cover":
+            if (
+                not is_versioned_standard_code(cover_code)
+                or canonical_standard_code(cover_code) != primary_code
+            ):
+                errors.append("primary_identity_cover_code_invalid")
+            if row.get("cover_name_status") != "verified":
+                errors.append("primary_identity_cover_name_unverified")
+        elif identity_basis == "official_page_and_content_sha256":
+            official_identity_proof = row.get("official_identity_proof")
+            if (
+                cover_code not in {None, ""}
+                or row.get("cover_name_status") != "verified_official_pin"
+                or not isinstance(official_identity_proof, dict)
+                or canonical_standard_code(
+                    official_identity_proof.get("standard_code")
+                )
+                != primary_code
+                or canonical_standard_code(
+                    official_identity_proof.get("current_version")
+                )
+                != primary_code
+                or not str(official_identity_proof.get("standard_name") or "").strip()
+                or not str(official_identity_proof.get("official_source") or "")
+                .strip()
+                .startswith("https://")
+                or not str(
+                    official_identity_proof.get("official_document_url") or ""
+                )
+                .strip()
+                .startswith("https://")
+                or _SHA256_RE.fullmatch(
+                    str(
+                        official_identity_proof.get("official_content_sha256")
+                        or ""
+                    )
+                    .strip()
+                    .lower()
+                )
+                is None
+            ):
+                errors.append("primary_identity_official_pin_invalid")
         registry = row.get("official_registry")
         if not isinstance(registry, dict):
             errors.append("official_registry_invalid")
@@ -1042,6 +1233,57 @@ def _formal_standard_evidence_check(
                 errors.append("official_registry_code_mismatch")
             if str(registry.get("status") or "").strip() != registry_status:
                 errors.append("official_registry_status_mismatch")
+            official_content_sha256 = str(
+                registry.get("official_content_sha256") or ""
+            ).strip().lower()
+            if official_content_sha256:
+                source_sha256 = str(row.get("sha256") or "").strip().lower()
+                source_hash_proof = row.get("source_hash_proof")
+                if (
+                    _SHA256_RE.fullmatch(official_content_sha256) is None
+                    or source_sha256 != official_content_sha256
+                    or not isinstance(source_hash_proof, dict)
+                    or source_hash_proof.get("status") != "verified"
+                    or source_hash_proof.get("basis")
+                    != "official_content_sha256"
+                    or str(
+                        source_hash_proof.get("expected_sha256") or ""
+                    ).strip().lower()
+                    != official_content_sha256
+                    or str(
+                        source_hash_proof.get("actual_sha256") or ""
+                    ).strip().lower()
+                    != source_sha256
+                    or row.get("source_hash_proof_status") != "verified"
+                    or registry.get("source_hash_proof_status") != "verified"
+                ):
+                    errors.append("official_content_sha256_unverified")
+            if identity_basis == "official_page_and_content_sha256":
+                official_identity_proof = row.get("official_identity_proof")
+                if not isinstance(official_identity_proof, dict) or (
+                    str(
+                        official_identity_proof.get("official_content_sha256")
+                        or ""
+                    )
+                    .strip()
+                    .lower()
+                    != official_content_sha256
+                    or str(
+                        official_identity_proof.get("official_document_url") or ""
+                    ).strip()
+                    != str(registry.get("official_document_url") or "").strip()
+                    or str(official_identity_proof.get("official_source") or "").strip()
+                    != str(registry.get("official_source") or "").strip()
+                    or str(official_identity_proof.get("standard_name") or "").strip()
+                    != str(registry.get("standard_name") or "").strip()
+                    or canonical_standard_code(
+                        official_identity_proof.get("current_version")
+                    )
+                    != canonical_standard_code(registry.get("current_version"))
+                ):
+                    errors.append("primary_identity_official_pin_mismatch")
+            if row.get("primary_identity_proof_basis") == "official_content_sha256":
+                errors.append("primary_identity_hash_basis_forbidden")
         if registry_verified:
             registry_verified_rows += 1
             if primary_code:
@@ -1061,6 +1303,29 @@ def _formal_standard_evidence_check(
                 errors.append(f"{field}_invalid")
         anchors = row.get("page_anchors")
         anchors = anchors if isinstance(anchors, list) else []
+        cover_anchor = next(
+            (
+                anchor
+                for anchor in anchors
+                if isinstance(anchor, dict) and anchor.get("page") == 1
+            ),
+            None,
+        )
+        cover_page_text_sha256 = str(
+            row.get("cover_page_text_sha256") or ""
+        ).strip().lower()
+        cover_identity_text_sha256 = str(
+            row.get("cover_identity_text_sha256") or ""
+        ).strip().lower()
+        if (
+            not isinstance(cover_anchor, dict)
+            or _SHA256_RE.fullmatch(cover_page_text_sha256) is None
+            or _SHA256_RE.fullmatch(cover_identity_text_sha256) is None
+            or str(cover_anchor.get("text_sha256") or "").strip().lower()
+            != cover_page_text_sha256
+            or cover_identity_text_sha256 != cover_page_text_sha256
+        ):
+            errors.append("cover_page_identity_proof_invalid")
         eligible_anchor = any(
             isinstance(anchor, dict)
             and anchor.get("evidence_eligible") is True
@@ -1095,6 +1360,15 @@ def _formal_standard_evidence_check(
     if missing_audit_codes:
         reasons.append("standard_citation_codes_absent_from_index")
 
+    trusted_violations = (
+        list(trusted_citation_audit.get("violations") or [])
+        if isinstance(trusted_citation_audit, dict)
+        else []
+    )
+    combined_violations = list(violations)
+    for violation in trusted_violations:
+        if violation not in combined_violations:
+            combined_violations.append(violation)
     reasons = list(dict.fromkeys(reasons))
     return {
         "pass": not reasons,
@@ -1113,7 +1387,15 @@ def _formal_standard_evidence_check(
         "standard_index_digest": _canonical_digest(index) if index else None,
         "reasons": reasons,
         "row_errors": row_errors,
-        "citation_violations": violations[:20],
+        "supplied_projection_digest": supplied_projection_digest,
+        "trusted_rebuild_digest": trusted_rebuild_digest,
+        "trusted_standard_audit_digest": (
+            _canonical_digest(trusted_citation_audit)
+            if isinstance(trusted_citation_audit, dict)
+            else None
+        ),
+        "trusted_citation_violations": trusted_violations[:20],
+        "citation_violations": combined_violations[:20],
     }
 
 
@@ -1132,6 +1414,10 @@ def build_delivery_quality_gate(
     project_fact_ledger: dict[str, Any] | None = None,
     sections: list[dict[str, Any]] | None = None,
     standard_index: dict[str, Any] | None = None,
+    standard_workspace_dir: str | Path | None = None,
+    standard_compliance_root: str | Path | None = None,
+    trusted_ingest_audit_lines: tuple[str, ...] | None = None,
+    trusted_standard_registry_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """Combine independent specialist results into one fail-closed delivery decision."""
 
@@ -1173,6 +1459,19 @@ def build_delivery_quality_gate(
             standard_audit,
             standard_index,
             expected_project_id=str(ledger.get("project_id") or "").strip(),
+            trusted_workspace_dir=standard_workspace_dir,
+            trusted_compliance_root=standard_compliance_root,
+            outline=[
+                str(section.get("title") or "").strip()
+                for section in (sections or [])
+                if isinstance(section, dict)
+                and str(section.get("title") or "").strip()
+            ],
+            sections=[
+                section for section in (sections or []) if isinstance(section, dict)
+            ],
+            audit_lines=trusted_ingest_audit_lines,
+            official_registry_bytes=trusted_standard_registry_bytes,
         )
     else:
         raw_violations = standards.get("violations")
@@ -1284,7 +1583,11 @@ def build_delivery_quality_gate(
     }
     if formal_delivery_required:
         parameter_check = {
-            **_formal_project_parameter_check(project_parameters, project_fact_ledger),
+            **_formal_project_parameter_check(
+                project_parameters,
+                project_fact_ledger,
+                audit_lines=trusted_ingest_audit_lines,
+            ),
             "required": True,
         }
     checks.append({"name": "formal_project_parameters", **parameter_check})

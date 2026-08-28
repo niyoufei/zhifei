@@ -184,6 +184,8 @@ def _formal_delivery_fixture(
         "score_overview_xlsx": score_overview_xlsx,
         "expert_review_docx": expert_review_docx,
         "delivery_profile": "sonnet5_professional_word",
+        "delivery_ready": True,
+        "validation_scope": "document",
         "delivery_receipt": str(sealed["receipt"]),
         "delivery_decision_digest": str(sealed["decision_digest"]),
     }
@@ -290,6 +292,34 @@ def test_formal_delivery_scope_must_be_explicit_in_payload_and_every_variant(
         result,
         missing_variant_scope,
     )[1] == "variant_scope_missing"
+
+
+@pytest.mark.parametrize("value", [None, False, "true"])
+def test_formal_delivery_outer_ready_must_be_literal_true(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    from backend.app.routers import actions_bridge
+
+    job, result, variants = _formal_delivery_fixture(tmp_path)
+    result["delivery_ready"] = value
+    assert actions_bridge._formal_delivery_state(job, result, variants)[1] == (
+        "outer_delivery_not_ready"
+    )
+
+
+@pytest.mark.parametrize("value", [None, "", "chapter_validation"])
+def test_formal_delivery_outer_validation_scope_must_be_document(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    from backend.app.routers import actions_bridge
+
+    job, result, variants = _formal_delivery_fixture(tmp_path)
+    result["validation_scope"] = value
+    assert actions_bridge._formal_delivery_state(job, result, variants)[1] == (
+        "outer_validation_scope_mismatch"
+    )
 
 
 def test_task_receipt_decision_digest_is_recomputed_from_canonical_content(

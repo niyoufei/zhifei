@@ -459,6 +459,46 @@ def test_drawing_index_uses_the_validated_extract_snapshot(
     assert result["drawings"][0]["text_status"] == "indexed"
 
 
+def test_drawing_index_consumes_supplied_audit_snapshot_without_path_reread(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        tmp_path,
+        filename="钢梁审计快照.pdf",
+        sha="audit-snapshot",
+        text="钢梁安装构件位置与节点做法。",
+    )
+    audit_path = tmp_path / "backend/data/audit/ingest.jsonl"
+    _write_audit(tmp_path, [])
+    snapshot_lines = (json.dumps(record, ensure_ascii=False),)
+    original_read_text = Path.read_text
+
+    def _forbid_audit_reread(path: Path, *args, **kwargs) -> str:
+        if path == audit_path:
+            raise AssertionError("audit snapshot must not be read from the path")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _forbid_audit_reread)
+    monkeypatch.chdir(tmp_path)
+    result = build_drawing_index(
+        "示例项目",
+        [],
+        project_id="p1",
+        audit_lines=snapshot_lines,
+    )
+    empty = build_drawing_index(
+        "示例项目",
+        [],
+        project_id="p1",
+        audit_lines=(),
+    )
+
+    assert result["processed_drawing_count"] == 1
+    assert result["drawings"][0]["filename"] == "钢梁审计快照.pdf"
+    assert empty["processed_drawing_count"] == 0
+
+
 def test_drawing_index_rejects_symlinked_audit_path(
     monkeypatch,
     tmp_path: Path,

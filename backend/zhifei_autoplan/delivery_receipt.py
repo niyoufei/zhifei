@@ -43,25 +43,27 @@ def canonical_delivery_receipt_digest(payload: dict[str, Any]) -> str:
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    temp_path = Path(handle.name)
+    temp_path: Path | None = None
     try:
-        with handle:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
             json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
+        assert temp_path is not None
         temp_path.chmod(0o600)
         os.replace(temp_path, path)
         path.chmod(0o600)
     finally:
-        temp_path.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def _read_json(path: Path, *, label: str) -> dict[str, Any]:
@@ -135,6 +137,7 @@ def build_delivery_receipt(
     score_overview_xlsx: Iterable[str | Path | None],
     expert_review_docx: Iterable[str | Path | None],
     receipt_path: str | Path | None = None,
+    job_execution_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Seal every per-variant formal artifact into one delivery chain."""
 
@@ -280,11 +283,33 @@ def build_delivery_receipt(
         rows.append(row)
 
     target = Path(receipt_path) if receipt_path else outputs[0].parent / f"delivery_receipt_{job_id}.json"
+    execution_identity: dict[str, Any] | None = None
+    if job_execution_identity is not None:
+        execution_identity = dict(job_execution_identity)
+        if (
+            set(execution_identity)
+            != {"job_id", "attempt_id", "owner_instance_id", "job_revision"}
+            or execution_identity.get("job_id") != str(job_id)
+            or not isinstance(execution_identity.get("attempt_id"), str)
+            or not isinstance(execution_identity.get("owner_instance_id"), str)
+            or len(str(execution_identity.get("attempt_id") or "")) != 32
+            or len(str(execution_identity.get("owner_instance_id") or "")) != 32
+            or any(
+                character not in "0123456789abcdef"
+                for field in ("attempt_id", "owner_instance_id")
+                for character in str(execution_identity.get(field) or "")
+            )
+            or isinstance(execution_identity.get("job_revision"), bool)
+            or not isinstance(execution_identity.get("job_revision"), int)
+            or int(execution_identity.get("job_revision") or 0) <= 0
+        ):
+            raise DeliveryReceiptError("任务执行身份无效")
     receipt = {
         "schema": "zhifei.delivery_receipt.v2",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "pass",
         "job_id": str(job_id),
+        "job_execution_identity": execution_identity,
         "delivery_profile": "sonnet5_professional_word",
         "variant_count": len(rows),
         "variants": rows,

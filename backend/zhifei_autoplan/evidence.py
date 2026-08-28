@@ -248,17 +248,44 @@ def resolve_trusted_ingest_record(
         return {"ok": False, "reason": "extract_text_sha256_mismatch"}
 
     declared_workspace = Path(str(rec.get("workspace_dir") or ""))
-    expected_workspace = Path(
-        workspace_root if workspace_root is not None else declared_workspace
-    ).resolve(strict=False)
-    if (
-        not str(rec.get("workspace_dir") or "").strip()
-        or declared_workspace.resolve(strict=False) != expected_workspace
+    if not str(rec.get("workspace_dir") or "").strip() or ".." in (
+        declared_workspace.parts
     ):
         return {"ok": False, "reason": "audit_workspace_mismatch"}
 
-    source_path = Path(str(rec.get("saved_as") or ""))
-    extract_path = Path(str(rec.get("extract_saved_as") or ""))
+    expected_workspace = Path(
+        workspace_root if workspace_root is not None else declared_workspace
+    ).resolve(strict=False)
+    if declared_workspace.is_absolute():
+        declared_matches = (
+            declared_workspace.resolve(strict=False) == expected_workspace
+        )
+    else:
+        declared_parts = declared_workspace.parts
+        declared_matches = bool(
+            declared_parts
+            and len(expected_workspace.parts) >= len(declared_parts)
+            and expected_workspace.parts[-len(declared_parts) :] == declared_parts
+        )
+    if not declared_matches:
+        return {"ok": False, "reason": "audit_workspace_mismatch"}
+
+    def _resolve_audit_path(raw_value: Any) -> Path:
+        raw_path = Path(str(raw_value or ""))
+        if raw_path.is_absolute():
+            return raw_path
+        if ".." in raw_path.parts:
+            return raw_path
+        if not declared_workspace.is_absolute():
+            try:
+                relative = raw_path.relative_to(declared_workspace)
+            except ValueError:
+                return raw_path
+            return expected_workspace / relative
+        return raw_path
+
+    source_path = _resolve_audit_path(rec.get("saved_as"))
+    extract_path = _resolve_audit_path(rec.get("extract_saved_as"))
     if (
         not filename
         or source_path.is_symlink()
@@ -397,6 +424,7 @@ def validate_ingest_evidence_set_receipt(
     receipt: Mapping[str, Any] | None,
     *,
     expected_project_id: str | None = None,
+    audit_lines: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Re-read the latest audit rows and current bytes bound by a receipt."""
 
@@ -437,13 +465,16 @@ def validate_ingest_evidence_set_receipt(
         current_rows: dict[tuple[str, str], dict[str, Any]] = {}
     else:
         current_rows = {}
-        try:
-            lines = audit_path.read_text(
-                encoding="utf-8", errors="ignore"
-            ).splitlines()
-        except OSError:
-            errors.append("receipt_audit_unreadable")
-            lines = []
+        if audit_lines is not None:
+            lines = list(audit_lines)
+        else:
+            try:
+                lines = audit_path.read_text(
+                    encoding="utf-8", errors="ignore"
+                ).splitlines()
+            except OSError:
+                errors.append("receipt_audit_unreadable")
+                lines = []
         for line in reversed(lines):
             try:
                 row = json.loads(line)

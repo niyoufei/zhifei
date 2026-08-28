@@ -100,6 +100,8 @@ async def test_professional_delivery_promotes_rendered_word_and_preserves_source
         str(tmp_path / "professional-v2.docx"),
     ]
     assert delivered["delivery_profile"] == "sonnet5_professional_word"
+    assert delivered["delivery_ready"] is True
+    assert delivered["validation_scope"] == "document"
     delivery_receipt = json.loads(Path(delivered["delivery_receipt"]).read_text(encoding="utf-8"))
     assert delivery_receipt["schema"] == "zhifei.delivery_receipt.v2"
     assert delivery_receipt["status"] == "pass"
@@ -114,7 +116,9 @@ async def test_professional_delivery_fails_atomically_without_exposing_source_as
     monkeypatch,
 ) -> None:
     from backend.app.routers import actions_bridge
-    from backend.zhifei_autoplan.professional_document_renderer import ProfessionalRenderError
+    from backend.zhifei_autoplan.professional_document_renderer import (
+        ProfessionalRenderError,
+    )
 
     source_json = tmp_path / "result.json"
     source_json.write_text('{"variants": [{}, {}]}', encoding="utf-8")
@@ -183,6 +187,7 @@ def test_professional_render_failure_preserves_sources_without_exposing_final(
     assert recovery["compare_docx"] == [str(compare)]
     assert recovery["delivery_profile"] == "professional_render_incomplete"
     assert recovery["delivery_ready"] is False
+    assert recovery["validation_scope"] == "professional_render_failed"
     assert recovery["professional_render_status"]["status"] == "failed"
     assert recovery["professional_render_status"]["source_preserved"] is True
     assert secret not in json.dumps(recovery, ensure_ascii=False)

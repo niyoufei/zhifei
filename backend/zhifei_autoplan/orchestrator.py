@@ -5,7 +5,10 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import time
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from backend.zhifei_autoplan.agent_contract import (
@@ -51,6 +54,7 @@ from backend.zhifei_autoplan.enterprise_params import get_enterprise_profile
 from backend.zhifei_autoplan.evidence import (
     best_ingested_hit,
     format_hit_locator,
+    resolve_trusted_ingest_record,
     search_ingested_docs,
 )
 from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
@@ -90,6 +94,17 @@ from backend.zhifei_autoplan.outline_planner import (
     recommend_chart_every_n,
 )
 from backend.zhifei_autoplan.params_runtime import get_image_defaults, load_params
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    ProjectFactApprovalAuditError,
+    parse_project_fact_approval_audit,
+    verify_project_fact_approval_event,
+)
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    canonical_digest as approval_canonical_digest,
+)
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    project_fact_value_digest as approval_value_digest,
+)
 from backend.zhifei_autoplan.project_fact_ledger import (
     build_project_fact_ledger_from_inputs,
     project_fact_prompt_requirements,
@@ -140,6 +155,30 @@ from backend.zhifei_autoplan.terminology_guard import (
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_FACT_INGEST_AUDIT_PATH = Path("backend/data/audit/ingest.jsonl")
+_PROJECT_FACT_APPROVAL_AUDIT_PATH = Path(
+    "backend/data/audit/project_fact_approvals.jsonl"
+)
+_PROJECT_FACT_AUDIT_MAX_BYTES = 64 * 1024 * 1024
+_APPROVAL_RECEIPT_FIELDS = (
+    "receipt_id",
+    "status",
+    "project_id",
+    "field",
+    "value_digest",
+    "summary",
+    "approved_by",
+    "approved_at",
+)
+
+
+class ProjectFactApprovalGateError(ValueError):
+    """Stable fail-close raised before formal generation can call a provider."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
 
 STANDARD_TRADES = [
     "测量工",
@@ -624,6 +663,291 @@ def _build_source_input_receipt(
         "boq_digest": _canonical_source_digest(boq),
     }
     return {**core, "receipt_digest": _canonical_source_digest(core)}
+
+
+def _read_project_fact_audit_snapshot(
+    path: Path,
+    *,
+    expected_name: str,
+    missing_code: str,
+    invalid_code: str,
+    require_private: bool = False,
+) -> bytes:
+    """Read one fixed audit file without following a file-level symlink."""
+
+    if path.name != expected_name or path.parent.name != "audit":
+        raise ProjectFactApprovalGateError(invalid_code, "项目事实审计路径无效")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise ProjectFactApprovalGateError(missing_code, "项目事实审计文件缺失") from exc
+    except OSError as exc:
+        raise ProjectFactApprovalGateError(invalid_code, "项目事实审计文件不可读") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size < 0
+            or before.st_size > _PROJECT_FACT_AUDIT_MAX_BYTES
+            or (require_private and stat.S_IMODE(before.st_mode) & 0o077)
+        ):
+            raise ProjectFactApprovalGateError(
+                invalid_code,
+                "项目事实审计文件类型、权限或大小无效",
+            )
+        chunks: list[bytes] = []
+        remaining = _PROJECT_FACT_AUDIT_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            len(raw) > _PROJECT_FACT_AUDIT_MAX_BYTES
+            or len(raw) != after.st_size
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise ProjectFactApprovalGateError(
+                invalid_code,
+                "项目事实审计读取期间发生变化",
+            )
+        namespace = os.stat(path, follow_symlinks=False)
+        if stat.S_ISLNK(namespace.st_mode) or (
+            namespace.st_dev,
+            namespace.st_ino,
+        ) != (after.st_dev, after.st_ino):
+            raise ProjectFactApprovalGateError(
+                invalid_code,
+                "项目事实审计命名空间发生变化",
+            )
+        return raw
+    except OSError as exc:
+        raise ProjectFactApprovalGateError(invalid_code, "项目事实审计读取失败") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _unique_audit_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_audit_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _trusted_current_project_ingest_records(
+    *,
+    project_id: str,
+    audit_path: Path,
+    audit_bytes: bytes,
+) -> list[dict[str, Any]]:
+    if audit_bytes and not audit_bytes.endswith(b"\n"):
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "入库审计末行不完整",
+        )
+    try:
+        text = audit_bytes.decode("utf-8")
+        rows = [
+            json.loads(
+                line,
+                object_pairs_hook=_unique_audit_json_object,
+                parse_constant=_reject_audit_json_constant,
+            )
+            for line in text.splitlines()
+        ]
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "入库审计JSON无效",
+        ) from exc
+    if any(not isinstance(row, dict) for row in rows):
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "入库审计行不是对象",
+        )
+
+    workspace_root = audit_path.parent.parent.resolve(strict=False)
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in reversed(rows):
+        row_project_id = str(row.get("project_id") or "").strip()
+        source_sha256 = str(row.get("sha256") or "").strip().lower()
+        identity = (row_project_id, source_sha256)
+        if not source_sha256 or identity in latest:
+            continue
+        latest[identity] = row
+
+    trusted_records: list[dict[str, Any]] = []
+    for (row_project_id, _source_sha256), row in latest.items():
+        if row_project_id != project_id:
+            continue
+        if row.get("enabled") is not True or row.get("usable") is not True:
+            continue
+        trusted = resolve_trusted_ingest_record(
+            row,
+            workspace_root=workspace_root,
+        )
+        if trusted.get("ok") is not True:
+            continue
+        trusted_records.append({**trusted, "enabled": True, "usable": True})
+    return trusted_records
+
+
+def _verified_formal_project_fact_resolutions(
+    *,
+    payload: Mapping[str, Any],
+    project_id: str,
+) -> dict[str, Any]:
+    raw_requested = payload.get("approved_project_fact_resolutions")
+    if raw_requested is None:
+        return {}
+    if not isinstance(raw_requested, Mapping):
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            "批准参数不是字段映射",
+        )
+    requested = dict(raw_requested)
+    if not requested:
+        return {}
+    if not project_id:
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            "批准参数缺少项目身份",
+        )
+
+    approval_path = _PROJECT_FACT_APPROVAL_AUDIT_PATH
+    ingest_path = _PROJECT_FACT_INGEST_AUDIT_PATH
+    if approval_path.parent.resolve(strict=False) != ingest_path.parent.resolve(
+        strict=False
+    ):
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            "审批审计与入库审计不在同一固定审计目录",
+        )
+    approval_bytes = _read_project_fact_audit_snapshot(
+        approval_path,
+        expected_name="project_fact_approvals.jsonl",
+        missing_code="HOLD_PROJECT_FACT_APPROVAL_EVENT_MISSING",
+        invalid_code="HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+        require_private=True,
+    )
+    try:
+        parse_project_fact_approval_audit(approval_bytes)
+    except ProjectFactApprovalAuditError as exc:
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            "审批审计内容无效",
+        ) from exc
+    ingest_bytes = _read_project_fact_audit_snapshot(
+        ingest_path,
+        expected_name="ingest.jsonl",
+        missing_code="HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+        invalid_code="HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+    )
+    current_sources = _trusted_current_project_ingest_records(
+        project_id=project_id,
+        audit_path=ingest_path,
+        audit_bytes=ingest_bytes,
+    )
+
+    verified: dict[str, Any] = {}
+    rejections: list[tuple[str, str]] = []
+    for raw_field, raw_resolution in requested.items():
+        field = str(raw_field or "").strip()
+        resolution = (
+            dict(raw_resolution) if isinstance(raw_resolution, Mapping) else {}
+        )
+        locator = resolution.get("approval_event")
+        resolution_core = {
+            key: value for key, value in resolution.items() if key != "approval_event"
+        }
+        evidence = (
+            resolution_core.get("evidence")
+            if isinstance(resolution_core.get("evidence"), Mapping)
+            else {}
+        )
+        receipt = resolution_core.get("approval_receipt")
+        if not isinstance(receipt, Mapping):
+            receipt = resolution_core.get("confirmation_receipt")
+        normalized_receipt = (
+            {
+                key: " ".join(str(receipt.get(key) or "").split()).strip()
+                for key in _APPROVAL_RECEIPT_FIELDS
+            }
+            if isinstance(receipt, Mapping)
+            else {}
+        )
+        if normalized_receipt:
+            normalized_receipt["status"] = normalized_receipt["status"].lower()
+            normalized_receipt["value_digest"] = normalized_receipt[
+                "value_digest"
+            ].lower()
+        if not isinstance(locator, Mapping):
+            rejections.append((field, "PROJECT_FACT_APPROVAL_EVENT_NOT_FOUND"))
+            continue
+        try:
+            outcome = verify_project_fact_approval_event(
+                approval_bytes,
+                locator,
+                expected_project_id=project_id,
+                expected_field=field,
+                expected_resolution_digest=approval_canonical_digest(
+                    resolution_core
+                ),
+                expected_value_digest=approval_value_digest(
+                    field=field,
+                    value=resolution_core.get("value"),
+                    unit=resolution_core.get("unit"),
+                ),
+                expected_approval_receipt_digest=approval_canonical_digest(
+                    normalized_receipt
+                ),
+                expected_source_evidence=evidence,
+                current_source_allowlist=current_sources,
+            )
+        except (ProjectFactApprovalAuditError, TypeError, ValueError):
+            outcome = {
+                "ok": False,
+                "machine_code": "PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            }
+        if outcome.get("ok") is True:
+            verified[field] = resolution_core
+        else:
+            rejections.append(
+                (
+                    field,
+                    str(
+                        outcome.get("machine_code")
+                        or "PROJECT_FACT_APPROVAL_EVENT_INVALID"
+                    ),
+                )
+            )
+    if rejections:
+        detail_codes = {detail for _field, detail in rejections}
+        if "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT" in detail_codes:
+            code = "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT"
+        elif detail_codes & {
+            "PROJECT_FACT_APPROVAL_EVENT_NOT_FOUND",
+            "PROJECT_FACT_APPROVAL_LOCATOR_INVALID",
+        }:
+            code = "HOLD_PROJECT_FACT_APPROVAL_EVENT_MISSING"
+        else:
+            code = "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID"
+        fields = "、".join(sorted(field or "<invalid>" for field, _detail in rejections))
+        raise ProjectFactApprovalGateError(code, f"批准参数审计未通过：{fields}")
+    return verified
 
 
 def _build_boq_focus(boq: dict[str, Any]) -> dict[str, Any]:
@@ -1392,8 +1716,24 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         conflict_count=len(project_parameter_evidence.get("conflicts") or []),
     )
+    ledger_payload = dict(payload)
+    if formal_document_delivery:
+        verified_approved_resolutions = _verified_formal_project_fact_resolutions(
+            payload=payload,
+            project_id=parameter_project_id,
+        )
+        if "approved_project_fact_resolutions" in ledger_payload:
+            ledger_payload["approved_project_fact_resolutions"] = (
+                verified_approved_resolutions
+            )
+        if verified_approved_resolutions:
+            _emit_progress(
+                "project_fact_approvals_verified",
+                requested_count=len(verified_approved_resolutions),
+                verified_count=len(verified_approved_resolutions),
+            )
     project_fact_ledger = build_project_fact_ledger_from_inputs(
-        payload=payload,
+        payload=ledger_payload,
         tender=tender if isinstance(tender, dict) else {},
         boq_wbs_cpm=boq_wbs_cpm if isinstance(boq_wbs_cpm, dict) else {},
         project_parameter_evidence=project_parameter_evidence,
@@ -1737,7 +2077,9 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         if emit_admission_events:
             _emit_progress(
                 "provider_admission_completed",
+                schema_version=provider_admission_public.get("schema_version"),
                 status=provider_admission_public.get("status"),
+                required_roles=provider_admission_public.get("required_roles") or [],
                 generation_allowed=bool(
                     provider_admission_public.get("generation_allowed")
                 ),
@@ -1745,6 +2087,7 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
                 admitted_chain=provider_admission_public.get("admitted_chain") or [],
                 missing_roles=provider_admission_public.get("missing_roles") or [],
                 public_digest=provider_admission_public.get("public_digest"),
+                binding_digest=provider_admission_binding_digest,
             )
         if not bool(provider_admission_public.get("generation_allowed")):
             raise RuntimeError(
@@ -1878,6 +2221,10 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
     checkpoint_scope = f"variant-{variant_index}"
     checkpoint_enabled = bool(checkpoint_namespace) and not dry_run and not no_write_preview
     generation_binding = build_generation_binding(
+        job_id=payload.get("_job_id"),
+        attempt_id=payload.get("_job_attempt_id"),
+        owner_instance_id=payload.get("_job_owner_instance_id"),
+        job_revision=payload.get("_job_revision"),
         topic=topic,
         project_id=project_id,
         project_type=project_type,
@@ -2583,8 +2930,10 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
             try:
                 last = _attach_section_meta(await writer.write(title, ctx))
                 if isinstance(last, dict):
-                    last.setdefault("model_slot", slot_id)
-                    last.setdefault("model_role", _model_role_for_slot(slot_id))
+                    last["provider"] = str(p or "").strip().lower()
+                    last["model"] = str(m or "").strip()
+                    last["model_slot"] = str(slot_id or "").strip()
+                    last["model_role"] = _model_role_for_slot(slot_id)
             except ExecutionCancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - provider failures are normalized for fallback routing.
@@ -4001,6 +4350,15 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         project_fact_ledger=project_fact_ledger,
         sections=sections,
         standard_index=standard_index if isinstance(standard_index, dict) else {},
+        standard_workspace_dir="backend/data",
+        standard_compliance_root=(
+            Path(str(standard_index.get("official_registry_path") or "")).parent
+            if isinstance(standard_index, dict)
+            and Path(
+                str(standard_index.get("official_registry_path") or "")
+            ).is_absolute()
+            else None
+        ),
     )
     quality["delivery_quality_gate"] = delivery_quality_gate
     pipeline_stages.append(

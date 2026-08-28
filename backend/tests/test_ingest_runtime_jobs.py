@@ -266,6 +266,9 @@ def _delivery_gate(
     parameters: dict[str, Any],
     sections: list[dict[str, str]],
     cross_index: dict[str, Any],
+    standard_index: dict[str, Any],
+    standard_workspace_dir: Path,
+    standard_compliance_root: Path,
 ) -> dict[str, Any]:
     return build_delivery_quality_gate(
         strict=True,
@@ -288,50 +291,15 @@ def _delivery_gate(
             "violation_count": 0,
             "violations": [],
         },
-        standard_index={
-            "ok": True,
-            "project_id": "P-TRUST-CHAIN",
-            "standards": [
-                {
-                    "filename": "施工标准.pdf",
-                    "sha256": "8" * 64,
-                    "extract_text_sha256": "9" * 64,
-                    "standard_code": "GB 50000-2020",
-                    "standard_codes": ["GB 50000-2020"],
-                    "primary_identity_status": "identified",
-                    "official_registry_status": "verified_clause_source",
-                    "official_registry": {
-                        "status": "verified_clause_source",
-                        "standard_code": "GB 50000-2020",
-                    },
-                    "text_status": "indexed",
-                    "source_integrity_status": "verified",
-                    "clause_evidence_eligible": True,
-                    "clause_evidence_source": "ingested_standard_text",
-                    "registry_metadata_used_as_clause_evidence": False,
-                    "page_anchors": [
-                        {
-                            "page": 1,
-                            "text_sha256": "7" * 64,
-                            "evidence_eligible": True,
-                        }
-                    ],
-                }
-            ],
-            "indexed_standard_count": 1,
-            "official_registry_verified_count": 1,
-            "integrity_rejection_count": 0,
-            "invalid_identity_count": 0,
-            "missing_text_or_ocr_count": 0,
-            "locator_unavailable_count": 0,
-            "text_index_status": "complete",
-        },
+        standard_index=standard_index,
         cross_index=cross_index,
         model_review_required=True,
         formal_delivery_required=True,
         project_parameters=parameters,
         project_fact_ledger=ledger,
         sections=sections,
+        standard_workspace_dir=standard_workspace_dir,
+        standard_compliance_root=standard_compliance_root,
     )
 
 
@@ -377,7 +345,52 @@ def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
             source_hint="tender_qa",
         )
     )
+    asyncio.run(
+        ingest_router._handle_upload(
+            [
+                _Upload(
+                    (
+                        "封面 GB 50000-2020 围墙工程施工标准。"
+                        "围墙施工工艺应按现行质量指标验收并留存记录。"
+                    ).encode(),
+                    "GB_50000-2020_围墙工程施工标准.txt",
+                )
+            ],
+            project_id=project_id,
+            source_hint="standard",
+        )
+    )
     audit_path = workspace / "audit" / "ingest.jsonl"
+    compliance_root = tmp_path / "compliance"
+    compliance_root.mkdir()
+    (compliance_root / "_official_registry.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "standards": [
+                    {
+                        "standard_code": "GB 50000-2020",
+                        "standard_name": "围墙工程施工标准",
+                        "current_version": "GB 50000-2020",
+                        "effective_status": "现行有效",
+                        "latest": True,
+                        "official_source": "https://example.gov.cn/gb50000",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    trusted_standard_index = build_standard_index(
+        "围墙项目",
+        ["围墙施工工艺"],
+        project_id=project_id,
+        workspace_dir=workspace,
+        compliance_root=compliance_root,
+    )
+    assert trusted_standard_index["indexed_standard_count"] == 1
+    assert trusted_standard_index["official_registry_verified_count"] == 1
 
     hits = search_ingested_docs(
         "压实系数",
@@ -502,6 +515,9 @@ def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
         parameters=parameters,
         sections=sections,
         cross_index=cross_index,
+        standard_index=trusted_standard_index,
+        standard_workspace_dir=workspace,
+        standard_compliance_root=compliance_root,
     )
     assert gate["delivery_allowed"] is True, gate
 
@@ -517,6 +533,9 @@ def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
         parameters=parameters,
         sections=sections,
         cross_index=cross_index,
+        standard_index=trusted_standard_index,
+        standard_workspace_dir=workspace,
+        standard_compliance_root=compliance_root,
     )
     assert tampered_gate["delivery_allowed"] is False
     formal_check = next(
@@ -581,6 +600,9 @@ def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
         parameters=same_source_parameters,
         sections=_formal_sections(same_source_ledger, drawing_locator),
         cross_index=cross_index,
+        standard_index=trusted_standard_index,
+        standard_workspace_dir=workspace,
+        standard_compliance_root=compliance_root,
     )
     assert same_source_gate["delivery_allowed"] is False
     same_source_formal = next(
@@ -623,6 +645,9 @@ def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
         parameters=forged_parameters,
         sections=forged_sections,
         cross_index=cross_index,
+        standard_index=trusted_standard_index,
+        standard_workspace_dir=workspace,
+        standard_compliance_root=compliance_root,
     )
     assert forged_gate["delivery_allowed"] is False
     forged_formal = next(
@@ -690,6 +715,9 @@ def test_ingest_to_delivery_trust_chain_rejects_tamper_and_forged_identity(
         parameters=revised_parameters,
         sections=_formal_sections(revised_ledger, drawing_locator),
         cross_index=cross_index,
+        standard_index=trusted_standard_index,
+        standard_workspace_dir=workspace,
+        standard_compliance_root=compliance_root,
     )
     assert revised_gate["delivery_allowed"] is True, revised_gate
     assert revised_gate["decision_digest"] != gate["decision_digest"]

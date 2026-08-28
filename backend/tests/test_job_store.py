@@ -3,10 +3,11 @@ Unit tests for backend/zhifei_autoplan/job_store.py
 """
 import json
 import multiprocessing
-import pytest
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
+import pytest
 
 
 def _merge_result_in_spawned_process(
@@ -326,9 +327,11 @@ class TestUpdateJob:
     def test_update_job_rejects_invalid_job_id(self, tmp_path):
         from backend.zhifei_autoplan import job_store
 
-        with patch.object(job_store, "JOB_DIR", tmp_path / "jobs"):
-            with pytest.raises(ValueError, match="invalid job_id"):
-                job_store.update_job("../outside", status="running")
+        with (
+            patch.object(job_store, "JOB_DIR", tmp_path / "jobs"),
+            pytest.raises(ValueError, match="invalid job_id"),
+        ):
+            job_store.update_job("../outside", status="running")
 
 
 class TestJobStoreSecurity:
@@ -493,6 +496,7 @@ class TestRuntimeReconciliation:
                 owner_instance_id="hung-worker",
             )
             assert lease is not None
+            assert lease["attempt_revision"] == lease["revision"]
             job_store.merge_job(
                 job_id,
                 expected_attempt_id=str(lease["attempt_id"]),
@@ -511,6 +515,9 @@ class TestRuntimeReconciliation:
             assert record["status"] == "interrupted_recoverable"
             assert record["attempt_id"] is None
             assert record["last_attempt_id"] == lease["attempt_id"]
+            assert record["last_owner_instance_id"] == lease["owner_instance_id"]
+            assert record["last_job_revision"] == lease["attempt_revision"]
+            assert record["attempt_revision"] is None
 
     def test_merge_job_preserves_nested_progress(self, tmp_path):
         from backend.zhifei_autoplan import job_store
@@ -1417,10 +1424,10 @@ class TestIntegration:
 
         with patch.object(job_store, 'JOB_DIR', job_dir):
             # Create jobs for different users
-            user1_jobs = [
+            [
                 job_store.create_job({"n": i}, user_id=1) for i in range(3)
             ]
-            user2_jobs = [
+            [
                 job_store.create_job({"n": i}, user_id=2) for i in range(2)
             ]
 

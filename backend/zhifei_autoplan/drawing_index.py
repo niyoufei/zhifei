@@ -293,6 +293,8 @@ def build_drawing_index(
     outline: list[str],
     project_id: str | None = None,
     workspace_dir: str | Path | None = None,
+    *,
+    audit_lines: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """
     Build a lightweight “图纸目录/关键构件-章节映射表”.
@@ -322,7 +324,7 @@ def build_drawing_index(
             "chapter_binding_status": "missing_project_id",
             "reason": "missing_project_id",
         }
-    if audit_path.is_symlink() or not audit_path.is_file():
+    if audit_lines is None and (audit_path.is_symlink() or not audit_path.is_file()):
         reason = (
             "ingest_audit_path_untrusted"
             if audit_path.is_symlink()
@@ -363,10 +365,16 @@ def build_drawing_index(
             {"filename": str(filename or ""), "reason": reason}
         )
 
-    try:
-        lines = audit_path.read_text(encoding="utf-8", errors="ignore").splitlines()[::-1]
-    except OSError:
-        lines = []
+    if audit_lines is not None:
+        lines = list(reversed(audit_lines))
+    else:
+        try:
+            lines = audit_path.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            ).splitlines()[::-1]
+        except OSError:
+            lines = []
     seen_content_ids: set[str] = set()
     for ln in lines:
         if len(drawings) >= 40:

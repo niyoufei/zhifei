@@ -8,9 +8,11 @@ import os
 import re
 import tempfile
 from collections import Counter
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable
+from typing import Any
 
 from backend.zhifei_autoplan.docx_structural_quality import (
     DocxStructuralQualityError,
@@ -18,6 +20,7 @@ from backend.zhifei_autoplan.docx_structural_quality import (
 )
 from backend.zhifei_autoplan.docx_visual_quality import (
     DocxVisualQualityError,
+    canonical_visual_quality_decision_digest,
     validate_docx_visual_quality,
 )
 from backend.zhifei_autoplan.execution_control import (
@@ -30,15 +33,20 @@ from backend.zhifei_autoplan.model_reliability import (
     bounded_retry_delay,
     classify_provider_error,
 )
-from backend.zhifei_autoplan.provider_runtime import ProviderSlot, resolve_document_render_slot
+from backend.zhifei_autoplan.provider_runtime import (
+    ProviderSlot,
+    resolve_document_render_slot,
+)
 from backend.zhifei_autoplan.providers.anthropic_provider import AnthropicProvider
-
 
 DISPLAY_MODEL_NAME = "Claude Sonnet 5"
 _MAX_CHUNK_CHARS = 36_000
-_EVIDENCE_MARKER_RE = re.compile(r"(?:【证据[^】]*】|【来源[^】]*】|#p\d+|第\s*\d+\s*页)")
+_EVIDENCE_MARKER_RE = re.compile(
+    r"(?:【证据[^】]*】|【来源[^】]*】|#p\d+|第\s*\d+\s*页)"
+)
 _REQUIREMENT_MARKER_RE = re.compile(r"【要求:[^】]+】")
 _HEX_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _DESIGN_BRIEF_SYSTEM = """你是中国建设工程技术标的文档编辑总监。请为已完成技术标制定专业、克制、可落地的 Word 视觉与编辑简报。
 硬性规则：
@@ -84,27 +92,125 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_digest(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def canonical_render_attempt_evidence_digest(payload: Mapping[str, Any]) -> str:
+    return _canonical_digest(
+        {
+            str(key): value
+            for key, value in payload.items()
+            if str(key) != "evidence_digest"
+        }
+    )
+
+
+def canonical_professional_render_receipt_digest(payload: Mapping[str, Any]) -> str:
+    return _canonical_digest(
+        {
+            str(key): value
+            for key, value in payload.items()
+            if str(key) != "receipt_digest"
+        }
+    )
+
+
+def _canonical_structural_quality_decision_digest(payload: Mapping[str, Any]) -> str:
+    return _canonical_digest(
+        {
+            str(key): value
+            for key, value in payload.items()
+            if str(key) not in {"created_at", "decision_digest", "docx", "receipt"}
+        }
+    )
+
+
+def _quality_receipt_binding(
+    quality: Mapping[str, Any],
+    *,
+    expected_schema: str,
+    expected_docx_sha256: str,
+    label: str,
+) -> dict[str, Any]:
+    receipt_path = Path(str(quality.get("receipt") or ""))
+    if not receipt_path.is_file() or receipt_path.stat().st_size <= 0:
+        raise ProfessionalRenderError(f"{label}回执不存在或为空")
+    try:
+        persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ProfessionalRenderError(f"{label}回执无法解析") from exc
+    if not isinstance(persisted, dict):
+        raise ProfessionalRenderError(f"{label}回执必须为 JSON 对象")
+
+    claimed_digest = str(quality.get("decision_digest") or "").strip().lower()
+    persisted_digest = str(persisted.get("decision_digest") or "").strip().lower()
+    hard_failures = quality.get("hard_failures")
+    persisted_hard_failures = persisted.get("hard_failures")
+    if (
+        quality.get("schema") != expected_schema
+        or persisted.get("schema") != expected_schema
+        or str(quality.get("status") or "").lower() != "pass"
+        or str(persisted.get("status") or "").lower() != "pass"
+        or str(quality.get("docx_sha256") or "").strip().lower() != expected_docx_sha256
+        or str(persisted.get("docx_sha256") or "").strip().lower()
+        != expected_docx_sha256
+        or hard_failures != []
+        or persisted_hard_failures != []
+        or _SHA256_RE.fullmatch(claimed_digest) is None
+        or claimed_digest != persisted_digest
+    ):
+        raise ProfessionalRenderError(f"{label}回执身份或状态不完整")
+
+    digest_fn = (
+        _canonical_structural_quality_decision_digest
+        if expected_schema == "zhifei.docx_structural_quality.v1"
+        else canonical_visual_quality_decision_digest
+    )
+    if claimed_digest != digest_fn(quality) or persisted_digest != digest_fn(persisted):
+        raise ProfessionalRenderError(f"{label}回执摘要无效")
+    return {
+        "schema": expected_schema,
+        "status": "pass",
+        "docx_sha256": expected_docx_sha256,
+        "hard_failures": [],
+        "receipt": str(receipt_path),
+        "receipt_sha256": _sha256_file(receipt_path),
+        "decision_digest": claimed_digest,
+    }
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    temp_path = Path(handle.name)
+    temp_path: Path | None = None
     try:
-        with handle:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
             json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
+        assert temp_path is not None
         temp_path.chmod(0o600)
         os.replace(temp_path, path)
         path.chmod(0o600)
     finally:
-        temp_path.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def _json_object(raw: Any, *, label: str) -> dict[str, Any]:
@@ -114,14 +220,16 @@ def _json_object(raw: Any, *, label: str) -> dict[str, Any]:
         text = re.sub(r"\s*```$", "", text)
     try:
         value = json.loads(text)
-    except Exception:
+    except json.JSONDecodeError:
         start, end = text.find("{"), text.rfind("}")
         if start < 0 or end <= start:
             raise ProfessionalRenderError(f"{label}未返回可解析的 JSON 对象")
         try:
             value = json.loads(text[start : end + 1])
-        except Exception as exc:
-            raise ProfessionalRenderError(f"{label}返回的 JSON 无法解析: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise ProfessionalRenderError(
+                f"{label}返回的 JSON 无法解析: {exc}"
+            ) from exc
     if not isinstance(value, dict):
         raise ProfessionalRenderError(f"{label}必须返回 JSON 对象")
     return value
@@ -130,7 +238,9 @@ def _json_object(raw: Any, *, label: str) -> dict[str, Any]:
 def _contrast_ratio(hex_a: str, hex_b: str = "FFFFFF") -> float:
     def _luminance(value: str) -> float:
         rgb = [int(value[i : i + 2], 16) / 255.0 for i in (0, 2, 4)]
-        linear = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in rgb]
+        linear = [
+            v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in rgb
+        ]
         return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
 
     high, low = sorted((_luminance(hex_a), _luminance(hex_b)), reverse=True)
@@ -159,8 +269,16 @@ def _merge_professional_style(source_style: Any, design: Any) -> dict[str, Any]:
     original = copy.deepcopy(source_style) if isinstance(source_style, dict) else {}
     design_dict = design if isinstance(design, dict) else {}
     model_palette = _safe_palette(design_dict.get("palette"))
-    original_palette = original.get("palette") if isinstance(original.get("palette"), dict) else {}
-    model_palette.update({k: v for k, v in original_palette.items() if k in model_palette and _HEX_RE.fullmatch(str(v).lstrip("#"))})
+    original_palette = (
+        original.get("palette") if isinstance(original.get("palette"), dict) else {}
+    )
+    model_palette.update(
+        {
+            k: v
+            for k, v in original_palette.items()
+            if k in model_palette and _HEX_RE.fullmatch(str(v).lstrip("#"))
+        }
+    )
     original["palette"] = _safe_palette(model_palette)
     original.setdefault("body_align", "justify")
     original.setdefault("first_line_indent_cm", 0.74)
@@ -183,7 +301,9 @@ def _split_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
             if current.strip():
                 chunks.append(current.strip())
                 current = ""
-            chunks.extend(paragraph[i : i + limit] for i in range(0, len(paragraph), limit))
+            chunks.extend(
+                paragraph[i : i + limit] for i in range(0, len(paragraph), limit)
+            )
             continue
         if len(current) + len(paragraph) > limit and current.strip():
             chunks.append(current.strip())
@@ -210,7 +330,9 @@ def _compact_quality_summary(raw: Any) -> dict[str, Any]:
     for key in keys:
         value = quality.get(key)
         if isinstance(value, dict):
-            summary[key] = {k: value.get(k) for k in ("ok", "score", "issues") if k in value}
+            summary[key] = {
+                k: value.get(k) for k in ("ok", "score", "issues") if k in value
+            }
     return summary
 
 
@@ -294,11 +416,11 @@ async def _design_brief(
     execution_runtime: ExecutionControlRuntime | None = None,
 ) -> dict[str, Any]:
     prompt = f"""
-项目主题：{variant.get('topic') or '施工组织设计'}
-项目类型：{variant.get('project_type') or '-'}
-章节数：{len(variant.get('sections') or [])}
-已解析排版约束：{json.dumps(variant.get('style') or {}, ensure_ascii=False)}
-质量摘要：{json.dumps(_compact_quality_summary(variant.get('quality_checks')), ensure_ascii=False)}
+项目主题：{variant.get("topic") or "施工组织设计"}
+项目类型：{variant.get("project_type") or "-"}
+章节数：{len(variant.get("sections") or [])}
+已解析排版约束：{json.dumps(variant.get("style") or {}, ensure_ascii=False)}
+质量摘要：{json.dumps(_compact_quality_summary(variant.get("quality_checks")), ensure_ascii=False)}
 
 只返回 JSON：
 {{
@@ -375,7 +497,9 @@ async def _refine_chunk(
     payload = _json_object(response.get("text"), label=f"{DISPLAY_MODEL_NAME}章节精修")
     returned_title = str(payload.get("title") or "").strip()
     if returned_title != title:
-        raise ProfessionalRenderError(f"章节标题漂移：期望“{title}”，实际“{returned_title or '-'}”")
+        raise ProfessionalRenderError(
+            f"章节标题漂移：期望“{title}”，实际“{returned_title or '-'}”"
+        )
     refined = str(payload.get("content") or "").strip()
     if not refined:
         raise ProfessionalRenderError(f"章节“{title}”精修结果为空")
@@ -392,9 +516,7 @@ async def _refine_chunk(
     source_requirements = Counter(_REQUIREMENT_MARKER_RE.findall(content))
     refined_requirements = Counter(_REQUIREMENT_MARKER_RE.findall(refined))
     if refined_requirements != source_requirements:
-        raise ProfessionalRenderError(
-            f"章节“{title}”要求绑定标记发生变化，已阻止导出"
-        )
+        raise ProfessionalRenderError(f"章节“{title}”要求绑定标记发生变化，已阻止导出")
     return refined
 
 
@@ -406,11 +528,17 @@ async def _refine_sections(
     execution_runtime: ExecutionControlRuntime | None = None,
     slot: ProviderSlot | None = None,
 ) -> list[dict[str, Any]]:
-    sections = [copy.deepcopy(x) for x in (variant.get("sections") or []) if isinstance(x, dict)]
+    sections = [
+        copy.deepcopy(x) for x in (variant.get("sections") or []) if isinstance(x, dict)
+    ]
     if not sections:
         raise ProfessionalRenderError("原文没有可精修章节")
     semaphore = asyncio.Semaphore(2)
-    priorities = design_brief.get("editorial_priorities") if isinstance(design_brief.get("editorial_priorities"), list) else []
+    priorities = (
+        design_brief.get("editorial_priorities")
+        if isinstance(design_brief.get("editorial_priorities"), list)
+        else []
+    )
 
     async def _one(section: dict[str, Any]) -> dict[str, Any]:
         title = str(section.get("title") or "").strip()
@@ -440,7 +568,10 @@ async def _refine_sections(
                 )
         section["original_content"] = content
         section["content"] = "\n\n".join(refined_parts).strip()
-        section["professional_render"] = {"display_model": DISPLAY_MODEL_NAME, "status": "refined"}
+        section["professional_render"] = {
+            "display_model": DISPLAY_MODEL_NAME,
+            "status": "refined",
+        }
         return section
 
     return list(await asyncio.gather(*[_one(section) for section in sections]))
@@ -463,9 +594,9 @@ async def render_professional_document(
     slot_override: ProviderSlot | None = None,
     provider_override: Any | None = None,
     execution_runtime: ExecutionControlRuntime | None = None,
-    export_fn: Callable[[Dict[str, Any], str], str] = export_autoplan_docx,
-    structural_qa_fn: Callable[..., Dict[str, Any]] = audit_docx_structural_quality,
-    visual_qa_fn: Callable[[str | Path], Dict[str, Any]] = validate_docx_visual_quality,
+    export_fn: Callable[[dict[str, Any], str], str] = export_autoplan_docx,
+    structural_qa_fn: Callable[..., dict[str, Any]] = audit_docx_structural_quality,
+    visual_qa_fn: Callable[[str | Path], dict[str, Any]] = validate_docx_visual_quality,
 ) -> dict[str, Any]:
     """Create a separate Sonnet-refined professional DOCX and provenance receipt."""
 
@@ -484,24 +615,35 @@ async def render_professional_document(
 
     slot = slot_override or resolve_document_render_slot()
     if slot is None:
-        raise ProfessionalRenderError("未配置 Anthropic 文档渲染凭据；请复用本机 ANTHROPIC_API_KEY 后重试")
-    if slot.provider != "anthropic":
+        raise ProfessionalRenderError(
+            "未配置 Anthropic 文档渲染凭据；请复用本机 ANTHROPIC_API_KEY 后重试"
+        )
+    if (
+        slot.provider != "anthropic"
+        or slot.role != "document_render"
+        or not str(slot.slot or "").strip()
+        or not str(slot.model or "").strip()
+    ):
         raise ProfessionalRenderError("专业文档渲染仅允许 Anthropic Sonnet 独立槽位")
     owns_provider = provider_override is None
-    provider = provider_override or AnthropicProvider(api_key=slot.api_key, model=slot.model)
+    provider = provider_override or AnthropicProvider(
+        api_key=slot.api_key, model=slot.model
+    )
+    active_runtime = execution_runtime or ExecutionControlRuntime()
+    execution_before = active_runtime.snapshot()
 
     try:
         design_brief = await _design_brief(
             provider,
             source_variant,
             slot,
-            execution_runtime=execution_runtime,
+            execution_runtime=active_runtime,
         )
         refined_sections = await _refine_sections(
             provider,
             source_variant,
             design_brief,
-            execution_runtime=execution_runtime,
+            execution_runtime=active_runtime,
             slot=slot,
         )
     finally:
@@ -509,15 +651,73 @@ async def render_professional_document(
             client = getattr(provider, "client", None)
             close = getattr(client, "close", None)
             if callable(close):
-                try:
+                with suppress(Exception):
                     close()
-                except Exception:
-                    pass
+    execution_after = active_runtime.snapshot()
+    before_usage = (
+        execution_before.get("usage")
+        if isinstance(execution_before.get("usage"), dict)
+        else {}
+    )
+    after_usage = (
+        execution_after.get("usage")
+        if isinstance(execution_after.get("usage"), dict)
+        else {}
+    )
+    before_provider_attempts = (
+        before_usage.get("provider_attempts")
+        if isinstance(before_usage.get("provider_attempts"), dict)
+        else {}
+    )
+    after_provider_attempts = (
+        after_usage.get("provider_attempts")
+        if isinstance(after_usage.get("provider_attempts"), dict)
+        else {}
+    )
+    render_attempt_core = {
+        "schema_version": "document-render-attempt-evidence-v1",
+        "execution_control_schema_version": str(
+            execution_after.get("schema_version") or ""
+        ),
+        "role": "document_render",
+        "slot": slot.slot,
+        "provider": slot.provider,
+        "model": slot.model,
+        "job_id": job_id,
+        "variant": variant,
+        "model_attempts_before": int(before_usage.get("model_attempts") or 0),
+        "model_attempts_after": int(after_usage.get("model_attempts") or 0),
+        "attempt_count": int(after_usage.get("model_attempts") or 0)
+        - int(before_usage.get("model_attempts") or 0),
+        "provider_attempts_before": int(
+            before_provider_attempts.get(slot.provider) or 0
+        ),
+        "provider_attempts_after": int(after_provider_attempts.get(slot.provider) or 0),
+        "provider_attempt_count": int(after_provider_attempts.get(slot.provider) or 0)
+        - int(before_provider_attempts.get(slot.provider) or 0),
+    }
+    if (
+        render_attempt_core["execution_control_schema_version"]
+        != "execution-control-v1"
+        or render_attempt_core["attempt_count"] <= 0
+        or render_attempt_core["provider_attempt_count"] <= 0
+        or render_attempt_core["attempt_count"]
+        != render_attempt_core["provider_attempt_count"]
+    ):
+        raise ProfessionalRenderError("专业文档渲染缺少模型尝试证据")
+    render_attempt_evidence = {
+        **render_attempt_core,
+        "evidence_digest": canonical_render_attempt_evidence_digest(
+            render_attempt_core
+        ),
+    }
     professional_variant = copy.deepcopy(source_variant)
     professional_variant["sections"] = refined_sections
     professional_variant["style"] = _merge_professional_style(
         source_variant.get("style"),
-        (design_brief.get("design") or {}) if isinstance(design_brief.get("design"), dict) else {},
+        (design_brief.get("design") or {})
+        if isinstance(design_brief.get("design"), dict)
+        else {},
     )
     professional_variant["professional_render"] = {
         "provider": slot.provider,
@@ -552,10 +752,16 @@ async def render_professional_document(
     figure_manifest: dict[str, Any] | None = None
     if figure_manifest_path.is_file():
         try:
-            loaded_manifest = json.loads(figure_manifest_path.read_text(encoding="utf-8"))
-            figure_manifest = loaded_manifest if isinstance(loaded_manifest, dict) else None
+            loaded_manifest = json.loads(
+                figure_manifest_path.read_text(encoding="utf-8")
+            )
+            figure_manifest = (
+                loaded_manifest if isinstance(loaded_manifest, dict) else None
+            )
         except Exception as exc:
-            raise ProfessionalRenderError(f"最终 Word 图表交付清单无法读取：{exc}") from exc
+            raise ProfessionalRenderError(
+                f"最终 Word 图表交付清单无法读取：{exc}"
+            ) from exc
     try:
         structural_quality = structural_qa_fn(
             professional_docx,
@@ -582,8 +788,27 @@ async def render_professional_document(
     if str(visual_quality.get("status") or "").lower() != "pass":
         raise ProfessionalRenderError("最终 Word 页面验收未通过，已阻止交付")
 
-    source_chars = sum(len(str(x.get("content") or "")) for x in (source_variant.get("sections") or []) if isinstance(x, dict))
-    output_chars = sum(len(str(x.get("content") or "")) for x in professional_variant["sections"])
+    professional_docx_sha256 = _sha256_file(professional_docx)
+    structural_binding = _quality_receipt_binding(
+        structural_quality,
+        expected_schema="zhifei.docx_structural_quality.v1",
+        expected_docx_sha256=professional_docx_sha256,
+        label="最终 Word 结构质量",
+    )
+    visual_binding = _quality_receipt_binding(
+        visual_quality,
+        expected_schema="zhifei.docx_visual_quality.v1",
+        expected_docx_sha256=professional_docx_sha256,
+        label="最终 Word 视觉质量",
+    )
+    source_chars = sum(
+        len(str(x.get("content") or ""))
+        for x in (source_variant.get("sections") or [])
+        if isinstance(x, dict)
+    )
+    output_chars = sum(
+        len(str(x.get("content") or "")) for x in professional_variant["sections"]
+    )
     receipt = {
         "schema": "zhifei.professional_document_render.v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -591,51 +816,56 @@ async def render_professional_document(
         "variant": variant,
         "provider": slot.provider,
         "model_id": slot.model,
+        "slot": slot.slot,
+        "role": slot.role,
         "display_model": DISPLAY_MODEL_NAME,
+        "source_json": str(source_json),
+        "source_json_sha256": _sha256_file(source_json),
         "source_docx": str(source_docx),
         "source_docx_sha256": _sha256_file(source_docx),
         "professional_docx": str(professional_docx),
-        "professional_docx_sha256": _sha256_file(professional_docx),
+        "professional_docx_sha256": professional_docx_sha256,
         "professional_json": str(professional_json),
+        "professional_json_sha256": _sha256_file(professional_json),
+        "render_attempt_evidence": render_attempt_evidence,
         "section_count": len(professional_variant["sections"]),
         "source_char_count": source_chars,
         "professional_char_count": output_chars,
         "structural_quality": {
-            "status": structural_quality.get("status"),
-            "docx_sha256": structural_quality.get("docx_sha256"),
+            **structural_binding,
             "heading_count": structural_quality.get("heading_count"),
             "table_count": structural_quality.get("table_count"),
             "word_fields": structural_quality.get("word_fields") or {},
             "body_style": structural_quality.get("body_style") or {},
             "section_metrics": structural_quality.get("section_metrics") or [],
             "figure_delivery": structural_quality.get("figure_delivery") or {},
-            "receipt": structural_quality.get("receipt"),
-            "decision_digest": structural_quality.get("decision_digest"),
         },
         "visual_quality": {
-            "status": visual_quality.get("status"),
-            "docx_sha256": visual_quality.get("docx_sha256"),
+            **visual_binding,
             "page_count": visual_quality.get("page_count"),
             "blank_pages": visual_quality.get("blank_pages") or [],
             "sparse_pages": visual_quality.get("sparse_pages") or [],
             "orphan_heading_pages": visual_quality.get("orphan_heading_pages") or [],
-            "edge_clipping_risk_pages": visual_quality.get("edge_clipping_risk_pages") or [],
+            "edge_clipping_risk_pages": visual_quality.get("edge_clipping_risk_pages")
+            or [],
             "pdf": visual_quality.get("pdf"),
+            "pdf_sha256": visual_quality.get("pdf_sha256"),
             "preview_dir": visual_quality.get("preview_dir"),
-            "receipt": visual_quality.get("receipt"),
         },
         "quality_gate": {
             "original_preserved": source_docx.exists(),
             "titles_preserved": True,
             "evidence_not_reduced": True,
             "tender_style_fields_preserved": True,
-            "export_succeeded": professional_docx.exists() and professional_docx.stat().st_size > 0,
+            "export_succeeded": professional_docx.exists()
+            and professional_docx.stat().st_size > 0,
             "structural_quality_passed": structural_quality.get("status") == "pass",
             "visual_page_quality_passed": visual_quality.get("status") == "pass",
             "no_blank_pages": not bool(visual_quality.get("blank_pages")),
             "no_orphan_headings": not bool(visual_quality.get("orphan_heading_pages")),
         },
     }
+    receipt["receipt_digest"] = canonical_professional_render_receipt_digest(receipt)
     _atomic_write_json(receipt_path, receipt)
     return {
         "professional_docx": str(professional_docx),

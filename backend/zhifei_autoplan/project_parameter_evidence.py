@@ -87,15 +87,25 @@ def _source_records(
     project_id: str,
     tender: Mapping[str, Any] | None,
     audit_path: Path,
+    audit_lines: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     del tender  # Every claim-grade audit row must be bound to this project.
-    if not project_id or audit_path.is_symlink() or not audit_path.is_file():
+    if not project_id or (
+        audit_lines is None
+        and (audit_path.is_symlink() or not audit_path.is_file())
+    ):
         return []
     workspace_root = audit_path.parent.parent.resolve(strict=False)
-    try:
-        lines = audit_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except OSError:
-        return []
+    if audit_lines is not None:
+        lines = list(audit_lines)
+    else:
+        try:
+            lines = audit_path.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            ).splitlines()
+        except OSError:
+            return []
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for line in reversed(lines):
@@ -383,6 +393,7 @@ def build_project_parameter_evidence(
     project_id: str,
     tender: Mapping[str, Any] | None,
     audit_path: str | Path | None = None,
+    audit_lines: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic, process-bound project parameter evidence.
 
@@ -397,6 +408,7 @@ def build_project_parameter_evidence(
         project_id=pid,
         tender=tender,
         audit_path=path,
+        audit_lines=audit_lines,
     )
     required_item_ids: set[str] = set()
     found: dict[str, list[dict[str, Any]]] = {}
@@ -483,6 +495,7 @@ def build_project_parameter_evidence(
     evidence_set_validation = validate_ingest_evidence_set_receipt(
         evidence_set_receipt,
         expected_project_id=pid,
+        audit_lines=audit_lines,
     )
     missing_required_item_ids = sorted(required_item_ids - selected_ids)
     unexpected_item_ids = sorted(selected_ids - required_item_ids)
@@ -553,6 +566,7 @@ def validate_project_parameter_fact_against_current_evidence(
     fact: Mapping[str, Any] | None,
     *,
     expected_project_id: str,
+    audit_lines: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Rebuild a process-bound fact from the receipt's current trusted bytes."""
 
@@ -571,6 +585,7 @@ def validate_project_parameter_fact_against_current_evidence(
     receipt_validation = validate_ingest_evidence_set_receipt(
         receipt,
         expected_project_id=expected_project_id,
+        audit_lines=audit_lines,
     )
     if receipt_validation.get("ok") is not True:
         errors.append("evidence_set_receipt_invalid")
@@ -584,6 +599,7 @@ def validate_project_parameter_fact_against_current_evidence(
         project_id=expected_project_id,
         tender={},
         audit_path=str(receipt.get("audit_path") or ""),
+        audit_lines=audit_lines,
     )
     rebuilt_fact = (
         rebuilt.get("quality_threshold")
@@ -631,7 +647,11 @@ def validate_project_parameter_fact_against_current_evidence(
     }
 
 
-def validate_project_parameter_evidence(value: Any) -> dict[str, Any]:
+def validate_project_parameter_evidence(
+    value: Any,
+    *,
+    audit_lines: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     """Validate the report contract before it may enter the fact ledger."""
 
     errors: list[str] = []
@@ -700,6 +720,7 @@ def validate_project_parameter_evidence(value: Any) -> dict[str, Any]:
     receipt_validation = validate_ingest_evidence_set_receipt(
         receipt,
         expected_project_id=str(report.get("project_id") or "").strip(),
+        audit_lines=audit_lines,
     )
     receipt_digest = str(receipt.get("receipt_digest") or "").strip().lower()
     fact_receipt = (
@@ -748,6 +769,7 @@ def validate_project_parameter_evidence(value: Any) -> dict[str, Any]:
         validate_project_parameter_fact_against_current_evidence(
             fact if isinstance(fact, Mapping) else {},
             expected_project_id=str(report.get("project_id") or "").strip(),
+            audit_lines=audit_lines,
         )
     )
     if current_evidence_validation.get("ok") is not True:

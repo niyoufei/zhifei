@@ -4,12 +4,15 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any
 
-from backend.zhifei_autoplan.compliance_policy import is_verified_standard_metadata
-
+from backend.zhifei_autoplan.compliance_policy import (
+    build_standard_registry_map,
+    is_verified_standard_metadata,
+)
 
 _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]+")
 _CODE_WITH_YEAR_RE = re.compile(r"^(?P<prefix>[A-Z]+)_(?P<num>[A-Z0-9]+)_(?P<year>\d{2,4})$")
@@ -26,8 +29,8 @@ def _norm_domain(v: Any) -> str:
     return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(v or "").strip().lower())
 
 
-def _tokenize(text: str) -> List[str]:
-    out: List[str] = []
+def _tokenize(text: str) -> list[str]:
+    out: list[str] = []
     seen = set()
     for t in _TOKEN_RE.findall(text or ""):
         tt = t.strip()
@@ -38,7 +41,7 @@ def _tokenize(text: str) -> List[str]:
     return out
 
 
-def _coerce_domains(v: Any) -> List[str]:
+def _coerce_domains(v: Any) -> list[str]:
     if v is None:
         return []
     if isinstance(v, str):
@@ -47,7 +50,7 @@ def _coerce_domains(v: Any) -> List[str]:
         vals = [str(x).strip() for x in v if str(x).strip()]
     else:
         vals = [str(v).strip()] if str(v).strip() else []
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
     for x in vals:
         nx = _norm_domain(x)
@@ -70,7 +73,7 @@ def _domains_overlap(left: Iterable[Any], right: Iterable[Any]) -> bool:
     return bool(a.intersection(b))
 
 
-def _parse_standard_key_year(standard_code: str) -> Tuple[str, int]:
+def _parse_standard_key_year(standard_code: str) -> tuple[str, int]:
     code = _norm_text(standard_code).upper()
     canonical = re.sub(r"[^A-Z0-9]+", "_", code).strip("_")
     m1 = _CODE_WITH_YEAR_RE.match(canonical)
@@ -117,7 +120,7 @@ def _canonical_standard_code(value: Any) -> str:
     return re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
 
 
-def _source_files(root: Path) -> List[Path]:
+def _source_files(root: Path) -> list[Path]:
     files = [
         p
         for p in root.glob("*_compliance.json")
@@ -137,8 +140,8 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _source_fingerprint(root: Path) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def _source_fingerprint(root: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for path in _source_files(root):
         try:
             stat = path.stat()
@@ -154,7 +157,7 @@ def _source_fingerprint(root: Path) -> List[Dict[str, Any]]:
     return out
 
 
-def _load_json_file(path: str, content_sha256: str) -> Dict[str, Any]:
+def _load_json_file(path: str, content_sha256: str) -> dict[str, Any]:
     """Load JSON bytes without trusting a separately patched existence check.
 
     ``content_sha256`` is intentionally retained in the call contract so
@@ -169,7 +172,7 @@ def _load_json_file(path: str, content_sha256: str) -> Dict[str, Any]:
         return {}
 
 
-def _extract_entry_from_payload(path: Path, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_entry_from_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
     standard_code = _norm_text(meta.get("standard_code")) or _norm_text(path.stem.replace("_compliance", "")).upper()
@@ -225,19 +228,15 @@ def _extract_entry_from_payload(path: Path, payload: Dict[str, Any]) -> Dict[str
     }
 
 
-def _load_official_registry(root: Path) -> List[Dict[str, Any]]:
-    path = _registry_path(root)
-    if not path.is_file():
-        return []
-    try:
-        content_sha256 = _file_sha256(path)
-    except OSError:
-        content_sha256 = ""
-    payload = _load_json_file(str(path), content_sha256)
+def _official_registry_rows(
+    payload: Any,
+    *,
+    path: Path,
+) -> list[dict[str, Any]]:
     rows = payload.get("standards") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         return []
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for raw in rows:
         if not isinstance(raw, dict):
             continue
@@ -255,6 +254,13 @@ def _load_official_registry(root: Path) -> List[Dict[str, Any]]:
             "prefix_tag": _norm_text(raw.get("prefix_tag")) or code_key.split("_")[0],
             "source_name": _norm_text(raw.get("source_name") or raw.get("standard_name")),
             "official_source": _norm_text(raw.get("official_source")),
+            "official_document_url": _norm_text(raw.get("official_document_url")),
+            "official_content_sha256": _norm_text(
+                raw.get("official_content_sha256")
+            ).lower(),
+            "official_identity_without_cover": (
+                raw.get("official_identity_without_cover") is True
+            ),
             "effective_status": _norm_text(raw.get("effective_status")),
             "current_version": _norm_text(raw.get("current_version")) or code,
             "priority": _norm_text(raw.get("priority")),
@@ -280,14 +286,38 @@ def _load_official_registry(root: Path) -> List[Dict[str, Any]]:
     return out
 
 
-def _string_list(value: Any) -> List[str]:
+def _parse_official_registry_bytes(
+    raw: bytes,
+    *,
+    path: str | Path,
+) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(bytes(raw).decode("utf-8"))
+    except (UnicodeError, ValueError):
+        return []
+    return _official_registry_rows(payload, path=Path(path))
+
+
+def _load_official_registry(root: Path) -> list[dict[str, Any]]:
+    path = _registry_path(root)
+    if not path.is_file():
+        return []
+    try:
+        content_sha256 = _file_sha256(path)
+    except OSError:
+        content_sha256 = ""
+    payload = _load_json_file(str(path), content_sha256)
+    return _official_registry_rows(payload, path=path)
+
+
+def _string_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         raw_values = value
     elif value is None:
         raw_values = []
     else:
         raw_values = [value]
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for raw in raw_values:
         text = _norm_text(raw)
@@ -298,7 +328,7 @@ def _string_list(value: Any) -> List[str]:
     return out
 
 
-def build_compliance_catalog(root: str | Path | None = None) -> Dict[str, Any]:
+def build_compliance_catalog(root: str | Path | None = None) -> dict[str, Any]:
     """
     Build compact catalog for fast pre-filter retrieval.
     """
@@ -314,30 +344,39 @@ def build_compliance_catalog(root: str | Path | None = None) -> Dict[str, Any]:
         }
     files = [p for p in _source_files(rt) if p.name != _REGISTRY_FILENAME]
     registry_entries = _load_official_registry(rt)
-    registry_by_code = {
-        _canonical_standard_code(row.get("standard_code")): row
-        for row in registry_entries
-        if _canonical_standard_code(row.get("standard_code"))
-    }
-    entries: List[Dict[str, Any]] = []
+    registry_by_code = build_standard_registry_map(registry_entries)
+    trusted_registry_entries = [
+        {key: value for key, value in row.items() if not key.startswith("_")}
+        for row in registry_by_code.values()
+        if row.get("_registry_ambiguous") is not True
+        and is_verified_standard_metadata(row)
+    ]
+    entries: list[dict[str, Any]] = []
     clause_source_codes: set[str] = set()
     for p in files:
         try:
             content_sha256 = _file_sha256(p)
-        except Exception:
+        except OSError:
             content_sha256 = ""
         payload = _load_json_file(str(p), content_sha256)
         if not isinstance(payload, dict):
             continue
         entry = _extract_entry_from_payload(p, payload)
         registry_meta = registry_by_code.get(_canonical_standard_code(entry.get("standard_code")))
-        if registry_meta:
+        if (
+            isinstance(registry_meta, dict)
+            and registry_meta.get("_registry_ambiguous") is not True
+            and is_verified_standard_metadata(registry_meta)
+        ):
             # An official registry record may verify the version/source of a
             # locally ingested text without pretending that registry metadata
             # contains clause bytes.
             for key in (
                 "source_name",
                 "official_source",
+                "official_document_url",
+                "official_content_sha256",
+                "official_identity_without_cover",
                 "effective_status",
                 "current_version",
                 "priority",
@@ -354,11 +393,11 @@ def build_compliance_catalog(root: str | Path | None = None) -> Dict[str, Any]:
 
     entries.extend(
         row
-        for row in registry_entries
+        for row in trusted_registry_entries
         if _canonical_standard_code(row.get("standard_code")) not in clause_source_codes
     )
 
-    latest_by_key: Dict[str, Tuple[int, str]] = {}
+    latest_by_key: dict[str, tuple[int, str]] = {}
     for e in entries:
         key = str(e.get("code_key") or "")
         year = int(e.get("code_year") or 0)
@@ -416,23 +455,23 @@ def build_compliance_catalog(root: str | Path | None = None) -> Dict[str, Any]:
 
 
 @lru_cache(maxsize=8)
-def _load_catalog(root_str: str, catalog_mtime_ns: int) -> Dict[str, Any]:
+def _load_catalog(root_str: str, catalog_mtime_ns: int) -> dict[str, Any]:
     p = _catalog_path(Path(root_str))
     if not p.exists():
         return {}
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
 
 
-def _load_or_build_catalog(root: Path) -> Dict[str, Any]:
+def _load_or_build_catalog(root: Path) -> dict[str, Any]:
     p = _catalog_path(root)
     if not p.exists():
         return build_compliance_catalog(root)
     try:
         mtime_ns = int(p.stat().st_mtime_ns)
-    except Exception:
+    except OSError:
         mtime_ns = 0
     cat = _load_catalog(str(root), mtime_ns)
     if not isinstance(cat, dict) or not isinstance(cat.get("entries"), list):
@@ -444,31 +483,32 @@ def _load_or_build_catalog(root: Path) -> Dict[str, Any]:
 
 def list_verified_standard_metadata(
     *,
-    domain_tags: List[str] | None = None,
+    domain_tags: list[str] | None = None,
     root: str | Path | None = None,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return de-duplicated, externally traceable standard metadata only."""
     rt = _compliance_root(root)
     if not rt.is_dir():
         return []
     catalog = _load_or_build_catalog(rt)
     allowed_domains = [str(x).strip() for x in (domain_tags or []) if str(x).strip()]
-    chosen: Dict[str, Dict[str, Any]] = {}
+    candidates: list[dict[str, Any]] = []
     for raw in catalog.get("entries") or []:
         if not isinstance(raw, dict) or not is_verified_standard_metadata(raw):
             continue
         if allowed_domains and not _domains_overlap(raw.get("domain_tags") or [], allowed_domains):
             continue
-        canonical = _canonical_standard_code(raw.get("standard_code"))
-        if not canonical:
-            continue
-        current = chosen.get(canonical)
-        if current is None or (current.get("metadata_only") and not raw.get("metadata_only")):
-            chosen[canonical] = dict(raw)
+        candidates.append(dict(raw))
+    chosen = {
+        code: row
+        for code, row in build_standard_registry_map(candidates).items()
+        if row.get("_registry_ambiguous") is not True
+        and is_verified_standard_metadata(row)
+    }
     return sorted(chosen.values(), key=lambda row: str(row.get("standard_code") or ""))
 
 
-def get_compliance_registry_status(root: str | Path | None = None) -> Dict[str, Any]:
+def get_compliance_registry_status(root: str | Path | None = None) -> dict[str, Any]:
     rt = _compliance_root(root)
     if not rt.is_dir():
         return {
@@ -482,7 +522,7 @@ def get_compliance_registry_status(root: str | Path | None = None) -> Dict[str, 
         }
     catalog = _load_or_build_catalog(rt)
     verified_count = len(list_verified_standard_metadata(root=rt))
-    warnings: List[str] = []
+    warnings: list[str] = []
     if verified_count <= 0:
         warnings.append("no_verified_standard_metadata")
     return {
@@ -496,7 +536,7 @@ def get_compliance_registry_status(root: str | Path | None = None) -> Dict[str, 
     }
 
 
-def _entry_prefilter_score(entry: Dict[str, Any], tokens: List[str], *, allowed_domains: List[str]) -> float:
+def _entry_prefilter_score(entry: dict[str, Any], tokens: list[str], *, allowed_domains: list[str]) -> float:
     text = str(entry.get("search_text") or "")
     score = 0.0
     for t in tokens:
@@ -509,7 +549,7 @@ def _entry_prefilter_score(entry: Dict[str, Any], tokens: List[str], *, allowed_
     return score
 
 
-def _node_score(text: str, tokens: List[str]) -> float:
+def _node_score(text: str, tokens: list[str]) -> float:
     score = 0.0
     for t in tokens:
         if t and t in text:
@@ -522,12 +562,12 @@ def _node_score(text: str, tokens: List[str]) -> float:
 def query_compliance(
     query: str,
     *,
-    domain_tags: List[str] | None = None,
+    domain_tags: list[str] | None = None,
     top_k: int = 8,
     prefer_latest: bool = True,
     verified_only: bool = False,
     root: str | Path | None = None,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Fast, domain-filtered compliance retrieval with latest-version preference.
     """
@@ -543,7 +583,7 @@ def query_compliance(
     if not entries:
         return []
 
-    prefiltered: List[Tuple[float, Dict[str, Any]]] = []
+    prefiltered: list[tuple[float, dict[str, Any]]] = []
     for e in entries:
         if not isinstance(e, dict):
             continue
@@ -560,14 +600,14 @@ def query_compliance(
     # limit deep file reads
     candidates = [x[1] for x in prefiltered[:20]]
 
-    scored: List[Tuple[float, Dict[str, Any]]] = []
+    scored: list[tuple[float, dict[str, Any]]] = []
     for e in candidates:
         p = Path(str(e.get("path") or ""))
         if not p.is_file():
             continue
         try:
             mtime_ns = int(p.stat().st_mtime_ns)
-        except Exception:
+        except OSError:
             mtime_ns = 0
         payload = _load_json_file(str(p), mtime_ns)
         if not isinstance(payload, dict):
@@ -619,7 +659,7 @@ def query_compliance(
             name = _norm_text(pm.get("parameter_name"))
             value = _norm_text(pm.get("value"))
             unit = _norm_text(pm.get("unit"))
-            txt = " ".join([name, value, unit, ctx])
+            txt = f"{name} {value} {unit} {ctx}"
             sc = _node_score(txt, tokens)
             if sc <= 0:
                 continue
@@ -650,7 +690,7 @@ def query_compliance(
             )
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     seen = set()
     for sc, item in scored:
         loc = str(item.get("locator") or "")

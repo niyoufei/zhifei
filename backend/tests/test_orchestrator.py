@@ -10,8 +10,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.zhifei_autoplan.evidence import resolve_trusted_ingest_record
 from backend.zhifei_autoplan.execution_control import ExecutionBudgetExceededError
 from backend.zhifei_autoplan.orchestrator import (
+    ProjectFactApprovalGateError,
     _build_source_input_receipt,
     _build_weights_and_penalties,
     _chapter_deadline_seconds,
@@ -20,6 +22,9 @@ from backend.zhifei_autoplan.orchestrator import (
 )
 from backend.zhifei_autoplan.orchestrator import (
     run_autoplan as _production_run_autoplan,
+)
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    record_project_fact_approval,
 )
 
 
@@ -201,6 +206,102 @@ def _approved_formal_fact(
             "approved_at": "2026-08-27T10:00:00+08:00",
         },
     }
+
+
+def _persist_formal_approval_audits(
+    *,
+    tmp_path: Path,
+    monkeypatch,
+    project_id: str,
+    approved: dict[str, dict],
+) -> tuple[dict[str, dict], Path]:
+    from backend.zhifei_autoplan import orchestrator
+
+    workspace = tmp_path / "backend" / "data"
+    audit_dir = workspace / "audit"
+    uploads_dir = workspace / "uploads"
+    extracts_dir = workspace / "extracts"
+    for directory in (audit_dir, uploads_dir, extracts_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    records: list[dict] = []
+    prepared: list[tuple[str, dict, dict]] = []
+    for field, raw_resolution in approved.items():
+        filename = f"批准参数-{field}.pdf"
+        source_bytes = f"source:{project_id}:{field}".encode()
+        extract_bytes = f"extract:{project_id}:{field}".encode()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        extract_sha256 = hashlib.sha256(extract_bytes).hexdigest()
+        source_path = uploads_dir / f"{source_sha256}_{filename}"
+        extract_path = extracts_dir / f"{source_sha256}_{extract_sha256}.txt"
+        source_path.write_bytes(source_bytes)
+        extract_path.write_bytes(extract_bytes)
+        record = {
+            "filename": filename,
+            "sha256": source_sha256,
+            "file_id": source_sha256,
+            "workspace_dir": str(workspace),
+            "saved_as": str(source_path),
+            "extract_saved_as": str(extract_path),
+            "extract_text_sha256": extract_sha256,
+            "project_id": project_id,
+            "source_hint": "approved_project_fact",
+            "enabled": True,
+            "usable": True,
+        }
+        resolution = dict(raw_resolution)
+        resolution["evidence"] = {
+            "file_name": filename,
+            "document_sha256": source_sha256,
+            "locator": f"{filename}#p1_{source_sha256}@10",
+        }
+        records.append(record)
+        prepared.append((field, resolution, record))
+
+    ingest_audit = audit_dir / "ingest.jsonl"
+    ingest_audit.write_text(
+        "".join(
+            json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+            for record in records
+        ),
+        encoding="utf-8",
+    )
+    approval_audit = audit_dir / "project_fact_approvals.jsonl"
+    persisted: dict[str, dict] = {}
+    for field, resolution, record in prepared:
+        trusted = resolve_trusted_ingest_record(
+            record,
+            workspace_root=workspace,
+        )
+        assert trusted["ok"] is True
+        appended = record_project_fact_approval(
+            audit_path=approval_audit,
+            project_id=project_id,
+            field=field,
+            resolution=resolution,
+            trusted_source={**trusted, "enabled": True, "usable": True},
+            actor={
+                "channel": "authenticated_user",
+                "actor_id": "user:test-orchestrator",
+            },
+            recorded_at="2026-08-28T08:00:00Z",
+        )
+        persisted[field] = {
+            **resolution,
+            "approval_event": appended["locator"],
+        }
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_PROJECT_FACT_INGEST_AUDIT_PATH",
+        ingest_audit,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_PROJECT_FACT_APPROVAL_AUDIT_PATH",
+        approval_audit,
+    )
+    return persisted, ingest_audit
 
 
 def _formal_quality_bundle() -> dict:
@@ -545,6 +646,8 @@ class TestRunAutoplan:
     async def test_explicit_strict_document_delivery_accepts_approved_parameters(
         self,
         mock_dependencies,
+        tmp_path,
+        monkeypatch,
     ):
         project_id = "P-ORCHESTRATOR-FORMAL"
         quality_bundle = _formal_quality_bundle()
@@ -583,6 +686,12 @@ class TestRunAutoplan:
                 value="4h",
             ),
         }
+        approved, _ingest_audit = _persist_formal_approval_audits(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            project_id=project_id,
+            approved=approved,
+        )
         result = await run_autoplan(
             {
                 "project_id": project_id,
@@ -613,6 +722,143 @@ class TestRunAutoplan:
         assert checks["formal_parameter_body_binding"]["pass"] is False
         assert checks["independent_model_review"]["required"] is True
         assert checks["independent_model_review"]["pass"] is False
+
+    @pytest.mark.asyncio
+    async def test_formal_approved_fact_without_persisted_event_blocks_before_model(
+        self,
+        mock_dependencies,
+        tmp_path,
+        monkeypatch,
+    ):
+        from backend.zhifei_autoplan import orchestrator
+
+        audit_dir = tmp_path / "backend" / "data" / "audit"
+        audit_dir.mkdir(parents=True)
+        monkeypatch.setattr(
+            orchestrator,
+            "_PROJECT_FACT_INGEST_AUDIT_PATH",
+            audit_dir / "ingest.jsonl",
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_PROJECT_FACT_APPROVAL_AUDIT_PATH",
+            audit_dir / "project_fact_approvals.jsonl",
+        )
+
+        with pytest.raises(ProjectFactApprovalGateError) as exc_info:
+            await run_autoplan(
+                {
+                    "project_id": "P-APPROVAL-MISSING",
+                    "delivery_scope": "document",
+                    "quality_strict": False,
+                    "outline": ["工程概况"],
+                    "generate_images": False,
+                    "approved_project_fact_resolutions": {
+                        "resource_peak": _approved_formal_fact(
+                            project_id="P-APPROVAL-MISSING",
+                            field="resource_peak",
+                            value=80,
+                            unit="人",
+                        )
+                    },
+                }
+            )
+
+        assert exc_info.value.code == "HOLD_PROJECT_FACT_APPROVAL_EVENT_MISSING"
+        mock_dependencies["llm_cls"].assert_not_called()
+        mock_dependencies["writer"].write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_formal_approved_fact_with_tampered_locator_blocks_before_model(
+        self,
+        mock_dependencies,
+        tmp_path,
+        monkeypatch,
+    ):
+        project_id = "P-APPROVAL-TAMPERED"
+        approved, _ingest_audit = _persist_formal_approval_audits(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            project_id=project_id,
+            approved={
+                "resource_peak": _approved_formal_fact(
+                    project_id=project_id,
+                    field="resource_peak",
+                    value=80,
+                    unit="人",
+                )
+            },
+        )
+        approved["resource_peak"]["approval_event"] = {
+            **approved["resource_peak"]["approval_event"],
+            "event_digest": "f" * 64,
+        }
+
+        with pytest.raises(ProjectFactApprovalGateError) as exc_info:
+            await run_autoplan(
+                {
+                    "project_id": project_id,
+                    "delivery_scope": "document",
+                    "quality_strict": False,
+                    "outline": ["工程概况"],
+                    "generate_images": False,
+                    "approved_project_fact_resolutions": approved,
+                }
+            )
+
+        assert exc_info.value.code == "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID"
+        mock_dependencies["llm_cls"].assert_not_called()
+        mock_dependencies["writer"].write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_formal_approved_fact_with_disabled_latest_source_blocks_before_model(
+        self,
+        mock_dependencies,
+        tmp_path,
+        monkeypatch,
+    ):
+        project_id = "P-APPROVAL-DISABLED"
+        approved, ingest_audit = _persist_formal_approval_audits(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            project_id=project_id,
+            approved={
+                "resource_peak": _approved_formal_fact(
+                    project_id=project_id,
+                    field="resource_peak",
+                    value=80,
+                    unit="人",
+                )
+            },
+        )
+        latest = json.loads(ingest_audit.read_text(encoding="utf-8").splitlines()[0])
+        latest["enabled"] = False
+        latest["usable"] = False
+        ingest_audit.write_text(
+            ingest_audit.read_text(encoding="utf-8")
+            + json.dumps(latest, ensure_ascii=False, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ProjectFactApprovalGateError) as exc_info:
+            await run_autoplan(
+                {
+                    "project_id": project_id,
+                    "delivery_scope": "document",
+                    "quality_strict": False,
+                    "outline": ["工程概况"],
+                    "generate_images": False,
+                    "approved_project_fact_resolutions": approved,
+                }
+            )
+
+        assert (
+            exc_info.value.code
+            == "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT"
+        )
+        mock_dependencies["llm_cls"].assert_not_called()
+        mock_dependencies["writer"].write.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_topic_from_payload(self, mock_dependencies):

@@ -365,9 +365,15 @@ def _quality_item_evidence_ready(
 
 
 def _validated_parameter_evidence_quality(
-    report: Mapping[str, Any], *, expected_project_id: str
+    report: Mapping[str, Any],
+    *,
+    expected_project_id: str,
+    audit_lines: tuple[str, ...] | None = None,
 ) -> Mapping[str, Any] | None:
-    validation = validate_project_parameter_evidence(report)
+    validation = validate_project_parameter_evidence(
+        report,
+        audit_lines=audit_lines,
+    )
     if validation.get("ok") is not True:
         return None
     quality = report.get("quality_threshold")
@@ -851,6 +857,7 @@ def build_project_fact_ledger_from_inputs(
     tender: Mapping[str, Any] | None,
     boq_wbs_cpm: Mapping[str, Any] | None,
     project_parameter_evidence: Mapping[str, Any] | None = None,
+    trusted_ingest_audit_lines: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     payload_data = dict(payload or {})
     tender_data = dict(tender or {})
@@ -862,6 +869,7 @@ def build_project_fact_ledger_from_inputs(
     quality_threshold = _validated_parameter_evidence_quality(
         parameter_evidence_data,
         expected_project_id=project_id,
+        audit_lines=trusted_ingest_audit_lines,
     )
     if isinstance(quality_threshold, Mapping):
         sources.append(

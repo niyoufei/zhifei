@@ -66,6 +66,52 @@ def _write_audit(path: Path, rows: list[dict]) -> None:
     )
 
 
+def test_parameter_evidence_consumes_supplied_audit_snapshot_without_reread(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    extract = tmp_path / "extracts" / "wall.txt"
+    extract.parent.mkdir()
+    extract.write_text(
+        "基础开挖至标高后，对下部土层进行压实处理，压实系数不小于0.97。",
+        encoding="utf-8",
+    )
+    record = _record(
+        filename="3 围墙.pdf",
+        sha256=_sha("snapshot-wall"),
+        extract_path=extract,
+        project_id="P-SNAPSHOT",
+        pages=1,
+        source_hint="drawing_standard",
+    )
+    audit = tmp_path / "audit" / "ingest.jsonl"
+    _write_audit(audit, [])
+    original_read_text = Path.read_text
+
+    def _forbid_audit_reread(path: Path, *args, **kwargs) -> str:
+        if path == audit:
+            raise AssertionError("audit snapshot must not be reread")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _forbid_audit_reread)
+    result = build_project_parameter_evidence(
+        project_id="P-SNAPSHOT",
+        tender={},
+        audit_path=audit,
+        audit_lines=(json.dumps(record, ensure_ascii=False),),
+    )
+    empty = build_project_parameter_evidence(
+        project_id="P-SNAPSHOT",
+        tender={},
+        audit_path=audit,
+        audit_lines=(),
+    )
+
+    assert result["source_count"] == 1
+    assert result["matched_item_count"] == 1
+    assert empty["source_count"] == 0
+
+
 def test_builds_six_process_bound_quality_items_with_reversible_locators(
     tmp_path: Path,
 ) -> None:

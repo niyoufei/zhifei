@@ -6,6 +6,7 @@ import inspect
 import json
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from backend.zhifei_autoplan.boq_store import load_boq_data
@@ -1067,6 +1068,7 @@ def _rebuild_formal_direct_export_receipts(
     payload: dict[str, Any],
     *,
     raw_request: dict[str, Any],
+    workspace_dir: str,
 ) -> None:
     """Rebuild every formal gate input from final sections and current indexes."""
 
@@ -1230,6 +1232,17 @@ def _rebuild_formal_direct_export_receipts(
         ),
         sections=sections,
         standard_index=indexes["standard_index"],
+        standard_workspace_dir=workspace_dir,
+        standard_compliance_root=(
+            Path(
+                str(indexes["standard_index"].get("official_registry_path") or "")
+            ).parent
+            if isinstance(indexes.get("standard_index"), dict)
+            and Path(
+                str(indexes["standard_index"].get("official_registry_path") or "")
+            ).is_absolute()
+            else None
+        ),
     )
     payload["delivery_quality_gate"] = gate
     quality["delivery_quality_gate"] = gate
@@ -1282,6 +1295,7 @@ def assemble_export_docx_payload(
     _rebuild_formal_direct_export_receipts(
         payload,
         raw_request=raw_request,
+        workspace_dir=workspace_dir,
     )
     media = build_export_docx_media_attachment(
         raw_request=raw_request,

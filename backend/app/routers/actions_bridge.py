@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -59,6 +60,7 @@ from backend.zhifei_autoplan.delivery_receipt import (
     build_delivery_receipt,
     canonical_delivery_receipt_digest,
 )
+from backend.zhifei_autoplan.evidence import resolve_trusted_ingest_record
 from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
 from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
 from backend.zhifei_autoplan.four_new_tech import recommend_four_new
@@ -111,6 +113,11 @@ from backend.zhifei_autoplan.professional_document_renderer import (
     ProfessionalRenderError,
     render_professional_document,
 )
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    ProjectFactApprovalAuditError,
+    append_project_fact_approval_event,
+    build_project_fact_approval_event,
+)
 from backend.zhifei_autoplan.provider_runtime import (
     ProviderRoutingConfigurationError,
     ProviderSlot,
@@ -161,6 +168,35 @@ from backend.zhifei_autoplan.zbid_snapshot_mapper import (
 
 router = APIRouter(prefix="/actions", tags=["Actions Bridge"])
 logger = logging.getLogger(__name__)
+
+
+def _generation_release_identity_from_environment() -> dict[str, Any]:
+    """Freeze the sealed release identity carried by generated evidence."""
+
+    return {
+        "schema_version": "autoplan-generation-release-v1",
+        "system_id": str(os.environ.get("ZF_SYSTEM_ID") or "docgen-system").strip(),
+        "release_id": str(os.environ.get("ZF_RELEASE_ID") or "").strip(),
+        "manifest_digest": str(
+            os.environ.get("ZF_RELEASE_MANIFEST_DIGEST") or ""
+        ).strip(),
+        "source_digest": str(
+            os.environ.get("ZF_RELEASE_SOURCE_DIGEST") or ""
+        ).strip(),
+        "runtime_digest": str(os.environ.get("ZF_RUNTIME_DIGEST") or "").strip(),
+        "release_root": str(os.environ.get("ZF_RELEASE_ROOT") or "").strip(),
+        "runtime_mode": str(os.environ.get("ZF_RUNTIME_MODE") or "development").strip(),
+        "release_managed": str(os.environ.get("ZF_RELEASE_MANAGED") or "") == "1",
+    }
+
+
+_GENERATION_RELEASE_IDENTITY_AT_START = _generation_release_identity_from_environment()
+
+
+def _bind_generation_release_identity(results: list[dict[str, Any]]) -> None:
+    identity = dict(_GENERATION_RELEASE_IDENTITY_AT_START)
+    for result in results:
+        result["generation_release_identity"] = dict(identity)
 
 
 def _provider_admission_api_projection(value: Any) -> dict[str, Any]:
@@ -1434,6 +1470,11 @@ _PROJECT_FACT_PLAN_FIELDS = (
     "approved_project_fact_resolutions",
 )
 
+_PROJECT_FACT_INGEST_AUDIT_PATH = Path("backend/data/audit/ingest.jsonl")
+_PROJECT_FACT_APPROVAL_AUDIT_PATH = Path(
+    "backend/data/audit/project_fact_approvals.jsonl"
+)
+
 
 def _inherit_project_fact_plan_fields(payload: dict, plan: dict) -> dict:
     """Inherit only omitted fact maps; an explicit empty map remains a clear."""
@@ -1442,6 +1483,120 @@ def _inherit_project_fact_plan_fields(payload: dict, plan: dict) -> dict:
         if payload.get(field) is None and isinstance(plan.get(field), dict):
             payload[field] = dict(plan[field])
     return payload
+
+
+def _latest_trusted_project_fact_approval_source(
+    *,
+    project_id: str,
+    source_sha256: str,
+) -> dict[str, Any]:
+    digest = str(source_sha256 or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_INVALID",
+            "批准参数来源摘要无效",
+        )
+    audit_path = _PROJECT_FACT_INGEST_AUDIT_PATH
+    if audit_path.is_symlink() or not audit_path.is_file():
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "当前入库审计不存在或不可信",
+        )
+    try:
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "当前入库审计无法读取",
+        ) from exc
+    latest: dict[str, Any] | None = None
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        if (
+            str(row.get("project_id") or "").strip() == project_id
+            and str(row.get("sha256") or "").strip().lower() == digest
+        ):
+            latest = row
+            break
+    if (
+        latest is None
+        or latest.get("enabled") is not True
+        or latest.get("usable") is not True
+    ):
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "批准参数来源不是当前启用且可用记录",
+        )
+    trusted = resolve_trusted_ingest_record(
+        latest,
+        workspace_root=audit_path.parent.parent,
+    )
+    if trusted.get("ok") is not True:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "批准参数来源当前字节验证失败",
+        )
+    return {**trusted, "enabled": True, "usable": True}
+
+
+def _persist_explicit_project_fact_approvals(
+    resolutions: dict[str, Any],
+    *,
+    project_id: str | None,
+    actor: dict[str, str],
+) -> dict[str, Any]:
+    if not resolutions:
+        return {}
+    pid = str(project_id or "").strip()
+    if not pid:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_PROJECT_INVALID",
+            "显式批准项目参数必须绑定项目ID",
+        )
+    prepared: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for field in sorted(resolutions):
+        raw = resolutions[field]
+        if not isinstance(raw, dict):
+            raise ProjectFactApprovalAuditError(
+                "PROJECT_FACT_APPROVAL_RESOLUTION_INVALID",
+                "批准参数必须是结构化对象",
+            )
+        evidence = raw.get("evidence")
+        if not isinstance(evidence, dict):
+            raise ProjectFactApprovalAuditError(
+                "PROJECT_FACT_APPROVAL_SOURCE_INVALID",
+                "批准参数缺少来源证据",
+            )
+        trusted_source = _latest_trusted_project_fact_approval_source(
+            project_id=pid,
+            source_sha256=str(
+                evidence.get("document_sha256")
+                or evidence.get("source_sha256")
+                or ""
+            ),
+        )
+        event = build_project_fact_approval_event(
+            project_id=pid,
+            field=field,
+            resolution=raw,
+            trusted_source=trusted_source,
+            actor=actor,
+        )
+        prepared.append((field, raw, event))
+
+    persisted: dict[str, Any] = {}
+    for field, raw, event in prepared:
+        appended = append_project_fact_approval_event(
+            _PROJECT_FACT_APPROVAL_AUDIT_PATH,
+            event,
+        )
+        persisted[field] = {**raw, "approval_event": appended["locator"]}
+    return persisted
 
 
 def _merge_plan_defaults(payload: dict) -> dict:
@@ -1825,9 +1980,16 @@ def _reseal_professional_variant(
         score_overview_xlsx=candidate.get("score_overview_xlsx"),
         expert_review_docx=candidate.get("expert_review_docx"),
         receipt_path=receipt_path,
+        job_execution_identity=(
+            candidate.get("job_execution_identity")
+            if isinstance(candidate.get("job_execution_identity"), dict)
+            else None
+        ),
     )
     candidate["docx"] = list(professional_paths)
     candidate["delivery_profile"] = "sonnet5_professional_word"
+    candidate["delivery_ready"] = True
+    candidate["validation_scope"] = "document"
     candidate["delivery_receipt"] = str(sealed["receipt"])
     candidate["delivery_decision_digest"] = str(sealed["decision_digest"])
     return candidate
@@ -1841,6 +2003,7 @@ async def _render_professional_outputs_for_job(
     progress_callback: Any | None = None,
     execution_runtime: ExecutionControlRuntime | None = None,
     slot_override: ProviderSlot | None = None,
+    job_execution_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Promote Sonnet-refined DOCX files to the only user-facing Word outputs.
 
@@ -1896,6 +2059,8 @@ async def _render_professional_outputs_for_job(
     delivery["professional_render_receipt"] = professional_receipts
     delivery["docx"] = list(professional_docx)
     delivery["delivery_profile"] = "sonnet5_professional_word"
+    if isinstance(job_execution_identity, Mapping):
+        delivery["job_execution_identity"] = dict(job_execution_identity)
     delivery_receipt_kwargs: dict[str, Any] = {
         "job_id": job_id,
         "source_docx": source_docx,
@@ -1906,6 +2071,11 @@ async def _render_professional_outputs_for_job(
         "focus_xlsx": delivery.get("focus_xlsx"),
         "score_overview_xlsx": delivery.get("score_overview_xlsx"),
         "expert_review_docx": delivery.get("expert_review_docx"),
+        "job_execution_identity": (
+            dict(job_execution_identity)
+            if isinstance(job_execution_identity, Mapping)
+            else None
+        ),
     }
     if artifact_namespace:
         safe_namespace = re.sub(
@@ -1920,6 +2090,8 @@ async def _render_professional_outputs_for_job(
     sealed_delivery = build_delivery_receipt(**delivery_receipt_kwargs)
     delivery["delivery_receipt"] = str(sealed_delivery["receipt"])
     delivery["delivery_decision_digest"] = str(sealed_delivery["decision_digest"])
+    delivery["delivery_ready"] = True
+    delivery["validation_scope"] = "document"
     return delivery
 
 
@@ -2096,6 +2268,7 @@ def _professional_render_failure_result(
 
     delivery["delivery_profile"] = "professional_render_incomplete"
     delivery["delivery_ready"] = False
+    delivery["validation_scope"] = "professional_render_failed"
     delivery["professional_render_status"] = {
         "status": "failed",
         "retryable": bool(error_info.get("retryable")),
@@ -2137,6 +2310,7 @@ def _rebuild_postprocessed_artifacts(
         and str(raw_workspace_dir).strip()
         else None
     )
+    effective_workspace_dir = workspace_dir or "backend/data"
 
     # Load latest tender/boq for this project scope (best-effort).
     tender = load_tender_matrix(project_id=pid) or {}
@@ -2287,13 +2461,13 @@ def _rebuild_postprocessed_artifacts(
                     current_topic,
                     current_outline,
                     project_id=pid,
-                    workspace_dir=workspace_dir,
+                    workspace_dir=effective_workspace_dir,
                 )
                 v["standard_index"] = build_standard_index(
                     current_topic,
                     current_outline,
                     project_id=pid,
-                    workspace_dir=workspace_dir,
+                    workspace_dir=effective_workspace_dir,
                 )
             except Exception as exc:  # noqa: BLE001 - current evidence is mandatory for formal delivery
                 v["drawing_index"] = {}
@@ -2428,6 +2602,17 @@ def _rebuild_postprocessed_artifacts(
 
         try:
             routing = v.get("model_routing") if isinstance(v.get("model_routing"), dict) else {}
+            current_standard_index = (
+                v.get("standard_index")
+                if isinstance(v.get("standard_index"), dict)
+                else {}
+            )
+            registry_path = Path(
+                str(current_standard_index.get("official_registry_path") or "")
+            )
+            standard_compliance_root = (
+                registry_path.parent if registry_path.is_absolute() else None
+            )
             delivery_gate = build_delivery_quality_gate(
                 strict=strict,
                 content_review=(
@@ -2471,11 +2656,9 @@ def _rebuild_postprocessed_artifacts(
                     else {}
                 ),
                 sections=sections,
-                standard_index=(
-                    v.get("standard_index")
-                    if isinstance(v.get("standard_index"), dict)
-                    else {}
-                ),
+                standard_index=current_standard_index,
+                standard_workspace_dir=effective_workspace_dir,
+                standard_compliance_root=standard_compliance_root,
             )
             v["delivery_quality_gate"] = delivery_gate
             qc["delivery_quality_gate"] = delivery_gate
@@ -2935,8 +3118,10 @@ def _formal_delivery_state(
         return False, "delivery_result_invalid"
     if str(result.get("delivery_profile") or "").strip() != "sonnet5_professional_word":
         return False, "delivery_profile_mismatch"
-    if result.get("delivery_ready") is False:
+    if result.get("delivery_ready") is not True:
         return False, "outer_delivery_not_ready"
+    if str(result.get("validation_scope") or "").strip() != "document":
+        return False, "outer_validation_scope_mismatch"
     audit_ready, audit_reason = _promotion_audit_state(job, result)
     if not audit_ready:
         return False, audit_reason
@@ -3088,6 +3273,7 @@ def _public_job_files(job: dict, result: dict, variants: list) -> dict[str, Any]
         "json": result.get("json"),
         "delivery_profile": result.get("delivery_profile"),
         "delivery_ready": formal_ready,
+        "validation_scope": "document" if formal_ready else None,
     }
     formal_keys = (
         "docx",
@@ -3618,10 +3804,31 @@ async def _rewrite_review_section(
 @router.post("/plan/save")
 async def actions_plan_save(req: ActionsPlanRequest, project_id: str | None = None, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
+    explicit_approvals = req.approved_project_fact_resolutions is not None
     payload = _inherit_project_fact_plan_fields(
         req.model_dump(),
         load_plan(project_id=project_id) or {},
     )
+    if explicit_approvals:
+        try:
+            payload["approved_project_fact_resolutions"] = (
+                _persist_explicit_project_fact_approvals(
+                    payload.get("approved_project_fact_resolutions") or {},
+                    project_id=project_id,
+                    actor={
+                        "channel": "actions_key",
+                        "actor_id": "system-actions",
+                    },
+                )
+            )
+        except ProjectFactApprovalAuditError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PROJECT_FACT_APPROVAL_CONFIRMATION_INVALID",
+                    "reason": exc.code,
+                },
+            ) from exc
     path = save_plan(payload, project_id=project_id)
     return {"ok": True, "saved_at": path}
 
@@ -4500,6 +4707,7 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
     )
     results = [item for item in ordered_results if isinstance(item, dict)]
     _finalize_variant_derivatives(results, payload=payload)
+    _bind_generation_release_identity(results)
     is_dry_run = bool(payload.get("dry_run"))
     is_chapter_validation = (
         str(payload.get("delivery_scope") or "document") == "chapter_validation"
@@ -4508,6 +4716,9 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
         "actions_generated",
         results,
         preview_only=is_dry_run or is_chapter_validation,
+    )
+    outputs["generation_release_identity"] = dict(
+        _GENERATION_RELEASE_IDENTITY_AT_START
     )
     if is_dry_run:
         outputs["delivery_profile"] = "dry_run_preview_no_provider_calls"
@@ -4542,8 +4753,21 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             return
         lease_attempt_id = str(lease_record.get("attempt_id") or "")
         lease_owner_instance_id = str(lease_record.get("owner_instance_id") or "")
-        if not lease_attempt_id or not lease_owner_instance_id:
+        lease_job_revision = lease_record.get("attempt_revision")
+        if (
+            re.fullmatch(r"[0-9a-f]{32}", lease_attempt_id) is None
+            or re.fullmatch(r"[0-9a-f]{32}", lease_owner_instance_id) is None
+            or isinstance(lease_job_revision, bool)
+            or not isinstance(lease_job_revision, int)
+            or lease_job_revision <= 0
+        ):
             raise RuntimeError("job_lease_acquisition_invalid")
+        job_execution_identity = {
+            "job_id": _job_id,
+            "attempt_id": lease_attempt_id,
+            "owner_instance_id": lease_owner_instance_id,
+            "job_revision": lease_job_revision,
+        }
 
         def _lease_active() -> bool:
             return job_lease_active(
@@ -4573,12 +4797,20 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             )
 
         def _append_active_event(event: str, **fields: Any) -> bool:
+            event_fields = dict(fields)
+            event_fields.update(
+                {
+                    "attempt_id": lease_attempt_id,
+                    "owner_instance_id": lease_owner_instance_id,
+                    "job_revision": lease_job_revision,
+                }
+            )
             try:
                 _lease_side_effect(
                     append_runtime_event,
                     _job_id,
                     event,
-                    **fields,
+                    **event_fields,
                 )
                 return True
             except JobLeaseLostError:
@@ -4694,10 +4926,19 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             )
             if transitioned is None:
                 return
-            append_runtime_event(_job_id, "job_cancelled")
+            append_runtime_event(
+                _job_id,
+                "job_cancelled",
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+                job_revision=lease_job_revision,
+            )
 
         local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
         local_payload["_job_id"] = _job_id
+        local_payload["_job_attempt_id"] = lease_attempt_id
+        local_payload["_job_owner_instance_id"] = lease_owner_instance_id
+        local_payload["_job_revision"] = lease_job_revision
         provider_admission_run = (
             new_provider_admission_run_coordinator(local_payload)
             if bool(local_payload.get("_provider_admission_required"))
@@ -4729,6 +4970,9 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             "chapters_done": 0,
             "active_agents": 0,
             "current_chapters": [],
+            "generation_release_identity": dict(
+                _GENERATION_RELEASE_IDENTITY_AT_START
+            ),
         }
         activity_lock = threading.RLock()
         activity_state: dict[str, Any] = {
@@ -4956,6 +5200,33 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     provider=event.get("provider"),
                     model=event.get("model"),
                     slot=event.get("slot"),
+                    schema_version=event.get("schema_version"),
+                    status=event.get("status"),
+                    required_roles=[
+                        str(value)[:80]
+                        for value in (event.get("required_roles") or [])[:20]
+                        if str(value).strip()
+                    ],
+                    candidate_count=event.get("candidate_count"),
+                    generation_allowed=event.get("generation_allowed"),
+                    degraded=event.get("degraded"),
+                    admitted_chain=[
+                        {
+                            "slot": str((value or {}).get("slot") or "")[:80],
+                            "role": str((value or {}).get("role") or "")[:80],
+                            "provider": str((value or {}).get("provider") or "")[:80],
+                            "model": str((value or {}).get("model") or "")[:160],
+                        }
+                        for value in (event.get("admitted_chain") or [])[:20]
+                        if isinstance(value, dict)
+                    ],
+                    missing_roles=[
+                        str(value)[:80]
+                        for value in (event.get("missing_roles") or [])[:20]
+                        if str(value).strip()
+                    ],
+                    public_digest=event.get("public_digest"),
+                    binding_digest=event.get("binding_digest"),
                     blocking_requirement_ids=[
                         str(value)[:160]
                         for value in (event.get("blocking_requirement_ids") or [])[:20]
@@ -5012,7 +5283,13 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
         )
         if started is None:
             return
-        _append_active_event("job_started", execution_policy=execution_policy)
+        _append_active_event(
+            "job_started",
+            execution_policy=execution_policy,
+            generation_release_identity=dict(
+                _GENERATION_RELEASE_IDENTITY_AT_START
+            ),
+        )
         heartbeat_thread = threading.Thread(
             target=_heartbeat_loop,
             name=f"autoplan-heartbeat-{_job_id[:8]}",
@@ -5104,6 +5381,9 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 lp["agent_parallelism"] = agent_parallelism
                 lp["_progress_callback"] = _variant_progress_callback(vid)
                 lp["_job_id"] = _job_id
+                lp["_job_attempt_id"] = lease_attempt_id
+                lp["_job_owner_instance_id"] = lease_owner_instance_id
+                lp["_job_revision"] = lease_job_revision
                 # Recovery reads the immutable source namespace but always
                 # writes a complete new checkpoint lineage under this job.
                 lp["_checkpoint_namespace"] = _job_id
@@ -5154,6 +5434,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 "正在执行跨方案一致性与差异性审计",
             ),
         )
+        _bind_generation_release_identity(results)
         if _is_cancelled():
             _mark_cancelled()
             return
@@ -5165,6 +5446,9 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             f"actions_{_job_id}",
             results,
             preview_only=is_dry_run or is_chapter_validation,
+        )
+        outputs["generation_release_identity"] = dict(
+            _GENERATION_RELEASE_IDENTITY_AT_START
         )
         if _is_cancelled():
             _mark_cancelled(outputs)
@@ -5213,6 +5497,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                         slot_override=_admitted_document_render_slot(
                             provider_admission_run
                         ),
+                        job_execution_identity=job_execution_identity,
                     )
                 )
         except Exception as render_error:  # noqa: BLE001 - render boundary converts failures to recoverable job state
@@ -5280,6 +5565,9 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     "job_failed",
                     code=str(error_info.get("code") or "PROFESSIONAL_RENDER_FAILED"),
                     phase="professional_rendering",
+                    attempt_id=lease_attempt_id,
+                    owner_instance_id=lease_owner_instance_id,
+                    job_revision=lease_job_revision,
                 )
             return
         agent_runtime["execution_control"] = execution_runtime.snapshot()
@@ -5291,6 +5579,7 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             delivery_scope=delivery_scope,
         )
         successful_checkpoint = _successful_checkpoint_projection(results)
+        outputs["job_execution_identity"] = dict(job_execution_identity)
         _update_progress(100, completion["stage"], completion["detail"])
         succeeded_transition = transition_job(
             _job_id,
@@ -5321,6 +5610,9 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 phase=completion["phase"],
                 dry_run=is_dry_run,
                 delivery_scope=delivery_scope,
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+                job_revision=lease_job_revision,
             )
     except Exception as e:  # noqa: BLE001 - worker boundary persists a safe terminal job projection
         error_text = str(e)
@@ -5390,6 +5682,9 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     code=public_error.get("code"),
                     phase=str(failure_progress.get("phase") or "generation"),
                     failures=public_error.get("failures"),
+                    attempt_id=active_attempt_id, owner_instance_id=active_owner_id, job_revision=int(
+                            locals().get("lease_job_revision") or 0
+                        ),
                 )
     finally:
         heartbeat_stop.set()

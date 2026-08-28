@@ -20,9 +20,9 @@ import shutil
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
-
+from typing import Any
 
 CHECKPOINT_DIR = Path(
     os.environ.get(
@@ -227,6 +227,10 @@ def build_generation_binding(
     delivery_scope: Any = "document",
     provider_admission_digest: Any = None,
     prompt_contract: Any = None,
+    job_id: Any = None,
+    attempt_id: Any = None,
+    owner_instance_id: Any = None,
+    job_revision: Any = None,
 ) -> dict[str, Any]:
     """Build the immutable metadata identity for one generation attempt."""
 
@@ -243,6 +247,14 @@ def build_generation_binding(
         )
     core = {
         "schema_version": SCHEMA_VERSION,
+        "job_id": str(job_id or "").strip() or None,
+        "attempt_id": str(attempt_id or "").strip() or None,
+        "owner_instance_id": str(owner_instance_id or "").strip() or None,
+        "job_revision": (
+            int(job_revision)
+            if isinstance(job_revision, int) and not isinstance(job_revision, bool)
+            else None
+        ),
         "topic": str(topic or "").strip(),
         "project_id": str(project_id or "").strip() or None,
         "project_type": str(project_type or "").strip() or None,
@@ -445,7 +457,7 @@ def finalize_generation_checkpoint(
                 raise CheckpointIntegrityError("checkpoint_finalize_binding_mismatch")
             record = _empty_record(binding)
         if target_status in {"complete", "draft_complete"}:
-            outline = list(((record.get("binding") or {}).get("outline") or []))
+            outline = list((record.get("binding") or {}).get("outline") or [])
             if not outline:
                 raise CheckpointIntegrityError("checkpoint_finalize_empty_outline")
             sections = record.get("sections") if isinstance(record.get("sections"), Mapping) else {}
@@ -476,7 +488,7 @@ def checkpoint_summary(record: Mapping[str, Any] | None) -> dict[str, Any]:
         "status": str(data.get("status") or "missing"),
         "saved_chapter_count": len(sections),
         "saved_chapter_indexes": sorted(int(x) for x in sections if str(x).isdigit()),
-        "chapters_total": len(((data.get("binding") or {}).get("outline") or []))
+        "chapters_total": len((data.get("binding") or {}).get("outline") or [])
         if isinstance(data.get("binding"), Mapping)
         else 0,
         "updated_at": data.get("updated_at"),

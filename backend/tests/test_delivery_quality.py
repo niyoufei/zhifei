@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 
+import pytest
+
+from backend.zhifei_autoplan import delivery_quality as delivery_quality_module
 from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
 from backend.zhifei_autoplan.project_fact_ledger import (
     build_project_fact_ledger,
@@ -177,6 +181,9 @@ def _verified_standard_index() -> dict:
     return {
         "ok": True,
         "project_id": _PROJECT_ID,
+        "audit_path": "/trusted/workspace/audit/ingest.jsonl",
+        "official_registry_path": "/trusted/compliance/_official_registry.json",
+        "official_registry_sha256": "9" * 64,
         "standards": [
             {
                 "filename": "施工标准.pdf",
@@ -185,6 +192,11 @@ def _verified_standard_index() -> dict:
                 "standard_code": "GB 50000-2020",
                 "standard_codes": ["GB 50000-2020"],
                 "primary_identity_status": "identified",
+                "primary_identity_proof_basis": "filename_and_cover",
+                "primary_identity_cover_code": "GB 50000-2020",
+                "cover_identity_text_sha256": "1" * 64,
+                "cover_page_text_sha256": "1" * 64,
+                "cover_name_status": "verified",
                 "official_registry_status": "verified_clause_source",
                 "official_registry": {
                     "status": "verified_clause_source",
@@ -204,6 +216,8 @@ def _verified_standard_index() -> dict:
                 ],
             }
         ],
+        "chapter_bindings": [],
+        "chapter_binding_status": "no_chapter_specific_evidence",
         "indexed_standard_count": 1,
         "official_registry_verified_count": 1,
         "integrity_rejection_count": 0,
@@ -211,7 +225,20 @@ def _verified_standard_index() -> dict:
         "missing_text_or_ocr_count": 0,
         "locator_unavailable_count": 0,
         "text_index_status": "complete",
+        "clause_evidence_policy": (
+            "ingested_page_anchor_required; "
+            "registry_metadata_alone_is_not_clause_evidence"
+        ),
     }
+
+
+@pytest.fixture(autouse=True)
+def _trusted_standard_rebuild(monkeypatch):
+    monkeypatch.setattr(
+        delivery_quality_module,
+        "_rebuild_current_standard_index",
+        lambda **_kwargs: copy.deepcopy(_verified_standard_index()),
+    )
 
 
 def _base_kwargs() -> dict:
@@ -238,6 +265,8 @@ def _base_kwargs() -> dict:
             "violations": [],
         },
         "standard_index": _verified_standard_index(),
+        "standard_workspace_dir": "/trusted/workspace",
+        "standard_compliance_root": "/trusted/compliance",
         "cross_index": {
             "ok": True,
             "focus_count": 1,
@@ -305,12 +334,22 @@ def test_formal_delivery_binds_standard_index_digest_and_rejects_missing_anchor(
     kwargs["standard_index"]["standards"][0]["page_anchors"][0][
         "text_sha256"
     ] = "2" * 64
+    kwargs["standard_index"]["standards"][0]["cover_identity_text_sha256"] = (
+        "2" * 64
+    )
+    kwargs["standard_index"]["standards"][0]["cover_page_text_sha256"] = (
+        "2" * 64
+    )
 
     changed = build_delivery_quality_gate(**kwargs)
 
     assert first["delivery_allowed"] is True
-    assert changed["delivery_allowed"] is True
+    assert changed["delivery_allowed"] is False
     assert first["decision_digest"] != changed["decision_digest"]
+    changed_check = next(
+        row for row in changed["checks"] if row["name"] == "verified_standards"
+    )
+    assert "standard_index_trusted_rebuild_mismatch" in changed_check["reasons"]
 
     kwargs["standard_index"]["standards"][0]["page_anchors"] = []
     blocked = build_delivery_quality_gate(**kwargs)
@@ -319,8 +358,275 @@ def test_formal_delivery_binds_standard_index_digest_and_rejects_missing_anchor(
     )
     assert blocked["delivery_allowed"] is False
     assert check["row_errors"][0]["errors"] == [
-        "page_anchor_evidence_missing"
+        "cover_page_identity_proof_invalid",
+        "page_anchor_evidence_missing",
     ]
+
+
+def test_formal_delivery_rejects_fully_self_consistent_forged_standard_payload():
+    kwargs = _base_kwargs()
+    forged = kwargs["standard_index"]
+    row = forged["standards"][0]
+    row.update(
+        {
+            "filename": "伪造标准.pdf",
+            "sha256": "2" * 64,
+            "extract_text_sha256": "3" * 64,
+            "cover_identity_text_sha256": "4" * 64,
+            "cover_page_text_sha256": "4" * 64,
+        }
+    )
+    row["page_anchors"] = [
+        {"page": 1, "text_sha256": "4" * 64, "evidence_eligible": True}
+    ]
+    forged["audit_path"] = "/forged/workspace/audit/ingest.jsonl"
+    forged["official_registry_path"] = "/forged/registry.json"
+    forged["official_registry_sha256"] = "5" * 64
+    forged["chapter_bindings"] = [
+        {
+            "chapter": "项目参数",
+            "standard_code": "GB 50000-2020",
+            "sha256": "2" * 64,
+            "page": 1,
+            "page_text_sha256": "4" * 64,
+        }
+    ]
+    forged["chapter_binding_status"] = "complete"
+
+    gate = build_delivery_quality_gate(**kwargs)
+
+    check = next(row for row in gate["checks"] if row["name"] == "verified_standards")
+    assert gate["delivery_allowed"] is False
+    assert "standard_index_trusted_rebuild_mismatch" in check["reasons"]
+
+
+def test_formal_delivery_reaudits_current_sections_against_trusted_index():
+    kwargs = _base_kwargs()
+    kwargs["sections"][0]["content"] += "\n消防执行 GB 99999-2099。"
+    forged_clean_audit = copy.deepcopy(kwargs["standard_audit"])
+
+    blocked = build_delivery_quality_gate(**kwargs)
+    check = next(
+        row for row in blocked["checks"] if row["name"] == "verified_standards"
+    )
+    assert blocked["delivery_allowed"] is False
+    assert kwargs["standard_audit"] == forged_clean_audit
+    assert "trusted_standard_citation_violations_present" in check["reasons"]
+    assert {
+        (row["standard_code"], row["reason"])
+        for row in check["trusted_citation_violations"]
+    } == {
+        ("GB 99999-2099", "standard_not_in_verified_project_manifest")
+    }
+
+    kwargs = _base_kwargs()
+    kwargs["sections"][0]["content"] += "\n消防执行 GB 50000-2020。"
+    accepted = build_delivery_quality_gate(**kwargs)
+    assert accepted["delivery_allowed"] is True
+
+
+def test_formal_delivery_requires_trusted_standard_workspace_and_rebuild(monkeypatch):
+    kwargs = _base_kwargs()
+    kwargs["standard_workspace_dir"] = None
+    missing = build_delivery_quality_gate(**kwargs)
+    missing_check = next(
+        row for row in missing["checks"] if row["name"] == "verified_standards"
+    )
+    assert "trusted_standard_workspace_missing" in missing_check["reasons"]
+
+    kwargs["standard_workspace_dir"] = "/trusted/workspace"
+    monkeypatch.setattr(
+        delivery_quality_module,
+        "_rebuild_current_standard_index",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+    failed = build_delivery_quality_gate(**kwargs)
+    failed_check = next(
+        row for row in failed["checks"] if row["name"] == "verified_standards"
+    )
+    assert "standard_index_trusted_rebuild_failed" in failed_check["reasons"]
+
+
+def test_formal_delivery_accepts_only_exact_official_preface_pin(monkeypatch):
+    kwargs = _base_kwargs()
+    kwargs["standard_audit"]["verified_standard_codes"] = ["GB_55032_2022"]
+    index = kwargs["standard_index"]
+    row = index["standards"][0]
+    row.update(
+        {
+            "filename": "GB55032-2022 建筑与市政工程施工质量控制通用规范.pdf",
+            "standard_code": "GB 55032-2022",
+            "standard_codes": ["GB55032-2022"],
+            "primary_identity_proof_basis": "official_page_and_content_sha256",
+            "primary_identity_cover_code": None,
+            "cover_name_status": "verified_official_pin",
+            "sha256": "e" * 64,
+            "source_hash_proof_status": "verified",
+            "source_hash_proof": {
+                "status": "verified",
+                "basis": "official_content_sha256",
+                "expected_sha256": "e" * 64,
+                "actual_sha256": "e" * 64,
+                "official_document_url": "https://example.gov.cn/gb55032.pdf",
+            },
+            "official_identity_proof": {
+                "official_source": "https://example.gov.cn/gb55032",
+                "official_document_url": "https://example.gov.cn/gb55032.pdf",
+                "official_content_sha256": "e" * 64,
+                "standard_code": "GB 55032-2022",
+                "standard_name": "建筑与市政工程施工质量控制通用规范",
+                "current_version": "GB 55032-2022",
+            },
+            "official_registry_status": "verified_metadata_only",
+            "official_registry": {
+                "status": "verified_metadata_only",
+                "standard_code": "GB 55032-2022",
+                "standard_name": "建筑与市政工程施工质量控制通用规范",
+                "official_source": "https://example.gov.cn/gb55032",
+                "official_document_url": "https://example.gov.cn/gb55032.pdf",
+                "official_content_sha256": "e" * 64,
+                "source_hash_proof_status": "verified",
+                "current_version": "GB 55032-2022",
+            },
+        }
+    )
+    monkeypatch.setattr(
+        delivery_quality_module,
+        "_rebuild_current_standard_index",
+        lambda **_kwargs: copy.deepcopy(index),
+    )
+
+    passed = build_delivery_quality_gate(**kwargs)
+    assert passed["delivery_allowed"] is True
+
+    row["official_identity_proof"]["official_content_sha256"] = "f" * 64
+    monkeypatch.setattr(
+        delivery_quality_module,
+        "_rebuild_current_standard_index",
+        lambda **_kwargs: copy.deepcopy(index),
+    )
+    blocked = build_delivery_quality_gate(**kwargs)
+    check = next(
+        row for row in blocked["checks"] if row["name"] == "verified_standards"
+    )
+    assert blocked["delivery_allowed"] is False
+    assert "primary_identity_official_pin_mismatch" in check["row_errors"][0][
+        "errors"
+    ]
+
+
+def test_gb_55037_formal_gate_requires_registry_and_pdf_clause_evidence(
+    monkeypatch,
+):
+    kwargs = _base_kwargs()
+    kwargs["standard_audit"].update(
+        {
+            "verified_standard_count": 1,
+            "verified_standard_codes": ["GB_55037_2022"],
+        }
+    )
+    row = kwargs["standard_index"]["standards"][0]
+    row.update(
+        {
+            "filename": "GB 55037-2022 建筑防火通用规范.pdf",
+            "standard_code": "GB 55037-2022",
+            "standard_codes": ["GB 55037-2022"],
+            "primary_identity_proof_basis": "filename_and_cover",
+            "primary_identity_cover_code": "GB 55037-2022",
+            "cover_identity_text_sha256": "1" * 64,
+            "cover_page_text_sha256": "1" * 64,
+            "cover_name_status": "verified",
+            "source_hash_proof_status": "verified",
+            "source_hash_proof": {
+                "status": "verified",
+                "basis": "official_content_sha256",
+                "expected_sha256": "e" * 64,
+                "actual_sha256": "e" * 64,
+                "official_document_url": "https://official.example/gb55037.pdf",
+            },
+            "official_registry_status": "verified_metadata_only",
+            "official_registry": {
+                "status": "verified_metadata_only",
+                "standard_code": "GB 55037-2022",
+                "metadata_only": True,
+                "clause_evidence_eligible": False,
+                "official_content_sha256": "e" * 64,
+                "source_hash_proof_status": "verified",
+            },
+            "clause_evidence_eligible": True,
+            "clause_evidence_source": "ingested_standard_text",
+            "registry_metadata_used_as_clause_evidence": False,
+        }
+    )
+
+    monkeypatch.setattr(
+        delivery_quality_module,
+        "_rebuild_current_standard_index",
+        lambda **_ignored: copy.deepcopy(kwargs["standard_index"]),
+    )
+    accepted = build_delivery_quality_gate(**kwargs)
+    assert accepted["delivery_allowed"] is True
+
+    row["source_hash_proof_status"] = "mismatch"
+    row["source_hash_proof"]["status"] = "mismatch"
+    row["source_hash_proof"]["actual_sha256"] = "d" * 64
+    hash_mismatch = build_delivery_quality_gate(**kwargs)
+    hash_check = next(
+        check
+        for check in hash_mismatch["checks"]
+        if check["name"] == "verified_standards"
+    )
+    assert hash_mismatch["delivery_allowed"] is False
+    assert "official_content_sha256_unverified" in hash_check["row_errors"][0][
+        "errors"
+    ]
+    row["source_hash_proof_status"] = "verified"
+    row["source_hash_proof"]["status"] = "verified"
+    row["source_hash_proof"]["actual_sha256"] = "e" * 64
+
+    row["official_registry_status"] = "not_verified"
+    row["official_registry"]["status"] = "not_verified"
+    kwargs["standard_index"]["official_registry_verified_count"] = 0
+    missing_metadata = build_delivery_quality_gate(**kwargs)
+    metadata_check = next(
+        check
+        for check in missing_metadata["checks"]
+        if check["name"] == "verified_standards"
+    )
+    assert missing_metadata["delivery_allowed"] is False
+    assert "official_registry_unverified" in metadata_check["row_errors"][0][
+        "errors"
+    ]
+    assert "GB_55037_2022" in metadata_check[
+        "missing_verified_standard_codes"
+    ]
+    assert "DELIVERY_STANDARD_EVIDENCE_BLOCKED" in {
+        blocker["code"] for blocker in missing_metadata["blockers"]
+    }
+
+    row["official_registry_status"] = "verified_metadata_only"
+    row["official_registry"]["status"] = "verified_metadata_only"
+    kwargs["standard_index"]["official_registry_verified_count"] = 1
+    row["page_anchors"] = []
+    row["clause_evidence_eligible"] = False
+    row["clause_evidence_source"] = None
+    row["registry_metadata_used_as_clause_evidence"] = True
+    metadata_only = build_delivery_quality_gate(**kwargs)
+    evidence_check = next(
+        check
+        for check in metadata_only["checks"]
+        if check["name"] == "verified_standards"
+    )
+    assert metadata_only["delivery_allowed"] is False
+    assert "page_anchor_evidence_missing" in evidence_check["row_errors"][0][
+        "errors"
+    ]
+    assert "registry_metadata_clause_evidence_invalid" in evidence_check[
+        "row_errors"
+    ][0]["errors"]
+    assert "DELIVERY_STANDARD_EVIDENCE_BLOCKED" in {
+        blocker["code"] for blocker in metadata_only["blockers"]
+    }
 
 
 def test_formal_delivery_rejects_unrelated_or_registry_unverified_standard():

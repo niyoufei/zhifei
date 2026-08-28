@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ from backend.auth_store import (
     update_balance,
 )
 from backend.zhifei_autoplan.boq_store import load_boq_data, save_boq_data
+from backend.zhifei_autoplan.evidence import resolve_trusted_ingest_record
 from backend.zhifei_autoplan.exporter import (
     export_autoplan_compare_docx,
     export_autoplan_docx,
@@ -59,6 +61,11 @@ from backend.zhifei_autoplan.output_artifacts import sanitize_output_payload
 from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
 from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
 from backend.zhifei_autoplan.plan_store import load_plan, save_plan
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    ProjectFactApprovalAuditError,
+    append_project_fact_approval_event,
+    build_project_fact_approval_event,
+)
 from backend.zhifei_autoplan.provider_runtime import (
     ProviderRoutingConfigurationError,
     apply_server_provider_routing,
@@ -594,10 +601,31 @@ async def parse_boq(
 @router.post("/plan/save")
 async def save_plan_api(req: PlanRequest, project_id: str | None = None, authorization: str | None = Header(default=None)):
     user = _auth_user(authorization)
+    explicit_approvals = req.approved_project_fact_resolutions is not None
     payload = _inherit_project_fact_plan_fields(
         req.model_dump(),
         load_plan(project_id=project_id) or {},
     )
+    if explicit_approvals:
+        try:
+            payload["approved_project_fact_resolutions"] = (
+                _persist_explicit_project_fact_approvals(
+                    payload.get("approved_project_fact_resolutions") or {},
+                    project_id=project_id,
+                    actor={
+                        "channel": "authenticated_user",
+                        "actor_id": f"user:{user['id']}",
+                    },
+                )
+            )
+        except ProjectFactApprovalAuditError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PROJECT_FACT_APPROVAL_CONFIRMATION_INVALID",
+                    "reason": exc.code,
+                },
+            ) from exc
     path = save_plan(payload, project_id=project_id)
     _audit("plan_save", user_id=user["id"], detail={"path": path, "project_id": project_id})
     return {"ok": True, "saved_at": path}
@@ -671,6 +699,11 @@ _PROJECT_FACT_PLAN_FIELDS = (
     "approved_project_fact_resolutions",
 )
 
+_PROJECT_FACT_INGEST_AUDIT_PATH = Path("backend/data/audit/ingest.jsonl")
+_PROJECT_FACT_APPROVAL_AUDIT_PATH = Path(
+    "backend/data/audit/project_fact_approvals.jsonl"
+)
+
 
 def _inherit_project_fact_plan_fields(payload: dict, plan: dict) -> dict:
     """Inherit only omitted fact maps; an explicit empty map remains a clear."""
@@ -679,6 +712,120 @@ def _inherit_project_fact_plan_fields(payload: dict, plan: dict) -> dict:
         if payload.get(field) is None and isinstance(plan.get(field), dict):
             payload[field] = dict(plan[field])
     return payload
+
+
+def _latest_trusted_project_fact_approval_source(
+    *,
+    project_id: str,
+    source_sha256: str,
+) -> dict[str, Any]:
+    digest = str(source_sha256 or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_INVALID",
+            "批准参数来源摘要无效",
+        )
+    audit_path = _PROJECT_FACT_INGEST_AUDIT_PATH
+    if audit_path.is_symlink() or not audit_path.is_file():
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "当前入库审计不存在或不可信",
+        )
+    try:
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "当前入库审计无法读取",
+        ) from exc
+    latest: dict[str, Any] | None = None
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        if (
+            str(row.get("project_id") or "").strip() == project_id
+            and str(row.get("sha256") or "").strip().lower() == digest
+        ):
+            latest = row
+            break
+    if (
+        latest is None
+        or latest.get("enabled") is not True
+        or latest.get("usable") is not True
+    ):
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "批准参数来源不是当前启用且可用记录",
+        )
+    trusted = resolve_trusted_ingest_record(
+        latest,
+        workspace_root=audit_path.parent.parent,
+    )
+    if trusted.get("ok") is not True:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "批准参数来源当前字节验证失败",
+        )
+    return {**trusted, "enabled": True, "usable": True}
+
+
+def _persist_explicit_project_fact_approvals(
+    resolutions: dict[str, Any],
+    *,
+    project_id: str | None,
+    actor: dict[str, str],
+) -> dict[str, Any]:
+    if not resolutions:
+        return {}
+    pid = str(project_id or "").strip()
+    if not pid:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_PROJECT_INVALID",
+            "显式批准项目参数必须绑定项目ID",
+        )
+    prepared: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for field in sorted(resolutions):
+        raw = resolutions[field]
+        if not isinstance(raw, dict):
+            raise ProjectFactApprovalAuditError(
+                "PROJECT_FACT_APPROVAL_RESOLUTION_INVALID",
+                "批准参数必须是结构化对象",
+            )
+        evidence = raw.get("evidence")
+        if not isinstance(evidence, dict):
+            raise ProjectFactApprovalAuditError(
+                "PROJECT_FACT_APPROVAL_SOURCE_INVALID",
+                "批准参数缺少来源证据",
+            )
+        trusted_source = _latest_trusted_project_fact_approval_source(
+            project_id=pid,
+            source_sha256=str(
+                evidence.get("document_sha256")
+                or evidence.get("source_sha256")
+                or ""
+            ),
+        )
+        event = build_project_fact_approval_event(
+            project_id=pid,
+            field=field,
+            resolution=raw,
+            trusted_source=trusted_source,
+            actor=actor,
+        )
+        prepared.append((field, raw, event))
+
+    persisted: dict[str, Any] = {}
+    for field, raw, event in prepared:
+        appended = append_project_fact_approval_event(
+            _PROJECT_FACT_APPROVAL_AUDIT_PATH,
+            event,
+        )
+        persisted[field] = {**raw, "approval_event": appended["locator"]}
+    return persisted
 
 
 class OptimizeRequest(BaseModel):

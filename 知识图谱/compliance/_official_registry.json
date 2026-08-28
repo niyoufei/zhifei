@@ -32,9 +32,11 @@
       "current_version": "GB 50300-2013",
       "effective_status": "现行有效",
       "latest": true,
-      "official_source": "https://zjj.sz.gov.cn/hdjl/ywzs/jsgcgl/qtl/content/post_8466200.html",
-      "verified_at": "2026-08-23",
-      "verification_note": "深圳市住房和建设局2025年业务知识页面仍以该标准为验收依据；与GB 55032-2022冲突的指定强制性条款除外。",
+      "official_source": "https://zjw.sh.gov.cn/xcsc2020-jsbz/20200430/1af104eaf997443aae1fac5abfcf948a.html",
+      "official_document_url": "https://zjw.sh.gov.cn/cmsres/34/349cab456a80498091dd53105c3b6109/7573fa552919c7dbb9ddd603afc4eea0.pdf",
+      "official_content_sha256": "601d66445bcfaed9adae5efd1030230ccb379972e73acdd4714069b2bd1eaf24",
+      "verified_at": "2026-08-28",
+      "verification_note": "上海市住房和城乡建设管理委员会技术标准页提供63页完整原件，封面载明GB 50300-2013；与GB 55032-2022冲突的指定强制性条款除外。",
       "domain_tags": ["房建", "装修", "房建工程", "建筑工程", "质量管理与验收"],
       "priority": "国家标准",
       "superseded_clauses": ["5.0.8", "6.0.6"]
@@ -46,9 +48,26 @@
       "effective_status": "现行有效",
       "latest": true,
       "official_source": "https://szwb.sz.gov.cn/gwszwfw/zsk/hybz/content/post_10878088.html",
-      "verified_at": "2026-08-23",
-      "verification_note": "政府主管部门公开页面载明自2023年3月1日起实施，且与现行标准冲突时以本规范为准。",
+      "official_document_url": "https://szwb.sz.gov.cn/attachment/1/1356/1356241/10878088.pdf",
+      "official_content_sha256": "42950e7c080e513c10ba1d4ecb41c1188b8ee0155b122424b6cfa33b03e69e97",
+      "official_identity_without_cover": true,
+      "verified_at": "2026-08-28",
+      "verification_note": "深圳市政府网站公开35页官方附件，正文自前言开始；页面、附件URL、内容SHA256与标准编号、名称、版本共同构成来源证明，固定哈希不得替代条文页锚。",
       "domain_tags": ["房建", "装修", "市政道路", "市政排水", "市政桥梁", "市政排水站", "综合管廊", "房建工程", "建筑工程", "市政工程", "质量管理与验收"],
+      "priority": "全文强制性工程建设规范"
+    },
+    {
+      "standard_code": "GB 55037-2022",
+      "standard_name": "建筑防火通用规范",
+      "current_version": "GB 55037-2022",
+      "effective_status": "现行有效",
+      "latest": true,
+      "official_source": "https://ha.119.gov.cn/2025/04-16/3491624.html",
+      "official_document_url": "https://oss.dahe.cn/bdtypt/sbgt-wztipt/typtfile/20250416/5aeb7bf9074144b9a3c0ec1901bc10c3.pdf",
+      "official_content_sha256": "04a42d414cc6f5e42f3fe33e2af7042666673b69aaf265f829885f2a1f83bafe",
+      "verified_at": "2026-08-28",
+      "verification_note": "河南省消防救援总队政府页面提供48页完整封面原件，首页明确载明《建筑防火通用规范》及GB 55037-2022；住房和城乡建设部公告2022年第189号载明本规范自2023-06-01起实施，全部条文必须严格执行。",
+      "domain_tags": ["房建", "装修", "房建工程", "建筑工程", "消防工程", "建筑防火"],
       "priority": "全文强制性工程建设规范"
     }
   ]

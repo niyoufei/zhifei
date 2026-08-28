@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 
+from backend.zhifei_autoplan.compliance_policy import (
+    is_verified_standard_metadata,
+)
 from backend.zhifei_autoplan.compliance_runtime import (
     build_compliance_catalog,
     get_compliance_registry_status,
@@ -176,6 +180,122 @@ def test_missing_registry_root_is_read_only(tmp_path: Path):
     assert status["ready"] is False
     assert status["warnings"] == ["compliance_root_missing"]
     assert not root.exists()
+
+
+def test_repository_registry_verifies_gb_55037_as_metadata_only(
+    tmp_path: Path,
+):
+    repository_root = Path(__file__).resolve().parents[2]
+    source_registry = (
+        repository_root / "知识图谱" / "compliance" / "_official_registry.json"
+    )
+    root = tmp_path / "compliance"
+    root.mkdir(parents=True)
+    registry = root / "_official_registry.json"
+    registry.write_bytes(source_registry.read_bytes())
+
+    rows = list_verified_standard_metadata(root=root)
+    matches = [
+        row for row in rows if row.get("standard_code") == "GB 55037-2022"
+    ]
+    gb_50300_matches = [
+        row for row in rows if row.get("standard_code") == "GB 50300-2013"
+    ]
+    gb_55032_matches = [
+        row for row in rows if row.get("standard_code") == "GB 55032-2022"
+    ]
+
+    assert len(rows) == 5
+    assert len(matches) == 1
+    assert len(gb_50300_matches) == 1
+    assert len(gb_55032_matches) == 1
+    row = matches[0]
+    assert row["source_name"] == "建筑防火通用规范"
+    assert row["current_version"] == "GB 55037-2022"
+    assert row["effective_status"] == "现行有效"
+    assert row["latest"] is True
+    assert row["metadata_only"] is True
+    assert row["official_source"] == (
+        "https://ha.119.gov.cn/2025/04-16/3491624.html"
+    )
+    assert row["official_document_url"] == (
+        "https://oss.dahe.cn/bdtypt/sbgt-wztipt/typtfile/20250416/"
+        "5aeb7bf9074144b9a3c0ec1901bc10c3.pdf"
+    )
+    assert row["official_content_sha256"] == (
+        "04a42d414cc6f5e42f3fe33e2af7042666673b69aaf265f829885f2a1f83bafe"
+    )
+    assert row["priority"] == "全文强制性工程建设规范"
+    assert "2023-06-01" in row["verification_note"]
+    assert "全部条文必须严格执行" in row["verification_note"]
+    assert is_verified_standard_metadata(row) is True
+    gb_50300 = gb_50300_matches[0]
+    assert gb_50300["official_source"] == (
+        "https://zjw.sh.gov.cn/xcsc2020-jsbz/20200430/"
+        "1af104eaf997443aae1fac5abfcf948a.html"
+    )
+    assert gb_50300["official_document_url"] == (
+        "https://zjw.sh.gov.cn/cmsres/34/349cab456a80498091dd53105c3b6109/"
+        "7573fa552919c7dbb9ddd603afc4eea0.pdf"
+    )
+    assert gb_50300["official_content_sha256"] == (
+        "601d66445bcfaed9adae5efd1030230ccb379972e73acdd4714069b2bd1eaf24"
+    )
+    assert is_verified_standard_metadata(gb_50300) is True
+    gb_55032 = gb_55032_matches[0]
+    assert gb_55032["official_content_sha256"] == (
+        "42950e7c080e513c10ba1d4ecb41c1188b8ee0155b122424b6cfa33b03e69e97"
+    )
+    assert gb_55032["official_document_url"] == (
+        "https://szwb.sz.gov.cn/attachment/1/1356/1356241/10878088.pdf"
+    )
+    assert gb_55032["official_identity_without_cover"] is True
+    assert is_verified_standard_metadata(gb_55032) is True
+
+    first_catalog = build_compliance_catalog(root)
+    first_bytes = (root / "_catalog.json").read_bytes()
+    second_catalog = build_compliance_catalog(root)
+    assert second_catalog == first_catalog
+    assert (root / "_catalog.json").read_bytes() == first_bytes
+
+
+def test_tracked_catalog_is_exact_projection_of_repository_registry() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    root = repository_root / "知识图谱" / "compliance"
+    registry_path = root / "_official_registry.json"
+    catalog_path = root / "_catalog.json"
+    registry_bytes = registry_path.read_bytes()
+    registry = json.loads(registry_bytes)
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+
+    assert catalog["source_fingerprint"] == [
+        {
+            "name": "_official_registry.json",
+            "size": len(registry_bytes),
+            "sha256": hashlib.sha256(registry_bytes).hexdigest(),
+        }
+    ]
+    registry_by_code = {
+        row["standard_code"]: row for row in registry["standards"]
+    }
+    catalog_by_code = {
+        row["standard_code"]: row for row in catalog["entries"]
+    }
+    assert set(catalog_by_code) == set(registry_by_code)
+    for code, metadata in registry_by_code.items():
+        projected = catalog_by_code[code]
+        assert projected["source_name"] == metadata["standard_name"]
+        assert projected["current_version"] == metadata["current_version"]
+        assert projected["official_source"] == metadata["official_source"]
+        assert projected["official_document_url"] == metadata.get(
+            "official_document_url", ""
+        )
+        assert projected["official_content_sha256"] == metadata.get(
+            "official_content_sha256", ""
+        )
+        assert projected["official_identity_without_cover"] is bool(
+            metadata.get("official_identity_without_cover", False)
+        )
 
 
 def test_official_registry_hydrates_matching_local_clause_source(tmp_path: Path):
