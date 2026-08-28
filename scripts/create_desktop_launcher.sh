@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DESKTOP="${HOME}/Desktop"
+BOOTSTRAP_PYTHON="/usr/bin/python3"
+OS_HOME="$("$BOOTSTRAP_PYTHON" -I -B -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+case "$OS_HOME" in /*) ;; *) exit 2 ;; esac
+DESKTOP="${OS_HOME}/Desktop"
 START_NAME="${1:-施组专家系统}"
 START_APP="${DESKTOP}/${START_NAME}.app"
 ICON_SOURCE="${ZF_LAUNCHER_ICON:-${ROOT}/assets/launcher/shi-zu-expert-app-icon.png}"
@@ -28,17 +31,16 @@ APPLESCRIPT_SOURCE="${TMP_DIR}/launcher.applescript"
 ICONSET="${TMP_DIR}/applet.iconset"
 mkdir -p "$ICONSET"
 
-# Escape the fixed repository location for an AppleScript string literal.
-APPLE_ROOT="${ROOT//\\/\\\\}"
-APPLE_ROOT="${APPLE_ROOT//\"/\\\"}"
 cat > "$APPLESCRIPT_SOURCE" <<APPLESCRIPT
 on run
   set appName to "施组专家系统"
-  set rootPath to "${APPLE_ROOT}"
-  set startScript to rootPath & "/scripts/run_web_ui.sh"
-  set logDirectory to rootPath & "/logs"
+  set homePath to POSIX path of (path to home folder)
+  set sealedBase to homePath & "Library/Application Support/com.zhifei.construction-expert"
+  set bootstrapPath to sealedBase & "/bootstrap/launch_current.py"
+  set bootstrapPython to "/usr/bin/python3"
+  set logDirectory to sealedBase & "/state/supervisor/logs"
   set logPath to logDirectory & "/desktop_launcher.log"
-  set launchCommand to "/bin/mkdir -p " & quoted form of logDirectory & " && " & quoted form of startScript & " --background >> " & quoted form of logPath & " 2>&1"
+  set launchCommand to quoted form of bootstrapPython & " -I -B " & quoted form of bootstrapPath & " >> " & quoted form of logPath & " 2>&1"
   try
     do shell script launchCommand
   on error errorMessage number errorNumber

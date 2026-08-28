@@ -2,10 +2,25 @@
 Unit tests for backend/zhifei_autoplan/job_store.py
 """
 import json
-import pytest
+import multiprocessing
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
+import pytest
+
+
+def _merge_result_in_spawned_process(
+    job_dir: str,
+    job_id: str,
+    result_key: str,
+    start_event,
+) -> None:
+    from backend.zhifei_autoplan import job_store
+
+    job_store.JOB_DIR = Path(job_dir)
+    start_event.wait(timeout=10)
+    job_store.merge_job(job_id, result={result_key: result_key})
 
 
 class TestCreateJob:
@@ -295,8 +310,8 @@ class TestUpdateJob:
             rec = job_store.get_job(job_id)
             assert rec["payload"] == original_payload
 
-    def test_update_job_nonexistent_creates_record(self, tmp_path):
-        """Test update_job with nonexistent job_id creates minimal record."""
+    def test_update_job_nonexistent_fails_closed(self, tmp_path):
+        """A late worker must never resurrect a deleted job record."""
         from backend.zhifei_autoplan import job_store
 
         job_dir = tmp_path / "jobs"
@@ -306,15 +321,17 @@ class TestUpdateJob:
             missing_job_id = "f" * 32
             result = job_store.update_job(missing_job_id, status="running")
 
-            assert result["job_id"] == missing_job_id
-            assert result["status"] == "running"
+            assert result is None
+            assert not (job_dir / f"{missing_job_id}.json").exists()
 
     def test_update_job_rejects_invalid_job_id(self, tmp_path):
         from backend.zhifei_autoplan import job_store
 
-        with patch.object(job_store, "JOB_DIR", tmp_path / "jobs"):
-            with pytest.raises(ValueError, match="invalid job_id"):
-                job_store.update_job("../outside", status="running")
+        with (
+            patch.object(job_store, "JOB_DIR", tmp_path / "jobs"),
+            pytest.raises(ValueError, match="invalid job_id"),
+        ):
+            job_store.update_job("../outside", status="running")
 
 
 class TestJobStoreSecurity:
@@ -392,6 +409,443 @@ class TestHeartbeatJob:
 
             assert rec["status"] == "done"
             assert rec["progress"] == before["progress"]
+
+
+class TestRuntimeReconciliation:
+    def test_cross_process_merges_do_not_lose_updates(self, tmp_path):
+        from backend.zhifei_autoplan import job_store
+
+        job_dir = tmp_path / "jobs"
+        with patch.object(job_store, "JOB_DIR", job_dir):
+            job_id = job_store.create_job({"action": "generate"})
+            context = multiprocessing.get_context("spawn")
+            start_event = context.Event()
+            processes = [
+                context.Process(
+                    target=_merge_result_in_spawned_process,
+                    args=(str(job_dir), job_id, f"worker_{index}", start_event),
+                )
+                for index in range(6)
+            ]
+            for process in processes:
+                process.start()
+            start_event.set()
+            for process in processes:
+                process.join(timeout=20)
+                assert process.exitcode == 0
+            result = (job_store.get_job(job_id) or {}).get("result") or {}
+
+        assert set(result) == {f"worker_{index}" for index in range(6)}
+
+    def test_transition_is_revisioned_and_terminal_state_is_monotonic(self, tmp_path):
+        from backend.zhifei_autoplan import job_store
+
+        with patch.object(job_store, "JOB_DIR", tmp_path / "jobs"):
+            job_id = job_store.create_job({"action": "generate"})
+            queued = job_store.get_job(job_id)
+            running = job_store.transition_job(
+                job_id,
+                allowed_from={"queued"},
+                status="running",
+                expected_revision=queued["revision"],
+            )
+            finished = job_store.transition_job(
+                job_id,
+                allowed_from={"running"},
+                status="succeeded",
+            )
+            late_worker = job_store.transition_job(
+                job_id,
+                allowed_from={"queued", "running"},
+                status="failed",
+            )
+
+        assert running["revision"] > queued["revision"]
+        assert finished["status"] == "succeeded"
+        assert late_worker is None
+
+    def test_dispatched_queued_job_is_not_reaped_before_worker_starts(self, tmp_path):
+        from backend.zhifei_autoplan import job_store
+
+        with patch.object(job_store, "JOB_DIR", tmp_path / "jobs"):
+            job_id = job_store.create_job({"action": "generate"})
+            job_store.merge_job(
+                job_id,
+                updated_at=100.0,
+                progress={"heartbeat_at": 100.0},
+            )
+            reconciled = job_store.reconcile_stale_jobs(
+                stale_after_seconds=60,
+                now=200.0,
+                protected_job_ids={job_id},
+            )
+
+            assert reconciled == []
+            assert job_store.get_job(job_id)["status"] == "queued"
+
+    def test_dispatched_running_job_is_reaped_after_lease_heartbeat_expires(
+        self,
+        tmp_path,
+    ):
+        from backend.zhifei_autoplan import job_store
+
+        with patch.object(job_store, "JOB_DIR", tmp_path / "jobs"):
+            job_id = job_store.create_job({"action": "generate"})
+            lease = job_store.acquire_job_lease(
+                job_id,
+                owner_instance_id="hung-worker",
+            )
+            assert lease is not None
+            assert lease["attempt_revision"] == lease["revision"]
+            job_store.merge_job(
+                job_id,
+                expected_attempt_id=str(lease["attempt_id"]),
+                expected_owner_instance_id=str(lease["owner_instance_id"]),
+                progress={"heartbeat_at": 100.0},
+            )
+
+            reconciled = job_store.reconcile_stale_jobs(
+                stale_after_seconds=60,
+                now=200.0,
+                protected_job_ids={job_id},
+            )
+
+            record = job_store.get_job(job_id)
+            assert reconciled == [job_id]
+            assert record["status"] == "interrupted_recoverable"
+            assert record["attempt_id"] is None
+            assert record["last_attempt_id"] == lease["attempt_id"]
+            assert record["last_owner_instance_id"] == lease["owner_instance_id"]
+            assert record["last_job_revision"] == lease["attempt_revision"]
+            assert record["attempt_revision"] is None
+
+    def test_merge_job_preserves_nested_progress(self, tmp_path):
+        from backend.zhifei_autoplan import job_store
+
+        with patch.object(job_store, "JOB_DIR", tmp_path / "jobs"):
+            job_id = job_store.create_job({"action": "generate"})
+            job_store.update_job(
+                job_id,
+                status="running",
+                progress={"percent": 15, "chapters": {"succeeded": 1, "total": 3}},
+            )
+            rec = job_store.merge_job(
+                job_id,
+                status="failed",
+                progress={"work_state": "idle", "detail": "failed"},
+            )
+
+        assert rec["progress"]["percent"] == 15
+        assert rec["progress"]["chapters"] == {"succeeded": 1, "total": 3}
+        assert rec["progress"]["work_state"] == "idle"
+
+    def test_reconcile_stale_job_is_fail_closed_and_recoverable(self, tmp_path):
+        from backend.zhifei_autoplan import job_store
+
+        with patch.object(job_store, "JOB_DIR", tmp_path / "jobs"):
+            job_id = job_store.create_job({"action": "generate"})
+            job_store.update_job(
+                job_id,
+                status="running",
+                updated_at=100.0,
+                progress={"heartbeat_at": 100.0, "stage": "generation", "percent": 35},
+            )
+            reconciled = job_store.reconcile_stale_jobs(
+                stale_after_seconds=60,
+                now=200.0,
+            )
+            rec = job_store.get_job(job_id)
+
+        assert reconciled == [job_id]
+        assert rec["status"] == "interrupted_recoverable"
+        assert rec["progress"]["percent"] == 35
+        assert rec["progress"]["work_state"] == "idle"
+        assert rec["error"]["code"] == "JOB_INTERRUPTED"
+
+    def test_reconcile_stale_ingest_job_cleans_spool_with_stable_error(self, tmp_path):
+        from backend.zhifei_autoplan import job_store
+
+        job_root = tmp_path / "jobs"
+        spool_root = tmp_path / "spool"
+        with (
+            patch.object(job_store, "JOB_DIR", job_root),
+            patch.object(job_store, "INGEST_SPOOL_DIR", spool_root),
+        ):
+            job_id = job_store.create_job({"action": "ingest"})
+            spool_dir = spool_root / job_id
+            spool_dir.mkdir(parents=True)
+            (spool_dir / "upload.pdf").write_bytes(b"spooled")
+            job_store.update_job(
+                job_id,
+                status="running",
+                updated_at=100.0,
+                progress={"heartbeat_at": 100.0, "stage": "ingest", "percent": 47},
+            )
+
+            reconciled = job_store.reconcile_stale_jobs(
+                stale_after_seconds=60,
+                now=200.0,
+            )
+            rec = job_store.get_job(job_id)
+
+        assert reconciled == [job_id]
+        assert rec["status"] == "interrupted_recoverable"
+        assert rec["error"]["code"] == "INGEST_INTERRUPTED"
+        assert rec["progress"]["percent"] == 47
+        assert not spool_dir.exists()
+
+    def test_reconcile_failed_job_repairs_checkpoint_and_public_error(self, tmp_path):
+        from backend.zhifei_autoplan import generation_checkpoint, job_store
+
+        job_root = tmp_path / "jobs"
+        checkpoint_root = tmp_path / "checkpoints"
+        binding = generation_checkpoint.build_generation_binding(
+            topic="项目",
+            project_id="p1",
+            project_type="房建",
+            outline=["一", "二"],
+            style={},
+            chapter_pages={},
+            variant_id=1,
+            project_fact_digest="a" * 64,
+            requirement_plan_digest="b" * 64,
+            provider_routes=[],
+        )
+        with patch.object(job_store, "JOB_DIR", job_root), patch.object(
+            generation_checkpoint,
+            "CHECKPOINT_DIR",
+            checkpoint_root,
+        ):
+            job_id = job_store.create_job({"action": "generate"})
+            generation_checkpoint.save_section_checkpoint(
+                namespace=job_id,
+                scope="variant-1",
+                binding=binding,
+                chapter_index=0,
+                chapter_title="一",
+                chapter_context_digest="c" * 64,
+                result={"title": "一", "content": "正文"},
+            )
+            job_store.update_job(
+                job_id,
+                status="failed",
+                error="RuntimeError('{\"code\": \"MODEL_CHAIN_EXHAUSTED\", \"message\": \"失败\"}')",
+                progress={"percent": 100},
+            )
+            rec = job_store.reconcile_failed_job_evidence(job_id)
+
+        assert rec["error"]["code"] == "MODEL_CHAIN_EXHAUSTED"
+        assert rec["progress"]["percent"] == 45
+        assert rec["progress"]["chapters"] == {
+            "started": 2,
+            "succeeded": 1,
+            "failed": 1,
+            "total": 2,
+        }
+        assert rec["progress"]["checkpoint"]["scopes"][0]["status"] == "failed_partial"
+
+    def test_startup_reconciles_failed_jobs_with_false_completion_evidence(self, tmp_path):
+        from backend.zhifei_autoplan import generation_checkpoint, job_store
+
+        job_root = tmp_path / "jobs"
+        checkpoint_root = tmp_path / "checkpoints"
+        binding = generation_checkpoint.build_generation_binding(
+            topic="项目",
+            project_id="p1",
+            project_type="房建",
+            outline=["一"],
+            style={},
+            chapter_pages={},
+            variant_id=1,
+            project_fact_digest="a" * 64,
+            requirement_plan_digest="b" * 64,
+            provider_routes=[],
+        )
+        with patch.object(job_store, "JOB_DIR", job_root), patch.object(
+            generation_checkpoint,
+            "CHECKPOINT_DIR",
+            checkpoint_root,
+        ):
+            failed_id = job_store.create_job({"action": "generate"})
+            generation_checkpoint.save_section_checkpoint(
+                namespace=failed_id,
+                scope="variant-1",
+                binding=binding,
+                chapter_index=0,
+                chapter_title="一",
+                chapter_context_digest="c" * 64,
+                result={"title": "一", "content": "正文"},
+            )
+            generation_checkpoint.finalize_generation_checkpoint(
+                namespace=failed_id,
+                scope="variant-1",
+                binding=binding,
+                status="draft_complete",
+            )
+            job_store.update_job(
+                failed_id,
+                status="failed",
+                error={
+                    "code": "REQUIREMENT_EVIDENCE_BLOCKED",
+                    "message": "章节初稿已保存，但证据门未通过。",
+                    "action": "修复后恢复。",
+                },
+                progress={
+                    "percent": 75,
+                    "phase": "quality_review",
+                    "stage": "quality_review_failed",
+                    "checkpoint": {"status": "draft_complete"},
+                },
+                result={"checkpoint_status": "draft_complete"},
+            )
+            untouched_id = job_store.create_job({"action": "generate"})
+            job_store.update_job(
+                untouched_id,
+                status="failed",
+                progress={"checkpoint": {"status": "failed_empty"}},
+            )
+            false_100_id = job_store.create_job({"action": "generate"})
+            job_store.update_job(
+                false_100_id,
+                status="failed",
+                progress={"percent": 100, "checkpoint": {"status": "failed_empty"}},
+            )
+
+            reconciled = job_store.reconcile_legacy_failed_jobs()
+            repaired = job_store.get_job(failed_id)
+            normalized_100 = job_store.get_job(false_100_id)
+
+        assert set(reconciled) == {failed_id, false_100_id}
+        assert repaired is not None
+        assert repaired["error"]["code"] == "REQUIREMENT_EVIDENCE_BLOCKED"
+        assert repaired["progress"]["phase"] == "quality_review"
+        assert repaired["progress"]["stage"] == "quality_review_failed"
+        assert repaired["progress"]["checkpoint"]["status"] == "failed_partial"
+        assert repaired["result"]["checkpoint_status"] == "failed_partial"
+        assert repaired["result"]["section_count"] == 1
+        assert normalized_100["status"] == "failed"
+        assert normalized_100["progress"]["percent"] == 99
+        assert normalized_100["progress"]["checkpoint"]["status"] == "failed_empty"
+
+    def test_startup_v2_failed_checkpoint_fails_closed_and_scan_continues(self, tmp_path):
+        from backend.zhifei_autoplan import generation_checkpoint, job_store
+
+        job_root = tmp_path / "jobs"
+        checkpoint_root = tmp_path / "checkpoints"
+        binding = generation_checkpoint.build_generation_binding(
+            topic="升级兼容性测试",
+            project_id="p-v2",
+            project_type="房建",
+            outline=["一"],
+            style={},
+            chapter_pages={},
+            variant_id=1,
+            project_fact_digest="a" * 64,
+            requirement_plan_digest="b" * 64,
+            provider_routes=[],
+        )
+        with patch.object(job_store, "JOB_DIR", job_root), patch.object(
+            generation_checkpoint,
+            "CHECKPOINT_DIR",
+            checkpoint_root,
+        ):
+            # This healthy record is deliberately older.  The newer v2 record is
+            # scanned first, proving that its incompatibility does not abort the
+            # remaining startup reconciliation pass.
+            healthy_id = job_store.create_job({"action": "generate"})
+            job_store.update_job(
+                healthy_id,
+                status="failed",
+                progress={"percent": 100, "checkpoint": {"status": "failed_empty"}},
+                result={"checkpoint_status": "failed_empty"},
+            )
+
+            legacy_id = job_store.create_job({"action": "generate"})
+            generation_checkpoint.save_section_checkpoint(
+                namespace=legacy_id,
+                scope="variant-1",
+                binding=binding,
+                chapter_index=0,
+                chapter_title="一",
+                chapter_context_digest="c" * 64,
+                result={"title": "一", "content": "旧版正文"},
+            )
+            checkpoint_path = checkpoint_root / legacy_id / "variant-1.json"
+            legacy_record = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            legacy_record["schema_version"] = "generation-checkpoint-v2"
+            core = {
+                key: value
+                for key, value in legacy_record.items()
+                if key != "integrity_digest"
+            }
+            legacy_record["integrity_digest"] = generation_checkpoint._digest(core)
+            checkpoint_path.write_text(
+                json.dumps(legacy_record, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            legacy_bytes = checkpoint_path.read_bytes()
+            job_store.update_job(
+                legacy_id,
+                status="failed",
+                error={
+                    "code": "REQUIREMENT_EVIDENCE_BLOCKED",
+                    "message": "旧任务质量门失败。",
+                    "action": "恢复任务。",
+                },
+                progress={
+                    "percent": 100,
+                    "phase": "quality_review",
+                    "checkpoint": {"status": "draft_complete"},
+                },
+                result={"checkpoint_status": "draft_complete"},
+            )
+
+            reconciled = job_store.reconcile_legacy_failed_jobs()
+            incompatible = job_store.get_job(legacy_id)
+            healthy = job_store.get_job(healthy_id)
+
+            assert checkpoint_path.read_bytes() == legacy_bytes
+            with pytest.raises(
+                generation_checkpoint.CheckpointIntegrityError,
+                match="checkpoint_schema_mismatch",
+            ):
+                generation_checkpoint.load_generation_checkpoint(
+                    namespace=legacy_id,
+                    scope="variant-1",
+                    binding=binding,
+                )
+
+        assert set(reconciled) == {legacy_id, healthy_id}
+        assert incompatible is not None
+        assert incompatible["status"] == "failed"
+        assert incompatible["progress"]["percent"] == 99
+        assert incompatible["progress"]["stage"] == "checkpoint_schema_incompatible"
+        assert incompatible["progress"]["checkpoint"] == {
+            "status": "failure_seal_failed",
+            "saved_chapter_count": 0,
+            "scopes": [],
+            "error_code": "CHECKPOINT_SCHEMA_INCOMPATIBLE",
+            "error_type": "CheckpointIntegrityError",
+            "reason_code": "checkpoint_schema_mismatch",
+            "reuse_allowed": False,
+            "migration_attempted": False,
+            "schema_compatible": False,
+        }
+        assert incompatible["error"]["code"] == "REQUIREMENT_EVIDENCE_BLOCKED"
+        assert incompatible["error"]["checkpoint_seal_failure"]["code"] == (
+            "CHECKPOINT_SCHEMA_INCOMPATIBLE"
+        )
+        assert incompatible["result"] == {
+            "checkpoint_status": "failure_seal_failed",
+            "section_count": 0,
+            "checkpoint_error_code": "CHECKPOINT_SCHEMA_INCOMPATIBLE",
+            "checkpoint_reuse_allowed": False,
+            "recoverable": False,
+            "delivery_ready": False,
+        }
+        assert healthy is not None
+        assert healthy["progress"]["percent"] == 99
+        assert healthy["progress"]["checkpoint"]["status"] == "failed_empty"
 
 
 class TestGetJob:
@@ -624,6 +1078,7 @@ class TestCleanupJobs:
             job_file = job_dir / f"{job_id}.json"
 
             rec = json.loads(job_file.read_text(encoding="utf-8"))
+            rec["status"] = "succeeded"
             rec["updated_at"] = time.time() - 10 * 24 * 3600  # 10 days ago
             job_file.write_text(json.dumps(rec), encoding="utf-8")
 
@@ -662,6 +1117,7 @@ class TestCleanupJobs:
                 job_id = job_store.create_job({"n": i})
                 job_file = job_dir / f"{job_id}.json"
                 rec = json.loads(job_file.read_text(encoding="utf-8"))
+                rec["status"] = "succeeded"
                 rec["updated_at"] = old_time
                 job_file.write_text(json.dumps(rec), encoding="utf-8")
 
@@ -691,6 +1147,7 @@ class TestCleanupJobs:
             # Make job old
             job_file = job_dir / f"{job_id}.json"
             rec = json.loads(job_file.read_text(encoding="utf-8"))
+            rec["status"] = "succeeded"
             rec["updated_at"] = time.time() - 10 * 24 * 3600
             job_file.write_text(json.dumps(rec), encoding="utf-8")
 
@@ -722,6 +1179,7 @@ class TestCleanupJobs:
 
             job_file = job_dir / f"{job_id}.json"
             rec = json.loads(job_file.read_text(encoding="utf-8"))
+            rec["status"] = "succeeded"
             rec["updated_at"] = time.time() - 10 * 24 * 3600
             job_file.write_text(json.dumps(rec), encoding="utf-8")
 
@@ -749,6 +1207,7 @@ class TestCleanupJobs:
             # Make job old
             job_file = job_dir / f"{job_id}.json"
             rec = json.loads(job_file.read_text(encoding="utf-8"))
+            rec["status"] = "succeeded"
             rec["updated_at"] = time.time() - 10 * 24 * 3600
             job_file.write_text(json.dumps(rec), encoding="utf-8")
 
@@ -770,6 +1229,7 @@ class TestCleanupJobs:
 
             # Make job 2 days old
             rec = json.loads(job_file.read_text(encoding="utf-8"))
+            rec["status"] = "succeeded"
             rec["updated_at"] = time.time() - 2 * 24 * 3600
             job_file.write_text(json.dumps(rec), encoding="utf-8")
 
@@ -792,6 +1252,7 @@ class TestCleanupJobs:
             # Make job old
             job_file = job_dir / f"{job_id}.json"
             rec = json.loads(job_file.read_text(encoding="utf-8"))
+            rec["status"] = "succeeded"
             rec["updated_at"] = time.time() - 10 * 24 * 3600
             job_file.write_text(json.dumps(rec), encoding="utf-8")
 
@@ -963,10 +1424,10 @@ class TestIntegration:
 
         with patch.object(job_store, 'JOB_DIR', job_dir):
             # Create jobs for different users
-            user1_jobs = [
+            [
                 job_store.create_job({"n": i}, user_id=1) for i in range(3)
             ]
-            user2_jobs = [
+            [
                 job_store.create_job({"n": i}, user_id=2) for i in range(2)
             ]
 
@@ -1016,6 +1477,7 @@ class TestIntegration:
                 job_id = job_store.create_job({"n": i})
                 job_file = job_dir / f"{job_id}.json"
                 rec = json.loads(job_file.read_text(encoding="utf-8"))
+                rec["status"] = "succeeded"
                 rec["updated_at"] = time.time() - 10 * 24 * 3600  # Old
                 job_file.write_text(json.dumps(rec), encoding="utf-8")
                 old_ids.append(job_id)

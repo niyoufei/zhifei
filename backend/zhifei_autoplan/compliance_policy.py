@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List
-
+import unicodedata
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 LEGACY_GLOBAL_INSTRUCTION = "严格遵守最新16条行业规定；所有工序采用A/B/C/D/E结构表达。"
 
@@ -33,12 +34,29 @@ _ACTIVE_STATUSES = {
     "有效",
     "现行有效",
 }
+_GENERAL_STANDARD_PREFIX = (
+    r"(?:GB(?:[/_ ]T)?|GBZ(?:[/_ ]T)?|JGJ(?:[/_ ]T)?|"
+    r"CJJ(?:[/_ ]T)?|CECS|DB(?:J|\d+)?(?:[/_ ]T)?|DL(?:[/_ ]T)?|"
+    r"SL(?:[/_ ]T)?|JT(?:[/_ ]T)?|TB(?:[/_ ]T)?|NB(?:[/_ ]T)?|"
+    r"HJ(?:[/_ ]T)?|YY(?:[/_ ]T)?|WS(?:[/_ ]T)?)"
+)
+_JTG_STANDARD_PREFIX = r"JTG(?:[/_ ]T)?"
+_GENERAL_STANDARD_BODY = r"\d+(?:\.\d+)*(?:/\d+)?"
+_JTG_STANDARD_BODY = r"(?:[A-Z]\d+|\d+)(?:\.\d+)*(?:/\d+)?"
 _STANDARD_CODE_RE = re.compile(
-    r"(?<![A-Z0-9])(?:GB(?:/T)?|GBZ(?:/T)?|JGJ(?:/T)?|CJJ(?:/T)?|CECS|DB(?:J|\d+)?(?:/T)?|"
-    r"DL(?:/T)?|SL(?:/T)?|JT(?:G|/T)?|NB(?:/T)?|HJ(?:/T)?|YY(?:/T)?|WS(?:/T)?)"
-    r"\s*[-_/]?[A-Z0-9.]+(?:[-_/]\d{2,4})?(?![A-Z0-9])",
+    rf"(?<![A-Z0-9])(?:{_GENERAL_STANDARD_PREFIX}\s*[-_/ ]?\s*"
+    rf"{_GENERAL_STANDARD_BODY}|{_JTG_STANDARD_PREFIX}\s*[-_/ ]?\s*"
+    rf"{_JTG_STANDARD_BODY})\s*[-_]\s*\d{{4}}(?![-_/.]?[A-Z0-9])",
     re.IGNORECASE,
 )
+_VERSIONED_STANDARD_CODE_RE = re.compile(
+    rf"^(?:{_GENERAL_STANDARD_PREFIX}\s*[-_/ ]?\s*{_GENERAL_STANDARD_BODY}|"
+    rf"{_JTG_STANDARD_PREFIX}\s*[-_/ ]?\s*{_JTG_STANDARD_BODY})"
+    rf"\s*[-_]\s*\d{{4}}$",
+    re.IGNORECASE,
+)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+_OFFICIAL_URL_RE = re.compile(r"^https://[^\s]+$", re.IGNORECASE)
 
 
 def should_migrate_global_instruction(value: Any) -> bool:
@@ -46,30 +64,49 @@ def should_migrate_global_instruction(value: Any) -> bool:
     return not text or text == LEGACY_GLOBAL_INSTRUCTION or "最新16条行业规定" in text
 
 
-def is_verified_standard_metadata(item: Dict[str, Any]) -> bool:
+def is_verified_standard_metadata(item: dict[str, Any]) -> bool:
     code = str(item.get("standard_code") or "").strip()
     name = str(item.get("source_name") or item.get("standard_name") or "").strip()
     official_source = str(item.get("official_source") or "").strip()
     current_version = str(item.get("current_version") or "").strip()
     effective_status = str(item.get("effective_status") or "").strip().lower()
+    official_content_sha256 = str(
+        item.get("official_content_sha256") or ""
+    ).strip()
+    official_document_url = str(
+        item.get("official_document_url") or ""
+    ).strip()
+    pin_valid = not official_content_sha256 or bool(
+        _SHA256_RE.fullmatch(official_content_sha256)
+        and _OFFICIAL_URL_RE.fullmatch(official_document_url)
+    )
+    identity_without_cover = item.get("official_identity_without_cover") is True
+    identity_policy_valid = not identity_without_cover or bool(
+        _SHA256_RE.fullmatch(official_content_sha256)
+        and _OFFICIAL_URL_RE.fullmatch(official_document_url)
+    )
     return bool(
-        code
+        is_versioned_standard_code(code)
         and name
         and official_source
-        and current_version
+        and is_versioned_standard_code(current_version)
+        and canonical_standard_code(current_version)
+        == canonical_standard_code(code)
         and effective_status in _ACTIVE_STATUSES
         and bool(item.get("latest", True))
+        and pin_valid
+        and identity_policy_valid
     )
 
 
-def _string_list(value: Any) -> List[str]:
+def _string_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         values = value
     elif value is None:
         values = []
     else:
         values = [value]
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for raw in values:
         text = str(raw or "").strip()
@@ -80,10 +117,10 @@ def _string_list(value: Any) -> List[str]:
     return out
 
 
-def build_project_applicable_standards_manifest(sections: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def build_project_applicable_standards_manifest(sections: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Build the per-project standard register from verified chapter-level readback only."""
-    records: Dict[str, Dict[str, Any]] = {}
-    rejected: Dict[str, Dict[str, Any]] = {}
+    records: dict[str, dict[str, Any]] = {}
+    rejected: dict[str, dict[str, Any]] = {}
     for section in sections or []:
         if not isinstance(section, dict):
             continue
@@ -94,7 +131,15 @@ def build_project_applicable_standards_manifest(sections: Iterable[Dict[str, Any
             code = str(hit.get("standard_code") or "").strip()
             if not code:
                 continue
-            verified = is_verified_standard_metadata(hit)
+            trusted_projection = bool(
+                hit.get("verified") is True
+                and hit.get("official_registry_verified") is True
+                and (
+                    hit.get("metadata_only") is True
+                    or hit.get("clause_source_authoritative") is True
+                )
+            )
+            verified = trusted_projection and is_verified_standard_metadata(hit)
             target = records if verified else rejected
             rec = target.setdefault(
                 code,
@@ -146,8 +191,8 @@ def build_project_applicable_standards_manifest(sections: Iterable[Dict[str, Any
     }
 
 
-def extract_standard_codes(text: Any) -> List[str]:
-    out: List[str] = []
+def extract_standard_codes(text: Any) -> list[str]:
+    out: list[str] = []
     seen: set[str] = set()
     for match in _STANDARD_CODE_RE.findall(str(text or "")):
         code = re.sub(r"\s+", " ", str(match).strip().upper())
@@ -158,7 +203,107 @@ def extract_standard_codes(text: Any) -> List[str]:
 
 
 def canonical_standard_code(value: Any) -> str:
-    return re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
+    canonical = re.sub(
+        r"[^A-Z0-9]+",
+        "_",
+        unicodedata.normalize("NFKC", str(value or "")).strip().upper(),
+    ).strip("_")
+    # OCR and official covers commonly omit the visual space between a known
+    # standard-system prefix and its numeric body (``GB55037`` vs
+    # ``GB 55037``).  Normalize only that boundary; the strict validator still
+    # rejects alphabetic or otherwise malformed numeric bodies.
+    prefix = (
+        r"(?:GB(?:_T)?|GBZ(?:_T)?|JGJ(?:_T)?|CJJ(?:_T)?|CECS|"
+        r"DB(?:J|\d+)?(?:_T)?|DL(?:_T)?|SL(?:_T)?|JTG(?:_T)?|"
+        r"JT(?:_T)?|TB(?:_T)?|NB(?:_T)?|HJ(?:_T)?|YY(?:_T)?|WS(?:_T)?)"
+    )
+    canonical = re.sub(rf"^({prefix})(?=\d)", r"\1_", canonical)
+    return re.sub(r"^(JTG(?:_T)?)(?=[A-Z]\d)", r"\1_", canonical)
+
+
+def is_versioned_standard_code(value: Any) -> bool:
+    """Return whether a standard identity has a numeric body and 4-digit year."""
+
+    normalized = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    return bool(normalized and _VERSIONED_STANDARD_CODE_RE.fullmatch(normalized))
+
+
+def _registry_identity_name(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalized)
+
+
+def _registry_rows_conflict(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> bool:
+    left_name = _registry_identity_name(
+        left.get("source_name") or left.get("standard_name")
+    )
+    right_name = _registry_identity_name(
+        right.get("source_name") or right.get("standard_name")
+    )
+    if not left_name or not right_name or left_name != right_name:
+        return True
+    if canonical_standard_code(left.get("current_version")) != canonical_standard_code(
+        right.get("current_version")
+    ):
+        return True
+    for field in ("official_content_sha256", "official_document_url"):
+        left_value = str(left.get(field) or "").strip().lower()
+        right_value = str(right.get(field) or "").strip().lower()
+        if left_value and right_value and left_value != right_value:
+            return True
+    return bool(left.get("official_identity_without_cover")) != bool(
+        right.get("official_identity_without_cover")
+    )
+
+
+def build_standard_registry_map(
+    rows: Iterable[Any],
+) -> dict[str, dict[str, Any]]:
+    """Deduplicate registry rows without concealing provenance conflicts."""
+
+    registry: dict[str, dict[str, Any]] = {}
+    for raw in rows or []:
+        if not isinstance(raw, Mapping):
+            continue
+        row = dict(raw)
+        canonical = canonical_standard_code(row.get("standard_code"))
+        if not canonical:
+            continue
+        row["_registry_unverified"] = not is_verified_standard_metadata(row)
+        current = registry.get(canonical)
+        if current is None:
+            registry[canonical] = row
+            continue
+        if current.get("_registry_ambiguous") is True:
+            continue
+        if _registry_rows_conflict(current, row):
+            registry[canonical] = {
+                "standard_code": row.get("standard_code"),
+                "_registry_ambiguous": True,
+                "_registry_unverified": True,
+            }
+            continue
+        current_verified = not bool(current.get("_registry_unverified"))
+        row_verified = not bool(row.get("_registry_unverified"))
+        prefer_row = bool(
+            (row_verified and not current_verified)
+            or (
+                row_verified == current_verified
+                and bool(current.get("metadata_only"))
+                and not bool(row.get("metadata_only"))
+            )
+            or (
+                row_verified == current_verified
+                and not str(current.get("official_content_sha256") or "").strip()
+                and bool(str(row.get("official_content_sha256") or "").strip())
+            )
+        )
+        if prefer_row:
+            registry[canonical] = row
+    return registry
 
 
 # Backward-compatible private alias for callers/tests that imported the old name.
@@ -168,12 +313,12 @@ _canonical_standard_code = canonical_standard_code
 def filter_evidence_to_verified_standard_codes(
     lines: Iterable[Any],
     verified_codes: Iterable[Any],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Remove evidence lines that cite a standard outside the verified project allowlist."""
     allowed = {canonical_standard_code(code) for code in verified_codes}
     allowed.discard("")
-    kept: List[str] = []
-    dropped: List[Dict[str, Any]] = []
+    kept: list[str] = []
+    dropped: list[dict[str, Any]] = []
     for raw in lines or []:
         line = str(raw or "").strip()
         if not line:
@@ -191,9 +336,9 @@ def filter_evidence_to_verified_standard_codes(
     }
 
 
-def standard_citation_directive(verified_metadata: Iterable[Dict[str, Any]]) -> str:
+def standard_citation_directive(verified_metadata: Iterable[dict[str, Any]]) -> str:
     """Return an explicit writer constraint derived only from verified metadata."""
-    labels: List[str] = []
+    labels: list[str] = []
     seen: set[str] = set()
     for row in verified_metadata or []:
         if not isinstance(row, dict) or not is_verified_standard_metadata(row):
@@ -220,7 +365,7 @@ def standard_citation_directive(verified_metadata: Iterable[Dict[str, Any]]) -> 
 def replace_unverified_standard_citations(
     text: Any,
     verified_codes: Iterable[Any],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Fail-safe sanitization for model-invented or stale standard identifiers.
 
     The surrounding requirement is retained, but the unverified identifier is
@@ -230,7 +375,7 @@ def replace_unverified_standard_citations(
     allowed = {canonical_standard_code(code) for code in verified_codes}
     allowed.discard("")
     source = str(text or "")
-    removed: List[str] = []
+    removed: list[str] = []
 
     def _replace(match: re.Match[str]) -> str:
         code = re.sub(r"\s+", " ", str(match.group(0) or "").strip().upper())
@@ -249,16 +394,16 @@ def replace_unverified_standard_citations(
 
 
 def audit_standard_citations(
-    sections: Iterable[Dict[str, Any]],
-    manifest: Dict[str, Any],
-) -> Dict[str, Any]:
+    sections: Iterable[dict[str, Any]],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
     verified_codes = {
         canonical_standard_code((row.get("standard_code_and_name") or {}).get("code"))
         for row in (manifest.get("verified_standards") or [])
         if isinstance(row, dict)
     }
     verified_codes.discard("")
-    violations: List[Dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
     for section in sections or []:
         if not isinstance(section, dict):
             continue
@@ -291,6 +436,7 @@ def audit_standard_citations(
     return {
         "ok": not violations,
         "verified_standard_count": len(verified_codes),
+        "verified_standard_codes": sorted(verified_codes),
         "violation_count": len(violations),
         "violations": violations,
     }

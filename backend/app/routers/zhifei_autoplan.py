@@ -1,37 +1,92 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import logging
+import os
+import re
 import tempfile
-from typing import Any, Dict, List
+import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Header, BackgroundTasks
+import jwt
+from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
-from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
-from backend.zhifei_autoplan.kg_store import save_kg_bytes, list_kg, set_active_kg, get_active_kg
+from backend.auth_store import (
+    count_user_actions_since,
+    get_user_by_id,
+    log_charge,
+    update_balance,
+)
+from backend.zhifei_autoplan.boq_store import load_boq_data, save_boq_data
+from backend.zhifei_autoplan.evidence import resolve_trusted_ingest_record
+from backend.zhifei_autoplan.exporter import (
+    export_autoplan_compare_docx,
+    export_autoplan_docx,
+    export_autoplan_docx_from_file,
+)
+from backend.zhifei_autoplan.job_store import (
+    JobLeaseLostError,
+    acquire_job_lease,
+    cleanup_jobs,
+    create_job,
+    get_job,
+    heartbeat_job,
+    job_lease_active,
+    list_jobs,
+    run_with_job_lease,
+    transition_job,
+)
 from backend.zhifei_autoplan.kg_runtime import search_kg
-from backend.zhifei_autoplan.tender_store import save_tender_matrix, load_tender_matrix
-from backend.zhifei_autoplan.boq_store import save_boq_data
-from backend.auth_store import get_user_by_id, update_balance, log_charge, count_user_actions_since
-import jwt
-import os
-from backend.zhifei_autoplan.orchestrator import run_autoplan
-from pathlib import Path
-import json
-from backend.zhifei_autoplan.exporter import export_autoplan_docx_from_file, export_autoplan_docx, export_autoplan_compare_docx
-from fastapi.responses import FileResponse
-from backend.zhifei_autoplan.job_store import create_job, update_job, get_job, list_jobs, cleanup_jobs
-from backend.zhifei_autoplan.plan_store import save_plan, load_plan
+from backend.zhifei_autoplan.kg_store import (
+    get_active_kg,
+    list_kg,
+    save_kg_bytes,
+    set_active_kg,
+)
+from backend.zhifei_autoplan.local_job_queue import submit_isolated_job
+from backend.zhifei_autoplan.model_reliability import classify_provider_error
 from backend.zhifei_autoplan.optimizer import optimize_sections
+from backend.zhifei_autoplan.orchestrator import (
+    new_provider_admission_run_coordinator,
+    probe_provider_candidate,
+    run_autoplan,
+)
+from backend.zhifei_autoplan.output_artifacts import sanitize_output_payload
+from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
+from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
+from backend.zhifei_autoplan.plan_store import load_plan, save_plan
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    ProjectFactApprovalAuditError,
+    append_project_fact_approval_event,
+    build_project_fact_approval_event,
+)
+from backend.zhifei_autoplan.provider_runtime import (
+    ProviderRoutingConfigurationError,
+    apply_server_provider_routing,
+    build_server_provider_admission_candidates,
+    server_provider_admission_required_roles,
+)
+from backend.zhifei_autoplan.runtime_events import append_runtime_event
+from backend.zhifei_autoplan.tender_store import load_tender_matrix, save_tender_matrix
 from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
+
+logger = logging.getLogger(__name__)
 
 try:
     from backend.zhifei_autoplan.local_adapter_shim import (
         block_export_response as _local_adapter_block_export_response,
+    )
+    from backend.zhifei_autoplan.local_adapter_shim import (
         map_output as _local_adapter_map_output,
     )
 except Exception:
+    logger.warning("local adapter shim unavailable; exports remain blocked", exc_info=True)
     _local_adapter_block_export_response = None
     _local_adapter_map_output = None
 
@@ -41,36 +96,208 @@ JWT_ALG = "HS256"
 COST_PER_JOB = int(os.environ.get("ZF_JOB_COST", "1"))
 
 
-def _local_adapter_issue(code: str, message: str, *, variant_index: int | None = None) -> Dict[str, Any]:
-    issue: Dict[str, Any] = {"code": code, "message": message, "severity": "error"}
+def _require_generation_sources(payload: dict[str, Any], project_id: str | None) -> None:
+    if bool(payload.get("dry_run")):
+        return
+    if not str(project_id or "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROJECT_SCOPE_REQUIRED",
+                "message": "真实生成必须绑定明确项目，禁止使用全局资料池。",
+            },
+        )
+    missing: list[str] = []
+    tender_source = load_tender_matrix(project_id=project_id) or {}
+    boq_source = load_boq_data(project_id=project_id) or {}
+    if not isinstance(tender_source.get("outline"), list) or not tender_source.get("outline"):
+        missing.append("tender")
+    if not isinstance(boq_source.get("items"), list) or not boq_source.get("items"):
+        missing.append("boq")
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MANDATORY_SOURCE_NOT_READY",
+                "message": "招标/答疑与工程量清单必须全部解析成功后才能生成。",
+                "missing": missing,
+            },
+        )
+
+
+def _route_generation_or_503(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        routed = apply_server_provider_routing(payload)
+        # This compatibility route exports deterministic DOCX directly and
+        # never calls the professional document-render model.
+        routed["_provider_admission_required_roles"] = [
+            role
+            for role in (routed.get("_provider_admission_required_roles") or [])
+            if str(role or "").strip().lower() != "document_render"
+        ]
+        return routed
+    except ProviderRoutingConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_CONFIGURATION_BLOCKED",
+                "message": "服务端模型路由未配置完整或尚不支持准入，已阻止生成。",
+            },
+        ) from exc
+
+
+async def _admit_server_provider_chain(payload: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
+    """Freshly admit the server-owned chain and return ephemeral text credentials.
+
+    The returned credentials live only in memory.  Callers must never place the
+    returned chain in a job record, result, checkpoint, audit record or response.
+    """
+
+    coordinator = new_provider_admission_run_coordinator(payload)
+    candidates = build_server_provider_admission_candidates()
+    required_roles = server_provider_admission_required_roles(
+        candidates,
+        require_document_render=False,
+    )
+    snapshot = await coordinator.admit_chain_once(
+        candidates=candidates,
+        probe=probe_provider_candidate,
+        required_roles=required_roles,
+    )
+    if not bool(snapshot.get("generation_allowed")):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_ADMISSION_BLOCKED",
+                "message": "模型供应商准入未通过，已在调用模型前停止。",
+                "action": "请在供应商准入页面检查凭据、模型、配额、流式能力和文档渲染槽位。",
+            },
+        )
+    admitted_identities = {
+        str(row.get("identity_digest") or "")
+        for row in (snapshot.get("admitted_chain") or [])
+        if isinstance(row, dict) and str(row.get("identity_digest") or "")
+    }
+    chain: list[dict[str, Any]] = []
+    for candidate in coordinator.bound_candidates:
+        if not str(candidate.role or "").startswith("text_"):
+            continue
+        if candidate.identity_digest not in admitted_identities:
+            continue
+        chain.append(
+            {
+                "slot": candidate.slot,
+                "role": candidate.role,
+                "provider": candidate.provider,
+                "model": candidate.model,
+                "api_key": candidate.credential,
+            }
+        )
+    if not chain:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_ADMISSION_EMPTY",
+                "message": "没有可用的已准入文本模型，已停止调用。",
+            },
+        )
+    return coordinator, chain
+
+
+def _stable_job_error(
+    exc: BaseException,
+    *,
+    provider: str = "",
+    model: str = "",
+) -> str:
+    """Project arbitrary exceptions into a stable, Chinese, credential-free error."""
+
+    raw = str(exc or "")
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        code = str(parsed.get("code") or "").strip()
+        if code and all(ch.isupper() or ch.isdigit() or ch == "_" for ch in code):
+            return json.dumps(
+                {
+                    "code": code[:80],
+                    "message": str(parsed.get("message") or "任务执行失败，系统已安全停止。")[:300],
+                    "action": str(parsed.get("action") or "请根据错误码检查资料和模型准入状态后重试。")[:300],
+                },
+                ensure_ascii=False,
+            )
+    provider_error = classify_provider_error(
+        exc,
+        provider=str(provider or ""),
+        model=str(model or ""),
+    )
+    return json.dumps(
+        {
+            "code": str(provider_error.get("code") or "AUTOPLAN_RUNTIME_FAILED")[:80],
+            "message": str(provider_error.get("user_message") or "任务执行失败，系统已安全停止。")[:300],
+            "action": str(provider_error.get("action") or "请检查资料和供应商准入状态后重试。")[:300],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _local_adapter_issue(code: str, message: str, *, variant_index: int | None = None) -> dict[str, Any]:
+    issue: dict[str, Any] = {"code": code, "message": message, "severity": "error"}
     if variant_index is not None:
         issue["variant_index"] = variant_index
     return issue
 
 
-def _local_adapter_block(issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _local_adapter_block(issues: list[dict[str, Any]]) -> dict[str, Any]:
     if _local_adapter_block_export_response is not None:
         return _local_adapter_block_export_response(issues)
     return {"ok": False, "status": "blocked", "export_allowed": False, "issues": issues}
 
 
-def _local_adapter_gate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _local_adapter_gate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     if _local_adapter_map_output is None:
         return {
             "export_allowed": False,
             "results": results,
             "issues": [_local_adapter_issue("ADAPTER_IMPORT_FAILURE", "local adapter shim import failed")],
         }
-    issues: List[Dict[str, Any]] = []
-    gated_results: List[Dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    gated_results: list[dict[str, Any]] = []
     for idx, result in enumerate(results):
         if not isinstance(result, dict):
             issues.append(_local_adapter_issue("ADAPTER_OUTPUT_INVALID", "variant output is not a dict", variant_index=idx))
             continue
+        delivery_scope = str(result.get("delivery_scope") or "document").strip().lower()
+        formal_document = delivery_scope == "document" and not bool(result.get("dry_run"))
+        delivery_gate = (
+            result.get("delivery_quality_gate")
+            if isinstance(result.get("delivery_quality_gate"), dict)
+            else {}
+        )
+        if formal_document and (
+            result.get("delivery_ready") is not True
+            or delivery_gate.get("delivery_allowed") is not True
+        ):
+            issues.append(
+                _local_adapter_issue(
+                    "FORMAL_DELIVERY_QUALITY_GATE_BLOCKED",
+                    "正式文档未通过参数与证据交付门，已阻止导出。",
+                    variant_index=idx,
+                )
+            )
         try:
             envelope = _local_adapter_map_output(result)
-        except Exception as exc:
-            issues.append(_local_adapter_issue("ADAPTER_HOOK_FAILURE", repr(exc), variant_index=idx))
+        except Exception:
+            logger.warning("local adapter hook failed for variant %s", idx, exc_info=True)
+            issues.append(
+                _local_adapter_issue(
+                    "ADAPTER_HOOK_FAILURE",
+                    "生成结果适配校验失败，已阻止导出。",
+                    variant_index=idx,
+                )
+            )
             continue
         adapter_view = {
             "status": envelope.get("status"),
@@ -89,22 +316,22 @@ def _local_adapter_gate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]
     return {"export_allowed": not issues, "results": gated_results, "issues": issues}
 
 
-def _local_adapter_job_error(issues: List[Dict[str, Any]]) -> str:
+def _local_adapter_job_error(issues: list[dict[str, Any]]) -> str:
     return json.dumps(_local_adapter_block(issues), ensure_ascii=False)
 
 
 def _load_field_alias() -> dict:
     try:
-        from pathlib import Path
         import json
+        from pathlib import Path
         cfg_path = Path("backend/data/autoplan/config.json")
         if cfg_path.exists():
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             alias = cfg.get("job_list_field_alias")
             if isinstance(alias, dict):
                 return {str(k): {str(s) for s in v} for k, v in alias.items() if isinstance(v, list)}
-    except Exception:
-        pass
+    except (AttributeError, json.JSONDecodeError, OSError, TypeError, UnicodeError):
+        logger.warning("job-list field alias configuration unavailable", exc_info=True)
     return {}
 
 
@@ -141,16 +368,16 @@ def _job_list_default_fields() -> set[str]:
     if env_fields:
         return {s.strip() for s in env_fields.split(",") if s.strip()}
     try:
-        from pathlib import Path
         import json
+        from pathlib import Path
         cfg_path = Path("backend/data/autoplan/config.json")
         if cfg_path.exists():
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             fields = cfg.get("job_list_default_fields")
             if isinstance(fields, list) and fields:
                 return {str(s) for s in fields}
-    except Exception:
-        pass
+    except (AttributeError, json.JSONDecodeError, OSError, TypeError, UnicodeError):
+        logger.warning("job-list default field configuration unavailable", exc_info=True)
     return {"job_id", "status", "created_at", "updated_at", "result", "error"}
 
 
@@ -176,8 +403,8 @@ def _auth_user(authorization: str | None):
         if not user:
             raise HTTPException(status_code=401, detail="invalid user")
         return user
-    except Exception:
-        raise HTTPException(status_code=401, detail="invalid token")
+    except (AttributeError, TypeError, ValueError, jwt.PyJWTError) as exc:
+        raise HTTPException(status_code=401, detail="invalid token") from exc
 
 
 def _is_admin(authorization: str | None) -> bool:
@@ -198,19 +425,18 @@ def _charge(user: dict, cost: int, action: str):
 
 def _audit(action: str, user_id: int | None = None, detail: dict | None = None):
     try:
-        from datetime import datetime
         path = Path("backend/data/audit/autoplan.jsonl")
         path.parent.mkdir(parents=True, exist_ok=True)
         rec = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "action": action,
             "user_id": user_id,
             "detail": detail or {},
         }
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError):
+        logger.warning("autoplan audit record could not be persisted", exc_info=True)
 
 
 def _read_audit(
@@ -230,7 +456,8 @@ def _read_audit(
             continue
         try:
             rec = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
+            logger.warning("skipping malformed autoplan audit line", exc_info=True)
             continue
         if action and rec.get("action") != action:
             continue
@@ -261,7 +488,8 @@ def _audit_summary(limit: int = 10000, user_id: int | None = None, by_user: bool
             continue
         try:
             rec = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
+            logger.warning("skipping malformed autoplan audit summary line", exc_info=True)
             continue
         if user_id is not None and rec.get("user_id") != user_id:
             continue
@@ -281,17 +509,14 @@ def _audit_stats_by_day(limit_days: int = 30, user_id: int | None = None):
     lines = path.read_text(encoding="utf-8").splitlines()
     by_day = {}
     total = 0
-    try:
-        from datetime import datetime, timedelta
-        cutoff = (datetime.utcnow() - timedelta(days=limit_days)).isoformat()[:10]
-    except Exception:
-        cutoff = ""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=limit_days)).date().isoformat()
     for line in lines:
         if not line.strip():
             continue
         try:
             rec = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
+            logger.warning("skipping malformed autoplan audit statistics line", exc_info=True)
             continue
         if user_id is not None and rec.get("user_id") != user_id:
             continue
@@ -316,7 +541,7 @@ async def _save_upload(uf: UploadFile) -> str:
 
 @router.post("/tender/parse")
 async def parse_tender(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_id: str | None = None,
     authorization: str | None = Header(default=None),
 ):
@@ -328,16 +553,23 @@ async def parse_tender(
     _charge(user, COST_PER_JOB, "tender_parse")
     if not files:
         raise HTTPException(status_code=400, detail="未上传文件")
+    if not str(project_id or "").strip():
+        raise HTTPException(status_code=422, detail={"code": "PROJECT_SCOPE_REQUIRED"})
     paths = await asyncio.gather(*[_save_upload(f) for f in files])
     parser = TenderParser()
     matrix = await parser.parse(paths)
-    saved_at = save_tender_matrix(matrix.model_dump(), project_id=project_id)
-    return {"matrix": matrix.model_dump(), "saved_at": saved_at}
+    matrix_payload = matrix.model_dump()
+    if not isinstance(matrix_payload.get("outline"), list) or not matrix_payload.get("outline"):
+        raise HTTPException(status_code=422, detail={"code": "TENDER_PARSE_NOT_READY"})
+    matrix_payload["parse_status"] = "ready"
+    matrix_payload["project_id"] = str(project_id).strip()
+    saved_at = save_tender_matrix(matrix_payload, project_id=project_id)
+    return {"matrix": matrix_payload, "saved_at": saved_at}
 
 
 @router.post("/boq/parse")
 async def parse_boq(
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File()],
     project_id: str | None = None,
     authorization: str | None = Header(default=None),
 ):
@@ -349,12 +581,18 @@ async def parse_boq(
     _charge(user, COST_PER_JOB, "boq_parse")
     if not file:
         raise HTTPException(status_code=400, detail="未上传文件")
+    if not str(project_id or "").strip():
+        raise HTTPException(status_code=422, detail={"code": "PROJECT_SCOPE_REQUIRED"})
     path = await _save_upload(file)
     parser = BoQParser()
     items, stats = await parser.parse(path)
+    if not items:
+        raise HTTPException(status_code=422, detail={"code": "BOQ_PARSE_NOT_READY"})
     payload = {
         "items": [it.model_dump() for it in items],
         "stats": stats,
+        "parse_status": "ready",
+        "project_id": str(project_id).strip(),
     }
     saved_at = save_boq_data(payload, project_id=project_id)
     return {**payload, "saved_at": saved_at}
@@ -363,7 +601,32 @@ async def parse_boq(
 @router.post("/plan/save")
 async def save_plan_api(req: PlanRequest, project_id: str | None = None, authorization: str | None = Header(default=None)):
     user = _auth_user(authorization)
-    path = save_plan(req.model_dump(), project_id=project_id)
+    explicit_approvals = req.approved_project_fact_resolutions is not None
+    payload = _inherit_project_fact_plan_fields(
+        req.model_dump(),
+        load_plan(project_id=project_id) or {},
+    )
+    if explicit_approvals:
+        try:
+            payload["approved_project_fact_resolutions"] = (
+                _persist_explicit_project_fact_approvals(
+                    payload.get("approved_project_fact_resolutions") or {},
+                    project_id=project_id,
+                    actor={
+                        "channel": "authenticated_user",
+                        "actor_id": f"user:{user['id']}",
+                    },
+                )
+            )
+        except ProjectFactApprovalAuditError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PROJECT_FACT_APPROVAL_CONFIRMATION_INVALID",
+                    "reason": exc.code,
+                },
+            ) from exc
+    path = save_plan(payload, project_id=project_id)
     _audit("plan_save", user_id=user["id"], detail={"path": path, "project_id": project_id})
     return {"ok": True, "saved_at": path}
 
@@ -381,14 +644,20 @@ class ActivateKGRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     project_id: str | None = None
+    delivery_scope: Literal["document", "chapter_validation"] = "document"
     topic: str
-    outline: List[str] = []
-    requirements: List[str] = []
+    outline: list[str] = []
+    requirements: list[str] = []
     chapter_requirements: dict | None = None
+    # Reusable project context is accepted as separate fields so the
+    # orchestrator can place it before the dynamic chapter instruction.
+    chapter_summaries: list[dict | str] = []
+    project_stage_context: str | None = None
+    common_construction_requirements: list[str] = []
     provider: str | None = None
     model: str | None = None
-    provider_chain: List[dict] | None = None
-    providers: List[str] = []
+    provider_chain: list[dict] | None = None
+    providers: list[str] = []
     model_map: dict | None = None
     style: dict | None = None
     variants: int = 1
@@ -405,10 +674,12 @@ class GenerateRequest(BaseModel):
     token_url: str | None = None
     dry_run: bool = False
     generate_images: bool = True
+    project_facts: dict[str, Any] | None = None
+    approved_project_fact_resolutions: dict[str, Any] | None = None
 
 
 class PlanRequest(BaseModel):
-    outline: List[str]
+    outline: list[str]
     style: dict = {}
     variants: int = 1
     chapter_requirements: dict = {}
@@ -419,10 +690,146 @@ class PlanRequest(BaseModel):
     compare_mode: str = "full"
     compare_max_chars: int = 800
     compare_titles: list[str] | None = None
+    project_facts: dict[str, Any] | None = None
+    approved_project_fact_resolutions: dict[str, Any] | None = None
+
+
+_PROJECT_FACT_PLAN_FIELDS = (
+    "project_facts",
+    "approved_project_fact_resolutions",
+)
+
+_PROJECT_FACT_INGEST_AUDIT_PATH = Path("backend/data/audit/ingest.jsonl")
+_PROJECT_FACT_APPROVAL_AUDIT_PATH = Path(
+    "backend/data/audit/project_fact_approvals.jsonl"
+)
+
+
+def _inherit_project_fact_plan_fields(payload: dict, plan: dict) -> dict:
+    """Inherit only omitted fact maps; an explicit empty map remains a clear."""
+
+    for field in _PROJECT_FACT_PLAN_FIELDS:
+        if payload.get(field) is None and isinstance(plan.get(field), dict):
+            payload[field] = dict(plan[field])
+    return payload
+
+
+def _latest_trusted_project_fact_approval_source(
+    *,
+    project_id: str,
+    source_sha256: str,
+) -> dict[str, Any]:
+    digest = str(source_sha256 or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_INVALID",
+            "批准参数来源摘要无效",
+        )
+    audit_path = _PROJECT_FACT_INGEST_AUDIT_PATH
+    if audit_path.is_symlink() or not audit_path.is_file():
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "当前入库审计不存在或不可信",
+        )
+    try:
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "当前入库审计无法读取",
+        ) from exc
+    latest: dict[str, Any] | None = None
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        if (
+            str(row.get("project_id") or "").strip() == project_id
+            and str(row.get("sha256") or "").strip().lower() == digest
+        ):
+            latest = row
+            break
+    if (
+        latest is None
+        or latest.get("enabled") is not True
+        or latest.get("usable") is not True
+    ):
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "批准参数来源不是当前启用且可用记录",
+        )
+    trusted = resolve_trusted_ingest_record(
+        latest,
+        workspace_root=audit_path.parent.parent,
+    )
+    if trusted.get("ok") is not True:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "批准参数来源当前字节验证失败",
+        )
+    return {**trusted, "enabled": True, "usable": True}
+
+
+def _persist_explicit_project_fact_approvals(
+    resolutions: dict[str, Any],
+    *,
+    project_id: str | None,
+    actor: dict[str, str],
+) -> dict[str, Any]:
+    if not resolutions:
+        return {}
+    pid = str(project_id or "").strip()
+    if not pid:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_PROJECT_INVALID",
+            "显式批准项目参数必须绑定项目ID",
+        )
+    prepared: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for field in sorted(resolutions):
+        raw = resolutions[field]
+        if not isinstance(raw, dict):
+            raise ProjectFactApprovalAuditError(
+                "PROJECT_FACT_APPROVAL_RESOLUTION_INVALID",
+                "批准参数必须是结构化对象",
+            )
+        evidence = raw.get("evidence")
+        if not isinstance(evidence, dict):
+            raise ProjectFactApprovalAuditError(
+                "PROJECT_FACT_APPROVAL_SOURCE_INVALID",
+                "批准参数缺少来源证据",
+            )
+        trusted_source = _latest_trusted_project_fact_approval_source(
+            project_id=pid,
+            source_sha256=str(
+                evidence.get("document_sha256")
+                or evidence.get("source_sha256")
+                or ""
+            ),
+        )
+        event = build_project_fact_approval_event(
+            project_id=pid,
+            field=field,
+            resolution=raw,
+            trusted_source=trusted_source,
+            actor=actor,
+        )
+        prepared.append((field, raw, event))
+
+    persisted: dict[str, Any] = {}
+    for field, raw, event in prepared:
+        appended = append_project_fact_approval_event(
+            _PROJECT_FACT_APPROVAL_AUDIT_PATH,
+            event,
+        )
+        persisted[field] = {**raw, "approval_event": appended["locator"]}
+    return persisted
 
 
 class OptimizeRequest(BaseModel):
-    titles: List[str]
+    titles: list[str]
     instruction: str = "请在保持证据引用的前提下优化本章表达。"
     provider: str | None = None
     model: str | None = None
@@ -479,8 +886,334 @@ class AuditExportCleanupRequest(BaseModel):
     keep_latest_n: int | None = None
 
 
+def run_legacy_generation_job(job_id: str, payload: dict) -> None:
+    """Spawn-safe compatibility worker shared by single and batch routes."""
+
+    heartbeat_stop = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+
+    lease_record = acquire_job_lease(job_id)
+    if lease_record is None:
+        return
+    lease_attempt_id = str(lease_record.get("attempt_id") or "")
+    lease_owner_instance_id = str(lease_record.get("owner_instance_id") or "")
+    if not lease_attempt_id or not lease_owner_instance_id:
+        raise RuntimeError("job_lease_acquisition_invalid")
+
+    def _lease_active() -> bool:
+        return job_lease_active(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+        )
+
+    def _status() -> str:
+        return str((get_job(job_id) or {}).get("status") or "").strip().lower()
+
+    def _cancel_requested() -> bool:
+        return _status() in {"cancel_requested", "cancelled"} or not _lease_active()
+
+    def _lease_side_effect(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        return run_with_job_lease(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+            callback=callback,
+            callback_args=tuple(args),
+            callback_kwargs=dict(kwargs),
+        )
+
+    def _running_side_effect(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        return run_with_job_lease(
+            job_id,
+            attempt_id=lease_attempt_id,
+            owner_instance_id=lease_owner_instance_id,
+            allowed_statuses={"running"},
+            callback=callback,
+            callback_args=tuple(args),
+            callback_kwargs=dict(kwargs),
+        )
+
+    def _append_active_event(event: str, **fields: Any) -> bool:
+        try:
+            _running_side_effect(append_runtime_event, job_id, event, **fields)
+            return True
+        except JobLeaseLostError:
+            return False
+
+    def _mark_cancelled() -> None:
+        if not _lease_active():
+            return
+        prior_progress = (get_job(job_id) or {}).get("progress") or {}
+        try:
+            from backend.zhifei_autoplan.generation_checkpoint import (
+                mark_checkpoint_namespace_interrupted,
+            )
+
+            scopes = _lease_side_effect(mark_checkpoint_namespace_interrupted, job_id)
+            checkpoint_projection = {
+                "status": (
+                    "interrupted_recoverable" if scopes else "interrupted_empty"
+                ),
+                "saved_chapter_count": sum(
+                    int(item.get("saved_chapter_count") or 0)
+                    for item in scopes
+                    if isinstance(item, dict)
+                ),
+                "scopes": scopes,
+            }
+            seal_failed = False
+        except JobLeaseLostError:
+            return
+        except Exception as seal_error:  # noqa: BLE001 - cancellation sealing records fail-closed state
+            checkpoint_projection = {
+                "status": "interruption_seal_failed",
+                "saved_chapter_count": 0,
+                "error_code": "CHECKPOINT_INTERRUPTION_SEAL_FAILED",
+                "error_type": type(seal_error).__name__,
+            }
+            seal_failed = True
+        transitioned = transition_job(
+            job_id,
+            allowed_from={"running", "cancel_requested"},
+            status="cancelled",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            revoke_lease=True,
+            error={
+                "code": (
+                    "JOB_CANCELLED_CHECKPOINT_SEAL_FAILED"
+                    if seal_failed
+                    else "JOB_CANCELLED"
+                ),
+                "message": (
+                    "用户已取消任务，但检查点封存失败；该故障已显式记录。"
+                    if seal_failed
+                    else "用户已取消任务。"
+                ),
+                "action": (
+                    "先检查检查点存储与权限，再决定是否从先前可信断点恢复。"
+                    if seal_failed
+                    else "可从已保存的可信检查点显式恢复。"
+                ),
+            },
+            progress={
+                "percent": min(99, int(prior_progress.get("percent") or 0)),
+                "phase": "generation",
+                "work_state": "idle",
+                "checkpoint": checkpoint_projection,
+            },
+        )
+        if transitioned is not None:
+            append_runtime_event(job_id, "legacy_job_cancelled")
+
+    def _heartbeat() -> None:
+        while not heartbeat_stop.wait(5.0):
+            updated = heartbeat_job(
+                job_id,
+                activity="兼容任务正在隔离生成",
+                progress_updates={"phase": "generation", "work_state": "processing"},
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                allowed_statuses={"running"},
+            )
+            if updated is None:
+                heartbeat_stop.set()
+                return
+
+    try:
+        if _cancel_requested():
+            _mark_cancelled()
+            return
+        started = transition_job(
+            job_id,
+            allowed_from={"running"},
+            status="running",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            progress={"phase": "generation", "work_state": "processing", "percent": 1},
+        )
+        if started is None:
+            return
+        _append_active_event("legacy_job_started")
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat,
+            name=f"legacy-autoplan-heartbeat-{job_id[:8]}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        local_payload = json.loads(json.dumps(payload))
+        provider_admission_run = (
+            new_provider_admission_run_coordinator(local_payload)
+            if bool(local_payload.get("_provider_admission_required"))
+            else None
+        )
+        variants = int(local_payload.get("variants") or 1)
+        variant_ids = local_payload.get("_variant_ids")
+        if not isinstance(variant_ids, list) or not variant_ids:
+            variant_ids = _running_side_effect(
+                reserve_variant_ids,
+                project_id=str(local_payload.get("project_id") or "").strip() or None,
+                count=max(1, variants),
+                explicit_variant_id=local_payload.get("variant_id"),
+                explicit_template_id=local_payload.get("logic_template_id")
+                or local_payload.get("logic_template"),
+            )
+        results = []
+        for variant_id in variant_ids:
+            if _cancel_requested():
+                _mark_cancelled()
+                return
+            local_payload["variant_id"] = int(variant_id)
+            local_payload["_job_id"] = job_id
+            local_payload["_checkpoint_namespace"] = job_id
+            local_payload["_cancel_callback"] = _cancel_requested
+            local_payload["_checkpoint_write_guard"] = _lease_side_effect
+            if provider_admission_run is not None:
+                local_payload["_provider_admission_run_coordinator"] = provider_admission_run
+            result = asyncio.run(run_autoplan(local_payload))
+            if _cancel_requested():
+                _mark_cancelled()
+                return
+            results.append(result)
+        if _cancel_requested():
+            _mark_cancelled()
+            return
+        gate = _local_adapter_gate_results(results)
+        if not gate["export_allowed"]:
+            failed = transition_job(
+                job_id,
+                allowed_from={"running"},
+                status="failed",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
+                result=_local_adapter_block(gate["issues"]),
+                error=_local_adapter_job_error(gate["issues"]),
+                progress={"work_state": "idle", "percent": 99},
+            )
+            if failed is not None:
+                append_runtime_event(job_id, "legacy_job_failed", code="LOCAL_ADAPTER_BLOCKED")
+            elif _status() == "cancel_requested":
+                _mark_cancelled()
+            return
+        results = gate["results"]
+
+        output_dir = Path("build")
+        _running_side_effect(output_dir.mkdir, parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=f"zhifei-autoplan-{job_id}-",
+            dir=str(output_dir),
+        ) as staging_dir_value:
+            staging_dir = Path(staging_dir_value)
+            staged_json = staging_dir / f"autoplan_{job_id}.json"
+            staged_json.write_text(
+                json.dumps(
+                    {"variants": sanitize_output_payload(results)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            staged_docx: list[Path] = []
+            staged_compare: list[Path] = []
+            for index, variant in enumerate(results, start=1):
+                staged_variant = staging_dir / f"autoplan_{job_id}_v{index}.docx"
+                export_autoplan_docx(variant, str(staged_variant))
+                staged_docx.append(staged_variant)
+                staged_comparison = (
+                    staging_dir / f"autoplan_{job_id}_compare_v{index}.docx"
+                )
+                export_autoplan_compare_docx(variant, str(staged_comparison))
+                staged_compare.append(staged_comparison)
+
+            final_json = output_dir / staged_json.name
+            final_docx = [output_dir / path.name for path in staged_docx]
+            final_compare = [output_dir / path.name for path in staged_compare]
+
+            def _publish_outputs() -> None:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                staged_json.replace(final_json)
+                for staged_path, final_path in zip(staged_docx, final_docx):
+                    staged_path.replace(final_path)
+                for staged_path, final_path in zip(staged_compare, final_compare):
+                    staged_path.replace(final_path)
+
+            # Rendering happens outside the global job-store lock.  Only the
+            # short, same-filesystem publish is fenced against cancellation or
+            # reconciliation, so a stale worker can never expose its outputs.
+            _running_side_effect(_publish_outputs)
+            output_files = {
+                "json": str(final_json),
+                "docx": [str(path) for path in final_docx],
+                "compare_docx": [str(path) for path in final_compare],
+            }
+        transition = transition_job(
+            job_id,
+            allowed_from={"running"},
+            status="succeeded",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            revoke_lease=True,
+            result=output_files,
+            error=None,
+            progress={"phase": "done", "work_state": "idle", "percent": 100},
+        )
+        if transition is not None:
+            append_runtime_event(job_id, "legacy_job_succeeded")
+        elif _status() == "cancel_requested":
+            _mark_cancelled()
+    except JobLeaseLostError:
+        if _status() == "cancel_requested":
+            _mark_cancelled()
+        return
+    except Exception as exc:  # noqa: BLE001 - worker boundary persists a safe terminal job projection
+        if _cancel_requested():
+            _mark_cancelled()
+        else:
+            failed = transition_job(
+                job_id,
+                allowed_from={"running"},
+                status="failed",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
+                error=_stable_job_error(
+                    exc,
+                    provider=str(payload.get("provider") or ""),
+                    model=str(payload.get("model") or ""),
+                ),
+                progress={"phase": "generation", "work_state": "idle", "percent": 99},
+            )
+            if failed is not None:
+                append_runtime_event(job_id, "legacy_job_failed", error_type=type(exc).__name__)
+            elif _status() == "cancel_requested":
+                _mark_cancelled()
+    finally:
+        heartbeat_stop.set()
+        if heartbeat_thread is not None and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=0.25)
+
+
+async def _wait_for_legacy_job(job_id: str, *, timeout_seconds: float = 3600.0) -> dict:
+    deadline = asyncio.get_running_loop().time() + max(1.0, float(timeout_seconds))
+    while True:
+        record = get_job(job_id)
+        if not record:
+            raise HTTPException(status_code=500, detail={"code": "JOB_RECORD_LOST"})
+        status = str(record.get("status") or "").strip().lower()
+        if status not in {"queued", "running", "cancel_requested"}:
+            return record
+        if asyncio.get_running_loop().time() >= deadline:
+            raise HTTPException(
+                status_code=504,
+                detail={"code": "LEGACY_SYNC_WAIT_TIMEOUT", "job_id": job_id},
+            )
+        await asyncio.sleep(0.1)
+
+
 @router.post("/kg/upload")
-async def upload_kg(file: UploadFile = File(...)):
+async def upload_kg(file: Annotated[UploadFile, File()]):
     """
     上传你已有的知识图谱（JSON），系统只做存档与追溯，不重新构建。
     """
@@ -493,8 +1226,8 @@ async def upload_kg(file: UploadFile = File(...)):
         # 仅做 JSON 结构校验，避免错误文件
         import json as _json
         _json.loads(data.decode("utf-8", errors="replace"))
-    except Exception:
-        raise HTTPException(status_code=400, detail="仅支持 JSON 知识图谱文件")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="仅支持 JSON 知识图谱文件") from exc
     meta = save_kg_bytes(data, file.filename)
     return {"ok": True, "kg": meta}
 
@@ -530,6 +1263,7 @@ async def generate_plan(req: GenerateRequest, authorization: str | None = Header
     payload = req.model_dump()
     pid = str(payload.get("project_id") or "").strip() or None
     plan = load_plan(project_id=pid) or {}
+    payload = _inherit_project_fact_plan_fields(payload, plan)
     tender = load_tender_matrix(project_id=pid) or {}
     if not payload.get("outline"):
         payload["outline"] = plan.get("outline") or []
@@ -562,31 +1296,36 @@ async def generate_plan(req: GenerateRequest, authorization: str | None = Header
     if not payload.get("variants"):
         payload["variants"] = plan.get("variants") or 1
 
+    _require_generation_sources(payload, pid)
+    payload = _route_generation_or_503(payload)
     variants = int(payload.get("variants") or 1)
-    variant_ids = reserve_variant_ids(
+    payload["_variant_ids"] = reserve_variant_ids(
         project_id=pid,
         count=max(1, variants),
         explicit_variant_id=payload.get("variant_id"),
         explicit_template_id=payload.get("logic_template_id") or payload.get("logic_template"),
     )
-    results = []
-    for vid in variant_ids:
-        payload["variant_id"] = int(vid)
-        results.append(await run_autoplan(payload))
-    gate = _local_adapter_gate_results(results)
-    if not gate["export_allowed"]:
-        return _local_adapter_block(gate["issues"])
-    results = gate["results"]
-    out_path = Path("build") / "autoplan_generated.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
-    # 自动导出 DOCX（每个版本一个文件）
-    docx_files = []
-    for i, variant in enumerate(results):
-        out_docx = Path("build") / f"autoplan_generated_v{i + 1}.docx"
-        export_autoplan_docx(variant, str(out_docx))
-        docx_files.append(str(out_docx))
-    _audit("generate", user_id=user["id"], detail={"variants": len(results), "docx": docx_files, "project_id": pid})
+    job_id = create_job(payload, user_id=user["id"])
+    submit_isolated_job(job_id, run_legacy_generation_job, job_id, payload)
+    record = await _wait_for_legacy_job(job_id)
+    if str(record.get("status") or "").strip().lower() != "succeeded":
+        blocked = record.get("result")
+        if isinstance(blocked, dict) and blocked.get("ok") is False:
+            return blocked
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "LEGACY_GENERATION_FAILED", "job_id": job_id, "error": record.get("error")},
+        )
+    files = record.get("result") if isinstance(record.get("result"), dict) else {}
+    out_path = Path(str(files.get("json") or ""))
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+    results = data.get("variants") if isinstance(data.get("variants"), list) else []
+    docx_files = list(files.get("docx") or [])
+    _audit(
+        "generate",
+        user_id=user["id"],
+        detail={"job_id": job_id, "variants": len(results), "docx": docx_files, "project_id": pid},
+    )
     return {"ok": True, "saved_at": str(out_path), "docx": docx_files, "result": results}
 
 
@@ -597,6 +1336,7 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
     payload = req.model_dump()
     pid = str(payload.get("project_id") or "").strip() or None
     plan = load_plan(project_id=pid) or {}
+    payload = _inherit_project_fact_plan_fields(payload, plan)
     tender = load_tender_matrix(project_id=pid) or {}
     if not payload.get("outline"):
         payload["outline"] = plan.get("outline") or []
@@ -628,6 +1368,8 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
         payload["compare_titles"] = plan.get("compare_titles")
     if not payload.get("variants"):
         payload["variants"] = plan.get("variants") or 1
+    _require_generation_sources(payload, pid)
+    payload = _route_generation_or_503(payload)
     variants = int(payload.get("variants") or 1)
     payload["_variant_ids"] = reserve_variant_ids(
         project_id=pid,
@@ -638,52 +1380,7 @@ async def generate_plan_async(req: GenerateRequest, background_tasks: Background
     job_id = create_job(payload, user_id=user["id"])
     _audit("generate_async", user_id=user["id"], detail={"job_id": job_id, "project_id": pid})
 
-    def _run_job():
-        try:
-            update_job(job_id, status="running")
-            variants = int(payload.get("variants") or 1)
-            variant_ids = payload.get("_variant_ids")
-            if not isinstance(variant_ids, list) or not variant_ids:
-                variant_ids = reserve_variant_ids(
-                    project_id=pid,
-                    count=max(1, variants),
-                    explicit_variant_id=payload.get("variant_id"),
-                    explicit_template_id=payload.get("logic_template_id") or payload.get("logic_template"),
-                )
-            results = []
-            for vid in variant_ids:
-                payload["variant_id"] = int(vid)
-                results.append(asyncio.run(run_autoplan(payload)))
-            gate = _local_adapter_gate_results(results)
-            if not gate["export_allowed"]:
-                update_job(
-                    job_id,
-                    status="failed",
-                    result=_local_adapter_block(gate["issues"]),
-                    error=_local_adapter_job_error(gate["issues"]),
-                )
-                return
-            results = gate["results"]
-            out_json = Path("build") / f"autoplan_{job_id}.json"
-            out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
-            docx_files = []
-            compare_files = []
-            for i, variant in enumerate(results):
-                out_docx = Path("build") / f"autoplan_{job_id}_v{i + 1}.docx"
-                export_autoplan_docx(variant, str(out_docx))
-                docx_files.append(str(out_docx))
-                out_compare = Path("build") / f"autoplan_{job_id}_compare_v{i + 1}.docx"
-                export_autoplan_compare_docx(variant, str(out_compare))
-                compare_files.append(str(out_compare))
-            update_job(
-                job_id,
-                status="done",
-                result={"json": str(out_json), "docx": docx_files, "compare_docx": compare_files},
-            )
-        except Exception as e:
-            update_job(job_id, status="failed", error=repr(e))
-
-    background_tasks.add_task(_run_job)
+    submit_isolated_job(job_id, run_legacy_generation_job, job_id, payload)
     return {"ok": True, "job_id": job_id}
 
 
@@ -696,6 +1393,7 @@ async def generate_async_batch(requests: list[GenerateRequest], background_tasks
         payload = req.model_dump()
         pid = str(payload.get("project_id") or "").strip() or None
         plan = load_plan(project_id=pid) or {}
+        payload = _inherit_project_fact_plan_fields(payload, plan)
         tender = load_tender_matrix(project_id=pid) or {}
         if not payload.get("outline"):
             payload["outline"] = plan.get("outline") or []
@@ -727,6 +1425,8 @@ async def generate_async_batch(requests: list[GenerateRequest], background_tasks
             payload["compare_titles"] = plan.get("compare_titles")
         if not payload.get("variants"):
             payload["variants"] = plan.get("variants") or 1
+        _require_generation_sources(payload, pid)
+        payload = _route_generation_or_503(payload)
         variants = int(payload.get("variants") or 1)
         payload["_variant_ids"] = reserve_variant_ids(
             project_id=pid,
@@ -736,43 +1436,7 @@ async def generate_async_batch(requests: list[GenerateRequest], background_tasks
         )
         job_id = create_job(payload, user_id=user["id"])
 
-        def _run_job(_job_id: str, _payload: dict):
-            try:
-                local_payload = json.loads(json.dumps(_payload))
-                update_job(_job_id, status="running")
-                variants = int(local_payload.get("variants") or 1)
-                variant_ids = local_payload.get("_variant_ids")
-                if not isinstance(variant_ids, list) or not variant_ids:
-                    variant_ids = reserve_variant_ids(
-                        project_id=str(local_payload.get("project_id") or "").strip() or None,
-                        count=max(1, variants),
-                        explicit_variant_id=local_payload.get("variant_id"),
-                        explicit_template_id=local_payload.get("logic_template_id") or local_payload.get("logic_template"),
-                    )
-                results = []
-                for vid in variant_ids:
-                    local_payload["variant_id"] = int(vid)
-                    results.append(asyncio.run(run_autoplan(local_payload)))
-                out_json = Path("build") / f"autoplan_{_job_id}.json"
-                out_json.write_text(json.dumps({"variants": results}, ensure_ascii=False, indent=2), encoding="utf-8")
-                docx_files = []
-                compare_files = []
-                for i, variant in enumerate(results):
-                    out_docx = Path("build") / f"autoplan_{_job_id}_v{i + 1}.docx"
-                    export_autoplan_docx(variant, str(out_docx))
-                    docx_files.append(str(out_docx))
-                    out_compare = Path("build") / f"autoplan_{_job_id}_compare_v{i + 1}.docx"
-                    export_autoplan_compare_docx(variant, str(out_compare))
-                    compare_files.append(str(out_compare))
-                update_job(
-                    _job_id,
-                    status="done",
-                    result={"json": str(out_json), "docx": docx_files, "compare_docx": compare_files},
-                )
-            except Exception as e:
-                update_job(_job_id, status="failed", error=repr(e))
-
-        background_tasks.add_task(_run_job, job_id, payload)
+        submit_isolated_job(job_id, run_legacy_generation_job, job_id, payload)
         jobs.append(job_id)
     return {"ok": True, "job_ids": jobs}
 
@@ -785,7 +1449,17 @@ async def optimize_content(req: OptimizeRequest, authorization: str | None = Hea
     if not json_path.exists():
         raise HTTPException(status_code=404, detail="autoplan_generated.json not found")
     data = json.loads(json_path.read_text(encoding="utf-8"))
-    result = await optimize_sections(data, req.model_dump())
+    # Keep the compatibility request fields for one cycle, but never trust its
+    # provider, endpoint or credential values.  Optimization uses a fresh
+    # server-owned admission receipt and the exact admitted in-memory key.
+    routed = _route_generation_or_503(req.model_dump())
+    _coordinator, admitted_chain = await _admit_server_provider_chain(routed)
+    optimization_request = {
+        "titles": list(req.titles or []),
+        "instruction": str(req.instruction or ""),
+        "_admitted_provider_chain": admitted_chain,
+    }
+    result = await optimize_sections(data, optimization_request)
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     docx_files = []
     if isinstance(result, dict) and isinstance(result.get("variants"), list) and result["variants"]:
@@ -985,14 +1659,11 @@ async def job_list_filtered(req: JobListFilterRequest, authorization: str | None
 @router.post("/job_download_batch")
 async def job_download_batch(job_ids: list[str], authorization: str | None = Header(default=None)):
     user = _auth_user(authorization)
-    from pathlib import Path
     import zipfile
+    from pathlib import Path
     zip_path = Path("build") / "autoplan_batch.zip"
     if zip_path.exists():
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
+        zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w") as z:
         for jid in job_ids[:20]:
             job = get_job(jid)
@@ -1015,14 +1686,11 @@ async def job_download_batch(job_ids: list[str], authorization: str | None = Hea
 @router.post("/job_download_compare_batch")
 async def job_download_compare_batch(job_ids: list[str], authorization: str | None = Header(default=None)):
     user = _auth_user(authorization)
-    from pathlib import Path
     import zipfile
+    from pathlib import Path
     zip_path = Path("build") / "autoplan_compare_batch.zip"
     if zip_path.exists():
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
+        zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w") as z:
         for jid in job_ids[:20]:
             job = get_job(jid)
@@ -1086,14 +1754,66 @@ async def export_docx(authorization: str | None = Header(default=None)):
     data = json.loads(json_path.read_text(encoding="utf-8"))
     docx_files = []
     if isinstance(data, dict) and isinstance(data.get("variants"), list) and data["variants"]:
+        required_checks = {
+            "independent_content_quality",
+            "plan_consistency",
+            "verified_standards",
+            "boq_cross_index_closure",
+            "formal_project_parameters",
+            "formal_parameter_body_binding",
+            "independent_model_review",
+        }
+        for variant in data["variants"]:
+            if not isinstance(variant, dict):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "LEGACY_EXPORT_FORMAL_GATE_REQUIRED"},
+                )
+            gate = variant.get("delivery_quality_gate")
+            gate = gate if isinstance(gate, dict) else {}
+            claimed_digest = str(gate.get("decision_digest") or "").strip()
+            digest_payload = {
+                key: value
+                for key, value in gate.items()
+                if key != "decision_digest"
+            }
+            computed_digest = hashlib.sha256(
+                json.dumps(
+                    digest_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            checks = gate.get("checks") if isinstance(gate.get("checks"), list) else []
+            passed_checks = {
+                str(check.get("name") or "")
+                for check in checks
+                if isinstance(check, dict) and check.get("pass") is True
+            }
+            if (
+                str(variant.get("delivery_scope") or "").strip() != "document"
+                or variant.get("delivery_ready") is not True
+                or not str(variant.get("project_id") or "").strip()
+                or gate.get("delivery_allowed") is not True
+                or gate.get("blocker_count") != 0
+                or claimed_digest != computed_digest
+                or not required_checks.issubset(passed_checks)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "LEGACY_EXPORT_FORMAL_GATE_REQUIRED"},
+                )
         for i, variant in enumerate(data["variants"]):
             out_docx = Path("build") / f"autoplan_generated_v{i + 1}.docx"
             export_autoplan_docx(variant, str(out_docx))
             docx_files.append(str(out_docx))
     else:
-        out_docx = Path("build") / "autoplan_generated_v1.docx"
-        export_autoplan_docx_from_file(str(json_path), str(out_docx))
-        docx_files.append(str(out_docx))
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LEGACY_EXPORT_FORMAL_GATE_REQUIRED"},
+        )
     _audit("export_docx", user_id=user["id"], detail={"docx": docx_files})
     return {"ok": True, "docx": docx_files}
 
@@ -1180,10 +1900,7 @@ async def download_compare_docx_all(authorization: str | None = Header(default=N
         raise HTTPException(status_code=404, detail="docx not found")
     zip_path = build_dir / "autoplan_compare_all.zip"
     if zip_path.exists():
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
+        zip_path.unlink()
     with ZipFile(str(zip_path), "w") as z:
         for p in files:
             z.write(p, arcname=p.name)
@@ -1221,7 +1938,7 @@ async def job_list_fields(authorization: str | None = Header(default=None)):
     return {
         "ok": True,
         "default_fields": sorted(_job_list_default_fields()),
-        "field_alias": {k: sorted(list(v)) for k, v in _job_list_field_alias().items()},
+        "field_alias": {k: sorted(v) for k, v in _job_list_field_alias().items()},
     }
 
 
@@ -1344,8 +2061,8 @@ async def audit_export_xlsx(
     output = io.BytesIO()
     try:
         from openpyxl import Workbook
-    except Exception:
-        raise HTTPException(status_code=500, detail="openpyxl not installed")
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="openpyxl not installed") from exc
 
     wb = Workbook()
     ws = wb.active
@@ -1475,16 +2192,16 @@ async def audit_export_file_cleanup(req: AuditExportCleanupRequest, authorizatio
                 try:
                     p.unlink()
                     removed += 1
-                except Exception:
-                    pass
+                except OSError:
+                    logger.warning("audit export could not be removed: %s", p, exc_info=True)
     if req.keep_latest_n is not None and req.keep_latest_n >= 0:
         for p in files[req.keep_latest_n:]:
             try:
                 if p.exists():
                     p.unlink()
                     removed += 1
-            except Exception:
-                pass
+            except OSError:
+                logger.warning("audit export could not be removed: %s", p, exc_info=True)
     return {"ok": True, "removed": removed}
 
 
@@ -1526,8 +2243,8 @@ async def audit_export_file(req: AuditExportRequest, authorization: str | None =
     out_path = build_dir / f"{base_name}.xlsx"
     try:
         from openpyxl import Workbook
-    except Exception:
-        raise HTTPException(status_code=500, detail="openpyxl not installed")
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="openpyxl not installed") from exc
     wb = Workbook()
     ws = wb.active
     ws.title = "audit"
@@ -1554,10 +2271,7 @@ async def download_docx_all(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=404, detail="docx not found")
     zip_path = build_dir / "autoplan_generated_all.zip"
     if zip_path.exists():
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
+        zip_path.unlink()
     with ZipFile(str(zip_path), "w") as z:
         for p in files:
             z.write(p, arcname=p.name)

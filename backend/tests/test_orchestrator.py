@@ -1,19 +1,93 @@
 """Unit tests for backend/zhifei_autoplan/orchestrator.py"""
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 import asyncio
+import hashlib
 import json
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from backend.zhifei_autoplan.evidence import resolve_trusted_ingest_record
+from backend.zhifei_autoplan.execution_control import ExecutionBudgetExceededError
 from backend.zhifei_autoplan.orchestrator import (
+    ProjectFactApprovalGateError,
+    _build_source_input_receipt,
     _build_weights_and_penalties,
+    _chapter_deadline_seconds,
     _is_critical_review_chapter,
     _provider_chain_for_role,
-    run_autoplan,
+    _trusted_formal_compliance_hits,
 )
+from backend.zhifei_autoplan.orchestrator import (
+    run_autoplan as _production_run_autoplan,
+)
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    record_project_fact_approval,
+)
+
+
+async def run_autoplan(payload, *args, **kwargs):
+    """Keep legacy unit cases inspectable without weakening production gates.
+
+    These tests exercise orchestration internals with mocked providers and
+    incomplete evidence.  They use the document scope but disable the final
+    exception so the returned fail-closed receipt can still be inspected.
+    HTTP/save routes independently refuse to publish such a receipt.
+    """
+
+    scoped_payload = dict(payload or {})
+    scoped_payload.setdefault("delivery_scope", "document")
+    scoped_payload.setdefault("quality_strict", False)
+    return await _production_run_autoplan(scoped_payload, *args, **kwargs)
+
+
+def test_long_chapter_deadline_allows_one_bounded_continuation() -> None:
+    assert _chapter_deadline_seconds({}, target_pages=7) == 480
+    assert _chapter_deadline_seconds({}, target_pages=10) == 900
+    assert (
+        _chapter_deadline_seconds(
+            {"chapter_deadline_seconds": 1200}, target_pages=16
+        )
+        == 900
+    )
+
+
+def test_source_input_receipt_is_project_bound_and_tamper_evident() -> None:
+    tender = {"project_name": "项目A", "planned_duration_days": 150}
+    boq = {"items": [{"name": "钢梁", "quantity": 59.214, "unit": "t"}]}
+
+    receipt = _build_source_input_receipt(
+        project_id="P-SOURCE",
+        tender=tender,
+        boq=boq,
+    )
+
+    assert receipt["schema_version"] == "autoplan-source-input-v1"
+    assert receipt["project_id"] == "P-SOURCE"
+    assert len(receipt["tender_digest"]) == 64
+    assert len(receipt["boq_digest"]) == 64
+    assert len(receipt["receipt_digest"]) == 64
+    assert receipt != _build_source_input_receipt(
+        project_id="P-SOURCE",
+        tender=tender,
+        boq={"items": [{"name": "钢梁", "quantity": 59214, "unit": "t"}]},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _allow_legacy_unadmitted_unit_payloads(monkeypatch):
+    """Old direct unit payloads are not HTTP-callable production entrypoints."""
+
+    from backend.zhifei_autoplan import orchestrator
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_ALLOW_UNADMITTED_PROVIDER_CALLS_FOR_TESTS",
+        True,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +117,9 @@ def _mock_verified_compliance_registry():
         "official_source": "https://official.example/GB-T-50326-2017",
         "domain_tags": ["通用工程"],
         "latest": True,
+        "metadata_only": True,
+        "verified": True,
+        "official_registry_verified": True,
     }
     with patch(
         "backend.zhifei_autoplan.orchestrator.get_compliance_registry_status",
@@ -92,6 +169,175 @@ def _passing_quality_result() -> dict:
     }
 
 
+def _digest(value) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _approved_formal_fact(
+    *,
+    project_id: str,
+    field: str,
+    value,
+    unit: str = "",
+) -> dict:
+    file_name = f"批准参数-{field}.pdf"
+    document_sha256 = hashlib.sha256(field.encode("utf-8")).hexdigest()
+    return {
+        "value": value,
+        "unit": unit,
+        "evidence": {
+            "file_name": file_name,
+            "document_sha256": document_sha256,
+            "locator": f"{file_name}#p1_{document_sha256}@10",
+        },
+        "approval_receipt": {
+            "receipt_id": f"APR-{field}",
+            "status": "approved",
+            "project_id": project_id,
+            "field": field,
+            "value_digest": _digest(
+                {"field": field, "value": value, "unit": unit}
+            ),
+            "summary": f"批准 {field} 的正式项目值",
+            "approved_by": "项目负责人",
+            "approved_at": "2026-08-27T10:00:00+08:00",
+        },
+    }
+
+
+def _persist_formal_approval_audits(
+    *,
+    tmp_path: Path,
+    monkeypatch,
+    project_id: str,
+    approved: dict[str, dict],
+) -> tuple[dict[str, dict], Path]:
+    from backend.zhifei_autoplan import orchestrator
+
+    workspace = tmp_path / "backend" / "data"
+    audit_dir = workspace / "audit"
+    uploads_dir = workspace / "uploads"
+    extracts_dir = workspace / "extracts"
+    for directory in (audit_dir, uploads_dir, extracts_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    records: list[dict] = []
+    prepared: list[tuple[str, dict, dict]] = []
+    for field, raw_resolution in approved.items():
+        filename = f"批准参数-{field}.pdf"
+        source_bytes = f"source:{project_id}:{field}".encode()
+        extract_bytes = f"extract:{project_id}:{field}".encode()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        extract_sha256 = hashlib.sha256(extract_bytes).hexdigest()
+        source_path = uploads_dir / f"{source_sha256}_{filename}"
+        extract_path = extracts_dir / f"{source_sha256}_{extract_sha256}.txt"
+        source_path.write_bytes(source_bytes)
+        extract_path.write_bytes(extract_bytes)
+        record = {
+            "filename": filename,
+            "sha256": source_sha256,
+            "file_id": source_sha256,
+            "workspace_dir": str(workspace),
+            "saved_as": str(source_path),
+            "extract_saved_as": str(extract_path),
+            "extract_text_sha256": extract_sha256,
+            "project_id": project_id,
+            "source_hint": "approved_project_fact",
+            "enabled": True,
+            "usable": True,
+        }
+        resolution = dict(raw_resolution)
+        resolution["evidence"] = {
+            "file_name": filename,
+            "document_sha256": source_sha256,
+            "locator": f"{filename}#p1_{source_sha256}@10",
+        }
+        records.append(record)
+        prepared.append((field, resolution, record))
+
+    ingest_audit = audit_dir / "ingest.jsonl"
+    ingest_audit.write_text(
+        "".join(
+            json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+            for record in records
+        ),
+        encoding="utf-8",
+    )
+    approval_audit = audit_dir / "project_fact_approvals.jsonl"
+    persisted: dict[str, dict] = {}
+    for field, resolution, record in prepared:
+        trusted = resolve_trusted_ingest_record(
+            record,
+            workspace_root=workspace,
+        )
+        assert trusted["ok"] is True
+        appended = record_project_fact_approval(
+            audit_path=approval_audit,
+            project_id=project_id,
+            field=field,
+            resolution=resolution,
+            trusted_source={**trusted, "enabled": True, "usable": True},
+            actor={
+                "channel": "authenticated_user",
+                "actor_id": "user:test-orchestrator",
+            },
+            recorded_at="2026-08-28T08:00:00Z",
+        )
+        persisted[field] = {
+            **resolution,
+            "approval_event": appended["locator"],
+        }
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_PROJECT_FACT_INGEST_AUDIT_PATH",
+        ingest_audit,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_PROJECT_FACT_APPROVAL_AUDIT_PATH",
+        approval_audit,
+    )
+    return persisted, ingest_audit
+
+
+def _formal_quality_bundle() -> dict:
+    return {
+        "mode": "process_bound",
+        "items": [
+            {
+                "id": "foundation-concrete-grade",
+                "process": "基础混凝土",
+                "metric": "强度等级",
+                "operator": "=",
+                "value": "C30",
+                "unit": "",
+                "status": "approved",
+                "source": "user_input",
+                "locator": f"批准参数.pdf#p1_{'a' * 64}@42",
+                "document_sha256": "a" * 64,
+                "extract_text_sha256": "b" * 64,
+                "page": 1,
+                "page_text_sha256": "c" * 64,
+                "offset": 42,
+                "end": 58,
+                "page_start_offset": 0,
+                "page_end_offset": 500,
+                "page_match_start": 42,
+                "page_match_end": 58,
+                "match_text_sha256": "d" * 64,
+            }
+        ],
+    }
+
+
 def _loaded_write_paths() -> set[str]:
     return WRITE_PATH_MODULES.intersection(sys.modules)
 
@@ -125,13 +371,24 @@ def test_tiered_provider_chain_keeps_fable_opt_in_only():
         allow_fable_escalation=True,
     )
 
-    assert [item["slot"] for item in draft] == ["text_draft", "text_backup", "text_review"]
-    assert [item["slot"] for item in review] == ["text_review", "text_backup", "text_draft"]
+    assert [item["slot"] for item in draft] == ["text_draft", "text_backup"]
+    assert [item["slot"] for item in review] == ["text_review"]
     assert [item["slot"] for item in review_with_escalation] == [
         "text_review",
         "text_escalation",
+    ]
+
+
+def test_role_chain_does_not_promote_backup_when_reviewer_is_missing():
+    chain = [
+        {"slot": "text_main", "provider": "anthropic", "model": "claude-sonnet-5"},
+        {"slot": "text_backup", "provider": "openai", "model": "gpt-5.6-sol"},
+    ]
+
+    assert _provider_chain_for_role(chain, "review") == []
+    assert [row["slot"] for row in _provider_chain_for_role(chain, "draft")] == [
         "text_backup",
-        "text_draft",
+        "text_main",
     ]
 
 
@@ -230,7 +487,7 @@ class TestBuildWeightsAndPenalties:
                 }
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
         # kw9 and kw10 should not be in the output (truncated at 8)
         assert "kw8" in weights[0]
@@ -247,7 +504,7 @@ class TestBuildWeightsAndPenalties:
                 }
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        _weights, penalties = _build_weights_and_penalties(tender)
         assert len(penalties) == 1
         assert "p10" in penalties[0]
         assert "p11" not in penalties[0]
@@ -259,7 +516,7 @@ class TestBuildWeightsAndPenalties:
                 {"dimension": "技术", "weight": 30}
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
         assert "技术" in weights[0]
 
@@ -270,7 +527,7 @@ class TestBuildWeightsAndPenalties:
                 {"dimension": "技术", "keywords": None, "weight": 30}
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
 
     def test_missing_weight(self):
@@ -280,7 +537,7 @@ class TestBuildWeightsAndPenalties:
                 {"dimension": "技术", "keywords": ["kw1"]}
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
         assert "权重=None" in weights[0]
 
@@ -291,7 +548,7 @@ class TestBuildWeightsAndPenalties:
                 {"dimension": 123, "keywords": ["kw1"], "weight": 10}
             ]
         }
-        weights, penalties = _build_weights_and_penalties(tender)
+        weights, _penalties = _build_weights_and_penalties(tender)
         assert len(weights) == 1
         assert "123" in weights[0]
 
@@ -349,6 +606,9 @@ class TestRunAutoplan:
                     "official_source": "https://official.example/GB-T-50326-2017",
                     "domain_tags": ["通用工程"],
                     "latest": True,
+                    "metadata_only": True,
+                    "verified": True,
+                    "official_registry_verified": True,
                 }
             ]
 
@@ -370,15 +630,242 @@ class TestRunAutoplan:
 
     @pytest.mark.asyncio
     async def test_empty_payload(self, mock_dependencies):
-        """Empty payload returns default structure."""
-        result = await run_autoplan({})
+        """Missing raw scope still defaults to a fail-closed formal document."""
+        with pytest.raises(ValueError, match="DELIVERY_PROJECT_PARAMETERS_UNRESOLVED"):
+            await _production_run_autoplan({})
 
-        assert result["topic"] == "未命名项目"
-        assert isinstance(result["outline"], list) and result["outline"]
-        assert "编制依据与原则" in result["outline"]
-        assert len(result["sections"]) == len(result["outline"])
-        assert "quality_checks" in result
-        assert "evidence" in result
+    @pytest.mark.asyncio
+    async def test_explicit_strict_document_delivery_blocks_unresolved_parameters(
+        self,
+        mock_dependencies,
+    ):
+        with pytest.raises(ValueError, match="DELIVERY_PROJECT_PARAMETERS_UNRESOLVED"):
+            await run_autoplan(
+                {
+                    "delivery_scope": "document",
+                    "quality_strict": True,
+                    "outline": ["工程概况"],
+                    "generate_images": False,
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_explicit_strict_document_delivery_accepts_approved_parameters(
+        self,
+        mock_dependencies,
+        tmp_path,
+        monkeypatch,
+    ):
+        project_id = "P-ORCHESTRATOR-FORMAL"
+        quality_bundle = _formal_quality_bundle()
+        approved = {
+            "planned_duration_days": _approved_formal_fact(
+                project_id=project_id,
+                field="planned_duration_days",
+                value=180,
+                unit="天",
+            ),
+            "resource_peak": _approved_formal_fact(
+                project_id=project_id,
+                field="resource_peak",
+                value=80,
+                unit="人",
+            ),
+            "critical_interval_days": _approved_formal_fact(
+                project_id=project_id,
+                field="critical_interval_days",
+                value=3,
+                unit="天",
+            ),
+            "risk_inspection_frequency": _approved_formal_fact(
+                project_id=project_id,
+                field="risk_inspection_frequency",
+                value="2次/日",
+            ),
+            "quality_threshold": _approved_formal_fact(
+                project_id=project_id,
+                field="quality_threshold",
+                value=quality_bundle,
+            ),
+            "deviation_action_deadline": _approved_formal_fact(
+                project_id=project_id,
+                field="deviation_action_deadline",
+                value="4h",
+            ),
+        }
+        approved, _ingest_audit = _persist_formal_approval_audits(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            project_id=project_id,
+            approved=approved,
+        )
+        result = await run_autoplan(
+            {
+                "project_id": project_id,
+                "delivery_scope": "document",
+                "quality_strict": False,
+                "outline": ["工程概况"],
+                "generate_images": False,
+                "approved_project_fact_resolutions": approved,
+            }
+        )
+
+        parameter_check = next(
+            row
+            for row in result["delivery_quality_gate"]["checks"]
+            if row["name"] == "formal_project_parameters"
+        )
+        assert parameter_check["required"] is True
+        assert parameter_check["pass"] is True
+        assert set(parameter_check["accepted_statuses"]) == {
+            "verified",
+            "derived",
+            "approved",
+        }
+        assert result["delivery_ready"] is False
+        checks = {
+            row["name"]: row for row in result["delivery_quality_gate"]["checks"]
+        }
+        assert checks["formal_parameter_body_binding"]["pass"] is False
+        assert checks["independent_model_review"]["required"] is True
+        assert checks["independent_model_review"]["pass"] is False
+
+    @pytest.mark.asyncio
+    async def test_formal_approved_fact_without_persisted_event_blocks_before_model(
+        self,
+        mock_dependencies,
+        tmp_path,
+        monkeypatch,
+    ):
+        from backend.zhifei_autoplan import orchestrator
+
+        audit_dir = tmp_path / "backend" / "data" / "audit"
+        audit_dir.mkdir(parents=True)
+        monkeypatch.setattr(
+            orchestrator,
+            "_PROJECT_FACT_INGEST_AUDIT_PATH",
+            audit_dir / "ingest.jsonl",
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_PROJECT_FACT_APPROVAL_AUDIT_PATH",
+            audit_dir / "project_fact_approvals.jsonl",
+        )
+
+        with pytest.raises(ProjectFactApprovalGateError) as exc_info:
+            await run_autoplan(
+                {
+                    "project_id": "P-APPROVAL-MISSING",
+                    "delivery_scope": "document",
+                    "quality_strict": False,
+                    "outline": ["工程概况"],
+                    "generate_images": False,
+                    "approved_project_fact_resolutions": {
+                        "resource_peak": _approved_formal_fact(
+                            project_id="P-APPROVAL-MISSING",
+                            field="resource_peak",
+                            value=80,
+                            unit="人",
+                        )
+                    },
+                }
+            )
+
+        assert exc_info.value.code == "HOLD_PROJECT_FACT_APPROVAL_EVENT_MISSING"
+        mock_dependencies["llm_cls"].assert_not_called()
+        mock_dependencies["writer"].write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_formal_approved_fact_with_tampered_locator_blocks_before_model(
+        self,
+        mock_dependencies,
+        tmp_path,
+        monkeypatch,
+    ):
+        project_id = "P-APPROVAL-TAMPERED"
+        approved, _ingest_audit = _persist_formal_approval_audits(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            project_id=project_id,
+            approved={
+                "resource_peak": _approved_formal_fact(
+                    project_id=project_id,
+                    field="resource_peak",
+                    value=80,
+                    unit="人",
+                )
+            },
+        )
+        approved["resource_peak"]["approval_event"] = {
+            **approved["resource_peak"]["approval_event"],
+            "event_digest": "f" * 64,
+        }
+
+        with pytest.raises(ProjectFactApprovalGateError) as exc_info:
+            await run_autoplan(
+                {
+                    "project_id": project_id,
+                    "delivery_scope": "document",
+                    "quality_strict": False,
+                    "outline": ["工程概况"],
+                    "generate_images": False,
+                    "approved_project_fact_resolutions": approved,
+                }
+            )
+
+        assert exc_info.value.code == "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID"
+        mock_dependencies["llm_cls"].assert_not_called()
+        mock_dependencies["writer"].write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_formal_approved_fact_with_disabled_latest_source_blocks_before_model(
+        self,
+        mock_dependencies,
+        tmp_path,
+        monkeypatch,
+    ):
+        project_id = "P-APPROVAL-DISABLED"
+        approved, ingest_audit = _persist_formal_approval_audits(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            project_id=project_id,
+            approved={
+                "resource_peak": _approved_formal_fact(
+                    project_id=project_id,
+                    field="resource_peak",
+                    value=80,
+                    unit="人",
+                )
+            },
+        )
+        latest = json.loads(ingest_audit.read_text(encoding="utf-8").splitlines()[0])
+        latest["enabled"] = False
+        latest["usable"] = False
+        ingest_audit.write_text(
+            ingest_audit.read_text(encoding="utf-8")
+            + json.dumps(latest, ensure_ascii=False, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ProjectFactApprovalGateError) as exc_info:
+            await run_autoplan(
+                {
+                    "project_id": project_id,
+                    "delivery_scope": "document",
+                    "quality_strict": False,
+                    "outline": ["工程概况"],
+                    "generate_images": False,
+                    "approved_project_fact_resolutions": approved,
+                }
+            )
+
+        assert (
+            exc_info.value.code
+            == "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT"
+        )
+        mock_dependencies["llm_cls"].assert_not_called()
+        mock_dependencies["writer"].write.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_topic_from_payload(self, mock_dependencies):
@@ -397,6 +884,7 @@ class TestRunAutoplan:
                         "project_facts": {"project_code": "BODY-02"},
                     },
                     "outline": ["第一章"],
+                    "quality_strict": True,
                     "generate_images": False,
                 }
             )
@@ -427,6 +915,137 @@ class TestRunAutoplan:
         assert writer_ctx["project_fact_ledger_digest"] == ledger["ledger_digest"]
         assert writer_ctx["project_fact_snapshot"]["ledger_digest"] == ledger["ledger_digest"]
         assert writer_ctx["project_fact_snapshot"]["facts"]["project_code"]["value"] == "TENDER-01"
+
+    @pytest.mark.asyncio
+    async def test_ineligible_schedule_reasons_reach_writer_and_facts_fail_closed(
+        self,
+        mock_dependencies,
+    ):
+        """Canonical CPM diagnostics survive sanitizing without promoting facts."""
+        schedule_fact_reasons = [
+            "derived_duration_implausible",
+            "schedule_input_locator_missing",
+        ]
+        boq_wbs_cpm = {
+            "ok": True,
+            "wbs": [],
+            "activities": [],
+            "cpm": {},
+            "schedule_input_warnings": [],
+            "summary": {
+                "estimated_duration_days": 9999,
+                "resource_peak": 321,
+                "critical_interval_days": 7,
+                "critical_path_names": ["异常关键工序"],
+                "schedule_fact_eligible": False,
+                "schedule_fact_reasons": schedule_fact_reasons,
+            },
+        }
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.build_boq_wbs_cpm",
+            return_value=boq_wbs_cpm,
+        ):
+            result = await run_autoplan(
+                {
+                    "project_id": "P-INELIGIBLE-SCHEDULE",
+                    "outline": ["施工进度"],
+                    "generate_images": False,
+                }
+            )
+
+        writer_ctx = mock_dependencies["writer"].write.call_args.args[1]
+        assert writer_ctx["boq_wbs_cpm_summary"] == {
+            "schedule_fact_eligible": False,
+            "schedule_fact_reasons": schedule_fact_reasons,
+        }
+        facts = result["project_fact_ledger"]["facts"]
+        assert "planned_duration_days" not in facts
+        assert "resource_peak" not in facts
+        assert "critical_interval_days" not in facts
+        assert result["missing_parameters"]["formal_ready"] is False
+        blocker_codes = {
+            row["code"] for row in result["delivery_quality_gate"]["blockers"]
+        }
+        assert "DELIVERY_PROJECT_PARAMETERS_UNRESOLVED" in blocker_codes
+
+    @pytest.mark.asyncio
+    async def test_project_parameter_evidence_is_returned_and_enters_fact_ledger(
+        self,
+        mock_dependencies,
+        tmp_path: Path,
+    ):
+        """Deterministic drawing evidence is observable and ledger-bound."""
+        from backend.zhifei_autoplan.project_parameter_evidence import (
+            build_project_parameter_evidence,
+        )
+
+        workspace = tmp_path / "parameter-evidence"
+        uploads = workspace / "uploads"
+        extracts = workspace / "extracts"
+        audit = workspace / "audit" / "ingest.jsonl"
+        uploads.mkdir(parents=True)
+        extracts.mkdir(parents=True)
+        audit.parent.mkdir(parents=True)
+        filename = "3 围墙.pdf"
+        source_bytes = b"orchestrator-reviewed-wall"
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        extract_text = "基础开挖后压实处理，压实系数不小于0.97。"
+        extract_bytes = extract_text.encode("utf-8")
+        extract_sha256 = hashlib.sha256(extract_bytes).hexdigest()
+        source_path = uploads / f"{source_sha256}_{filename}"
+        extract_path = extracts / f"{source_sha256}_{extract_sha256}.txt"
+        source_path.write_bytes(source_bytes)
+        extract_path.write_bytes(extract_bytes)
+        audit.write_text(
+            json.dumps(
+                {
+                    "project_id": "P-EVIDENCE",
+                    "workspace_dir": str(workspace),
+                    "filename": filename,
+                    "sha256": source_sha256,
+                    "file_id": source_sha256,
+                    "pages": 1,
+                    "source_hint": "drawing",
+                    "tags": ["drawing"],
+                    "saved_as": str(source_path),
+                    "extract_saved_as": str(extract_path),
+                    "extract_text_sha256": extract_sha256,
+                    "usable": True,
+                    "enabled": True,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        evidence = build_project_parameter_evidence(
+            project_id="P-EVIDENCE",
+            tender={},
+            audit_path=audit,
+        )
+        item = evidence["quality_threshold"]["value"]["items"][0]
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.build_project_parameter_evidence",
+            return_value=evidence,
+        ) as mock_builder:
+            result = await run_autoplan(
+                {
+                    "project_id": "P-EVIDENCE",
+                    "outline": ["质量管理"],
+                    "quality_strict": False,
+                    "dry_run": True,
+                    "generate_images": False,
+                }
+            )
+
+        assert result["project_parameter_evidence"] == evidence
+        fact = result["project_fact_ledger"]["facts"]["quality_threshold"]
+        assert fact["source_id"] == "project-parameter-evidence"
+        assert fact["value"]["items"][0]["locator"] == item["locator"]
+        mock_builder.assert_called_once()
+        assert mock_builder.call_args.kwargs["project_id"] == "P-EVIDENCE"
 
     @pytest.mark.asyncio
     async def test_outline_sections(self, mock_dependencies):
@@ -690,13 +1309,28 @@ class TestRunAutoplan:
 
     @pytest.mark.asyncio
     async def test_doc_search_called(self, mock_dependencies):
-        """Document search is called for each section."""
+        """Project-scoped document search is called for each section."""
         result = await run_autoplan({
             "topic": "测试",
             "outline": ["章节1"],
+            "project_id": "P-001",
+            "quality_strict": False,
         })
 
-        assert mock_dependencies["docs"].call_count == len(result["sections"])
+        assert mock_dependencies["docs"].call_count >= len(result["sections"])
+        assert all(
+            call.kwargs.get("project_id") == "P-001"
+            for call in mock_dependencies["docs"].call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_doc_search_is_not_global_without_project_scope(self, mock_dependencies):
+        """Missing project scope must not search another project's documents."""
+        await run_autoplan(
+            {"topic": "测试", "outline": ["章节1"], "quality_strict": False}
+        )
+
+        mock_dependencies["docs"].assert_not_called()
 
     @pytest.mark.asyncio
     async def test_generate_images_creates_charts(self, mock_dependencies):
@@ -809,6 +1443,85 @@ class TestRunAutoplan:
         assert isinstance(ctx, dict)
         assert ctx.get("chapter_target_pages") == 8
         assert any("目标页数" in str(r) for r in ctx.get("requirements", []))
+
+    @pytest.mark.asyncio
+    async def test_metadata_only_standard_never_becomes_clause_evidence(
+        self,
+        mock_dependencies,
+    ):
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.query_compliance",
+            return_value=[],
+        ):
+            result = await run_autoplan(
+                {"outline": ["质量管理"], "dry_run": True, "generate_images": False}
+            )
+
+        ctx = _find_ctx_by_title(mock_dependencies["writer"], "质量管理")
+        requirements = "\n".join(str(row) for row in ctx.get("requirements", []))
+        assert ctx["compliance_hits"] == []
+        assert "GB/T 50326-2017" in ctx["standard_citation_policy"]
+        assert "规范强条" not in requirements
+        assert "【证据:】" not in requirements
+        assert result["project_applicable_standards"]["verified_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_only_complete_authoritative_clause_hit_enters_writer_prompt(
+        self,
+        mock_dependencies,
+    ):
+        clause = {
+            "type": "clause",
+            "standard_code": "GB/T 50326-2017",
+            "metadata_only": False,
+            "verified": True,
+            "official_registry_verified": True,
+            "clause_source_authoritative": True,
+            "clause_no": "5.1.2",
+            "text": "施工质量检查应形成可追溯记录。",
+            "locator": "GB-T-50326.pdf#page=12&anchor=5.1.2",
+        }
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.query_compliance",
+            return_value=[clause],
+        ):
+            await run_autoplan(
+                {"outline": ["质量管理"], "dry_run": True, "generate_images": False}
+            )
+
+        ctx = _find_ctx_by_title(mock_dependencies["writer"], "质量管理")
+        requirements = "\n".join(str(row) for row in ctx.get("requirements", []))
+        assert ctx["compliance_hits"] == [clause]
+        assert "规范强条：GB/T 50326-2017 5.1.2" in requirements
+        assert "【证据:GB-T-50326.pdf#page=12&anchor=5.1.2】" in requirements
+
+
+    def test_formal_compliance_hit_filter_rejects_incomplete_evidence(self) -> None:
+        valid_parameter = {
+            "type": "parameter",
+            "standard_code": "GB 50300-2013",
+            "metadata_only": False,
+            "verified": True,
+            "official_registry_verified": True,
+            "clause_source_authoritative": True,
+            "parameter_name": "抽检比例",
+            "value": "10%",
+            "locator": "GB-50300.pdf#page=20&anchor=表6.0.1",
+        }
+        assert _trusted_formal_compliance_hits([valid_parameter]) == [
+            valid_parameter
+        ]
+        for override in (
+            {"metadata_only": True},
+            {"verified": False},
+            {"clause_source_authoritative": False},
+            {"locator": ""},
+            {"parameter_name": ""},
+            {"value": ""},
+        ):
+            assert _trusted_formal_compliance_hits(
+                [{**valid_parameter, **override}]
+            ) == []
 
     @pytest.mark.asyncio
     async def test_page_target_enrichment_forbids_mechanical_padding(self, mock_dependencies):
@@ -1022,16 +1735,19 @@ class TestRunAutoplan:
         assert isinstance(result.get("pipeline_stages"), list)
 
     @pytest.mark.asyncio
-    async def test_missing_param_fallback_injected_into_requirements(self, mock_dependencies):
-        """Missing-parameter fallback guidance should be injected into section requirements."""
-        await run_autoplan({
+    async def test_unconfirmed_missing_param_defaults_are_not_injected(self, mock_dependencies):
+        """Enterprise proposals remain advisory until explicitly approved."""
+        result = await run_autoplan({
             "outline": ["工程概况"],
             "requirements": [],
+            "dry_run": True,
         })
         call_args = mock_dependencies["writer"].write.call_args
         ctx = call_args[0][1]
         reqs = [str(x) for x in (ctx.get("requirements") or [])]
-        assert any("参数缺失自动补位" in x for x in reqs)
+        assert not any("参数缺失自动补位" in x for x in reqs)
+        assert result["missing_parameters"]["auto_fill"] == {}
+        assert result["missing_parameters"]["formal_ready"] is False
 
     @pytest.mark.asyncio
     async def test_contract_chapter_id_attached(self, mock_dependencies):
@@ -1054,12 +1770,419 @@ class TestRunAutoplan:
 
         expected_chapters = len(result.get("sections") or [])
         names = [event.get("event") for event in events]
+        assert "project_parameter_evidence_ready" in names
         assert "project_facts_ready" in names
+        assert names.index("project_parameter_evidence_ready") < names.index(
+            "project_facts_ready"
+        )
         assert names.index("project_facts_ready") < names.index("chapters_ready")
         assert names.count("chapter_started") == expected_chapters
         assert names.count("chapter_completed") == expected_chapters
         assert names[-1] == "draft_complete"
         assert events[-1]["chapters_done"] == expected_chapters
+
+    @pytest.mark.asyncio
+    async def test_model_preflight_always_closes_provider_client(self, mock_dependencies):
+        clients = []
+
+        def _client_factory(*_args, **_kwargs):
+            client = MagicMock()
+            client.preflight = AsyncMock(
+                return_value={
+                    "ok": True,
+                    "provider": "openai",
+                    "model": "test-model",
+                    "attempts": 1,
+                    "error": None,
+                    "error_info": None,
+                }
+            )
+            clients.append(client)
+            return client
+
+        mock_dependencies["llm_cls"].side_effect = _client_factory
+
+        await run_autoplan(
+            {
+                "outline": ["工程概况"],
+                "provider": "openai",
+                "model": "test-model",
+                "api_key": "test-key",
+                "model_preflight": True,
+                "quality_strict": False,
+                "requirement_evidence_hard_gate": False,
+            }
+        )
+
+        assert clients
+        assert clients[0].preflight.await_count == 1
+        clients[0].close.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_requirement_evidence_preflight_blocks_before_any_model_call(
+        self, mock_dependencies
+    ):
+        events = []
+        tender = {
+            "items": [
+                {
+                    "dimension": "扣分项",
+                    "keywords": ["质量验收闭环"],
+                    "source_spans": [
+                        {
+                            "file_name": "招标文件.pdf",
+                            "page": 1,
+                            "start": None,
+                            "end": None,
+                            "snippet": "",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with pytest.raises(ValueError, match="证据生成前准入失败"):
+            await run_autoplan(
+                {
+                    "outline": ["质量管理"],
+                    "strict_tender_outline": True,
+                    "tender_matrix": tender,
+                    "provider": "openai",
+                    "model": "test-model",
+                    "model_preflight": True,
+                    "quality_strict": True,
+                    "_progress_callback": events.append,
+                }
+            )
+
+        names = [event.get("event") for event in events]
+        assert "requirement_evidence_preflight" in names
+        assert events[names.index("requirement_evidence_preflight")]["ok"] is False
+        assert "model_preflight_started" not in names
+        assert "provider_attempt_started" not in names
+        assert mock_dependencies["llm_cls"].call_count == 0
+        assert mock_dependencies["writer"].write.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_evidence_failure_retries_only_failed_chapter_before_checkpoint(
+        self, mock_dependencies
+    ):
+        events = []
+        calls = {"质量管理": 0, "安全管理": 0}
+        saved_titles = []
+        tender = {
+            "items": [],
+            "chapter_requirements": {
+                "质量管理": [
+                    {
+                        "requirement": "落实质量验收闭环",
+                        "source_spans": [
+                            {
+                                "file_name": "招标文件.pdf",
+                                "page": 2,
+                                "start": 20,
+                                "end": 28,
+                                "snippet": "质量验收闭环",
+                            }
+                        ],
+                    }
+                ],
+                "安全管理": [
+                    {
+                        "requirement": "落实安全检查闭环",
+                        "source_spans": [
+                            {
+                                "file_name": "招标文件.pdf",
+                                "page": 4,
+                                "start": 40,
+                                "end": 48,
+                                "snippet": "安全检查闭环",
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+
+        async def _write(title, ctx):
+            calls[title] += 1
+            row = ctx["requirement_evidence_rows"][0]
+            requirement_id = row["requirement_id"]
+            locator = row["source_evidence"][0]["traceable_locator"]
+            if title == "质量管理" and calls[title] == 1:
+                content = (
+                    f"落实要求。【要求:{requirement_id}】"
+                    "【证据:无关资料.pdf#p1_deadbeef@9】"
+                )
+            else:
+                content = (
+                    f"落实要求。【要求:{requirement_id}】"
+                    f"【证据:{locator}】"
+                )
+            return {"title": title, "content": content}
+
+        mock_dependencies["writer"].write.side_effect = _write
+
+        def _save(**kwargs):
+            saved_titles.append(kwargs["chapter_title"])
+            return {
+                "saved_chapter_count": len(saved_titles),
+                "saved_chapter_indexes": list(range(len(saved_titles))),
+                "status": "running",
+            }
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.load_section_checkpoint",
+            return_value=None,
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.save_section_checkpoint",
+            side_effect=_save,
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.finalize_generation_checkpoint",
+            return_value={
+                "saved_chapter_count": 2,
+                "saved_chapter_indexes": [0, 1],
+                "status": "draft_complete",
+            },
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator._build_chapter_validation_quality_gate",
+            return_value={"pass": True, "blocker_codes": []},
+        ):
+            result = await run_autoplan(
+                {
+                    "delivery_scope": "chapter_validation",
+                    "outline": ["质量管理", "安全管理"],
+                    "strict_tender_outline": True,
+                    "tender_matrix": tender,
+                    "provider_chain": [
+                        {
+                            "slot": "main",
+                            "provider": "provider_a",
+                            "model": "model_a",
+                            "api_key": "a",
+                        },
+                        {
+                            "slot": "fallback_1",
+                            "provider": "provider_b",
+                            "model": "model_b",
+                            "api_key": "b",
+                        },
+                    ],
+                    "quality_strict": True,
+                    "auto_remediate": False,
+                    "generate_images": False,
+                    "dry_run": False,
+                    "_checkpoint_namespace": "evidence-retry-job",
+                    "_progress_callback": events.append,
+                }
+            )
+
+        assert calls == {"质量管理": 2, "安全管理": 1}
+        assert sorted(saved_titles) == ["安全管理", "质量管理"]
+        quality_events = [
+            event
+            for event in events
+            if event.get("chapter_title") == "质量管理"
+        ]
+        quality_names = [event.get("event") for event in quality_events]
+        assert quality_names.index("chapter_evidence_gate_failed") < quality_names.index(
+            "chapter_evidence_gate_passed"
+        )
+        assert quality_names.index("chapter_evidence_gate_passed") < quality_names.index(
+            "chapter_checkpoint_saved"
+        )
+        assert all(
+            section["requirement_evidence_gate"]["ok"]
+            for section in result["sections"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_checkpoint_is_rejected_and_only_chapter_is_regenerated(
+        self, mock_dependencies
+    ):
+        events = []
+        tender = {
+            "items": [],
+            "chapter_requirements": {
+                "质量管理": [
+                    {
+                        "requirement": "落实质量验收闭环",
+                        "source_spans": [
+                            {
+                                "file_name": "招标文件.pdf",
+                                "page": 2,
+                                "start": 20,
+                                "end": 28,
+                                "snippet": "质量验收闭环",
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        async def _write(title, ctx):
+            row = ctx["requirement_evidence_rows"][0]
+            return {
+                "title": title,
+                "content": (
+                    f"落实要求。【要求:{row['requirement_id']}】"
+                    f"【证据:{row['source_evidence'][0]['traceable_locator']}】"
+                ),
+            }
+
+        mock_dependencies["writer"].write.side_effect = _write
+        saved = []
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.load_section_checkpoint",
+            return_value={"title": "质量管理", "content": "旧检查点正文，无要求标记"},
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.save_section_checkpoint",
+            side_effect=lambda **kwargs: saved.append(kwargs["chapter_title"])
+            or {"saved_chapter_count": 1, "status": "running"},
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.finalize_generation_checkpoint",
+            return_value={"saved_chapter_count": 1, "status": "draft_complete"},
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator._build_chapter_validation_quality_gate",
+            return_value={"pass": True, "blocker_codes": []},
+        ):
+            await run_autoplan(
+                {
+                    "delivery_scope": "chapter_validation",
+                    "outline": ["质量管理"],
+                    "strict_tender_outline": True,
+                    "tender_matrix": tender,
+                    "provider": "provider_a",
+                    "model": "model_a",
+                    "quality_strict": True,
+                    "auto_remediate": False,
+                    "generate_images": False,
+                    "dry_run": False,
+                    "_checkpoint_namespace": "legacy-evidence-job",
+                    "_progress_callback": events.append,
+                }
+            )
+
+        names = [event.get("event") for event in events]
+        assert "chapter_checkpoint_rejected" in names
+        assert "chapter_resumed" not in names
+        assert mock_dependencies["writer"].write.await_count == 1
+        assert saved == ["质量管理"]
+
+    @pytest.mark.asyncio
+    async def test_valid_resume_copies_section_into_new_checkpoint_namespace(
+        self, mock_dependencies
+    ):
+        events = []
+        resumed = {
+            "title": "工程概况",
+            "content": "已核验的原任务章节正文，检查频次为1次/日。",
+        }
+        saved = []
+        loaded = []
+        mock_dependencies["docs"].return_value = [
+            {
+                "sha256": "d" * 64,
+                "offset": 12,
+                "snippet": "当前招标文件中的现场组织约束",
+            }
+        ]
+
+        def _load_after_dynamic_context(**kwargs):
+            # The chapter's real KG/document retrieval must finish before a
+            # persisted section is considered for reuse.
+            assert mock_dependencies["kg"].called
+            assert mock_dependencies["docs"].called
+            loaded.append(kwargs)
+            return resumed
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.load_section_checkpoint",
+            side_effect=_load_after_dynamic_context,
+        ) as load_checkpoint, patch(
+            "backend.zhifei_autoplan.orchestrator.save_section_checkpoint",
+            side_effect=lambda **kwargs: saved.append(kwargs)
+            or {"saved_chapter_count": 1, "status": "running"},
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.finalize_generation_checkpoint",
+            return_value={"saved_chapter_count": 1, "status": "draft_complete"},
+        ):
+            result = await run_autoplan(
+                {
+                    "outline": ["工程概况"],
+                    "project_id": "P-CONTEXT-RESUME",
+                    "variant_id": 6,
+                    "quality_strict": False,
+                    "requirement_evidence_hard_gate": False,
+                    "auto_remediate": False,
+                    "generate_images": False,
+                    "dry_run": False,
+                    "_checkpoint_namespace": "new-job",
+                    "_resume_checkpoint_namespace": "old-job",
+                    "_progress_callback": events.append,
+                }
+            )
+
+        assert mock_dependencies["writer"].write.await_count == 0
+        assert load_checkpoint.call_args.kwargs["namespace"] == "old-job"
+        assert load_checkpoint.call_args.kwargs["scope"] == "variant-6"
+        assert len(loaded[0]["chapter_context_digest"]) == 64
+        assert loaded[0]["binding"]["delivery_scope"] == "document"
+        assert saved[0]["namespace"] == "new-job"
+        assert saved[0]["scope"] == "variant-6"
+        assert (
+            saved[0]["chapter_context_digest"]
+            == loaded[0]["chapter_context_digest"]
+        )
+        assert saved[0]["result"]["content"] == resumed["content"]
+        assert "chapter_resumed" in [event.get("event") for event in events]
+        assert result["sections"][0]["content"] == resumed["content"]
+
+    @pytest.mark.asyncio
+    async def test_every_checkpoint_finalize_uses_worker_write_guard(
+        self,
+        mock_dependencies,
+    ):
+        guarded_callbacks = []
+
+        def _guard(callback, **kwargs):
+            guarded_callbacks.append((callback, kwargs.get("status")))
+            return callback(**kwargs)
+
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.load_section_checkpoint",
+            return_value=None,
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.save_section_checkpoint",
+            return_value={"saved_chapter_count": 1, "status": "partial"},
+        ), patch(
+            "backend.zhifei_autoplan.orchestrator.finalize_generation_checkpoint",
+            side_effect=lambda **kwargs: {
+                "saved_chapter_count": 1,
+                "status": kwargs["status"],
+            },
+        ) as finalize_checkpoint:
+            await run_autoplan(
+                {
+                    "outline": ["工程概况"],
+                    "quality_strict": False,
+                    "requirement_evidence_hard_gate": False,
+                    "auto_remediate": False,
+                    "generate_images": False,
+                    "dry_run": False,
+                    "_checkpoint_namespace": "lease-guard-job",
+                    "_checkpoint_write_guard": _guard,
+                }
+            )
+
+        guarded_finalize_statuses = [
+            status
+            for callback, status in guarded_callbacks
+            if callback is finalize_checkpoint
+        ]
+        assert guarded_finalize_statuses == ["draft_complete", "complete"]
 
 
 # =============================================================================
@@ -1261,9 +2384,9 @@ class TestOrchestratorIntegration:
         # Verify structure
         assert result["topic"] == "合肥市排水工程"
         assert len(result["sections"]) >= 3
-        assert len(result["media"]) >= 1
-        # Should include a mindmap (auto) when generate_images=True
-        assert any(isinstance(m, dict) and "思维导图" in str(m.get("caption") or "") for m in (result.get("media") or []))
+        # Dry-run is a zero-provider preview: it must not call image models even
+        # if the request left generate_images enabled.
+        assert result["media"] == []
         assert result["quality_checks"]["score"] == 92
         assert result["evidence"]["tender_loaded"] is True
         assert result["evidence"]["boq_loaded"] is True
@@ -1279,7 +2402,7 @@ class TestOrchestratorIntegration:
             ]
         }
 
-        result = await run_autoplan({
+        await run_autoplan({
             "topic": "测试项目",
             "outline": ["质量管理"],
             "auto_remediate": True,
@@ -1575,7 +2698,7 @@ class TestLLMRemediation:
     @pytest.mark.asyncio
     async def test_llm_remediation_applied(self, mock_deps_llm):
         """LLM remediation mode calls LLM to fix sections."""
-        result = await run_autoplan({
+        await run_autoplan({
             "outline": ["章节1"],
             "provider": "openai",
             "model": "gpt-4",
@@ -1696,7 +2819,8 @@ class TestLLMRemediation:
 
         # Content should not be updated on bad response
         section = result["sections"][0]
-        # auto_remediated flag should not be set since response was bad
+        # A failed LLM response must not be recorded as an LLM remediation.
+        assert section.get("auto_remediated") != "llm"
 
 
 # =============================================================================
@@ -1740,6 +2864,50 @@ class TestPickProviderWithList:
                 "llm_cls": mock_llm_cls,
                 "llm_calls": llm_calls,
             }
+
+    @pytest.mark.asyncio
+    async def test_execution_budget_exhaustion_is_not_reported_as_provider_failure(
+        self,
+        mock_deps_prov,
+    ):
+        class _BudgetWriter:
+            def __init__(self, llm):
+                self.llm = llm
+
+            async def write(self, title, ctx):
+                raise ExecutionBudgetExceededError(
+                    dimension="model_attempts",
+                    attempted=5,
+                    limit=4,
+                )
+
+        with (
+            patch("backend.zhifei_autoplan.orchestrator.SectionWriter", _BudgetWriter),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
+            await run_autoplan(
+                {
+                    "outline": ["章节1"],
+                    "provider_chain": [
+                        {
+                            "slot": "text_draft",
+                            "provider": "anthropic",
+                            "model": "claude-sonnet-5",
+                            "api_key": "test-key",
+                        }
+                    ],
+                    "fail_on_model_exhaustion": True,
+                    "quality_strict": False,
+                    "auto_remediate": False,
+                    "generate_images": False,
+                    "dry_run": False,
+                }
+            )
+
+        failure = json.loads(str(exc_info.value))
+        assert failure["code"] == "EXECUTION_BUDGET_EXCEEDED"
+        assert failure["failures"][0]["code"] == "EXECUTION_BUDGET_EXCEEDED"
+        assert failure["failures"][0]["failure_kind"] == "execution_control"
 
     @pytest.mark.asyncio
     async def test_tiered_route_uses_sonnet_for_draft_and_opus_for_critical_review(self, mock_deps_prov):
@@ -1798,8 +2966,6 @@ class TestPickProviderWithList:
         calls = mock_deps_prov["llm_calls"]
         # Check that providers rotate correctly
         providers_used = [c["provider"] for c in calls]
-        models_used = [c["model"] for c in calls]
-
         # 3 sections with 2 providers should show rotation pattern
         assert "provider_a" in providers_used
         assert "provider_b" in providers_used

@@ -28,8 +28,55 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 import requests
+
+
+_SENSITIVE_GENERATION_FIELDS = {
+    "api_key",
+    "base_url",
+    "secret_key",
+    "token_url",
+    "image_api_key",
+}
+
+
+def _require_loopback_base_url(value: str) -> str:
+    """Fail closed before a credential or project byte can leave this Mac."""
+    raw = str(value or "").strip().rstrip("/")
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            "LOCAL_BACKEND_LOOPBACK_REQUIRED: 后端地址必须是本机 127.0.0.1"
+        ) from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or port is None
+        or not 1 <= port <= 65535
+    ):
+        raise ValueError(
+            "LOCAL_BACKEND_LOOPBACK_REQUIRED: 后端地址必须是本机 127.0.0.1"
+        )
+    return f"http://127.0.0.1:{port}"
+
+
+def _server_routed_generation_payload(payload: dict) -> dict:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key not in _SENSITIVE_GENERATION_FIELDS
+        and key not in {"provider", "model", "image_provider", "image_model"}
+    }
 
 
 def _now() -> str:
@@ -153,7 +200,7 @@ def _post_files(
     timeout: int,
     params: dict | None = None,
 ) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
     files = []
     handles = []
     try:
@@ -183,7 +230,7 @@ def _ingest_files(base: str, project_id: str, file_paths: list[str], timeout: in
     """
 
     def _ingest_batch(paths: list[str]) -> dict:
-        url = base + "/ingest/upload"
+        url = _require_loopback_base_url(base) + "/ingest/upload"
         files = []
         handles = []
         try:
@@ -246,12 +293,17 @@ def _ingest_files(base: str, project_id: str, file_paths: list[str], timeout: in
 
 
 def _post_json(base: str, path: str, actions_key: str, payload: dict, timeout: int, params: dict | None = None) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
+    wire_payload = (
+        _server_routed_generation_payload(payload)
+        if path in {"/actions/generate_async", "/actions/runs"}
+        else dict(payload or {})
+    )
     r = requests.post(
         url,
         headers={**_hdr(actions_key), "Content-Type": "application/json"},
         params=params or {},
-        json=payload,
+        json=wire_payload,
         timeout=timeout,
     )
     if r.status_code >= 400:
@@ -260,7 +312,7 @@ def _post_json(base: str, path: str, actions_key: str, payload: dict, timeout: i
 
 
 def _get_json(base: str, path: str, actions_key: str, params: dict | None = None, timeout: int = 60) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
     r = requests.get(url, headers=_hdr(actions_key), params=params or {}, timeout=timeout)
     if r.status_code >= 400:
         raise RuntimeError(f"GET {path} failed: {r.status_code} {r.text[:500]}")
@@ -268,7 +320,7 @@ def _get_json(base: str, path: str, actions_key: str, params: dict | None = None
 
 
 def _download(base: str, actions_key: str, job_id: str, kind: str, variant: int, out_path: Path, timeout: int):
-    url = base + "/actions/download"
+    url = _require_loopback_base_url(base) + "/actions/download"
     r = requests.get(url, headers=_hdr(actions_key), params={"job_id": job_id, "kind": kind, "variant": variant}, timeout=timeout)
     if r.status_code >= 400:
         raise RuntimeError(f"GET /actions/download failed: {r.status_code} {r.text[:500]}")
@@ -416,16 +468,15 @@ def _process_one_project(base_url: str, actions_key: str, work_dir: Path, out_di
         gen["requirements"] = [str(x).strip() for x in cfg.get("requirements") if str(x).strip()]
     if isinstance(cfg.get("params_override"), dict) and cfg.get("params_override"):
         gen["params_override"] = cfg.get("params_override")
-    # Optional overrides
-    for k in ("provider", "model", "api_key", "base_url", "secret_key", "token_url"):
-        if cfg.get(k):
-            gen[k] = cfg.get(k)
     # Optional execution controls
     if "dry_run" in cfg:
         gen["dry_run"] = bool(cfg.get("dry_run"))
-    for k in ("image_provider", "image_model", "image_aspect_ratio", "image_api_key", "bidder_company", "bidder_domain", "logo_url"):
+    for k in ("image_aspect_ratio", "bidder_company", "bidder_domain", "logo_url"):
         if cfg.get(k):
             gen[k] = cfg.get(k)
+    # Project folders are untrusted input.  Provider selection and all model
+    # credentials are resolved only by the backend's fresh admission gate.
+    gen = _server_routed_generation_payload(gen)
 
     _log(f"[{project_id}] generate_async")
     ret = _post_json(base_url, "/actions/generate_async", actions_key, gen, timeout=120)
@@ -538,7 +589,13 @@ def main() -> int:
 
     host = os.environ.get("ZF_HOST") or "127.0.0.1"
     port = os.environ.get("ZF_PORT") or "8000"
-    base_url = (os.environ.get("ZF_BACKEND_BASE_URL") or f"http://{host}:{port}").rstrip("/")
+    try:
+        base_url = _require_loopback_base_url(
+            os.environ.get("ZF_BACKEND_BASE_URL") or f"http://{host}:{port}"
+        )
+    except ValueError as exc:
+        _log(f"[FAIL] {exc}")
+        return 2
     actions_key = (os.environ.get("ZF_ACTIONS_KEY") or "").strip()
     if not actions_key:
         _log("[FAIL] missing ZF_ACTIONS_KEY")

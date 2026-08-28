@@ -142,8 +142,10 @@ def validate_media_item(
     if width and insert_width_cm > 0:
         effective_dpi = width / (float(insert_width_cm) / 2.54)
         receipt["effective_dpi"] = round(effective_dpi, 1)
-        if effective_dpi < 110:
-            receipt["warnings"].append("effective_dpi_below_recommended_110")
+        if effective_dpi < 150:
+            receipt["errors"].append("effective_dpi_below_formal_minimum_150")
+        elif effective_dpi < 300:
+            receipt["warnings"].append("effective_dpi_below_print_target_300")
     receipt["ok"] = not receipt["errors"]
     receipt["status"] = "accepted" if receipt["ok"] else "rejected"
     return receipt
@@ -386,6 +388,7 @@ def build_media_delivery_manifest(
 
     payload = {
         "schema_version": "docx_figure_delivery.v2",
+        "figure_count": len(rows),
         "source_media": dict(source_media or {}),
         "insertions": rows,
         "insertion_failures": failures,

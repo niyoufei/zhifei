@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from backend.zhifei_autoplan.project_namespace import project_storage_key
 
 
 PROJECTS_DIR = Path("backend/data/autoplan/projects")
@@ -11,10 +12,7 @@ PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _safe_project_id(project_id: str, limit: int = 80) -> str:
-    pid = (project_id or "").strip()
-    out = re.sub(r"[^A-Za-z0-9_\\-\\.\\u4e00-\\u9fff]+", "_", pid)
-    out = out.strip("_")
-    return (out[:limit] or "project").strip("_")
+    return project_storage_key(project_id, limit=limit)
 
 
 def project_dir(project_id: str) -> Path:
@@ -65,4 +63,3 @@ def update_branding(project_id: str, update: Dict[str, Any], merge: bool = True)
             continue
         out[k] = v
     return save_branding(pid, out)
-

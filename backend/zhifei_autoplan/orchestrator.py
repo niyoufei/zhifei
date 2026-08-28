@@ -1,79 +1,39 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
 import os
-from typing import Dict, Any, List
+import stat
+import time
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
-from backend.zhifei_autoplan.tender_store import load_tender_matrix
-from backend.zhifei_autoplan.boq_store import load_boq_data
-from backend.zhifei_autoplan.kg_runtime import search_kg
-from backend.zhifei_autoplan.evidence import search_ingested_docs, format_hit_locator, best_ingested_hit
-from backend.zhifei_autoplan.utils.llm_client import LLMClient
-from backend.zhifei_autoplan.model_reliability import ModelReliabilityRuntime, sanitize_provider_message
-from backend.zhifei_autoplan.agents.section_writer import SectionWriter
-from backend.zhifei_autoplan.media import generate_boq_chart, generate_ingested_previews, generate_outline_mindmap
-from backend.zhifei_autoplan.quality_check import (
-    run_quality_checks,
-    apply_remediation,
-    ensure_local_export_mandatory_content,
-    strip_nonconcrete_language,
+from backend.zhifei_autoplan.agent_contract import (
+    build_agent_contract,
+    validate_section_with_contract,
 )
-from backend.zhifei_autoplan.params_runtime import load_params, get_image_defaults
-from backend.zhifei_autoplan.provider_runtime import iterate_image_failover_slots
+from backend.zhifei_autoplan.agents.section_writer import (
+    SectionWriter,
+    compact_chapter_summary,
+)
 from backend.zhifei_autoplan.boq_focus_enforcer import ensure_boq_focus_item_cards
-from backend.zhifei_autoplan.project_types import (
-    detect_project_type,
-    normalize_project_type,
-    project_type_requirements,
+from backend.zhifei_autoplan.boq_focus_policy import (
+    MAX_BOQ_FOCUS_ITEMS,
+    normalize_boq_focus_items,
+    normalize_boq_focus_name,
+    select_boq_focus_names,
 )
-from backend.zhifei_autoplan.style_policy import resolve_style_with_decisions
-from backend.zhifei_autoplan.outline_planner import (
-    enrich_outline,
-    infer_total_page_limit,
-    plan_chapter_pages,
-    recommend_chart_every_n,
+from backend.zhifei_autoplan.boq_schedule import (
+    build_boq_wbs_cpm,
+    sanitize_boq_for_generation,
 )
-from backend.zhifei_autoplan.multi_agent_runtime import (
-    build_agent_execution_ledger,
-    build_multi_agent_plan,
-)
-from backend.zhifei_autoplan.enterprise_params import get_enterprise_profile
-from backend.zhifei_autoplan.boq_schedule import build_boq_wbs_cpm
-from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
-from backend.zhifei_autoplan.agent_contract import build_agent_contract, validate_section_with_contract
-from backend.zhifei_autoplan.project_fact_ledger import (
-    build_project_fact_ledger_from_inputs,
-    project_fact_prompt_requirements,
-    validate_project_fact_ledger,
-)
-from backend.zhifei_autoplan.score_mapper import build_score_mapping
-from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
-from backend.zhifei_autoplan.requirement_evidence_matrix import (
-    build_requirement_evidence_plan,
-    finalize_requirement_evidence_matrix,
-    requirement_prompt_lines_for_chapter,
-    requirement_rows_for_chapter,
-    validate_requirement_evidence_matrix,
-)
-from backend.zhifei_autoplan.generation_checkpoint import (
-    build_generation_binding,
-    checkpoint_summary,
-    finalize_generation_checkpoint,
-    load_section_checkpoint,
-    save_section_checkpoint,
-)
-from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
-from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
+from backend.zhifei_autoplan.boq_store import load_boq_data
 from backend.zhifei_autoplan.case_library_service import (
     build_case_reference_pack,
     case_reference_prompt_requirements,
-)
-from backend.zhifei_autoplan.image_library import build_image_selection_pack
-from backend.zhifei_autoplan.compliance_runtime import (
-    get_compliance_registry_status,
-    list_verified_standard_metadata,
-    query_compliance,
 )
 from backend.zhifei_autoplan.compliance_policy import (
     GLOBAL_COMPLIANCE_REQUIREMENT,
@@ -84,12 +44,142 @@ from backend.zhifei_autoplan.compliance_policy import (
     replace_unverified_standard_citations,
     standard_citation_directive,
 )
+from backend.zhifei_autoplan.compliance_runtime import (
+    get_compliance_registry_status,
+    list_verified_standard_metadata,
+    load_runtime_registry_authority,
+    query_compliance,
+)
+from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
+from backend.zhifei_autoplan.enterprise_params import get_enterprise_profile
+from backend.zhifei_autoplan.evidence import (
+    best_ingested_hit,
+    format_hit_locator,
+    resolve_trusted_ingest_record,
+    search_ingested_docs,
+)
+from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
+from backend.zhifei_autoplan.execution_control import (
+    ExecutionBudgetExceededError,
+    ExecutionCancelledError,
+    ExecutionControlRuntime,
+)
+from backend.zhifei_autoplan.generation_checkpoint import (
+    build_chapter_context_digest,
+    build_generation_binding,
+    finalize_generation_checkpoint,
+    load_section_checkpoint,
+    save_section_checkpoint,
+)
+from backend.zhifei_autoplan.image_library import build_image_selection_pack
+from backend.zhifei_autoplan.kg_runtime import search_kg
+from backend.zhifei_autoplan.media import (
+    generate_boq_chart,
+    generate_ingested_previews,
+    generate_outline_mindmap,
+)
+from backend.zhifei_autoplan.missing_param_probe import probe_missing_parameters
+from backend.zhifei_autoplan.model_reliability import (
+    ModelReliabilityRuntime,
+    classify_provider_error,
+    sanitize_provider_message,
+)
+from backend.zhifei_autoplan.multi_agent_runtime import (
+    build_agent_execution_ledger,
+    build_multi_agent_plan,
+)
+from backend.zhifei_autoplan.outline_planner import (
+    enrich_outline,
+    infer_total_page_limit,
+    plan_chapter_pages,
+    recommend_chart_every_n,
+)
+from backend.zhifei_autoplan.params_runtime import get_image_defaults, load_params
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    ProjectFactApprovalAuditError,
+    parse_project_fact_approval_audit,
+    verify_project_fact_approval_event,
+)
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    canonical_digest as approval_canonical_digest,
+)
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    project_fact_value_digest as approval_value_digest,
+)
+from backend.zhifei_autoplan.project_fact_ledger import (
+    build_project_fact_ledger_from_inputs,
+    project_fact_prompt_requirements,
+    validate_project_fact_ledger,
+)
+from backend.zhifei_autoplan.project_parameter_evidence import (
+    build_project_parameter_evidence,
+)
+from backend.zhifei_autoplan.project_types import (
+    detect_project_type,
+    normalize_project_type,
+    project_type_requirements,
+)
+from backend.zhifei_autoplan.provider_admission import (
+    ProviderAdmissionManager,
+    ProviderCandidate,
+)
+from backend.zhifei_autoplan.provider_admission import (
+    canonical_digest as provider_admission_canonical_digest,
+)
+from backend.zhifei_autoplan.provider_admission import (
+    public_snapshot as public_provider_admission_snapshot,
+)
+from backend.zhifei_autoplan.quality_check import (
+    apply_remediation,
+    ensure_local_export_mandatory_content,
+    run_quality_checks,
+    strip_nonconcrete_language,
+)
+from backend.zhifei_autoplan.requirement_evidence_matrix import (
+    build_requirement_evidence_plan,
+    finalize_requirement_evidence_matrix,
+    requirement_prompt_lines_for_chapter,
+    requirement_rows_for_chapter,
+    scope_requirement_evidence_plan_to_chapters,
+    validate_chapter_requirement_evidence,
+    validate_requirement_evidence_matrix,
+    validate_requirement_evidence_plan_readiness,
+)
+from backend.zhifei_autoplan.score_mapper import build_score_mapping
+from backend.zhifei_autoplan.style_policy import resolve_style_with_decisions
+from backend.zhifei_autoplan.tender_store import load_tender_matrix
 from backend.zhifei_autoplan.terminology_guard import (
     load_labor_allocation_matrix,
     normalize_sections_terminology_async,
     suggest_labor_ratio_for_chapter,
 )
+from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
+logger = logging.getLogger(__name__)
+
+_PROJECT_FACT_INGEST_AUDIT_PATH = Path("backend/data/audit/ingest.jsonl")
+_PROJECT_FACT_APPROVAL_AUDIT_PATH = Path(
+    "backend/data/audit/project_fact_approvals.jsonl"
+)
+_PROJECT_FACT_AUDIT_MAX_BYTES = 64 * 1024 * 1024
+_APPROVAL_RECEIPT_FIELDS = (
+    "receipt_id",
+    "status",
+    "project_id",
+    "field",
+    "value_digest",
+    "summary",
+    "approved_by",
+    "approved_at",
+)
+
+
+class ProjectFactApprovalGateError(ValueError):
+    """Stable fail-close raised before formal generation can call a provider."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
 
 STANDARD_TRADES = [
     "测量工",
@@ -143,37 +233,51 @@ def _is_critical_review_chapter(title: str | None) -> bool:
     return bool(normalized and any(keyword in normalized for keyword in _CRITICAL_REVIEW_KEYWORDS))
 
 
-def _has_tiered_anthropic_route(chain: List[Dict[str, Any]]) -> bool:
+def _has_tiered_anthropic_route(chain: list[dict[str, Any]]) -> bool:
     slots = {str(item.get("slot") or "").strip() for item in chain if isinstance(item, dict)}
     return "text_draft" in slots and "text_review" in slots
 
 
 def _provider_chain_for_role(
-    chain: List[Dict[str, Any]],
+    chain: list[dict[str, Any]],
     role: str,
     *,
     allow_fable_escalation: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return a stable role-aware chain while keeping Fable opt-in only."""
-    if not _has_tiered_anthropic_route(chain):
+    recognized_slots = {
+        "text_draft",
+        "text_review",
+        "text_escalation",
+        "text_backup",
+        "text_main",
+        "text_compat_google",
+    }
+    if not any(
+        str(item.get("slot") or "").strip() in recognized_slots
+        for item in chain
+        if isinstance(item, dict)
+    ):
         return [dict(item) for item in chain if isinstance(item, dict)]
 
     if role == "review":
+        # Preserve the independent-review boundary: generic drafting backups
+        # must not silently become the formal reviewer.  Fable is the only
+        # review escalation and remains explicit opt-in.
         order = ["text_review"]
         if allow_fable_escalation:
             order.append("text_escalation")
-        order.extend(["text_backup", "text_draft", "text_main", "text_compat_google"])
     else:
-        order = ["text_draft", "text_backup", "text_review", "text_main", "text_compat_google"]
-        if allow_fable_escalation:
-            order.append("text_escalation")
+        # Draft/main work may use the configured text backups, but must not
+        # consume the independent reviewer as a drafting fallback.
+        order = ["text_draft", "text_backup", "text_main", "text_compat_google"]
 
     slot_map = {
         str(item.get("slot") or "").strip(): dict(item)
         for item in chain
         if isinstance(item, dict) and str(item.get("slot") or "").strip()
     }
-    ordered: List[Dict[str, Any]] = []
+    ordered: list[dict[str, Any]] = []
     seen: set[str] = set()
     for slot in order:
         item = slot_map.get(slot)
@@ -181,14 +285,6 @@ def _provider_chain_for_role(
             continue
         seen.add(slot)
         ordered.append(item)
-    for item in chain:
-        if not isinstance(item, dict):
-            continue
-        slot = str(item.get("slot") or "").strip()
-        if slot in seen or (slot == "text_escalation" and not allow_fable_escalation):
-            continue
-        seen.add(slot)
-        ordered.append(dict(item))
     return ordered
 
 
@@ -202,8 +298,8 @@ def _model_role_for_slot(slot_id: str | None) -> str:
     }.get(str(slot_id or "").strip(), "legacy")
 
 
-def _dedup_lines(lines: List[str], limit: int | None = None) -> List[str]:
-    out: List[str] = []
+def _dedup_lines(lines: list[str], limit: int | None = None) -> list[str]:
+    out: list[str] = []
     seen: set[str] = set()
     for raw in lines:
         s = str(raw or "").strip()
@@ -216,7 +312,237 @@ def _dedup_lines(lines: List[str], limit: int | None = None) -> List[str]:
     return out
 
 
-def _build_weights_and_penalties(tender: Dict[str, Any]) -> tuple[list[str], list[str]]:
+def _trusted_formal_compliance_hits(
+    rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Keep only locator-backed clause/parameter evidence for writer prompts.
+
+    Official registry rows are metadata-only: they establish the applicable
+    standard and version, but they are not clause evidence. Formal prompt
+    evidence must carry a verified, authoritative clause-source projection
+    and the fields needed to render a non-empty locator.
+    """
+
+    trusted: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        evidence_type = str(raw.get("type") or "").strip().lower()
+        code = canonical_standard_code(raw.get("standard_code"))
+        locator = str(raw.get("locator") or "").strip()
+        if (
+            raw.get("metadata_only") is not False
+            or raw.get("verified") is not True
+            or raw.get("official_registry_verified") is not True
+            or raw.get("clause_source_authoritative") is not True
+            or not code
+            or not locator
+        ):
+            continue
+        if evidence_type == "clause":
+            if not str(raw.get("clause_no") or "").strip() or not str(
+                raw.get("text") or ""
+            ).strip():
+                continue
+        elif evidence_type == "parameter":
+            if not str(raw.get("parameter_name") or "").strip() or not str(
+                raw.get("value") or ""
+            ).strip():
+                continue
+        else:
+            continue
+        key = (code, locator)
+        if key in seen:
+            continue
+        seen.add(key)
+        trusted.append(dict(raw))
+    return trusted
+
+
+def _normalize_delivery_scope(value: Any) -> str:
+    scope = str(value or "document").strip().lower()
+    if scope not in {"document", "chapter_validation"}:
+        raise ValueError("交付范围无效：delivery_scope 必须为 document 或 chapter_validation。")
+    return scope
+
+
+def _validate_strict_outline_for_scope(
+    requested_outline: list[str],
+    tender_outline: list[str],
+    *,
+    delivery_scope: str,
+) -> None:
+    if not tender_outline:
+        return
+    if delivery_scope == "document":
+        if requested_outline != tender_outline:
+            raise ValueError(
+                "TENDER_OUTLINE_MISMATCH："
+                "严格正式交付目录与招标目录不一致，已在模型调用前停止。"
+            )
+        return
+    unknown = [title for title in requested_outline if title not in tender_outline]
+    if unknown:
+        raise ValueError(
+            "CHAPTER_VALIDATION_OUTLINE_INVALID："
+            "章节验证目录包含招标目录外章节，已在模型调用前停止："
+            + "、".join(unknown[:20])
+        )
+
+
+def _build_chapter_validation_quality_gate(
+    *,
+    quality: dict[str, Any],
+    contract_checks: dict[str, Any],
+    delivery_quality_gate: dict[str, Any],
+) -> dict[str, Any]:
+    """Enforce chapter-level quality without pretending to validate a document."""
+
+    checks: list[dict[str, Any]] = []
+    blocker_codes: list[str] = []
+    for key in (
+        "structure",
+        "officialese",
+        "risk_triplet",
+        "logic_template_adherence",
+        "quantitative",
+        "evidence_traceability",
+        "standard_evidence",
+    ):
+        value = quality.get(key) if isinstance(quality.get(key), dict) else {}
+        passed = value.get("ok") is True
+        checks.append({"name": key, "pass": passed})
+        if not passed:
+            blocker_codes.append(f"CHAPTER_CHECK_{key.upper()}_BLOCKED")
+
+    # This check is intentionally document-wide: it asks whether every special
+    # topic appears somewhere in the complete document. A bounded validation
+    # of one tender chapter must not fail because another chapter owns a topic.
+    document_topic_check = (
+        quality.get("required_topics_detail")
+        if isinstance(quality.get("required_topics_detail"), dict)
+        else {}
+    )
+    checks.append(
+        {
+            "name": "required_topics_detail",
+            "pass": None,
+            "observed_pass": document_topic_check.get("ok") is True,
+            "scope": "document",
+            "deferred": True,
+        }
+    )
+
+    review = (
+        quality.get("independent_content_review")
+        if isinstance(quality.get("independent_content_review"), dict)
+        else {}
+    )
+    section_threshold = int(review.get("section_threshold") or 60)
+    section_rows = [
+        row for row in (review.get("by_section") or []) if isinstance(row, dict)
+    ]
+    sections_ok = bool(section_rows) and all(
+        int(row.get("score") or 0) >= section_threshold
+        and str(row.get("status") or "").lower() != "blocked"
+        for row in section_rows
+    )
+    checks.append(
+        {
+            "name": "independent_section_quality",
+            "pass": sections_ok,
+            "threshold": section_threshold,
+            "section_count": len(section_rows),
+        }
+    )
+    if not sections_ok:
+        blocker_codes.append("CHAPTER_SECTION_QUALITY_BLOCKED")
+
+    contract_ok = bool(contract_checks.get("ok"))
+    checks.append({"name": "agent_contract", "pass": contract_ok})
+    if not contract_ok:
+        blocker_codes.append("CHAPTER_AGENT_CONTRACT_BLOCKED")
+
+    model_check = next(
+        (
+            row
+            for row in (delivery_quality_gate.get("checks") or [])
+            if isinstance(row, dict) and row.get("name") == "independent_model_review"
+        ),
+        {},
+    )
+    model_ok = bool(model_check.get("pass"))
+    checks.append({"name": "independent_model_review", "pass": model_ok})
+    if not model_ok:
+        blocker_codes.append("CHAPTER_MODEL_REVIEW_BLOCKED")
+
+    blocker_codes = list(dict.fromkeys(blocker_codes))
+    return {
+        "schema_version": "chapter-validation-quality-v1",
+        "pass": not blocker_codes,
+        "checks": checks,
+        "blocker_codes": blocker_codes,
+    }
+
+
+def _build_consistency_review_prompt(
+    consistency_material: list[str],
+    *,
+    delivery_scope: str,
+) -> str:
+    scope = _normalize_delivery_scope(delivery_scope)
+    if scope == "chapter_validation":
+        scope_instruction = (
+            "仅复核所选章节自身及所选章节之间的一致性；"
+            "不得因为其他招标章节未提供而扣分或判定全文缺失。"
+            "明确标注为“经验值”“待确认”或“须复核”的参数属于非交付验证占位，"
+            "只能列为警告，不能仅因尚未确认而判定 BLOCK；"
+            "仅当已确认值互相矛盾、强制规范不可信或章节内部存在实质性安全冲突时判定 BLOCK。"
+        )
+    else:
+        scope_instruction = "对所提供的完整招标目录正文执行全文一致性复核。"
+    return (
+        "你是施工组织设计终审专家。"
+        f"{scope_instruction}"
+        "重点检查工期、资源峰值、关键线路、质量验收、安全责任和规范引用是否前后冲突。"
+        "不得补造事实。输出必须满足以下机器判定合同："
+        "第一行只能是“DECISION: PASS”或“DECISION: BLOCK”；"
+        "仅当不存在实质性冲突时输出 PASS；随后输出简短的问题清单或通过依据。"
+        "\n\n"
+        + "\n\n".join(consistency_material)
+    )[:24000]
+
+
+def _build_consistency_material(
+    sections: list[dict[str, Any]],
+    *,
+    delivery_scope: str,
+) -> list[str]:
+    """Build a bounded, fair review sample instead of reading only each head."""
+
+    rows = [row for row in sections if isinstance(row, dict)]
+    if not rows:
+        return []
+    total_budget = 21000
+    per_section_budget = max(1500, total_budget // len(rows))
+    material: list[str] = []
+    for row in rows:
+        title = str(row.get("title") or "").strip()
+        content = str(row.get("content") or "").strip()
+        if len(content) > per_section_budget:
+            head_budget = int(per_section_budget * 0.7)
+            tail_budget = per_section_budget - head_budget
+            content = (
+                content[:head_budget]
+                + "\n\n[中段因审校上下文预算省略]\n\n"
+                + content[-tail_budget:]
+            )
+        material.append(f"## {title}\n{content}")
+    return material
+
+
+def _build_weights_and_penalties(tender: dict[str, Any]) -> tuple[list[str], list[str]]:
     weights = []
     penalties = []
     for it in tender.get("items", []):
@@ -234,11 +560,11 @@ def _to_int_or_none(v: Any) -> int | None:
     try:
         n = int(float(v))
         return n if n > 0 else None
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
-def _extract_chapter_page_target(chapter_pages: Dict[str, Any], title: str) -> int | None:
+def _extract_chapter_page_target(chapter_pages: dict[str, Any], title: str) -> int | None:
     if not isinstance(chapter_pages, dict):
         return None
     raw = chapter_pages.get(title)
@@ -254,7 +580,31 @@ def _extract_chapter_page_target(chapter_pages: Dict[str, Any], title: str) -> i
     return _to_int_or_none(raw)
 
 
-def _chapter_requirements_for_title(chapter_requirements: Dict[str, Any], title: str) -> list[str]:
+def _chapter_deadline_seconds(
+    payload: dict[str, Any],
+    *,
+    target_pages: int | None,
+) -> int:
+    """Return one bounded chapter deadline that can include a continuation.
+
+    A long chapter may legitimately need two provider requests when the first
+    response stops at the output-token limit.  The former 480-second ceiling
+    could cancel that bounded continuation (or the next admitted provider)
+    even though each individual request respected its 240-second deadline.
+    """
+
+    # 900 seconds leaves bounded room for initial+continuation plus one
+    # admitted fallback request (each individual request remains <=240s).
+    default_seconds = 900 if int(target_pages or 0) >= 8 else 480
+    raw = payload.get("chapter_deadline_seconds")
+    try:
+        requested = int(raw) if raw is not None else default_seconds
+    except (TypeError, ValueError):
+        requested = default_seconds
+    return max(60, min(900, requested))
+
+
+def _chapter_requirements_for_title(chapter_requirements: dict[str, Any], title: str) -> list[str]:
     if not isinstance(chapter_requirements, dict):
         return []
     raw = chapter_requirements.get(title)
@@ -277,7 +627,7 @@ def _chapter_requirements_for_title(chapter_requirements: Dict[str, Any], title:
     return [text] if text else []
 
 
-def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
+def _estimate_chars_per_page(style: dict[str, Any]) -> int:
     default_chars = 900
     if not isinstance(style, dict):
         return default_chars
@@ -287,7 +637,7 @@ def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
     def _to_float(v: Any, default: float) -> float:
         try:
             return float(v)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return default
 
     body_size = style.get("body_size") or style.get("font_size")
@@ -306,10 +656,14 @@ def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
         line_spacing_pt = 22.0
     # 固定值行距（磅）转近似倍数，用于估算字数/页
     if line_spacing_pt is not None:
-        try:
-            spacing = max(1.0, min(3.0, float(line_spacing_pt) / max(8.0, size)))
-        except Exception:
-            pass
+        spacing = max(
+            1.0,
+            min(
+                3.0,
+                _to_float(line_spacing_pt, spacing * max(8.0, size))
+                / max(8.0, size),
+            ),
+        )
 
     left = _to_float(margins_cfg.get("left"), 2.0)
     right = _to_float(margins_cfg.get("right"), 2.0)
@@ -324,7 +678,7 @@ def _estimate_chars_per_page(style: Dict[str, Any]) -> int:
     return max(350, min(1800, est))
 
 
-def _deep_merge_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+def _deep_merge_dict(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
     out = dict(dst or {})
     for k, v in (src or {}).items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
@@ -334,7 +688,318 @@ def _deep_merge_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]
     return out
 
 
-def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
+def _canonical_source_digest(value: Any) -> str:
+    raw = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_source_input_receipt(
+    *,
+    project_id: str | None,
+    tender: dict[str, Any],
+    boq: dict[str, Any],
+) -> dict[str, Any]:
+    core = {
+        "schema_version": "autoplan-source-input-v1",
+        "project_id": str(project_id or "").strip(),
+        "tender_digest": _canonical_source_digest(tender),
+        "boq_digest": _canonical_source_digest(boq),
+    }
+    return {**core, "receipt_digest": _canonical_source_digest(core)}
+
+
+def _read_project_fact_audit_snapshot(
+    path: Path,
+    *,
+    expected_name: str,
+    missing_code: str,
+    invalid_code: str,
+    require_private: bool = False,
+) -> bytes:
+    """Read one fixed audit file without following a file-level symlink."""
+
+    if path.name != expected_name or path.parent.name != "audit":
+        raise ProjectFactApprovalGateError(invalid_code, "项目事实审计路径无效")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise ProjectFactApprovalGateError(missing_code, "项目事实审计文件缺失") from exc
+    except OSError as exc:
+        raise ProjectFactApprovalGateError(invalid_code, "项目事实审计文件不可读") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size < 0
+            or before.st_size > _PROJECT_FACT_AUDIT_MAX_BYTES
+            or (require_private and stat.S_IMODE(before.st_mode) & 0o077)
+        ):
+            raise ProjectFactApprovalGateError(
+                invalid_code,
+                "项目事实审计文件类型、权限或大小无效",
+            )
+        chunks: list[bytes] = []
+        remaining = _PROJECT_FACT_AUDIT_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            len(raw) > _PROJECT_FACT_AUDIT_MAX_BYTES
+            or len(raw) != after.st_size
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise ProjectFactApprovalGateError(
+                invalid_code,
+                "项目事实审计读取期间发生变化",
+            )
+        namespace = os.stat(path, follow_symlinks=False)
+        if stat.S_ISLNK(namespace.st_mode) or (
+            namespace.st_dev,
+            namespace.st_ino,
+        ) != (after.st_dev, after.st_ino):
+            raise ProjectFactApprovalGateError(
+                invalid_code,
+                "项目事实审计命名空间发生变化",
+            )
+        return raw
+    except OSError as exc:
+        raise ProjectFactApprovalGateError(invalid_code, "项目事实审计读取失败") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _unique_audit_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_audit_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _trusted_current_project_ingest_records(
+    *,
+    project_id: str,
+    audit_path: Path,
+    audit_bytes: bytes,
+) -> list[dict[str, Any]]:
+    if audit_bytes and not audit_bytes.endswith(b"\n"):
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "入库审计末行不完整",
+        )
+    try:
+        text = audit_bytes.decode("utf-8")
+        rows = [
+            json.loads(
+                line,
+                object_pairs_hook=_unique_audit_json_object,
+                parse_constant=_reject_audit_json_constant,
+            )
+            for line in text.splitlines()
+        ]
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "入库审计JSON无效",
+        ) from exc
+    if any(not isinstance(row, dict) for row in rows):
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "入库审计行不是对象",
+        )
+
+    workspace_root = audit_path.parent.parent.resolve(strict=False)
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in reversed(rows):
+        row_project_id = str(row.get("project_id") or "").strip()
+        source_sha256 = str(row.get("sha256") or "").strip().lower()
+        identity = (row_project_id, source_sha256)
+        if not source_sha256 or identity in latest:
+            continue
+        latest[identity] = row
+
+    trusted_records: list[dict[str, Any]] = []
+    for (row_project_id, _source_sha256), row in latest.items():
+        if row_project_id != project_id:
+            continue
+        if row.get("enabled") is not True or row.get("usable") is not True:
+            continue
+        trusted = resolve_trusted_ingest_record(
+            row,
+            workspace_root=workspace_root,
+        )
+        if trusted.get("ok") is not True:
+            continue
+        trusted_records.append({**trusted, "enabled": True, "usable": True})
+    return trusted_records
+
+
+def _verified_formal_project_fact_resolutions(
+    *,
+    payload: Mapping[str, Any],
+    project_id: str,
+) -> dict[str, Any]:
+    raw_requested = payload.get("approved_project_fact_resolutions")
+    if raw_requested is None:
+        return {}
+    if not isinstance(raw_requested, Mapping):
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            "批准参数不是字段映射",
+        )
+    requested = dict(raw_requested)
+    if not requested:
+        return {}
+    if not project_id:
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            "批准参数缺少项目身份",
+        )
+
+    approval_path = _PROJECT_FACT_APPROVAL_AUDIT_PATH
+    ingest_path = _PROJECT_FACT_INGEST_AUDIT_PATH
+    if approval_path.parent.resolve(strict=False) != ingest_path.parent.resolve(
+        strict=False
+    ):
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            "审批审计与入库审计不在同一固定审计目录",
+        )
+    approval_bytes = _read_project_fact_audit_snapshot(
+        approval_path,
+        expected_name="project_fact_approvals.jsonl",
+        missing_code="HOLD_PROJECT_FACT_APPROVAL_EVENT_MISSING",
+        invalid_code="HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+        require_private=True,
+    )
+    try:
+        parse_project_fact_approval_audit(approval_bytes)
+    except ProjectFactApprovalAuditError as exc:
+        raise ProjectFactApprovalGateError(
+            "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            "审批审计内容无效",
+        ) from exc
+    ingest_bytes = _read_project_fact_audit_snapshot(
+        ingest_path,
+        expected_name="ingest.jsonl",
+        missing_code="HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+        invalid_code="HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+    )
+    current_sources = _trusted_current_project_ingest_records(
+        project_id=project_id,
+        audit_path=ingest_path,
+        audit_bytes=ingest_bytes,
+    )
+
+    verified: dict[str, Any] = {}
+    rejections: list[tuple[str, str]] = []
+    for raw_field, raw_resolution in requested.items():
+        field = str(raw_field or "").strip()
+        resolution = (
+            dict(raw_resolution) if isinstance(raw_resolution, Mapping) else {}
+        )
+        locator = resolution.get("approval_event")
+        resolution_core = {
+            key: value for key, value in resolution.items() if key != "approval_event"
+        }
+        evidence = (
+            resolution_core.get("evidence")
+            if isinstance(resolution_core.get("evidence"), Mapping)
+            else {}
+        )
+        receipt = resolution_core.get("approval_receipt")
+        if not isinstance(receipt, Mapping):
+            receipt = resolution_core.get("confirmation_receipt")
+        normalized_receipt = (
+            {
+                key: " ".join(str(receipt.get(key) or "").split()).strip()
+                for key in _APPROVAL_RECEIPT_FIELDS
+            }
+            if isinstance(receipt, Mapping)
+            else {}
+        )
+        if normalized_receipt:
+            normalized_receipt["status"] = normalized_receipt["status"].lower()
+            normalized_receipt["value_digest"] = normalized_receipt[
+                "value_digest"
+            ].lower()
+        if not isinstance(locator, Mapping):
+            rejections.append((field, "PROJECT_FACT_APPROVAL_EVENT_NOT_FOUND"))
+            continue
+        try:
+            outcome = verify_project_fact_approval_event(
+                approval_bytes,
+                locator,
+                expected_project_id=project_id,
+                expected_field=field,
+                expected_resolution_digest=approval_canonical_digest(
+                    resolution_core
+                ),
+                expected_value_digest=approval_value_digest(
+                    field=field,
+                    value=resolution_core.get("value"),
+                    unit=resolution_core.get("unit"),
+                ),
+                expected_approval_receipt_digest=approval_canonical_digest(
+                    normalized_receipt
+                ),
+                expected_source_evidence=evidence,
+                current_source_allowlist=current_sources,
+            )
+        except (ProjectFactApprovalAuditError, TypeError, ValueError):
+            outcome = {
+                "ok": False,
+                "machine_code": "PROJECT_FACT_APPROVAL_EVENT_INVALID",
+            }
+        if outcome.get("ok") is True:
+            verified[field] = resolution_core
+        else:
+            rejections.append(
+                (
+                    field,
+                    str(
+                        outcome.get("machine_code")
+                        or "PROJECT_FACT_APPROVAL_EVENT_INVALID"
+                    ),
+                )
+            )
+    if rejections:
+        detail_codes = {detail for _field, detail in rejections}
+        if "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT" in detail_codes:
+            code = "HOLD_PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT"
+        elif detail_codes & {
+            "PROJECT_FACT_APPROVAL_EVENT_NOT_FOUND",
+            "PROJECT_FACT_APPROVAL_LOCATOR_INVALID",
+        }:
+            code = "HOLD_PROJECT_FACT_APPROVAL_EVENT_MISSING"
+        else:
+            code = "HOLD_PROJECT_FACT_APPROVAL_EVENT_INVALID"
+        fields = "、".join(sorted(field or "<invalid>" for field, _detail in rejections))
+        raise ProjectFactApprovalGateError(code, f"批准参数审计未通过：{fields}")
+    return verified
+
+
+def _build_boq_focus(boq: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(boq, dict):
         return {
             "lines": [],
@@ -347,12 +1012,12 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
     focus_lines: list[str] = []
     must_cover: list[str] = []
 
-    def _pick_lines(items: List[Dict[str, Any]], title: str, key: str):
+    def _pick_lines(items: list[dict[str, Any]], title: str, key: str):
         if not items:
             return
         focus_lines.append(f"{title}：")
         for it in items[:5]:
-            name = (it.get("name") or "").strip()
+            name = normalize_boq_focus_name(it.get("name"))
             qty = it.get("quantity")
             unit = it.get("unit") or ""
             unit_price = it.get("unit_price")
@@ -365,7 +1030,7 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
             if total_price is not None:
                 seg += f" / 合价={total_price}"
             focus_lines.append(seg)
-            if name and name not in must_cover:
+            if name:
                 must_cover.append(name)
 
     _pick_lines(stats.get("top_quantity_items") or [], "清单重点（单项工程量大）", "top_quantity_items")
@@ -385,7 +1050,10 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "lines": focus_lines,
-        "must_cover_keywords": must_cover[:20],
+        "must_cover_keywords": select_boq_focus_names(
+            stats,
+            limit=MAX_BOQ_FOCUS_ITEMS,
+        ),
         "special_materials": [it.get("name") for it in special_items[:12] if it.get("name")],
         "hazardous_materials": [it.get("name") for it in hazard_items[:12] if it.get("name")],
         "ppe_items": [it.get("name") for it in ppe_items[:12] if it.get("name")],
@@ -393,7 +1061,7 @@ def _build_boq_focus(boq: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_provider_api_key(
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     provider: str | None,
     *,
     slot_id: str | None = None,
@@ -429,6 +1097,22 @@ def _resolve_provider_api_key(
     if isinstance(v2, str) and v2.strip():
         return v2.strip()
 
+    # Production chains persist only a key alias.  Resolve the credential from
+    # the server-owned slot at call time so plaintext never enters job payloads,
+    # checkpoints, events, or output JSON.
+    try:
+        from backend.zhifei_autoplan.provider_runtime import (
+            resolve_provider_slot_credentials,
+        )
+
+        server_key, _server_alias = resolve_provider_slot_credentials(slot_id, p)
+        if isinstance(server_key, str) and server_key.strip():
+            return server_key.strip()
+    except Exception:  # noqa: BLE001 - server credential adapters are optional and provider-defined.
+        logger.warning(
+            "Server-owned provider credential resolution failed; falling back to environment lookup"
+        )
+
     env_map = {
         "openai": ("OPENAI_API_KEY", "ZF_OPENAI_API_KEY"),
         "google": ("ZF_GOOGLE_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"),
@@ -448,14 +1132,14 @@ def _resolve_provider_api_key(
     return None
 
 
-def _normalize_provider_chain(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _normalize_provider_chain(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Normalize provider chain to support multiple keys for same provider.
     Preferred input schema:
       provider_chain = [{"slot":"primary","provider":"google","model":"...", "api_key":"..."}]
     Backward compatible with legacy providers/model_map/provider fields.
     """
-    chain: List[Dict[str, Any]] = []
+    chain: list[dict[str, Any]] = []
 
     raw_chain = payload.get("provider_chain")
     if isinstance(raw_chain, list):
@@ -468,12 +1152,14 @@ def _normalize_provider_chain(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                 continue
             slot = str(item.get("slot") or f"slot_{idx + 1}").strip()
             api_key = str(item.get("api_key") or "").strip()
+            key_alias = str(item.get("key_alias") or "").strip()
             chain.append(
                 {
                     "slot": slot,
                     "provider": provider,
                     "model": model,
                     "api_key": api_key,
+                    "key_alias": key_alias,
                 }
             )
     if chain:
@@ -507,7 +1193,280 @@ def _normalize_provider_chain(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return chain
 
 
-async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
+_PROVIDER_ADMISSION_MANAGERS: dict[tuple[str, float], ProviderAdmissionManager] = {}
+# Test modules may patch this in-process boolean.  It is deliberately not an
+# environment variable or payload field, so HTTP clients and launch scripts
+# cannot turn provider admission off.
+_ALLOW_UNADMITTED_PROVIDER_CALLS_FOR_TESTS = False
+
+
+class ProviderAdmissionRunCoordinator:
+    """One fresh admission task shared by every variant in one generation run."""
+
+    def __init__(self, manager: ProviderAdmissionManager) -> None:
+        self.manager = manager
+        self._task: asyncio.Task[dict[str, Any]] | None = None
+        self._candidates: tuple[ProviderCandidate, ...] = ()
+        self._required_roles: tuple[str, ...] = ()
+        self._snapshot: dict[str, Any] | None = None
+        self._events_claimed = False
+        self._preflight_variant_ids: frozenset[int] = frozenset()
+        self._preflight_arrivals: set[int] = set()
+        self._preflight_event: asyncio.Event | None = None
+        self._preflight_loop: asyncio.AbstractEventLoop | None = None
+        self._preflight_failure: str | None = None
+
+    @property
+    def bound_candidates(self) -> tuple[ProviderCandidate, ...]:
+        return self._candidates
+
+    def claim_event_emitter(self) -> bool:
+        if self._events_claimed:
+            return False
+        self._events_claimed = True
+        return True
+
+    def configure_preflight_variants(self, variant_ids: list[int]) -> None:
+        normalized = frozenset(
+            int(variant_id)
+            for variant_id in variant_ids
+            if not isinstance(variant_id, bool) and int(variant_id) > 0
+        )
+        if not normalized or len(normalized) != len(variant_ids):
+            raise RuntimeError("provider_admission_preflight_variants_invalid")
+        if self._preflight_variant_ids and self._preflight_variant_ids != normalized:
+            raise RuntimeError("provider_admission_preflight_variants_changed")
+        if self._preflight_arrivals and self._preflight_variant_ids != normalized:
+            raise RuntimeError("provider_admission_preflight_already_started")
+        self._preflight_variant_ids = normalized
+
+    async def await_preflight_barrier(self, variant_id: int) -> None:
+        normalized_variant_id = int(variant_id)
+        if self._preflight_failure:
+            raise RuntimeError(self._preflight_failure)
+        if not self._preflight_variant_ids:
+            # Direct one-variant callers remain supported. Production multi-
+            # variant entrypoints configure the complete plan before launch.
+            self.configure_preflight_variants([normalized_variant_id])
+        if normalized_variant_id not in self._preflight_variant_ids:
+            raise RuntimeError("provider_admission_preflight_variant_unexpected")
+        loop = asyncio.get_running_loop()
+        if self._preflight_loop is not None and self._preflight_loop is not loop:
+            raise RuntimeError("provider_admission_preflight_loop_mismatch")
+        if self._preflight_event is None:
+            self._preflight_loop = loop
+            self._preflight_event = asyncio.Event()
+        if self._preflight_failure:
+            raise RuntimeError(self._preflight_failure)
+        if normalized_variant_id in self._preflight_arrivals:
+            raise RuntimeError("provider_admission_preflight_variant_duplicate")
+        self._preflight_arrivals.add(normalized_variant_id)
+        if self._preflight_arrivals == set(self._preflight_variant_ids):
+            self._preflight_event.set()
+        await self._preflight_event.wait()
+        if self._preflight_failure:
+            raise RuntimeError(self._preflight_failure)
+
+    def abort_preflight_barrier(self) -> None:
+        self._preflight_failure = "provider_admission_preflight_aborted"
+        if self._preflight_event is not None and not self._preflight_event.is_set():
+            self._preflight_event.set()
+
+    def admitted_candidate(self, role: str) -> ProviderCandidate | None:
+        if not isinstance(self._snapshot, dict):
+            return None
+        admitted = {
+            str(item.get("identity_digest") or "")
+            for item in (self._snapshot.get("admitted_chain") or [])
+            if isinstance(item, dict)
+        }
+        normalized_role = str(role or "").strip().lower()
+        return next(
+            (
+                candidate
+                for candidate in self._candidates
+                if candidate.role == normalized_role
+                and candidate.identity_digest in admitted
+            ),
+            None,
+        )
+
+    async def admit_chain_once(
+        self,
+        *,
+        candidates: list[ProviderCandidate],
+        probe: Any,
+        required_roles: list[str],
+    ) -> dict[str, Any]:
+        if self._snapshot is not None:
+            if (
+                tuple(candidate.identity_digest for candidate in candidates)
+                != tuple(candidate.identity_digest for candidate in self._candidates)
+                or tuple(required_roles) != self._required_roles
+            ):
+                raise RuntimeError("provider_admission_route_changed_during_run")
+            return dict(self._snapshot)
+        loop = asyncio.get_running_loop()
+        if self._task is not None and self._task.get_loop() is not loop:
+            raise RuntimeError("provider_admission_run_loop_mismatch")
+        if self._task is None:
+            self._candidates = tuple(candidates)
+            self._required_roles = tuple(required_roles)
+            self._task = loop.create_task(
+                self.manager.admit_chain(
+                    candidates=self._candidates,
+                    probe=probe,
+                    required_roles=self._required_roles,
+                    force=True,
+                )
+            )
+        elif (
+            tuple(candidate.identity_digest for candidate in candidates)
+            != tuple(candidate.identity_digest for candidate in self._candidates)
+            or tuple(required_roles) != self._required_roles
+        ):
+            raise RuntimeError("provider_admission_route_changed_during_run")
+        result = await asyncio.shield(self._task)
+        self._snapshot = dict(result)
+        return result
+
+
+def _provider_admission_manager(payload: dict[str, Any]) -> ProviderAdmissionManager:
+    supplied = payload.get("_provider_admission_manager")
+    if isinstance(supplied, ProviderAdmissionManager):
+        return supplied
+    configured_root = payload.get("_provider_admission_root") or os.environ.get(
+        "ZF_PROVIDER_ADMISSION_STATE_DIR"
+    )
+    root = str(configured_root or "").strip() or None
+    try:
+        ttl = max(
+            30.0,
+            min(
+                1800.0,
+                float(
+                    payload.get("provider_admission_ttl_seconds")
+                    or os.environ.get("ZF_PROVIDER_ADMISSION_TTL_SECONDS")
+                    or 300.0
+                ),
+            ),
+        )
+    except (TypeError, ValueError):
+        ttl = 300.0
+    key = (root or "<module-default>", ttl)
+    manager = _PROVIDER_ADMISSION_MANAGERS.get(key)
+    if manager is None:
+        manager = ProviderAdmissionManager(root=root, ttl_seconds=ttl)
+        _PROVIDER_ADMISSION_MANAGERS[key] = manager
+    return manager
+
+
+def new_provider_admission_run_coordinator(
+    payload: dict[str, Any],
+) -> ProviderAdmissionRunCoordinator:
+    return ProviderAdmissionRunCoordinator(_provider_admission_manager(payload))
+
+
+def _provider_admission_candidates(
+    payload: dict[str, Any],
+    provider_chain: list[dict[str, Any]],
+) -> list[ProviderCandidate]:
+    raw_candidates = list(provider_chain)
+    extra = payload.get("_provider_admission_extra_slots")
+    if isinstance(extra, list):
+        raw_candidates.extend(item for item in extra if isinstance(item, dict))
+    candidates: list[ProviderCandidate] = []
+    for item in raw_candidates:
+        provider = str(item.get("provider") or "").strip().lower()
+        model = str(item.get("model") or "").strip()
+        slot = str(item.get("slot") or "").strip().lower()
+        if not provider or not model or not slot:
+            continue
+        credential = _resolve_provider_api_key(
+            payload,
+            provider,
+            slot_id=slot,
+            explicit_key=str(item.get("api_key") or "").strip() or None,
+        )
+        role = str(item.get("role") or slot).strip().lower()
+        if role == "text_escalation" and not bool(
+            payload.get("allow_fable_escalation", False)
+        ):
+            continue
+        stream_required = role.startswith("text_")
+        candidates.append(
+            ProviderCandidate(
+                slot=slot,
+                role=role,
+                provider=provider,
+                model=model,
+                credential=str(credential or ""),
+                key_alias=str(item.get("key_alias") or ""),
+                stream_required=stream_required,
+                stream_supported=(
+                    provider in {"openai", "anthropic", "google"}
+                    if stream_required
+                    else True
+                ),
+            )
+        )
+    return candidates
+
+
+async def probe_provider_candidate(
+    candidate: ProviderCandidate,
+    *,
+    reliability_runtime: ModelReliabilityRuntime | None = None,
+    execution_runtime: ExecutionControlRuntime | None = None,
+) -> dict[str, Any]:
+    """Run one minimal, streamed, credential-bound admission probe."""
+
+    started = time.monotonic()
+    client = LLMClient(
+        provider=candidate.provider,
+        model=candidate.model,
+        api_key=candidate.credential,
+        reliability_runtime=reliability_runtime,
+        reliability_identity=candidate.identity_digest,
+        retry_attempts=1,
+        execution_runtime=execution_runtime,
+    )
+    try:
+        receipt = await client.preflight(timeout=60.0)
+    finally:
+        client.close()
+    elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+    if bool(receipt.get("ok")):
+        if candidate.stream_required and not bool(receipt.get("streamed")):
+            return {
+                "ok": False,
+                "code": "stream_unavailable",
+                "stream": {"status": "fail", "code": "stream_unavailable"},
+                "elapsed_ms": elapsed_ms,
+            }
+        return {
+            "ok": True,
+            "code": "probe_passed",
+            "stream": (
+                {"status": "pass", "code": "stream_ready"}
+                if candidate.stream_required
+                else {"status": "skipped", "code": "stream_not_required"}
+            ),
+            "elapsed_ms": elapsed_ms,
+        }
+    error_info = classify_provider_error(
+        receipt.get("error_info") or receipt.get("error") or "provider_error",
+        provider=candidate.provider,
+        model=candidate.model,
+    )
+    return {
+        "ok": False,
+        "code": str(error_info.get("code") or "provider_error"),
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
     topic = payload.get("topic") or "未命名项目"
     outline = payload.get("outline") or []
     requirements = payload.get("requirements") or []
@@ -520,18 +1479,41 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     providers = payload.get("providers") or []
     model_map = payload.get("model_map") or {}
     provider_chain = _normalize_provider_chain(payload)
-    model_reliability = ModelReliabilityRuntime(failure_threshold=2)
-    model_preflight_receipts: List[Dict[str, Any]] = []
+    try:
+        agent_parallelism = int(payload.get("agent_parallelism") or 4)
+    except (TypeError, ValueError, OverflowError):
+        agent_parallelism = 4
+    agent_parallelism = max(1, min(16, agent_parallelism))
+    try:
+        requested_model_parallelism = int(
+            payload.get("max_model_parallelism") or min(agent_parallelism, 2)
+        )
+    except (TypeError, ValueError, OverflowError):
+        requested_model_parallelism = min(agent_parallelism, 2)
+    max_model_parallelism = max(
+        1, min(8, agent_parallelism, requested_model_parallelism)
+    )
+    try:
+        requested_failure_threshold = int(
+            payload.get("model_circuit_failure_threshold")
+            or 2
+        )
+    except (TypeError, ValueError, OverflowError):
+        requested_failure_threshold = 2
+    model_circuit_failure_threshold = max(
+        2, min(16, requested_failure_threshold)
+    )
+    model_reliability = ModelReliabilityRuntime(
+        failure_threshold=model_circuit_failure_threshold
+    )
+    model_preflight_receipts: list[dict[str, Any]] = []
     progress_callback = payload.get("_progress_callback")
     cancel_callback = payload.get("_cancel_callback")
+    checkpoint_write_guard = payload.get("_checkpoint_write_guard")
     execution_runtime = payload.get("_execution_runtime")
     if not isinstance(execution_runtime, ExecutionControlRuntime):
         execution_runtime = ExecutionControlRuntime(
-            max_concurrency=int(
-                payload.get("max_model_parallelism")
-                or payload.get("agent_parallelism")
-                or 4
-            ),
+            max_concurrency=max_model_parallelism,
             max_model_attempts=int(payload.get("max_model_attempts") or 256),
             max_input_chars=int(payload.get("max_model_input_chars") or 24_000_000),
             max_requested_output_tokens=int(
@@ -545,31 +1527,87 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             return
         try:
             cancelled = bool(cancel_callback())
-        except Exception:
+        except Exception:  # noqa: BLE001 - arbitrary control-plane callbacks cannot cancel generation implicitly.
             # Cancellation is a control-plane decision.  A broken probe must not
             # silently cancel or change the generated document.
             cancelled = False
         if cancelled:
             raise GenerationCancelledError(f"cancelled_by_user:{stage}")
 
+    def _write_checkpoint(callback: Any, **kwargs: Any) -> dict[str, Any]:
+        _raise_if_cancelled("before_checkpoint_write")
+        if callable(checkpoint_write_guard):
+            return checkpoint_write_guard(callback, **kwargs)
+        return callback(**kwargs)
+
     def _emit_progress(event: str, **data: Any) -> None:
         if not callable(progress_callback):
             return
         try:
             progress_callback({"event": str(event or ""), **data})
-        except Exception:
+        except Exception:  # noqa: BLE001 - telemetry callbacks are isolated from document generation.
             # Observability must never change the generated document outcome.
-            pass
+            return
     _raise_if_cancelled("run_started")
+    _emit_progress("preflight_started", stage="project_context")
     if provider_chain:
         provider = provider_chain[0].get("provider") or provider
         model = provider_chain[0].get("model") or model
     tiered_anthropic_route = _has_tiered_anthropic_route(provider_chain)
     allow_fable_escalation = bool(payload.get("allow_fable_escalation", False))
     dry_run = bool(payload.get("dry_run", False))
+
+    def _emit_provider_progress(event: str, **data: Any) -> None:
+        # Dry-run intentionally constructs deterministic fallback sections and
+        # never sends a provider request.  Suppress provider-attempt telemetry
+        # so monitoring cannot report a cache/model call that did not happen.
+        if dry_run:
+            return
+        _emit_progress(event, **data)
+
     no_write_preview = bool(payload.get("no_write") or payload.get("preview_only"))
-    generate_images = bool(payload.get("generate_images", True)) and not no_write_preview
+    strict_loopback_local_preview = bool(
+        not dry_run
+        and str(provider or "").strip().lower() == "ollama"
+        and bool(payload.get("no_write"))
+        and bool(payload.get("preview_only"))
+        and str(payload.get("base_url") or "").strip().rstrip("/")
+        == "http://127.0.0.1:11434"
+        and not bool(payload.get("generate_images", False))
+    )
+    mandatory_provider_admission = bool(
+        not dry_run
+        and not strict_loopback_local_preview
+        and not _ALLOW_UNADMITTED_PROVIDER_CALLS_FOR_TESTS
+    )
+    generate_images = (
+        bool(payload.get("generate_images", True))
+        and not no_write_preview
+        and not dry_run
+    )
     strict_quality = bool(payload.get("quality_strict", True))
+    raw_delivery_scope = payload.get("delivery_scope")
+    delivery_scope = _normalize_delivery_scope(raw_delivery_scope)
+    formal_document_delivery = bool(delivery_scope == "document" and not dry_run)
+    compliance_registry_authority = None
+    compliance_registry_bytes: bytes | None = None
+    compliance_registry_path: Path | None = None
+    try:
+        compliance_registry_authority = load_runtime_registry_authority()
+        compliance_registry_bytes = compliance_registry_authority.raw
+        compliance_registry_path = compliance_registry_authority.path
+        expected_registry_authority = payload.get("_compliance_registry_authority")
+        if (
+            expected_registry_authority is not None
+            and expected_registry_authority
+            != compliance_registry_authority.projection
+        ):
+            raise RuntimeError("COMPLIANCE_REGISTRY_AUTHORITY_MISMATCH")
+    except Exception as exc:
+        if formal_document_delivery or strict_quality:
+            raise RuntimeError(
+                "COMPLIANCE_REGISTRY_AUTHORITY_UNTRUSTED"
+            ) from exc
     case_library_options = payload.get("case_library") if isinstance(payload.get("case_library"), dict) else {}
     image_library_options = payload.get("image_library") if isinstance(payload.get("image_library"), dict) else {}
     reference_library_audit_path = (
@@ -597,7 +1635,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_variant_id = payload.get("variant_id")
     try:
         variant_index = int(raw_variant_id or 1)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         variant_index = 1
     if variant_index <= 0:
         variant_index = 1
@@ -615,12 +1653,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             explicit_template_id=explicit_logic,
             domain="qse",
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional template adapters may fail without changing the outline.
         logic_template_general = None
         logic_template_qse = None
 
     # Branding (logo/company) is optional but should be stable within one project run.
-    branding: Dict[str, Any] = {
+    branding: dict[str, Any] = {
         "bidder_company": payload.get("bidder_company"),
         "bidder_domain": payload.get("bidder_domain"),
         "logo_url": payload.get("logo_url"),
@@ -628,42 +1666,6 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
     logo_embed: str | None = None
     logo_raw_path: str | None = None
-    try:
-        from backend.zhifei_autoplan.logo_runtime import resolve_logo, prepare_logo_for_embedding
-
-        # Only resolve when bidder info is provided OR project_id is set (so we can scope to this project).
-        if payload.get("bidder_company") or payload.get("logo_url") or payload.get("bidder_domain") or project_id:
-            logo_raw = resolve_logo(
-                bidder_company=payload.get("bidder_company"),
-                logo_url=payload.get("logo_url"),
-                bidder_domain=payload.get("bidder_domain"),
-                project_id=project_id,
-            )
-            if logo_raw:
-                logo_raw_path = str(logo_raw)
-                logo_embed = prepare_logo_for_embedding(logo_raw) or None
-    except Exception:
-        logo_embed = None
-    if logo_embed:
-        branding["logo_path"] = logo_embed
-        try:
-            if project_id:
-                from backend.zhifei_autoplan.branding_store import update_branding
-
-                update_branding(
-                    str(project_id),
-                    {
-                        "bidder_company": branding.get("bidder_company"),
-                        "bidder_domain": branding.get("bidder_domain"),
-                        "logo_url": branding.get("logo_url"),
-                        "logo_raw_path": logo_raw_path,
-                        "logo_embed_path": str(logo_embed),
-                        "logo_path": str(logo_embed),
-                    },
-                    merge=True,
-                )
-        except Exception:
-            pass
 
     tender = payload.get("tender_matrix") or load_tender_matrix(project_id=project_id) or {}
     # 若调用方未显式给出目录/版式/页数约束，优先使用招标文件抽取结果兜底
@@ -690,12 +1692,22 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(enterprise_override, dict) and enterprise_override:
         enterprise_profile = _deep_merge_dict(enterprise_profile, enterprise_override)
     strict_tender_outline = bool(payload.get("strict_tender_outline", False))
-    if strict_tender_outline:
+    tender_outline = _dedup_lines(
+        tender.get("outline") if isinstance(tender.get("outline"), list) else [],
+        limit=80,
+    )
+    if strict_tender_outline or delivery_scope == "chapter_validation" or tender_outline:
         # 严格模式：目录与招标/评审标准保持一致，不自动补章、不改名。
         outline = _dedup_lines(outline if isinstance(outline, list) else [], limit=80)
     else:
         # 非严格模式：可按项目类型补齐缺失章节。
         outline = enrich_outline(outline if isinstance(outline, list) else [], project_type=project_type)
+    if tender_outline:
+        _validate_strict_outline_for_scope(
+            outline,
+            tender_outline,
+            delivery_scope=delivery_scope,
+        )
     # 版式策略：招标有明确要求时覆盖；否则用系统默认（22磅+2.5/2.0边距+宋体三号/四号）。
     tender_extraction_meta = tender.get("extraction_meta") if isinstance(tender.get("extraction_meta"), dict) else {}
     tender_requirement_matrix = (
@@ -724,7 +1736,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         _raw_tp = payload.get("total_pages_target")
         if _raw_tp is not None and int(_raw_tp) > 0:
             user_total_pages_target = int(_raw_tp)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         user_total_pages_target = None
     total_pages_limit = infer_total_page_limit(
         tender,
@@ -753,12 +1765,97 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         tender_globals.append(f"总页数不超过{total_pages_limit}页。")
     if style_source == "tender_override":
         tender_globals.append("字体/字号/行距/页边距等版式参数必须严格按招标文件要求执行，不得改写。")
-    boq = payload.get("boq_data") or load_boq_data(project_id=project_id) or {}
-    boq_wbs_cpm = build_boq_wbs_cpm(boq, enterprise_profile=enterprise_profile)
+    boq_source = payload.get("boq_data") or load_boq_data(project_id=project_id) or {}
+    source_input_receipt = _build_source_input_receipt(
+        project_id=str(project_id or "").strip() or None,
+        tender=tender if isinstance(tender, dict) else {},
+        boq=boq_source if isinstance(boq_source, dict) else {},
+    )
+    _emit_progress(
+        "boq_schedule_started",
+        item_count=(
+            len(boq_source.get("items") or []) if isinstance(boq_source, dict) else 0
+        ),
+    )
+    boq_wbs_cpm = build_boq_wbs_cpm(
+        boq_source,
+        enterprise_profile=enterprise_profile,
+    )
+    raw_cpm_summary = (
+        boq_wbs_cpm.get("summary")
+        if isinstance(boq_wbs_cpm.get("summary"), dict)
+        else {}
+    )
+    if bool(raw_cpm_summary.get("schedule_fact_eligible", True)):
+        cpm_summary = dict(raw_cpm_summary)
+    else:
+        # Keep the diagnostic state visible to downstream agents without
+        # presenting an implausible derived duration as a usable project fact.
+        cpm_summary = {
+            "schedule_fact_eligible": False,
+            "schedule_fact_reasons": list(
+                raw_cpm_summary.get("schedule_fact_reasons") or []
+            ),
+        }
+    boq = sanitize_boq_for_generation(boq_source)
+    _emit_progress(
+        "boq_schedule_completed",
+        process_count=len(boq_wbs_cpm.get("wbs") or []),
+        warning_count=len(boq_wbs_cpm.get("schedule_input_warnings") or []),
+    )
+    parameter_project_id = str(
+        project_id
+        or (tender.get("project_id") if isinstance(tender, dict) else "")
+        or (tender.get("project_code") if isinstance(tender, dict) else "")
+        or ""
+    ).strip()
+    try:
+        project_parameter_evidence = build_project_parameter_evidence(
+            project_id=parameter_project_id,
+            tender=tender if isinstance(tender, dict) else {},
+            audit_path=reference_library_audit_path,
+        )
+    except Exception as exc:  # noqa: BLE001 - evidence failure stays an explicit HOLD.
+        project_parameter_evidence = {
+            "schema_version": "project-parameter-evidence-v1",
+            "project_id": parameter_project_id or None,
+            "status": "HOLD_PROJECT_PARAMETER_EVIDENCE_BUILD_ERROR",
+            "ready": False,
+            "quality_threshold": None,
+            "matched_item_count": 0,
+            "conflicts": [],
+            "error_type": type(exc).__name__,
+        }
+    _emit_progress(
+        "project_parameter_evidence_ready",
+        status=project_parameter_evidence.get("status"),
+        ready=bool(project_parameter_evidence.get("ready")),
+        matched_item_count=int(
+            project_parameter_evidence.get("matched_item_count") or 0
+        ),
+        conflict_count=len(project_parameter_evidence.get("conflicts") or []),
+    )
+    ledger_payload = dict(payload)
+    if formal_document_delivery:
+        verified_approved_resolutions = _verified_formal_project_fact_resolutions(
+            payload=payload,
+            project_id=parameter_project_id,
+        )
+        if "approved_project_fact_resolutions" in ledger_payload:
+            ledger_payload["approved_project_fact_resolutions"] = (
+                verified_approved_resolutions
+            )
+        if verified_approved_resolutions:
+            _emit_progress(
+                "project_fact_approvals_verified",
+                requested_count=len(verified_approved_resolutions),
+                verified_count=len(verified_approved_resolutions),
+            )
     project_fact_ledger = build_project_fact_ledger_from_inputs(
-        payload=payload,
+        payload=ledger_payload,
         tender=tender if isinstance(tender, dict) else {},
         boq_wbs_cpm=boq_wbs_cpm if isinstance(boq_wbs_cpm, dict) else {},
+        project_parameter_evidence=project_parameter_evidence,
     )
     project_fact_validation = validate_project_fact_ledger(project_fact_ledger)
     if strict_quality and not project_fact_validation.get("ok"):
@@ -787,14 +1884,35 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         tender=tender if isinstance(tender, dict) else {},
         boq=boq if isinstance(boq, dict) else {},
         enterprise_profile=enterprise_profile if isinstance(enterprise_profile, dict) else {},
+        project_fact_ledger=project_fact_ledger,
     )
-    schedule_constraints: List[str] = []
-    cpm_summary = boq_wbs_cpm.get("summary") if isinstance(boq_wbs_cpm, dict) else {}
-    if isinstance(cpm_summary, dict) and cpm_summary:
-        est_days = cpm_summary.get("estimated_duration_days")
-        peak = cpm_summary.get("resource_peak")
-        cp_gap = cpm_summary.get("critical_interval_days")
-        cp_names = [str(x).strip() for x in (cpm_summary.get("critical_path_names") or []) if str(x).strip()]
+    missing_param_probe["project_fact_ledger_digest"] = str(
+        project_fact_ledger.get("ledger_digest") or ""
+    )
+    schedule_constraints: list[str] = []
+    ledger_facts = (
+        project_fact_ledger.get("facts")
+        if isinstance(project_fact_ledger.get("facts"), dict)
+        else {}
+    )
+    if ledger_facts:
+        def _fact_value(field: str):
+            row = ledger_facts.get(field)
+            if not isinstance(row, dict):
+                return None
+            if str(row.get("status") or "") not in {"verified", "derived", "approved"}:
+                return None
+            return row.get("value")
+
+        est_days = _fact_value("planned_duration_days")
+        peak = _fact_value("resource_peak")
+        cp_gap = _fact_value("critical_interval_days")
+        raw_cp_names = _fact_value("critical_path_names")
+        cp_names = [
+            str(x).strip()
+            for x in (raw_cp_names if isinstance(raw_cp_names, list) else [])
+            if str(x).strip()
+        ]
         if est_days:
             schedule_constraints.append(f"计划口径统一：总工期={est_days}天。")
         if peak:
@@ -818,8 +1936,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         recs = recommend_four_new(boq, outline=outline, limit=6, topic=str(topic))
         if isinstance(recs, list) and recs:
             boq_focus["four_new_recommendations"] = recs
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - optional recommendation adapters are isolated from core generation.
+        logger.warning("Four-new-technology recommendations are unavailable for this run")
     type_requirements = project_type_requirements(project_type)
 
     base_requirements: list[str] = []
@@ -858,9 +1976,25 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         ],
         limit=40,
     )
-    compliance_registry_status = get_compliance_registry_status()
+    compliance_registry_status = get_compliance_registry_status(
+        official_registry_bytes=compliance_registry_bytes,
+        official_registry_path=compliance_registry_path,
+    )
+    if compliance_registry_authority is not None:
+        compliance_registry_status = {
+            **compliance_registry_status,
+            "official_registry_path": str(compliance_registry_path),
+            "official_registry_sha256": compliance_registry_authority.projection.get(
+                "registry_sha256"
+            ),
+            "authority_digest": compliance_registry_authority.projection.get(
+                "authority_digest"
+            ),
+        }
     verified_project_standards = list_verified_standard_metadata(
         domain_tags=compliance_domains or None,
+        official_registry_bytes=compliance_registry_bytes,
+        official_registry_path=compliance_registry_path,
     )
     verified_standard_codes = [
         str(row.get("standard_code") or "").strip()
@@ -870,9 +2004,17 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     _emit_progress("chapters_ready", chapters_total=len(outline))
     _emit_progress(
         "compliance_preflight",
+        variant_id=variant_index,
         ready=bool(compliance_registry_status.get("ready")),
         verified_standard_count=len(verified_standard_codes),
         project_domains=compliance_domains,
+        authority_digest=compliance_registry_status.get("authority_digest"),
+        official_registry_sha256=compliance_registry_status.get(
+            "official_registry_sha256"
+        ),
+    )
+    provider_admission_coordinator = payload.get(
+        "_provider_admission_run_coordinator"
     )
     if strict_quality and (
         not bool(compliance_registry_status.get("ready"))
@@ -881,10 +2023,21 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         warnings = "、".join(
             str(x) for x in (compliance_registry_status.get("warnings") or []) if str(x)
         )
+        if isinstance(
+            provider_admission_coordinator,
+            ProviderAdmissionRunCoordinator,
+        ):
+            provider_admission_coordinator.abort_preflight_barrier()
         raise ValueError(
             "项目适用规范生成前预检未通过，未调用大模型："
             + (warnings or "当前项目没有可由官方来源复核的现行规范元数据")
         )
+    if isinstance(provider_admission_coordinator, ProviderAdmissionRunCoordinator):
+        await provider_admission_coordinator.await_preflight_barrier(variant_index)
+        variant_generation_semaphore = payload.get("_variant_generation_semaphore")
+        if isinstance(variant_generation_semaphore, asyncio.Semaphore):
+            await variant_generation_semaphore.acquire()
+            payload["_variant_generation_slot_acquired"] = True
     agent_contract = build_agent_contract(
         topic=str(topic),
         outline=outline if isinstance(outline, list) else [],
@@ -899,12 +2052,46 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         for ch in (agent_contract.get("chapters") or [])
         if isinstance(ch, dict) and str(ch.get("title") or "").strip()
     }
+    requirement_evidence_hard_gate = bool(
+        payload.get("requirement_evidence_hard_gate", bool(tender))
+    )
+    requirement_plan_agent_contract = agent_contract
+    if (
+        delivery_scope == "chapter_validation"
+        and tender_outline
+        and tender_outline != outline
+    ):
+        # Determine requirement ownership against the complete tender outline
+        # first.  Otherwise a score item belonging to an omitted chapter can
+        # fall back onto the first selected validation chapter.
+        requirement_plan_agent_contract = build_agent_contract(
+            topic=str(topic),
+            outline=tender_outline,
+            chapter_pages=(
+                tender_chapter_pages
+                if isinstance(tender_chapter_pages, dict)
+                else {}
+            ),
+            chapter_requirements=(
+                chapter_requirements
+                if isinstance(chapter_requirements, dict)
+                else {}
+            ),
+            multi_agent_summary=multi_agent_plan.summary(),
+            chapter_specialties=multi_agent_plan.chapter_specialties,
+            project_fact_ledger=project_fact_ledger,
+        )
     requirement_evidence_plan = build_requirement_evidence_plan(
         tender=tender if isinstance(tender, dict) else {},
         chapter_requirements=chapter_requirements if isinstance(chapter_requirements, dict) else {},
         global_requirements=tender_globals,
-        agent_contract=agent_contract,
+        agent_contract=requirement_plan_agent_contract,
     )
+    if delivery_scope == "chapter_validation":
+        requirement_evidence_plan = scope_requirement_evidence_plan_to_chapters(
+            requirement_evidence_plan,
+            outline,
+        )
     requirement_evidence_plan_validation = validate_requirement_evidence_matrix(
         requirement_evidence_plan
     )
@@ -913,16 +2100,285 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "招标要求—证据计划完整性校验失败，未调用章节Agent："
             + "、".join(requirement_evidence_plan_validation.get("errors") or [])
         )
+    requirement_evidence_plan_readiness = validate_requirement_evidence_plan_readiness(
+        requirement_evidence_plan
+    )
+    _emit_progress(
+        "requirement_evidence_preflight",
+        ok=bool(requirement_evidence_plan_readiness.get("ok")),
+        blocking_requirement_ids=requirement_evidence_plan_readiness.get(
+            "blocking_requirement_ids"
+        )
+        or [],
+        warning_requirement_ids=requirement_evidence_plan_readiness.get(
+            "warning_requirement_ids"
+        )
+        or [],
+    )
+    if (
+        not requirement_evidence_plan_readiness.get("ok")
+        and (
+            mandatory_provider_admission
+            or bool(payload.get("_provider_admission_required", False))
+            or (strict_quality and requirement_evidence_hard_gate)
+        )
+    ):
+        raise ValueError(
+            "招标要求—证据生成前准入失败，未调用模型；阻断要求："
+            + "、".join(
+                requirement_evidence_plan_readiness.get("blocking_requirement_ids")
+                or ["UNKNOWN"]
+            )
+        )
+
+    provider_admission_public: dict[str, Any] = {
+        "schema_version": "provider-admission-v1",
+        "status": "not_required",
+        "generation_allowed": True,
+        "degraded": False,
+        "slots": [],
+        "admitted_chain": [],
+        "missing_roles": [],
+    }
+    provider_admission_binding_digest: str | None = None
+    provider_admission_required = bool(
+        not dry_run
+        and (
+            mandatory_provider_admission
+            or bool(payload.get("_provider_admission_required", False))
+        )
+    )
+    if provider_admission_required:
+        _raise_if_cancelled("provider_admission_started")
+        candidates = _provider_admission_candidates(payload, provider_chain)
+        required_roles = [
+            str(role or "").strip().lower()
+            for role in (payload.get("_provider_admission_required_roles") or ["text_draft"])
+            if str(role or "").strip()
+        ]
+        coordinator = provider_admission_coordinator
+        if not isinstance(coordinator, ProviderAdmissionRunCoordinator):
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "MODEL_PROVIDER_ADMISSION_CONTEXT_MISSING",
+                        "message": "生成任务缺少运行级供应商准入上下文，已安全停止。",
+                        "action": "请从系统生成入口重新发起任务。",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        emit_admission_events = coordinator.claim_event_emitter()
+        if emit_admission_events:
+            _emit_progress(
+                "provider_admission_started",
+                candidate_count=len(candidates),
+                required_roles=required_roles,
+            )
+
+        async def _probe_provider_candidate(candidate: ProviderCandidate) -> dict[str, Any]:
+            return await probe_provider_candidate(
+                candidate,
+                reliability_runtime=model_reliability,
+                execution_runtime=execution_runtime,
+            )
+
+        try:
+            internal_snapshot = await coordinator.admit_chain_once(
+                candidates=candidates,
+                probe=_probe_provider_candidate,
+                required_roles=required_roles,
+            )
+        except GenerationCancelledError:
+            raise
+        except Exception as exc:
+            if emit_admission_events:
+                _emit_progress(
+                    "provider_admission_failed",
+                    code="MODEL_PROVIDER_ADMISSION_UNAVAILABLE",
+                    error_type=type(exc).__name__,
+                )
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "MODEL_PROVIDER_ADMISSION_UNAVAILABLE",
+                        "message": "模型供应商准入检查未能形成可信回执，已阻止生成。",
+                        "action": "请检查本机模型配置和准入状态后重试。",
+                    },
+                    ensure_ascii=False,
+                )
+            ) from exc
+        provider_admission_binding_digest = provider_admission_canonical_digest(
+            {
+                "schema_version": "provider-admission-binding-v1",
+                "required_roles": list(internal_snapshot.get("required_roles") or []),
+                "admitted_route_identities": [
+                    {
+                        "slot": item.get("slot"),
+                        "role": item.get("role"),
+                        "provider": item.get("provider"),
+                        "model": item.get("model"),
+                        "identity_digest": item.get("identity_digest"),
+                    }
+                    for item in (internal_snapshot.get("admitted_chain") or [])
+                    if isinstance(item, dict)
+                ],
+            }
+        )
+        provider_admission_public = public_provider_admission_snapshot(
+            internal_snapshot
+        )
+        if emit_admission_events:
+            _emit_progress(
+                "provider_admission_completed",
+                schema_version=provider_admission_public.get("schema_version"),
+                status=provider_admission_public.get("status"),
+                required_roles=provider_admission_public.get("required_roles") or [],
+                generation_allowed=bool(
+                    provider_admission_public.get("generation_allowed")
+                ),
+                degraded=bool(provider_admission_public.get("degraded")),
+                admitted_chain=provider_admission_public.get("admitted_chain") or [],
+                missing_roles=provider_admission_public.get("missing_roles") or [],
+                public_digest=provider_admission_public.get("public_digest"),
+                binding_digest=provider_admission_binding_digest,
+            )
+        if not bool(provider_admission_public.get("generation_allowed")):
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "MODEL_PROVIDER_ADMISSION_BLOCKED",
+                        "message": "模型供应商未通过生成前准入，已在调用章节模型前停止。",
+                        "action": "请按准入详情修复凭据、模型、配额、流式能力或文档渲染槽位。",
+                        "admission": provider_admission_public,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        admitted_by_identity = {
+            str(item.get("identity_digest") or ""): item
+            for item in (internal_snapshot.get("admitted_chain") or [])
+            if isinstance(item, dict) and str(item.get("identity_digest") or "")
+        }
+        admitted_text_chain: list[dict[str, Any]] = []
+        text_slots = {str(item.get("slot") or "") for item in provider_chain}
+        for candidate in coordinator.bound_candidates:
+            if candidate.slot not in text_slots:
+                continue
+            admitted = admitted_by_identity.get(candidate.identity_digest)
+            if admitted:
+                admitted_text_chain.append(
+                    {
+                        **dict(admitted),
+                        # Ephemeral only. Generation bindings, checkpoints,
+                        # progress events and final output project an allowlist
+                        # that never serializes this credential.
+                        "api_key": candidate.credential,
+                    }
+                )
+        provider_chain = admitted_text_chain
+        if provider_chain:
+            provider = provider_chain[0].get("provider") or provider
+            model = provider_chain[0].get("model") or model
+        tiered_anthropic_route = _has_tiered_anthropic_route(provider_chain)
+
+    # Optional logo lookup may perform DNS/HTTP. It is deliberately deferred
+    # until both the evidence gate and mandatory provider admission have passed.
+    try:
+        from backend.zhifei_autoplan.logo_runtime import (
+            prepare_logo_for_embedding,
+            resolve_logo,
+        )
+
+        if (
+            payload.get("bidder_company")
+            or payload.get("logo_url")
+            or payload.get("bidder_domain")
+            or project_id
+        ):
+            logo_raw = resolve_logo(
+                bidder_company=payload.get("bidder_company"),
+                logo_url=payload.get("logo_url"),
+                bidder_domain=payload.get("bidder_domain"),
+                project_id=project_id,
+            )
+            if logo_raw:
+                logo_raw_path = str(logo_raw)
+                logo_embed = prepare_logo_for_embedding(logo_raw) or None
+    except Exception:  # noqa: BLE001 - optional branding adapters must not block content generation.
+        logo_embed = None
+    if logo_embed:
+        branding["logo_path"] = logo_embed
+        try:
+            if project_id:
+                from backend.zhifei_autoplan.branding_store import update_branding
+
+                update_branding(
+                    str(project_id),
+                    {
+                        "bidder_company": branding.get("bidder_company"),
+                        "bidder_domain": branding.get("bidder_domain"),
+                        "logo_url": branding.get("logo_url"),
+                        "logo_raw_path": logo_raw_path,
+                        "logo_embed_path": str(logo_embed),
+                        "logo_path": str(logo_embed),
+                    },
+                    merge=True,
+                )
+        except Exception:  # noqa: BLE001 - branding persistence is an optional side effect.
+            logger.warning("Resolved branding could not be persisted for this run")
+
+    def _chapter_evidence_gate(section: dict[str, Any], title: str | None = None) -> dict[str, Any]:
+        chapter_title = str(title or section.get("title") or "").strip()
+        return validate_chapter_requirement_evidence(
+            plan=requirement_evidence_plan,
+            title=chapter_title,
+            section=section,
+        )
+
+    def _assign_evidence_safe_content(
+        section: dict[str, Any],
+        content: Any,
+        *,
+        stage: str,
+    ) -> bool:
+        candidate = dict(section)
+        candidate["content"] = str(content or "")
+        gate = _chapter_evidence_gate(candidate)
+        if strict_quality and requirement_evidence_hard_gate and not gate.get("ok"):
+            section.setdefault("evidence_guard_rejections", []).append(
+                {
+                    "stage": stage,
+                    "blocking_requirement_ids": gate.get("blocking_requirement_ids") or [],
+                }
+            )
+            _emit_progress(
+                "chapter_evidence_regression_rejected",
+                chapter_title=str(section.get("title") or ""),
+                stage=stage,
+                blocking_requirement_ids=gate.get("blocking_requirement_ids") or [],
+            )
+            return False
+        section["content"] = candidate["content"]
+        section["requirement_evidence_gate"] = gate
+        return True
 
     checkpoint_namespace = str(
-        payload.get("_checkpoint_namespace")
+        payload.get("_checkpoint_namespace") or payload.get("_job_id") or ""
+    ).strip()
+    resume_checkpoint_namespace = str(
+        payload.get("_resume_checkpoint_namespace")
         or payload.get("resume_from_job_id")
-        or payload.get("_job_id")
         or ""
     ).strip()
     checkpoint_scope = f"variant-{variant_index}"
     checkpoint_enabled = bool(checkpoint_namespace) and not dry_run and not no_write_preview
     generation_binding = build_generation_binding(
+        job_id=payload.get("_job_id"),
+        attempt_id=payload.get("_job_attempt_id"),
+        owner_instance_id=payload.get("_job_owner_instance_id"),
+        job_revision=payload.get("_job_revision"),
         topic=topic,
         project_id=project_id,
         project_type=project_type,
@@ -933,9 +2389,37 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         project_fact_digest=project_fact_ledger.get("ledger_digest"),
         requirement_plan_digest=requirement_evidence_plan.get("matrix_digest"),
         provider_routes=provider_chain,
+        delivery_scope=delivery_scope,
+        provider_admission_digest=provider_admission_binding_digest,
+        compliance_registry_authority_digest=(
+            compliance_registry_authority.projection.get("authority_digest")
+            if compliance_registry_authority is not None
+            else None
+        ),
+        prompt_contract={
+            "prompt_layout_version": "section-envelope-v3",
+            "requirements": base_requirements,
+            "global_instruction": global_instruction,
+            "chapter_requirements": chapter_requirements,
+            "logic_templates": {
+                "general": logic_template_general.as_dict() if logic_template_general else None,
+                "qse": logic_template_qse.as_dict() if logic_template_qse else None,
+            },
+            "effective_params": params,
+            "tender": tender,
+            "boq_focus": boq_focus,
+            "case_library": case_library_options,
+            "image_library": image_library_options,
+            "chapter_summaries": payload.get("chapter_summaries") or [],
+            "project_stage_context": str(payload.get("project_stage_context") or ""),
+            "common_construction_requirements": payload.get(
+                "common_construction_requirements"
+            )
+            or [],
+        },
     )
-    generation_checkpoint: Dict[str, Any] = {
-        "schema_version": "generation-checkpoint-v1",
+    generation_checkpoint: dict[str, Any] = {
+        "schema_version": "generation-checkpoint-v3",
         "binding_digest": generation_binding.get("binding_digest"),
         "status": "disabled" if not checkpoint_enabled else "ready",
         "saved_chapter_count": 0,
@@ -957,7 +2441,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             return p, m, None, None
         return provider, model, None, None
 
-    def _role_attempts(role: str) -> List[tuple[str | None, str | None, str | None, str | None]]:
+    def _role_attempts(role: str) -> list[tuple[str | None, str | None, str | None, str | None]]:
         entries = _provider_chain_for_role(
             provider_chain,
             role,
@@ -973,10 +2457,14 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             for entry in entries
         ]
 
-    if bool(payload.get("model_preflight", False)) and not dry_run:
+    if (
+        bool(payload.get("model_preflight", False))
+        and not dry_run
+        and not provider_admission_required
+    ):
         _raise_if_cancelled("model_preflight_started")
         _emit_progress("model_preflight_started")
-        unique_candidates: Dict[tuple[str, str], tuple[str, str, str | None, str | None]] = {}
+        unique_candidates: dict[tuple[str, str], tuple[str, str, str | None, str | None]] = {}
         for role in ("draft", "review"):
             for p, m, key_override, slot_id in _role_attempts(role):
                 if not p or not m:
@@ -1007,7 +2495,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 retry_attempts=2,
                 execution_runtime=execution_runtime,
             )
-            receipt = await client.preflight(timeout=30.0)
+            try:
+                receipt = await client.preflight(timeout=30.0)
+            finally:
+                client.close()
             receipt["slot"] = slot_id
             model_preflight_receipts.append(receipt)
         draft_keys = {
@@ -1058,8 +2549,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     def _pick_agent_role(title: str) -> str:
         # 可配置角色规则（优先）
         try:
-            from pathlib import Path
             import json
+            from pathlib import Path
             cfg_path = Path("backend/data/autoplan/agent_roles.json")
             if cfg_path.exists():
                 cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -1070,8 +2561,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     if any(k in title for k in keys):
                         return r.get("role") or default_role
                 return default_role
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - malformed optional role configuration falls back deterministically.
+            logger.warning("Agent-role configuration is unavailable; using deterministic role rules")
         # 回退默认规则
         t = title
         if any(k in t for k in ("质量", "检验", "验收")):
@@ -1086,12 +2577,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             return "资源统筹负责人"
         return "技术负责人"
 
-    try:
-        agent_parallelism = int(payload.get("agent_parallelism") or 4)
-    except Exception:
-        agent_parallelism = 4
-    agent_parallelism = max(1, min(16, agent_parallelism))
     section_sem = asyncio.Semaphore(agent_parallelism)
+    rolling_chapter_summaries: list[dict[str, str]] = [
+        dict(item)
+        for item in (payload.get("chapter_summaries") or [])
+        if isinstance(item, dict) and str(item.get("summary") or "").strip()
+    ][-30:]
 
     def _build_case_pack_for_section(title: str) -> dict[str, Any]:
         try:
@@ -1102,7 +2593,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 project_type=project_type,
                 audit_path=reference_library_audit_path,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - optional reference-pack adapters expose arbitrary backends.
             return {
                 "enabled": bool(case_library_options.get("enabled")),
                 "requested_selected_case_ids": [],
@@ -1115,7 +2606,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "reference_lines": [],
                 "non_fact_reference_notice": "",
                 "hits": [],
-                "warning_list": [f"case_reference_pack_error:{repr(e)}"],
+                "warning_list": [f"case_reference_pack_error:{e!r}"],
             }
 
     def _build_image_pack_for_section(title: str) -> dict[str, Any]:
@@ -1128,7 +2619,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 tags=[str(title)],
                 audit_path=reference_library_audit_path,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - optional image-pack adapters expose arbitrary backends.
             return {
                 "enabled": bool(image_library_options.get("enabled")),
                 "requested_selected_image_ids": [],
@@ -1139,7 +2630,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "insertion_hint": "",
                 "caption_hint": "",
                 "images": [],
-                "warning_list": [f"image_selection_pack_error:{repr(e)}"],
+                "warning_list": [f"image_selection_pack_error:{e!r}"],
             }
 
     def _reference_pack_summary(pack: Any, *, id_key: str, item_key: str) -> dict[str, Any]:
@@ -1192,7 +2683,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "warning_list": warnings,
         }
 
-    async def build_section(idx: int, title: str):
+    async def build_section(idx: int, title: str, checkpoint_resolver=None):
         # 章节级重试：多模型轮询重试，最多尝试 3 个 provider（主+备1+备2）
         tries = []
         if tiered_anthropic_route:
@@ -1211,10 +2702,14 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         section_case_reference_pack = _build_case_pack_for_section(title)
         section_image_selection_pack = _build_image_pack_for_section(title)
         kg_hits = search_kg(f"{topic} {title} 施工组织 质量 安全 工期", top_k=4)
-        doc_hits = search_ingested_docs(
-            f"{topic} {title} 招标 清单 图纸 质量 安全 工期",
-            limit=6,
-            project_id=project_id,
+        doc_hits = (
+            search_ingested_docs(
+                f"{topic} {title} 招标 清单 图纸 质量 安全 工期",
+                limit=6,
+                project_id=project_id,
+            )
+            if str(project_id or "").strip()
+            else []
         )
         # Prefer enterprise standards / work instructions when provided (to raise output quality and reduce hallucination).
         # Only do this when project_id is set, otherwise global audit may cross-contaminate between projects.
@@ -1264,9 +2759,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         # inject the corresponding "章内结构" guidance (does not change outline).
         bp = None
         try:
-            from backend.zhifei_autoplan.chapter_blueprints import match_chapter_blueprint
+            from backend.zhifei_autoplan.chapter_blueprints import (
+                match_chapter_blueprint,
+            )
             bp = match_chapter_blueprint(title)
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional blueprint loading falls back to no blueprint.
             bp = None
         chapter_target_pages = _extract_chapter_page_target(chapter_pages, title)
         if chapter_target_pages is None and isinstance(chapter_contract, dict):
@@ -1345,20 +2842,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             top_k=4,
             prefer_latest=True,
             verified_only=True,
+            official_registry_bytes=compliance_registry_bytes,
+            official_registry_path=compliance_registry_path,
         )
-        compliance_hits: List[Dict[str, Any]] = []
-        seen_compliance_rows: set[tuple[str, str]] = set()
-        for raw_hit in [*verified_project_standards, *clause_hits]:
-            if not isinstance(raw_hit, dict):
-                continue
-            key = (
-                canonical_standard_code(raw_hit.get("standard_code")),
-                str(raw_hit.get("locator") or "metadata").strip(),
-            )
-            if not key[0] or key in seen_compliance_rows:
-                continue
-            seen_compliance_rows.add(key)
-            compliance_hits.append(dict(raw_hit))
+        compliance_hits = _trusted_formal_compliance_hits(clause_hits)
         section_requirements.append(standard_citation_directive(verified_project_standards))
         if compliance_hits:
             section_requirements.append("本章应优先引用适配专业且最新版本的规范条款（禁止跨专业串用规范）。")
@@ -1402,7 +2889,9 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         doc_evidence = list(doc_evidence_filter.get("lines") or [])
 
         ctx = {
+            "project_id": project_id,
             "requirements": section_requirements,
+            "common_requirements": list(base_requirements),
             "kg_evidence": kg_evidence,
             "doc_evidence": doc_evidence,
             "checklist": checklist,
@@ -1433,6 +2922,17 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "boq_wbs_cpm_summary": cpm_summary if isinstance(cpm_summary, dict) else {},
             "project_fact_ledger_digest": project_fact_ledger.get("ledger_digest"),
             "project_fact_snapshot": agent_contract.get("project_fact_ledger") or {},
+            "word_format_rules": style if isinstance(style, dict) else {},
+            "graphics_rules": chart_policy if isinstance(chart_policy, dict) else {},
+            # The list is updated only between bounded chapter waves. Every
+            # chapter in one wave therefore sees an identical medium-lived
+            # prefix, while the next wave receives compact summaries instead
+            # of full historical chapter bodies.
+            "chapter_summaries": [dict(item) for item in rolling_chapter_summaries],
+            "project_stage_context": str(payload.get("project_stage_context") or "")[:12000],
+            "common_construction_requirements": payload.get("common_construction_requirements")
+            if isinstance(payload.get("common_construction_requirements"), list)
+            else [],
             "requirement_evidence_plan_digest": requirement_evidence_plan.get("matrix_digest"),
             "requirement_evidence_rows": chapter_requirement_evidence_rows,
             "boq_wbs_top_process": (boq_wbs_cpm.get("wbs") or [])[:8] if isinstance(boq_wbs_cpm, dict) else [],
@@ -1442,6 +2942,14 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "standard_citation_policy": standard_citation_directive(verified_project_standards),
             "case_reference_pack": section_case_reference_pack,
             "image_selection_pack": section_image_selection_pack,
+            "model_request_timeout_seconds": max(
+                30,
+                min(240, int(payload.get("model_request_timeout_seconds") or 240)),
+            ),
+            "max_chapter_output_tokens": max(
+                256,
+                min(16384, int(payload.get("max_chapter_output_tokens") or 8192)),
+            ),
             "dropped_unverified_standard_evidence": int(kg_evidence_filter.get("dropped_count") or 0)
             + int(doc_evidence_filter.get("dropped_count") or 0),
         }
@@ -1452,14 +2960,34 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             from backend.zhifei_autoplan.logic_templates import classify_chapter_domain
 
             dom = classify_chapter_domain(title)
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional domain classification falls back to the general template.
             dom = "general"
         lt = logic_template_qse if dom == "qse" else logic_template_general
         if lt:
             ctx["logic_template"] = lt.as_dict()
         ctx["chapter_domain"] = dom
 
-        def _attach_section_meta(rec: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        chapter_context_digest = build_chapter_context_digest(
+            chapter_index=idx,
+            chapter_title=title,
+            delivery_scope=delivery_scope,
+            writer_context=ctx,
+        )
+        if checkpoint_resolver is not None:
+            resumed = checkpoint_resolver(chapter_context_digest)
+            if isinstance(resumed, dict):
+                return {
+                    **dict(resumed),
+                    "_checkpoint_resumed": True,
+                    "_chapter_context_digest": chapter_context_digest,
+                }
+
+        def _attach_context_identity(rec: dict[str, Any] | None) -> dict[str, Any] | None:
+            if isinstance(rec, dict):
+                rec["_chapter_context_digest"] = chapter_context_digest
+            return rec
+
+        def _attach_section_meta(rec: dict[str, Any] | None) -> dict[str, Any] | None:
             if not isinstance(rec, dict):
                 return rec
             # Always keep deterministic metadata for downstream quality gates and exports.
@@ -1520,27 +3048,51 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                         secret_key=payload.get("secret_key"),
                         token_url=payload.get("token_url"),
                         reliability_runtime=model_reliability,
-                        retry_attempts=3,
+                        retry_attempts=1,
                         execution_runtime=execution_runtime,
                     )
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - provider SDK constructors raise vendor-specific errors.
                     last = _attach_section_meta(
                         {
                             "title": title,
                             "content": "",
                             "provider": p,
                             "model": m,
-                            "error": f"provider_init_failed: {e}",
+                            "error": (
+                                "provider_init_failed: "
+                                + sanitize_provider_message(e)
+                            ),
                         }
                     )
                     continue
+            _emit_provider_progress(
+                "provider_attempt_started",
+                chapter_index=int(idx) + 1,
+                chapter_title=str(title or ""),
+                chapters_total=len(outline),
+                provider=str(p or ""),
+                model=str(m or ""),
+                slot=str(slot_id or ""),
+                request_timeout_seconds=240,
+            )
             writer = SectionWriter(llm=llm)
             try:
                 last = _attach_section_meta(await writer.write(title, ctx))
                 if isinstance(last, dict):
-                    last.setdefault("model_slot", slot_id)
-                    last.setdefault("model_role", _model_role_for_slot(slot_id))
-            except Exception as e:
+                    last["provider"] = str(p or "").strip().lower()
+                    last["model"] = str(m or "").strip()
+                    last["model_slot"] = str(slot_id or "").strip()
+                    last["model_role"] = _model_role_for_slot(slot_id)
+            except ExecutionCancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - provider failures are normalized for fallback routing.
+                budget_exhausted = isinstance(e, ExecutionBudgetExceededError)
+                error_info = classify_provider_error(
+                    e.as_dict() if budget_exhausted else e,
+                    provider=str(p or ""),
+                    model=str(m or ""),
+                )
+                error_code = str(error_info.get("code") or "provider_error")
                 last = _attach_section_meta(
                     {
                         "title": title,
@@ -1549,17 +3101,111 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                         "model": m,
                         "model_slot": slot_id,
                         "model_role": _model_role_for_slot(slot_id),
-                        "error": f"section_write_failed: {e}",
+                        "error": error_code,
+                        "error_info": error_info,
+                        "code": error_code,
+                        "failure_kind": (
+                            "execution_control" if budget_exhausted else "provider"
+                        ),
                     }
                 )
+                _emit_provider_progress(
+                    "provider_attempt_finished",
+                    chapter_index=int(idx) + 1,
+                    chapter_title=str(title or ""),
+                    chapters_total=len(outline),
+                    provider=str(p or ""),
+                    model=str(m or ""),
+                    slot=str(slot_id or ""),
+                    ok=False,
+                    error_type=type(e).__name__,
+                    error_code=error_code,
+                    circuits=model_reliability.snapshot(),
+                )
+                if budget_exhausted:
+                    break
                 continue
+            finally:
+                if llm is not None:
+                    llm.close()
             if last and not last.get("error"):
-                return last
+                evidence_gate = _chapter_evidence_gate(last, title)
+                last["requirement_evidence_gate"] = evidence_gate
+                if (
+                    strict_quality
+                    and requirement_evidence_hard_gate
+                    and not evidence_gate.get("ok")
+                ):
+                    blocking_ids = evidence_gate.get("blocking_requirement_ids") or []
+                    last["error"] = (
+                        "requirement_evidence_precheckpoint_blocked:"
+                        + ",".join(str(value) for value in blocking_ids[:20])
+                    )
+                    last["failure_kind"] = "quality_gate"
+                    last["code"] = "requirement_evidence_failed"
+                    last["blocking_requirement_ids"] = [
+                        str(value)[:160]
+                        for value in blocking_ids[:20]
+                        if str(value).strip()
+                    ]
+                    _emit_progress(
+                        "chapter_evidence_gate_failed",
+                        chapter_index=int(idx) + 1,
+                        chapter_title=str(title or ""),
+                        chapters_total=len(outline),
+                        provider=str(p or ""),
+                        model=str(m or ""),
+                        slot=str(slot_id or ""),
+                        blocking_requirement_ids=blocking_ids,
+                    )
+                else:
+                    _emit_progress(
+                        "chapter_evidence_gate_passed",
+                        chapter_index=int(idx) + 1,
+                        chapter_title=str(title or ""),
+                        chapters_total=len(outline),
+                        provider=str(p or ""),
+                        model=str(m or ""),
+                        slot=str(slot_id or ""),
+                        warning_requirement_ids=evidence_gate.get(
+                            "warning_requirement_ids"
+                        )
+                        or [],
+                    )
+            if last and not last.get("error"):
+                _emit_provider_progress(
+                    "provider_attempt_finished",
+                    chapter_index=int(idx) + 1,
+                    chapter_title=str(title or ""),
+                    chapters_total=len(outline),
+                    provider=str(p or ""),
+                    model=str(m or ""),
+                    slot=str(slot_id or ""),
+                    ok=True,
+                    circuits=model_reliability.snapshot(),
+                )
+                return _attach_context_identity(last)
+            _emit_provider_progress(
+                "provider_attempt_finished",
+                chapter_index=int(idx) + 1,
+                chapter_title=str(title or ""),
+                chapters_total=len(outline),
+                provider=str(p or ""),
+                model=str(m or ""),
+                slot=str(slot_id or ""),
+                ok=False,
+                error=str((last or {}).get("error") or "no_visible_text"),
+                circuits=model_reliability.snapshot(),
+            )
         if last:
-            return last
-        return _attach_section_meta({"title": title, "content": "章节生成失败"}) or {"title": title, "content": "章节生成失败"}
+            return _attach_context_identity(last)
+        return _attach_context_identity(
+            _attach_section_meta({"title": title, "content": "章节生成失败"})
+            or {"title": title, "content": "章节生成失败"}
+        )
 
     async def _build_section_with_limit(idx: int, title: str):
+        nonlocal generation_checkpoint
         async with section_sem:
             _raise_if_cancelled("before_chapter")
             _emit_progress(
@@ -1568,44 +3214,129 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 chapter_title=str(title or ""),
                 chapters_total=len(outline),
             )
-            if checkpoint_enabled:
+
+            def _resolve_checkpoint(
+                chapter_context_digest: str,
+            ) -> dict[str, Any] | None:
+                nonlocal generation_checkpoint
+                if not checkpoint_enabled:
+                    return None
                 resumed = load_section_checkpoint(
-                    namespace=checkpoint_namespace,
+                    namespace=resume_checkpoint_namespace or checkpoint_namespace,
                     scope=checkpoint_scope,
                     binding=generation_binding,
                     chapter_index=idx,
                     chapter_title=str(title or ""),
+                    chapter_context_digest=chapter_context_digest,
                 )
-                if resumed is not None:
+                if resumed is None:
+                    return None
+                resumed_gate = _chapter_evidence_gate(resumed, title)
+                resumed["requirement_evidence_gate"] = resumed_gate
+                if (
+                    strict_quality
+                    and requirement_evidence_hard_gate
+                    and not resumed_gate.get("ok")
+                ):
                     _emit_progress(
-                        "chapter_resumed",
+                        "chapter_checkpoint_rejected",
                         chapter_index=int(idx) + 1,
                         chapter_title=str(title or ""),
                         chapters_total=len(outline),
+                        reason="requirement_evidence_invalid",
+                        blocking_requirement_ids=resumed_gate.get(
+                            "blocking_requirement_ids"
+                        )
+                        or [],
                     )
-                    _emit_progress(
-                        "chapter_completed",
-                        chapter_index=int(idx) + 1,
+                    return None
+                if (
+                    resume_checkpoint_namespace
+                    and resume_checkpoint_namespace != checkpoint_namespace
+                ):
+                    generation_checkpoint = _write_checkpoint(
+                        save_section_checkpoint,
+                        namespace=checkpoint_namespace,
+                        scope=checkpoint_scope,
+                        binding=generation_binding,
+                        chapter_index=idx,
                         chapter_title=str(title or ""),
-                        chapters_total=len(outline),
-                        ok=True,
-                        resumed=True,
+                        chapter_context_digest=chapter_context_digest,
+                        result=resumed,
                     )
-                    return resumed
-            result = await build_section(idx, title)
+                _emit_progress(
+                    "chapter_resumed",
+                    chapter_index=int(idx) + 1,
+                    chapter_title=str(title or ""),
+                    chapters_total=len(outline),
+                )
+                return resumed
+            target_pages = _extract_chapter_page_target(chapter_pages, title)
+            chapter_contract = (
+                chapter_contract_map.get(str(title).strip())
+                if isinstance(chapter_contract_map, dict)
+                else None
+            )
+            if target_pages is None and isinstance(chapter_contract, dict):
+                target_pages = _to_int_or_none(chapter_contract.get("page_target"))
+            chapter_deadline = _chapter_deadline_seconds(
+                payload,
+                target_pages=target_pages,
+            )
+            try:
+                result = await asyncio.wait_for(
+                    build_section(
+                        idx,
+                        title,
+                        checkpoint_resolver=_resolve_checkpoint,
+                    ),
+                    timeout=float(chapter_deadline),
+                )
+            except asyncio.TimeoutError:
+                result = {
+                    "title": str(title or ""),
+                    "content": "",
+                    "provider": "",
+                    "model": "",
+                    "error": "chapter_deadline_exceeded",
+                    "failure_kind": "provider",
+                    "code": "timeout",
+                }
+            chapter_context_digest = ""
+            resumed_from_checkpoint = False
+            if isinstance(result, dict):
+                chapter_context_digest = str(
+                    result.pop("_chapter_context_digest", "") or ""
+                ).strip()
+                resumed_from_checkpoint = bool(
+                    result.pop("_checkpoint_resumed", False)
+                )
+            if resumed_from_checkpoint:
+                _emit_progress(
+                    "chapter_completed",
+                    chapter_index=int(idx) + 1,
+                    chapter_title=str(title or ""),
+                    chapters_total=len(outline),
+                    ok=True,
+                    resumed=True,
+                )
+                return result
             if (
                 checkpoint_enabled
                 and isinstance(result, dict)
                 and not result.get("error")
                 and str(result.get("content") or "").strip()
             ):
-                nonlocal generation_checkpoint
-                generation_checkpoint = save_section_checkpoint(
+                if not chapter_context_digest:
+                    raise RuntimeError("chapter_context_digest_missing")
+                generation_checkpoint = _write_checkpoint(
+                    save_section_checkpoint,
                     namespace=checkpoint_namespace,
                     scope=checkpoint_scope,
                     binding=generation_binding,
                     chapter_index=idx,
                     chapter_title=str(title or ""),
+                    chapter_context_digest=chapter_context_digest,
                     result=result,
                 )
                 _emit_progress(
@@ -1624,7 +3355,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             _raise_if_cancelled("after_chapter")
             return result
 
-    async def _gather_with_cancellation(coroutines: List[Any]) -> List[Any]:
+    async def _gather_with_cancellation(coroutines: list[Any]) -> list[Any]:
         """Gather tasks in input order while polling the durable cancel flag."""
 
         tasks = [asyncio.create_task(coro) for coro in coroutines]
@@ -1653,8 +3384,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-    async def _complete_with_role(prompt: str, role: str) -> tuple[str, Dict[str, Any]]:
-        failures: List[Dict[str, str]] = []
+    async def _complete_with_role(prompt: str, role: str) -> tuple[str, dict[str, Any]]:
+        failures: list[dict[str, str]] = []
         if dry_run:
             return "", {"ok": False, "reason": "dry_run", "failures": failures}
         for p, m, key_override, slot_id in _role_attempts(role)[:5]:
@@ -1674,10 +3405,18 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     secret_key=payload.get("secret_key"),
                     token_url=payload.get("token_url"),
                     reliability_runtime=model_reliability,
-                    retry_attempts=3,
+                    retry_attempts=1,
                     execution_runtime=execution_runtime,
                 )
-                response = await llm.complete(prompt)
+                try:
+                    response = await llm.complete(
+                        prompt,
+                        timeout=240.0,
+                        project_id=project_id,
+                        task_type=f"{str(role or 'generic').strip().lower()}_agent_task",
+                    )
+                finally:
+                    llm.close()
                 text = str(response.get("text") or "").strip() if isinstance(response, dict) else ""
                 if text:
                     return text, {
@@ -1697,7 +3436,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                         "error": str((error_info or {}).get("code") or response.get("error") or "no_visible_text"),
                     }
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - role providers expose vendor-specific exceptions.
                 failures.append(
                     {
                         "slot": str(slot_id or ""),
@@ -1708,28 +3447,132 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
         return "", {"ok": False, "reason": "all_role_candidates_failed", "failures": failures}
 
-    sections = await _gather_with_cancellation(
-        [_build_section_with_limit(i, t) for i, t in enumerate(outline)]
-    )
+    sections: list[dict[str, Any]] = []
+    for batch_start in range(0, len(outline), agent_parallelism):
+        batch_outline = outline[batch_start : batch_start + agent_parallelism]
+        batch_sections = await _gather_with_cancellation(
+            [
+                _build_section_with_limit(batch_start + offset, title)
+                for offset, title in enumerate(batch_outline)
+            ]
+        )
+        sections.extend(batch_sections)
+        for section in batch_sections:
+            if not isinstance(section, dict):
+                continue
+            title = str(section.get("title") or "章节").strip()
+            summary = str(section.get("chapter_summary") or "").strip()
+            if not summary:
+                summary = compact_chapter_summary(title, section.get("content"))
+                section["chapter_summary"] = summary
+            if summary:
+                rolling_chapter_summaries.append(
+                    {"title": title, "summary": summary[:800]}
+                )
+        rolling_chapter_summaries[:] = rolling_chapter_summaries[-30:]
+    failed_sections = []
+    for sec in sections:
+        if not isinstance(sec, dict) or not sec.get("error"):
+            continue
+        raw_error = sanitize_provider_message(sec.get("error"))
+        error_info = sec.get("error_info") if isinstance(sec.get("error_info"), dict) else {}
+        failure_kind = str(sec.get("failure_kind") or "").strip()
+        failure_code = str(sec.get("code") or error_info.get("code") or "").strip()
+        if raw_error.startswith("requirement_evidence_precheckpoint_blocked"):
+            failure_kind = "quality_gate"
+            failure_code = "requirement_evidence_failed"
+        if not failure_kind:
+            failure_kind = "provider"
+        blocking_ids = [
+            str(value)[:160]
+            for value in (sec.get("blocking_requirement_ids") or [])[:20]
+            if str(value).strip()
+        ]
+        failed_sections.append(
+            {
+                "title": str(sec.get("title") or ""),
+                "provider": str(sec.get("provider") or ""),
+                "model": str(sec.get("model") or ""),
+                "failure_kind": failure_kind,
+                "code": failure_code or "provider_error",
+                "error": raw_error,
+                **(
+                    {"blocking_requirement_ids": blocking_ids}
+                    if blocking_ids
+                    else {}
+                ),
+            }
+        )
+    succeeded_sections = [
+        sec
+        for sec in sections
+        if isinstance(sec, dict)
+        and not sec.get("error")
+        and str(sec.get("content") or "").strip()
+    ]
+    if failed_sections:
+        checkpoint_terminal_status = (
+            "failed_partial" if succeeded_sections else "failed_empty"
+        )
+        progress_event = "draft_failed"
+    else:
+        checkpoint_terminal_status = "draft_complete"
+        progress_event = "draft_complete"
     if checkpoint_enabled:
-        generation_checkpoint = finalize_generation_checkpoint(
+        generation_checkpoint = _write_checkpoint(
+            finalize_generation_checkpoint,
             namespace=checkpoint_namespace,
             scope=checkpoint_scope,
             binding=generation_binding,
-            status="draft_complete",
+            status=checkpoint_terminal_status,
         )
-    _emit_progress("draft_complete", chapters_total=len(outline), chapters_done=len(sections))
-    failed_sections = [
-        {
-            "title": str(sec.get("title") or ""),
-            "provider": str(sec.get("provider") or ""),
-            "model": str(sec.get("model") or ""),
-            "error": sanitize_provider_message(sec.get("error")),
-        }
-        for sec in sections
-        if isinstance(sec, dict) and sec.get("error")
-    ]
+    _emit_progress(
+        progress_event,
+        chapters_total=len(outline),
+        chapters_done=len(succeeded_sections),
+        chapters_succeeded=len(succeeded_sections),
+        chapters_failed=len(failed_sections),
+        saved_chapter_count=generation_checkpoint.get("saved_chapter_count"),
+        checkpoint_status=checkpoint_terminal_status,
+    )
     if bool(payload.get("fail_on_model_exhaustion", False)) and failed_sections and not dry_run:
+        evidence_failures = [
+            row
+            for row in failed_sections
+            if str(row.get("error") or "").startswith(
+                "requirement_evidence_precheckpoint_blocked"
+            )
+        ]
+        if evidence_failures:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "REQUIREMENT_EVIDENCE_CHAPTER_BLOCKED",
+                        "message": "章节要求证据未通过成功检查点前校验；不合格章节未保存为成功。",
+                        # Keep provider/timeout failures from the same wave.  A
+                        # local quality-gate failure must not erase independent
+                        # model-chain evidence needed for a truthful retry.
+                        "failures": failed_sections,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        execution_budget_failures = [
+            row
+            for row in failed_sections
+            if str(row.get("code") or "") == "EXECUTION_BUDGET_EXCEEDED"
+        ]
+        if execution_budget_failures:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "EXECUTION_BUDGET_EXCEEDED",
+                        "message": "本次任务的模型调用安全预算已用尽，正文生成已停止。",
+                        "failures": failed_sections,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         raise RuntimeError(
             json.dumps(
                 {
@@ -1741,9 +3584,13 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
         )
     for sec in sections:
-        sec["content"] = strip_nonconcrete_language(sec.get("content") or "")
+        _assign_evidence_safe_content(
+            sec,
+            strip_nonconcrete_language(sec.get("content") or ""),
+            stage="strip_nonconcrete_language_after_draft",
+        )
 
-    page_target_enrichment: Dict[str, Any] = {
+    page_target_enrichment: dict[str, Any] = {
         "enabled": bool(style.get("enforce_chapter_pages")),
         "policy": "technical_content_only_no_page_padding",
         "candidates": [],
@@ -1753,7 +3600,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     if page_target_enrichment["enabled"] and not dry_run:
         enrichment_sem = asyncio.Semaphore(2)
 
-        async def _enrich_short_section(sec: Dict[str, Any]) -> Dict[str, Any]:
+        async def _enrich_short_section(sec: dict[str, Any]) -> dict[str, Any]:
             title = str(sec.get("title") or "章节").strip()
             content = str(sec.get("content") or "").strip()
             target_pages = _extract_chapter_page_target(chapter_pages, title)
@@ -1808,8 +3655,24 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "minimum_effective_chars": minimum_effective_chars,
                     "model_audit": audit,
                 }
+            if not _assign_evidence_safe_content(
+                sec,
+                enriched,
+                stage="page_target_enrichment",
+            ):
+                return {
+                    "title": title,
+                    "ok": False,
+                    "reason": "requirement_evidence_regression",
+                    "blocking_requirement_ids": (
+                        _chapter_evidence_gate({**sec, "content": enriched}, title).get(
+                            "blocking_requirement_ids"
+                        )
+                        or []
+                    ),
+                    "model_audit": audit,
+                }
             sec.setdefault("pre_page_target_enrichment_content", content)
-            sec["content"] = enriched
             sec["page_target_enriched"] = True
             sec["page_target_enrichment_model_slot"] = audit.get("slot")
             return {
@@ -1862,7 +3725,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 enhanced_count=len(page_target_enrichment["enhanced"]),
             )
 
-    model_review_audit: Dict[str, Any] = {
+    model_review_audit: dict[str, Any] = {
         "enabled": bool(tiered_anthropic_route),
         "fable_escalation_enabled": bool(allow_fable_escalation),
         "critical_chapters": [],
@@ -1881,7 +3744,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         ]
         review_sem = asyncio.Semaphore(2)
 
-        async def _review_critical_section(sec: Dict[str, Any]) -> Dict[str, Any]:
+        async def _review_critical_section(sec: dict[str, Any]) -> dict[str, Any]:
             title = str(sec.get("title") or "章节").strip()
             content = str(sec.get("content") or "").strip()
             if not content or sec.get("error"):
@@ -1897,8 +3760,25 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             async with review_sem:
                 reviewed, audit = await _complete_with_role(prompt, "review")
             if reviewed:
+                reviewed = strip_nonconcrete_language(reviewed)
+                if not _assign_evidence_safe_content(
+                    sec,
+                    reviewed,
+                    stage="tiered_model_review",
+                ):
+                    return {
+                        "title": title,
+                        "ok": False,
+                        "reason": "requirement_evidence_regression",
+                        "blocking_requirement_ids": (
+                            _chapter_evidence_gate(
+                                {**sec, "content": reviewed}, title
+                            ).get("blocking_requirement_ids")
+                            or []
+                        ),
+                        **audit,
+                    }
                 sec.setdefault("pre_review_content", content)
-                sec["content"] = strip_nonconcrete_language(reviewed)
                 sec["review_model_slot"] = audit.get("slot")
                 sec["review_model_role"] = audit.get("role")
                 sec["review_provider"] = audit.get("provider")
@@ -1916,19 +3796,14 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             row for row in review_results if not bool(row.get("ok"))
         ]
 
-        consistency_material = []
-        for sec in sections:
-            if not isinstance(sec, dict):
-                continue
-            title = str(sec.get("title") or "").strip()
-            content = str(sec.get("content") or "").strip()
-            consistency_material.append(f"## {title}\n{content[:900]}")
-        consistency_prompt = (
-            "你是施工组织设计终审专家。仅基于以下章节摘要做全文一致性复核，重点检查工期、"
-            "资源峰值、关键线路、质量验收、安全责任和规范引用是否前后冲突。不得补造事实。"
-            "请输出简短的终审问题清单；无冲突时明确写“未发现实质性冲突”。\n\n"
-            + "\n\n".join(consistency_material)
-        )[:24000]
+        consistency_material = _build_consistency_material(
+            sections,
+            delivery_scope=delivery_scope,
+        )
+        consistency_prompt = _build_consistency_review_prompt(
+            consistency_material,
+            delivery_scope=delivery_scope,
+        )
         consistency_text, consistency_audit = await _complete_with_role(consistency_prompt, "review")
         if consistency_text:
             consistency_audit["summary"] = consistency_text[:4000]
@@ -1952,7 +3827,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         id_key="selected_image_ids",
         item_key="images",
     )
-    pipeline_stages: List[Dict[str, Any]] = [
+    pipeline_stages: list[dict[str, Any]] = [
         {
             "stage": "compliance_preflight",
             "ok": bool(compliance_registry_status.get("ready")) and bool(verified_standard_codes),
@@ -1963,12 +3838,21 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         {"stage": "draft_generation", "ok": True, "chapter_count": len(sections)},
         {
             "stage": "requirement_evidence_plan",
-            "ok": bool(requirement_evidence_plan_validation.get("ok")),
+            "ok": bool(requirement_evidence_plan_validation.get("ok"))
+            and bool(requirement_evidence_plan_readiness.get("ok")),
             "matrix_digest": requirement_evidence_plan.get("matrix_digest"),
             "requirement_count": (requirement_evidence_plan.get("summary") or {}).get("requirement_count"),
             "mandatory_count": (requirement_evidence_plan.get("summary") or {}).get("mandatory_count"),
             "source_bound_count": (requirement_evidence_plan.get("summary") or {}).get("source_bound_count"),
             "unmapped_count": (requirement_evidence_plan.get("summary") or {}).get("unmapped_count"),
+            "blocking_requirement_ids": requirement_evidence_plan_readiness.get(
+                "blocking_requirement_ids"
+            )
+            or [],
+            "warning_requirement_ids": requirement_evidence_plan_readiness.get(
+                "warning_requirement_ids"
+            )
+            or [],
         },
         {
             "stage": "page_target_enrichment",
@@ -1997,8 +3881,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
     ]
 
-    def _run_contract_checks(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-        results: List[Dict[str, Any]] = []
+    def _run_contract_checks(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
         for sec in rows:
             title = str(sec.get("title") or "").strip()
             if not title:
@@ -2020,14 +3904,16 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         # Note: sections do not store doc_evidence; auto-pick a traceable locator for "工程量清单" if ingested docs exist.
         evidence_src = str(payload.get("evidence_src") or "").strip()
-        if not evidence_src:
+        if not evidence_src and str(project_id or "").strip():
             hit = best_ingested_hit(
                 "工程量清单 报价 清单",
                 limit=10,
                 prefer_filename_keywords=["清单", "BOQ", "报价", "工程量"],
                 project_id=project_id,
             )
-            evidence_src = str((hit or {}).get("locator") or "工程量清单(解析统计)")
+            evidence_src = str((hit or {}).get("locator") or "")
+        if not evidence_src:
+            evidence_src = "工程量清单(解析统计)"
         ensure_boq_focus_item_cards(
             sections,
             boq_focus,
@@ -2035,9 +3921,10 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             params=params,
             project_id=project_id,
             boq_data=boq,
+            project_fact_ledger=project_fact_ledger,
         )
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - enrichment failures are surfaced through quality gates downstream.
+        logger.warning("BoQ focus-item card enrichment failed for this run")
 
     media = []
     if generate_images:
@@ -2055,7 +3942,16 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             mm = None
             include_outline_mindmap = bool(payload.get("include_outline_mindmap")) or not project_source_media
             if include_outline_mindmap:
-                for image_slot in iterate_image_failover_slots():
+                # External image generation is fail-closed until an
+                # image-specific admission probe has bound an in-memory slot
+                # to this run.  Text-model admission must never be treated as
+                # permission to call a separate image model/API.
+                admitted_image_slots = payload.get(
+                    "_provider_admitted_image_slots"
+                )
+                if not isinstance(admitted_image_slots, list):
+                    admitted_image_slots = []
+                for image_slot in admitted_image_slots:
                     mm = generate_outline_mindmap(
                         topic,
                         outline,
@@ -2083,11 +3979,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                     )
             if mm:
                 media.append(mm)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - media providers are optional and must not alter text delivery.
+            logger.warning("Optional media generation failed for this run")
 
-    quality: Dict[str, Any] = {}
-    quality_draft: Dict[str, Any] | None = None
+    quality: dict[str, Any] = {}
+    quality_draft: dict[str, Any] | None = None
     if payload.get("auto_remediate", True):
         quality_draft = run_quality_checks(
             tender,
@@ -2115,8 +4011,13 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
         remediate_mode = payload.get("remediate_mode") or "template"
+        pre_remediation_content = {
+            id(sec): str(sec.get("content") or "")
+            for sec in sections
+            if isinstance(sec, dict)
+        }
 
-        async def _remediate_with_llm(sec: Dict[str, Any], recs: List[Dict[str, Any]]):
+        async def _remediate_with_llm(sec: dict[str, Any], recs: list[dict[str, Any]]):
             if not recs:
                 return
             title = sec.get("title") or "章节"
@@ -2138,8 +4039,11 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "请输出修复后的正文："
             )
             revised, audit = await _complete_with_role(prompt, "review")
-            if revised:
-                sec["content"] = strip_nonconcrete_language(revised)
+            if revised and _assign_evidence_safe_content(
+                sec,
+                strip_nonconcrete_language(revised),
+                stage="quality_llm_remediation",
+            ):
                 sec["auto_remediated"] = "llm"
                 sec["remediation_model_slot"] = audit.get("slot")
                 sec["remediation_provider"] = audit.get("provider")
@@ -2162,9 +4066,17 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 project_id=project_id,
                 boq_focus=boq_focus,
                 params=params,
+                project_fact_ledger=project_fact_ledger,
             )
         for sec in sections:
-            sec["content"] = strip_nonconcrete_language(sec.get("content") or "")
+            candidate_content = strip_nonconcrete_language(sec.get("content") or "")
+            original_content = pre_remediation_content.get(id(sec), "")
+            sec["content"] = original_content
+            _assign_evidence_safe_content(
+                sec,
+                candidate_content,
+                stage=f"quality_{remediate_mode}_remediation",
+            )
 
         mandatory_supplements = ensure_local_export_mandatory_content(sections)
         pipeline_stages.append(
@@ -2178,16 +4090,33 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Plan consistency: normalize duplicated metrics (工期/资源峰值/关键线路间隔) to a single canonical value.
     plan_receipt = None
     try:
-        from backend.zhifei_autoplan.plan_consistency import normalize_metrics_in_sections
+        from backend.zhifei_autoplan.plan_consistency import (
+            normalize_metrics_in_sections,
+        )
 
+        pre_plan_consistency_content = {
+            id(sec): str(sec.get("content") or "")
+            for sec in sections
+            if isinstance(sec, dict)
+        }
         plan_receipt = normalize_metrics_in_sections(sections)
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            candidate_content = str(sec.get("content") or "")
+            sec["content"] = pre_plan_consistency_content.get(id(sec), "")
+            _assign_evidence_safe_content(
+                sec,
+                candidate_content,
+                stage="plan_consistency",
+            )
         pipeline_stages.append(
             {
                 "stage": "plan_consistency",
                 "ok": bool((plan_receipt or {}).get("ok", True)),
             }
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - stage failure is recorded and consumed by the delivery gate.
         plan_receipt = None
         pipeline_stages.append({"stage": "plan_consistency", "ok": False, "reason": "plan_consistency_exception"})
 
@@ -2215,7 +4144,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 sec["content"] = (text.rstrip() + add).strip() + "\n"
                 break
-    except Exception:
+    except Exception:  # noqa: BLE001 - missing drawing evidence remains fail-closed in the cross-index gate.
         drawing_index = None
 
     # Enterprise standards index (best-effort): list standard docs + chapter bindings for traceability.
@@ -2223,7 +4152,23 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         from backend.zhifei_autoplan.standard_index import build_standard_index
 
-        standard_index = build_standard_index(topic, outline, project_id=str(project_id) if project_id else None)
+        standard_index = build_standard_index(
+            topic,
+            outline,
+            project_id=str(project_id) if project_id else None,
+            official_registry_bytes=compliance_registry_bytes,
+            official_registry_path=compliance_registry_path,
+        )
+        if compliance_registry_authority is not None and (
+            str(standard_index.get("official_registry_sha256") or "")
+            != str(
+                compliance_registry_authority.projection.get("registry_sha256")
+                or ""
+            )
+            or Path(str(standard_index.get("official_registry_path") or ""))
+            != compliance_registry_path
+        ):
+            raise RuntimeError("COMPLIANCE_STANDARD_INDEX_AUTHORITY_MISMATCH")
         # Bind best-effort standard locators into key chapters to make "按企业标准执行" traceable.
         for b in (standard_index or {}).get("chapter_bindings") or []:
             ch = str(b.get("chapter") or "").strip()
@@ -2243,18 +4188,44 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 sec["content"] = (text.rstrip() + add).strip() + "\n"
                 break
-    except Exception:
+    except Exception:  # noqa: BLE001 - missing standards remain visible to evidence and quality gates.
         standard_index = None
 
     terminology_audit = {"ok": True, "terminology_loaded": False, "entry_count": 0, "changed_sections": 0, "replacement_count": 0}
     try:
+        terminology_attempts = _role_attempts("review") or _role_attempts("draft")
+        terminology_provider = ""
+        terminology_model = ""
+        terminology_key = None
+        if terminology_attempts:
+            (
+                terminology_provider,
+                terminology_model,
+                terminology_key,
+                _terminology_slot,
+            ) = terminology_attempts[0]
+        pre_terminology_content = {
+            id(sec): str(sec.get("content") or "")
+            for sec in sections
+            if isinstance(sec, dict)
+        }
         terminology_audit = await normalize_sections_terminology_async(
             sections,
-            provider=str(provider or ""),
-            model=str(model or ""),
-            api_key=_resolve_provider_api_key(payload, provider),
-            use_llm=True,
+            provider=str(terminology_provider or ""),
+            model=str(terminology_model or ""),
+            api_key=terminology_key,
+            use_llm=bool(terminology_key) and not dry_run,
         )
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            candidate_content = str(sec.get("content") or "")
+            sec["content"] = pre_terminology_content.get(id(sec), "")
+            _assign_evidence_safe_content(
+                sec,
+                candidate_content,
+                stage="terminology_audit",
+            )
         pipeline_stages.append(
             {
                 "stage": "terminology_audit",
@@ -2265,17 +4236,27 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "replacement_count": int(terminology_audit.get("replacement_count") or 0),
             }
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - terminology failure is retained as an explicit failed stage.
         terminology_audit = {"ok": False, "terminology_loaded": False, "entry_count": 0, "changed_sections": 0, "replacement_count": 0}
         pipeline_stages.append({"stage": "terminology_audit", "ok": False, "reason": "terminology_guard_exception"})
 
     # Final quality check after remediation + normalization + drawing binding.
     try:
         for sec in sections:
-            sec["content"] = strip_nonconcrete_language(sec.get("content") or "")
-    except Exception:
-        pass
-    standard_citation_sanitization: List[Dict[str, Any]] = []
+            _assign_evidence_safe_content(
+                sec,
+                strip_nonconcrete_language(sec.get("content") or ""),
+                stage="strip_nonconcrete_language_final",
+            )
+    except Exception:  # noqa: BLE001 - final sanitization failure is retained for delivery auditing.
+        pipeline_stages.append(
+            {
+                "stage": "strip_nonconcrete_language_final",
+                "ok": False,
+                "reason": "final_language_sanitization_exception",
+            }
+        )
+    standard_citation_sanitization: list[dict[str, Any]] = []
     for sec in sections:
         if not isinstance(sec, dict):
             continue
@@ -2285,7 +4266,12 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
         if not bool(sanitized.get("changed")):
             continue
-        sec["content"] = str(sanitized.get("text") or "")
+        if not _assign_evidence_safe_content(
+            sec,
+            str(sanitized.get("text") or ""),
+            stage="standard_citation_sanitization",
+        ):
+            continue
         sec["removed_unverified_standard_codes"] = list(sanitized.get("removed_codes") or [])
         standard_citation_sanitization.append(
             {
@@ -2324,7 +4310,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     if strict_quality and not bool(standard_citation_audit.get("ok", False)):
         sample = (standard_citation_audit.get("violations") or [])[:5]
         details = "；".join(
-            f"{str(row.get('chapter') or '未命名章节')}:{str(row.get('standard_code') or '未知规范')}"
+            f"{row.get('chapter') or '未命名章节'!s}:{row.get('standard_code') or '未知规范'!s}"
             for row in sample
             if isinstance(row, dict)
         )
@@ -2388,19 +4374,31 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
     param_receipt = None
     param_receipt_path = None
     try:
-        from backend.zhifei_autoplan.param_trace import build_param_receipt, save_latest_receipt
+        from backend.zhifei_autoplan.param_trace import (
+            build_param_receipt,
+            save_latest_receipt,
+        )
 
         param_receipt = build_param_receipt(sections, params)
         if not no_write_preview:
             param_receipt_path = save_latest_receipt(param_receipt, project_id=str(project_id) if project_id else None)
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional receipt failure is represented by a missing receipt.
         param_receipt = None
         param_receipt_path = None
 
     # Cross-index: BoQ focus item -> chapter -> drawing/standard locator -> closure flags.
     cross_index = None
+    expected_focus_count = len(
+        normalize_boq_focus_items(
+            (boq_focus or {}).get("must_cover_keywords") or [],
+            limit=MAX_BOQ_FOCUS_ITEMS,
+        )
+    )
     try:
-        from backend.zhifei_autoplan.cross_index import build_cross_index
+        from backend.zhifei_autoplan.cross_index import (
+            build_cross_index,
+            validate_cross_index_contract,
+        )
 
         cross_index = build_cross_index(
             boq=boq,
@@ -2411,8 +4409,26 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             quality_checks=quality,
             project_id=str(project_id) if project_id else None,
         )
-    except Exception:
-        cross_index = None
+        cross_index = validate_cross_index_contract(
+            cross_index,
+            expected_names=(boq_focus or {}).get("must_cover_keywords") or [],
+        )
+    except Exception:  # noqa: BLE001 - fail-closed cross-index state blocks focused-item delivery.
+        cross_index = {
+            "ok": expected_focus_count == 0,
+            "build_failed": expected_focus_count > 0,
+            "reason": (
+                "cross_index_build_failed"
+                if expected_focus_count > 0
+                else "no_boq_focus_items"
+            ),
+            "focus_count": expected_focus_count,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        }
     evidence_tracking = {}
     try:
         evidence_tracking = build_evidence_tracking(
@@ -2420,7 +4436,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             tender=tender if isinstance(tender, dict) else {},
             chapter_pages=chapter_pages if isinstance(chapter_pages, dict) else {},
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - empty evidence tracking is an explicit failed pipeline stage below.
         evidence_tracking = {"rows": [], "summary": {}}
     pipeline_stages.append(
         {
@@ -2435,6 +4451,23 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         plan=requirement_evidence_plan,
         sections=sections,
         evidence_tracking=evidence_tracking,
+        document_control_evidence={
+            "page_plan": {
+                "planned_total_pages": sum(
+                    max(0, int(value or 0))
+                    for value in chapter_pages.values()
+                )
+                if isinstance(chapter_pages, dict)
+                else 0,
+                "limit": int(total_pages_limit or 0),
+                "verified": bool(chapter_pages) and bool(total_pages_limit),
+            },
+            "format_policy": {
+                "source": str(style_source or ""),
+                "verified": bool(style)
+                and not bool(requirement_decision_matrix.get("unresolved_fields")),
+            },
+        },
     )
     requirement_evidence_validation = validate_requirement_evidence_matrix(
         requirement_evidence_matrix
@@ -2451,9 +4484,6 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "blocking_count": requirement_evidence_summary.get("blocking_count"),
             "warning_count": requirement_evidence_summary.get("warning_count"),
         }
-    )
-    requirement_evidence_hard_gate = bool(
-        payload.get("requirement_evidence_hard_gate", bool(tender))
     )
     if strict_quality and requirement_evidence_hard_gate:
         if not requirement_evidence_validation.get("ok"):
@@ -2479,7 +4509,19 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         requirement_matrix=requirement_evidence_matrix,
         standard_audit=standard_citation_audit,
         cross_index=cross_index if isinstance(cross_index, dict) else {},
-        model_review_required=bool(tiered_anthropic_route and not dry_run),
+        model_review_required=formal_document_delivery,
+        formal_delivery_required=formal_document_delivery,
+        project_parameters=missing_param_probe,
+        project_fact_ledger=project_fact_ledger,
+        sections=sections,
+        standard_index=standard_index if isinstance(standard_index, dict) else {},
+        standard_workspace_dir="backend/data",
+        standard_compliance_root=(
+            compliance_registry_path.parent
+            if compliance_registry_path is not None
+            else None
+        ),
+        trusted_standard_registry_bytes=compliance_registry_bytes,
     )
     quality["delivery_quality_gate"] = delivery_quality_gate
     pipeline_stages.append(
@@ -2491,22 +4533,47 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "warning_count": delivery_quality_gate.get("warning_count"),
         }
     )
-    if strict_quality and not bool(delivery_quality_gate.get("delivery_allowed")):
-        blocker_codes = [
-            str(row.get("code") or "DELIVERY_QUALITY_BLOCKED")
-            for row in (delivery_quality_gate.get("blockers") or [])
-            if isinstance(row, dict)
-        ]
+    blocker_codes = [
+        str(row.get("code") or "DELIVERY_QUALITY_BLOCKED")
+        for row in (delivery_quality_gate.get("blockers") or [])
+        if isinstance(row, dict)
+    ]
+    if (
+        strict_quality
+        and delivery_scope == "document"
+        and not bool(delivery_quality_gate.get("delivery_allowed"))
+    ):
         raise ValueError(
             "最终专业交付质量门未通过，已停止交付："
             + "、".join(blocker_codes[:20])
         )
+    chapter_validation_gate = None
+    if delivery_scope == "chapter_validation":
+        chapter_validation_gate = _build_chapter_validation_quality_gate(
+            quality=quality,
+            contract_checks=contract_checks,
+            delivery_quality_gate=delivery_quality_gate,
+        )
+        quality["chapter_validation_gate"] = chapter_validation_gate
+        pipeline_stages.append(
+            {
+                "stage": "chapter_validation_quality_gate",
+                "ok": bool(chapter_validation_gate.get("pass")),
+                "blocker_codes": chapter_validation_gate.get("blocker_codes") or [],
+            }
+        )
+        if strict_quality and not bool(chapter_validation_gate.get("pass")):
+            raise ValueError(
+                "CHAPTER_VALIDATION_QUALITY_BLOCKED："
+                "章节真实模型验证质量门未通过："
+                + "、".join(chapter_validation_gate.get("blocker_codes") or [])
+            )
     params_used = None
     try:
         from backend.zhifei_autoplan.params_runtime import (
-            get_quant_defaults,
             get_boq_focus_card_defaults,
             get_qse_defaults,
+            get_quant_defaults,
         )
 
         params_used = {
@@ -2517,7 +4584,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             # Use the module-level import to avoid local-scope shadowing (which would break mindmap generation).
             "image_defaults": get_image_defaults(params),
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional parameter summaries are omitted on adapter failure.
         params_used = None
     graph_binding_missing = [
         str(sec.get("title") or "")
@@ -2561,8 +4628,9 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
     )
     _raise_if_cancelled("before_result_delivery")
-    if checkpoint_enabled:
-        generation_checkpoint = finalize_generation_checkpoint(
+    if checkpoint_enabled and checkpoint_terminal_status == "draft_complete":
+        generation_checkpoint = _write_checkpoint(
+            finalize_generation_checkpoint,
             namespace=checkpoint_namespace,
             scope=checkpoint_scope,
             binding=generation_binding,
@@ -2576,6 +4644,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "global_instruction": global_instruction,
         "outline": outline,
         "sections": sections,
+        "chapter_summaries": rolling_chapter_summaries,
         "case_reference_pack": case_reference_pack,
         "image_selection_pack": image_selection_pack,
         "media": media,
@@ -2596,10 +4665,24 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "style_source": style_source,
         "requirement_decision_matrix": requirement_decision_matrix,
         "quality_strict": strict_quality,
+        "dry_run": dry_run,
+        "delivery_scope": delivery_scope,
+        "delivery_ready": bool(
+            delivery_scope == "document"
+            and not dry_run
+            and delivery_quality_gate.get("delivery_allowed")
+        ),
         "compliance_registry_status": compliance_registry_status,
+        "compliance_registry_authority": (
+            dict(compliance_registry_authority.projection)
+            if compliance_registry_authority is not None
+            else None
+        ),
         "standard_citation_sanitization": standard_citation_sanitization,
         "boq_focus": boq_focus,
         "boq_wbs_cpm": boq_wbs_cpm,
+        "source_input_receipt": source_input_receipt,
+        "project_parameter_evidence": project_parameter_evidence,
         "project_fact_ledger": project_fact_ledger,
         "project_fact_validation": project_fact_validation,
         "missing_parameters": missing_param_probe,
@@ -2608,6 +4691,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "agent_contract_checks": contract_checks,
         "requirement_evidence_plan": requirement_evidence_plan,
         "requirement_evidence_plan_validation": requirement_evidence_plan_validation,
+        "requirement_evidence_plan_readiness": requirement_evidence_plan_readiness,
         "requirement_evidence_matrix": requirement_evidence_matrix,
         "requirement_evidence_validation": requirement_evidence_validation,
         "generation_checkpoint": generation_checkpoint,
@@ -2639,6 +4723,7 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
         "execution_control": execution_runtime.snapshot(),
         "model_routing": {
             "mode": "anthropic_tiered" if tiered_anthropic_route else "legacy_failover",
+            "provider_admission": provider_admission_public,
             "draft": [
                 {
                     "slot": item.get("slot"),
@@ -2666,7 +4751,8 @@ async def run_autoplan(payload: Dict[str, Any]) -> Dict[str, Any]:
             "fable_escalation_enabled": bool(allow_fable_escalation),
             "review_audit": model_review_audit,
             "reliability": {
-                "preflight_enabled": bool(payload.get("model_preflight", False)),
+                "preflight_enabled": bool(payload.get("model_preflight", False))
+                and not provider_admission_required,
                 "preflight": model_preflight_receipts,
                 "circuits": model_reliability.snapshot(),
             },

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+
+from backend.zhifei_autoplan.project_namespace import project_storage_key
 
 BASE_DIR = Path("backend/data/autoplan")
 PROJECTS_DIR = BASE_DIR / "projects"
@@ -12,9 +13,7 @@ GLOBAL_STATE_PATH = BASE_DIR / "variant_cycle_global.json"
 
 
 def _safe_project_id(pid: str) -> str:
-    out = re.sub(r"[^A-Za-z0-9_\-\.\u4e00-\u9fff]+", "_", (pid or "").strip())
-    out = out.strip("._")
-    return out or "default"
+    return project_storage_key(pid)
 
 
 def _state_path(project_id: str | None) -> Path:

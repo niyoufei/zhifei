@@ -247,6 +247,39 @@ async def test_actions_ollama_main_chain_smoke_enabled_mock_success_forces_no_wr
 
 
 @pytest.mark.asyncio
+async def test_actions_ollama_smoke_rejects_remote_base_url_before_orchestrator() -> None:
+    from backend.app.routers import actions_bridge
+
+    req = actions_bridge.ActionsOllamaMainChainSmokeRequest(
+        base_url="http://example.invalid:11434/private"
+    )
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ZF_ACTIONS_KEY": "test-actions-key",
+                "ZDOC_OLLAMA_MAIN_CHAIN_SMOKE_ENABLED": "1",
+            },
+            clear=False,
+        ),
+        patch.object(
+            actions_bridge,
+            "run_autoplan",
+            side_effect=AssertionError("remote URL must be blocked first"),
+        ) as run_mock,
+    ):
+        result = await actions_bridge.actions_ollama_main_chain_smoke(
+            req,
+            x_actions_key="test-actions-key",
+        )
+
+    assert result["status"] == "blocked"
+    assert result["error"]["code"] == "LOCAL_OLLAMA_LOOPBACK_REQUIRED"
+    assert result["base_url"] == "http://127.0.0.1:11434"
+    run_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_actions_ollama_main_chain_smoke_run_autoplan_error_returns_fallback() -> None:
     from backend.app.routers import actions_bridge
 

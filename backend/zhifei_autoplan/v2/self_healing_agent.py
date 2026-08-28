@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from backend.zhifei_autoplan.provider_admission import ProviderCandidate
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
 
 
@@ -150,6 +151,7 @@ class SelfHealingAgent:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
+        admitted_candidate: ProviderCandidate | None = None,
     ):
         defaults = LLMClient.load_defaults() or {}
         self.provider = (
@@ -164,12 +166,21 @@ class SelfHealingAgent:
             or defaults.get("default_model")
             or "gemini-3.1-pro-preview"
         )
-        self.api_key = api_key or self._resolve_api_key(self.provider)
-        self._llm = LLMClient(
-            provider=self.provider,
-            model=self.model,
-            api_key=self.api_key,
-        )
+        # Caller/env credentials alone are not authority to contact a model.
+        # Only a fresh credential-bound ProviderCandidate may activate LLM use.
+        self.api_key: str | None = None
+        self._llm: LLMClient | None = None
+        if isinstance(admitted_candidate, ProviderCandidate):
+            self.provider = admitted_candidate.provider
+            self.model = admitted_candidate.model
+            self.api_key = admitted_candidate.credential
+            self._llm = LLMClient(
+                provider=self.provider,
+                model=self.model,
+                api_key=self.api_key,
+                reliability_identity=admitted_candidate.identity_digest,
+                retry_attempts=1,
+            )
 
     def _resolve_api_key(self, provider: str) -> Optional[str]:
         p = str(provider or "").strip().lower()
@@ -388,7 +399,21 @@ class SelfHealingAgent:
             }
 
         prompt = self._build_prompt(gaps)
-        resp = await self._llm.complete(prompt)
+        if self._llm is None:
+            resp: Dict[str, Any] = {
+                "provider": self.provider,
+                "model": self.model,
+                "text": "",
+                "error": "MODEL_PROVIDER_ADMISSION_REQUIRED",
+            }
+        else:
+            resp = await self._llm.complete(
+                prompt,
+                timeout=240.0,
+                stream=True,
+                project_id="knowledge-graph",
+                task_type="self_healing_knowledge_patch",
+            )
         parsed = _extract_json(str(resp.get("text") or ""))
         raw_nodes = parsed.get("nodes") if isinstance(parsed, dict) else None
         if not isinstance(raw_nodes, list):
@@ -407,6 +432,10 @@ class SelfHealingAgent:
             "used_fallback": used_fallback or bool(resp.get("error")),
             "nodes": nodes,
         }
+
+    def close(self) -> None:
+        if self._llm is not None:
+            self._llm.close()
 
     def persist_patch_nodes(
         self,

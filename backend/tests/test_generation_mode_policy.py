@@ -40,6 +40,32 @@ def test_generation_mode_quality_forces_defaults():
     assert out["_mode_policy"]["auto_switched"] is False
 
 
+def test_chapter_validation_can_explicitly_request_non_strict_diagnostics():
+    payload = {
+        "generation_mode": "quality_200",
+        "delivery_scope": "chapter_validation",
+        "quality_strict": False,
+    }
+
+    out = _apply_generation_mode_policy(payload)
+
+    assert out["quality_strict"] is False
+    assert out["_mode_policy"]["chapter_validation_non_strict"] is True
+
+
+def test_formal_document_cannot_disable_quality_strict():
+    payload = {
+        "generation_mode": "quality_200",
+        "delivery_scope": "document",
+        "quality_strict": False,
+    }
+
+    out = _apply_generation_mode_policy(payload)
+
+    assert out["quality_strict"] is True
+    assert out["_mode_policy"]["chapter_validation_non_strict"] is False
+
+
 def test_generation_mode_auto_switch_when_pages_gt_500():
     payload = {
         "generation_mode": "quality_200",
@@ -68,3 +94,22 @@ def test_generation_mode_hq_speed_policy():
     assert out["variant_parallelism"] >= 1
     assert out["generate_images"] is False
 
+
+def test_dry_run_disables_real_delivery_enforcement_and_model_work():
+    payload = {
+        "generation_mode": "quality_200",
+        "dry_run": True,
+        "quality_strict": True,
+        "auto_remediate": True,
+        "model_preflight": True,
+        "fail_on_model_exhaustion": True,
+    }
+
+    out = _apply_generation_mode_policy(payload)
+
+    assert out["generation_mode"] == "quality_200"
+    assert out["quality_strict"] is False
+    assert out["auto_remediate"] is False
+    assert out["model_preflight"] is False
+    assert out["fail_on_model_exhaustion"] is False
+    assert out["_mode_policy"]["dry_run"] is True

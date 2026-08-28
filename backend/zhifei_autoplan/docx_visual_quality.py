@@ -9,13 +9,13 @@ import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from PIL import Image
 from pypdf import PdfReader
-
 
 _HEADING_RE = re.compile(
     r"^(?:第\s*[一二三四五六七八九十百零〇0-9]+\s*[章节篇]|"
@@ -42,30 +42,77 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+_DECISION_NON_SEMANTIC_FIELDS = frozenset(
+    {
+        "created_at",
+        "decision_digest",
+        "docx",
+        "pdf",
+        "preview_dir",
+        "receipt",
+    }
+)
+
+
+def canonical_visual_quality_decision_digest(payload: Mapping[str, Any]) -> str:
+    """Return a path- and timestamp-independent digest of a QA decision.
+
+    The DOCX bytes remain bound through ``docx_sha256`` while volatile paths and
+    timestamps are deliberately excluded.  Both pass and blocked receipts use
+    this exact projection so downstream acceptance can independently recompute
+    the decision identity.
+    """
+
+    material = {
+        str(key): value
+        for key, value in payload.items()
+        if str(key) not in _DECISION_NON_SEMANTIC_FIELDS
+    }
+    return hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _seal_visual_quality_report(payload: Mapping[str, Any]) -> dict[str, Any]:
+    report = dict(payload)
+    report["decision_digest"] = canonical_visual_quality_decision_digest(report)
+    return report
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    temp_path = Path(handle.name)
+    temp_path: Path | None = None
     try:
-        with handle:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
             json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
+        assert temp_path is not None
         temp_path.chmod(0o600)
         os.replace(temp_path, path)
         path.chmod(0o600)
     finally:
-        temp_path.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
-def _resolve_executable(env_name: str, names: Iterable[str], candidates: Iterable[Path]) -> Path | None:
+def _resolve_executable(
+    env_name: str, names: Iterable[str], candidates: Iterable[Path]
+) -> Path | None:
     configured = str(os.getenv(env_name) or "").strip()
     if configured:
         path = Path(configured).expanduser()
@@ -127,10 +174,14 @@ def _run(
 def _render_docx_to_pdf(source: Path, destination: Path, *, timeout: int) -> None:
     soffice = _soffice_binary()
     if soffice is None:
-        raise DocxVisualQualityError("缺少 LibreOffice headless，无法执行最终 Word 页面验收")
-    with tempfile.TemporaryDirectory(prefix="zhifei-lo-profile-") as profile_dir, tempfile.TemporaryDirectory(
-        prefix="zhifei-lo-output-"
-    ) as output_dir, tempfile.TemporaryDirectory(prefix="zhifei-fontconfig-") as fontconfig_dir:
+        raise DocxVisualQualityError(
+            "缺少 LibreOffice headless，无法执行最终 Word 页面验收"
+        )
+    with (
+        tempfile.TemporaryDirectory(prefix="zhifei-lo-profile-") as profile_dir,
+        tempfile.TemporaryDirectory(prefix="zhifei-lo-output-") as output_dir,
+        tempfile.TemporaryDirectory(prefix="zhifei-fontconfig-") as fontconfig_dir,
+    ):
         profile_uri = Path(profile_dir).resolve().as_uri()
         render_env = os.environ.copy()
         if platform.system() == "Darwin":
@@ -176,7 +227,11 @@ def _render_docx_to_pdf(source: Path, destination: Path, *, timeout: int) -> Non
             env=render_env,
         )
         converted = Path(output_dir) / f"{source.stem}.pdf"
-        if completed.returncode != 0 or not converted.is_file() or converted.stat().st_size == 0:
+        if (
+            completed.returncode != 0
+            or not converted.is_file()
+            or converted.stat().st_size == 0
+        ):
             detail = (completed.stderr or completed.stdout or "未知转换错误").strip()
             raise DocxVisualQualityError(f"Word 转 PDF 失败：{detail[:500]}")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -258,15 +313,13 @@ def assess_cjk_glyph_integrity(
                 shape_characters[str(shape)].add(str(character))
     unique_shapes = len(shape_characters)
     shape_retention = round(unique_shapes / max(1, unique_characters), 4)
-    largest_collision = max((len(chars) for chars in shape_characters.values()), default=0)
+    largest_collision = max(
+        (len(chars) for chars in shape_characters.values()), default=0
+    )
     empty_ratio = round(int(empty_glyphs) / max(1, int(inspected_glyphs)), 4)
     blocked = bool(
         unique_characters >= 16
-        and (
-            shape_retention < 0.35
-            or largest_collision >= 8
-            or empty_ratio > 0.2
-        )
+        and (shape_retention < 0.35 or largest_collision >= 8 or empty_ratio > 0.2)
     )
     return {
         "status": "blocked" if blocked else "pass",
@@ -303,7 +356,9 @@ def _inspect_cjk_glyphs(
     try:
         import pdfplumber
     except Exception as exc:  # pragma: no cover - production dependency gate
-        raise DocxVisualQualityError(f"缺少 pdfplumber，无法执行中文逐字形验收：{exc}") from exc
+        raise DocxVisualQualityError(
+            f"缺少 pdfplumber，无法执行中文逐字形验收：{exc}"
+        ) from exc
 
     character_shapes: dict[str, set[str]] = defaultdict(set)
     empty_glyphs = 0
@@ -327,7 +382,9 @@ def _inspect_cjk_glyphs(
                             rendered.width,
                             int(float(item.get("x1") or 0) * width_scale) + 2,
                         )
-                        top = max(0, int(float(item.get("top") or 0) * height_scale) - 1)
+                        top = max(
+                            0, int(float(item.get("top") or 0) * height_scale) - 1
+                        )
                         bottom = min(
                             rendered.height,
                             int(float(item.get("bottom") or 0) * height_scale) + 2,
@@ -336,7 +393,9 @@ def _inspect_cjk_glyphs(
                         if x1 <= x0 or bottom <= top:
                             empty_glyphs += 1
                             continue
-                        shape = _normalised_glyph_hash(rendered.crop((x0, top, x1, bottom)))
+                        shape = _normalised_glyph_hash(
+                            rendered.crop((x0, top, x1, bottom))
+                        )
                         if shape is None:
                             empty_glyphs += 1
                         else:
@@ -366,13 +425,15 @@ def _orphan_heading_pages(pdf_path: Path) -> list[int]:
 
     try:
         import pdfplumber
-    except Exception:
+    except ImportError:
         return []
     flagged: list[int] = []
     try:
         with pdfplumber.open(str(pdf_path)) as document:
             for page_number, page in enumerate(document.pages, start=1):
-                words = page.extract_words(use_text_flow=True, keep_blank_chars=False) or []
+                words = (
+                    page.extract_words(use_text_flow=True, keep_blank_chars=False) or []
+                )
                 if not words:
                     continue
                 lines: dict[int, list[dict[str, Any]]] = {}
@@ -381,13 +442,17 @@ def _orphan_heading_pages(pdf_path: Path) -> list[int]:
                     lines.setdefault(top, []).append(word)
                 line_items: list[tuple[int, str]] = []
                 for top, line_words in lines.items():
-                    ordered = sorted(line_words, key=lambda item: float(item.get("x0") or 0))
-                    text = "".join(str(item.get("text") or "") for item in ordered).strip()
+                    ordered = sorted(
+                        line_words, key=lambda item: float(item.get("x0") or 0)
+                    )
+                    text = "".join(
+                        str(item.get("text") or "") for item in ordered
+                    ).strip()
                     if text:
                         line_items.append((top, text))
                 if not line_items:
                     continue
-                top, last_text = sorted(line_items)[-1]
+                top, last_text = max(line_items)
                 compact = _normalise_text(last_text)
                 if _PAGE_NUMBER_RE.fullmatch(compact):
                     if len(line_items) < 2:
@@ -401,13 +466,15 @@ def _orphan_heading_pages(pdf_path: Path) -> list[int]:
                     and _HEADING_RE.match(compact)
                 ):
                     flagged.append(page_number)
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional positional analysis is advisory
         # Text-position extraction is an advisory signal. Pixel/page checks still run.
         return []
     return flagged
 
 
-def _select_preview_pages(page_count: int, flagged: Iterable[int], limit: int) -> list[int]:
+def _select_preview_pages(
+    page_count: int, flagged: Iterable[int], limit: int
+) -> list[int]:
     selected = {1, 2, page_count - 1, page_count}
     selected.update(int(page) for page in flagged)
     valid = sorted(page for page in selected if 1 <= page <= page_count)
@@ -420,8 +487,12 @@ def evaluate_page_quality(page_metrics: list[dict[str, Any]]) -> dict[str, Any]:
     page_count = len(page_metrics)
     blank_pages = [int(item["page"]) for item in page_metrics if item.get("blank")]
     sparse_pages = [int(item["page"]) for item in page_metrics if item.get("sparse")]
-    orphan_pages = [int(item["page"]) for item in page_metrics if item.get("orphan_heading")]
-    clipping_pages = [int(item["page"]) for item in page_metrics if item.get("edge_clipping_risk")]
+    orphan_pages = [
+        int(item["page"]) for item in page_metrics if item.get("orphan_heading")
+    ]
+    clipping_pages = [
+        int(item["page"]) for item in page_metrics if item.get("edge_clipping_risk")
+    ]
     sparse_budget = max(1, int(page_count * 0.04)) if page_count else 0
     excessive_sparse = len(sparse_pages) > sparse_budget
     sparse_set = set(sparse_pages)
@@ -445,10 +516,16 @@ def evaluate_page_quality(page_metrics: list[dict[str, Any]]) -> dict[str, Any]:
         except (TypeError, ValueError):
             continue
         if width > 0 and height > 0:
-            page_ratios.append((int(item["page"]), round(width / height, 6)))
+            ratio = width / height
+            # A4 portrait and A4 landscape are the same physical page geometry.
+            # Compare the orientation-independent short/long ratio so legitimate
+            # landscape table sections are not misclassified as size drift.
+            page_ratios.append((int(item["page"]), round(min(ratio, 1.0 / ratio), 6)))
     geometry_outliers: list[int] = []
     if page_ratios:
-        baseline_ratio = sorted(ratio for _, ratio in page_ratios)[len(page_ratios) // 2]
+        baseline_ratio = sorted(ratio for _, ratio in page_ratios)[
+            len(page_ratios) // 2
+        ]
         geometry_outliers = [
             page for page, ratio in page_ratios if abs(ratio - baseline_ratio) > 0.01
         ]
@@ -460,7 +537,11 @@ def evaluate_page_quality(page_metrics: list[dict[str, Any]]) -> dict[str, Any]:
         hard_failures.append({"code": "ORPHAN_HEADINGS", "pages": orphan_pages})
     if excessive_sparse:
         hard_failures.append(
-            {"code": "EXCESSIVE_SPARSE_PAGES", "pages": sparse_pages, "allowed": sparse_budget}
+            {
+                "code": "EXCESSIVE_SPARSE_PAGES",
+                "pages": sparse_pages,
+                "allowed": sparse_budget,
+            }
         )
     elif sparse_streaks:
         hard_failures.append(
@@ -469,11 +550,15 @@ def evaluate_page_quality(page_metrics: list[dict[str, Any]]) -> dict[str, Any]:
     elif sparse_pages:
         warnings.append({"code": "SPARSE_PAGES_WITHIN_BUDGET", "pages": sparse_pages})
     if len(clipping_pages) >= 2:
-        hard_failures.append({"code": "SYSTEMIC_EDGE_CLIPPING_RISK", "pages": clipping_pages})
+        hard_failures.append(
+            {"code": "SYSTEMIC_EDGE_CLIPPING_RISK", "pages": clipping_pages}
+        )
     elif clipping_pages:
         warnings.append({"code": "EDGE_CLIPPING_RISK", "pages": clipping_pages})
     if geometry_outliers:
-        hard_failures.append({"code": "INCONSISTENT_PAGE_GEOMETRY", "pages": geometry_outliers})
+        hard_failures.append(
+            {"code": "INCONSISTENT_PAGE_GEOMETRY", "pages": geometry_outliers}
+        )
     return {
         "status": "blocked" if hard_failures else "pass",
         "page_count": page_count,
@@ -502,7 +587,9 @@ def validate_docx_visual_quality(
     source = Path(docx_path)
     if not source.is_file() or source.stat().st_size == 0:
         raise DocxVisualQualityError(f"待验收 Word 不存在或为空：{source}")
-    artifact_dir = Path(output_dir) if output_dir else source.parent / f"{source.stem}.visual_qa"
+    artifact_dir = (
+        Path(output_dir) if output_dir else source.parent / f"{source.stem}.visual_qa"
+    )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = artifact_dir / f"{source.stem}.pdf"
     receipt_path = artifact_dir / "visual_quality.json"
@@ -515,7 +602,9 @@ def validate_docx_visual_quality(
             raise DocxVisualQualityError("Word 渲染结果没有任何页面")
         orphan_pages = set(_orphan_heading_pages(pdf_path))
         with tempfile.TemporaryDirectory(prefix="zhifei-page-render-") as page_dir:
-            rendered_pages = _render_pdf_pages(pdf_path, Path(page_dir), timeout=render_timeout)
+            rendered_pages = _render_pdf_pages(
+                pdf_path, Path(page_dir), timeout=render_timeout
+            )
             if len(rendered_pages) != len(page_texts):
                 raise DocxVisualQualityError(
                     f"页面计数不一致：PDF={len(page_texts)}，图像={len(rendered_pages)}"
@@ -562,37 +651,55 @@ def validate_docx_visual_quality(
             )
             preview_dir = artifact_dir / "preview_pages"
             preview_dir.mkdir(parents=True, exist_ok=True)
-            for page_number in _select_preview_pages(len(rendered_pages), flagged, preview_page_limit):
+            for page_number in _select_preview_pages(
+                len(rendered_pages), flagged, preview_page_limit
+            ):
                 source_image = rendered_pages[page_number - 1]
                 shutil.copy2(source_image, preview_dir / f"page-{page_number:04d}.png")
-    except DocxVisualQualityError as exc:
-        report = {
-            "schema": "zhifei.docx_visual_quality.v1",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "status": "blocked",
-            "docx": str(source),
+    except Exception as exc:
+        report = _seal_visual_quality_report(
+            {
+                "schema": "zhifei.docx_visual_quality.v1",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": "blocked",
+                "docx": str(source),
             "docx_sha256": _sha256_file(source),
             "pdf": str(pdf_path) if pdf_path.exists() else None,
-            "hard_failures": [{"code": "RENDER_OR_ANALYSIS_FAILED", "message": str(exc)}],
-            "warnings": [],
-        }
+            "pdf_sha256": _sha256_file(pdf_path) if pdf_path.is_file() else None,
+                "preview_dir": (
+                    str(artifact_dir / "preview_pages")
+                    if (artifact_dir / "preview_pages").is_dir()
+                    else None
+                ),
+                "receipt": str(receipt_path),
+                "hard_failures": [
+                    {"code": "RENDER_OR_ANALYSIS_FAILED", "message": str(exc)}
+                ],
+                "warnings": [],
+            }
+        )
         _atomic_write_json(receipt_path, report)
         raise DocxVisualQualityError(str(exc), report=report) from exc
 
-    report = {
-        "schema": "zhifei.docx_visual_quality.v1",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "docx": str(source),
-        "docx_sha256": _sha256_file(source),
+    report = _seal_visual_quality_report(
+        {
+            "schema": "zhifei.docx_visual_quality.v1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "docx": str(source),
+            "docx_sha256": _sha256_file(source),
         "pdf": str(pdf_path),
-        "preview_dir": str(artifact_dir / "preview_pages"),
-        "receipt": str(receipt_path),
-        **decision,
-        "cjk_glyph_integrity": glyph_integrity,
-        "page_metrics": metrics,
-    }
+        "pdf_sha256": _sha256_file(pdf_path),
+            "preview_dir": str(artifact_dir / "preview_pages"),
+            "receipt": str(receipt_path),
+            **decision,
+            "cjk_glyph_integrity": glyph_integrity,
+            "page_metrics": metrics,
+        }
+    )
     _atomic_write_json(receipt_path, report)
     if strict and report["status"] != "pass":
         codes = ", ".join(str(item.get("code")) for item in report["hard_failures"])
-        raise DocxVisualQualityError(f"最终 Word 页面验收未通过：{codes}", report=report)
+        raise DocxVisualQualityError(
+            f"最终 Word 页面验收未通过：{codes}", report=report
+        )
     return report

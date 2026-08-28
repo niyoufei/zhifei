@@ -10,7 +10,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def preserve_preloaded_module_identity():
+def preserve_preloaded_module_identity(monkeypatch, tmp_path):
     """Keep destructive import-isolation checks local to their own test.
 
     Several contract tests deliberately remove already imported production
@@ -19,6 +19,12 @@ def preserve_preloaded_module_identity():
     function retained from the original module object.
     """
 
+    # Provider tests must never append observability events to production data.
+    # Real persistence behavior is exercised against this per-test path.
+    monkeypatch.setenv(
+        "ZHIFEI_CLAUDE_USAGE_LOG",
+        str(tmp_path / "claude_usage" / "events.jsonl"),
+    )
     before = dict(sys.modules)
     yield
     for name, module in before.items():

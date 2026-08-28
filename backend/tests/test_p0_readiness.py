@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -128,8 +129,34 @@ class P0ReadinessTest(unittest.TestCase):
 
         self.assertEqual(snapshot["status"], "NO-GO_P0_READINESS_STATIC")
         self.assertIn("worktree_not_clean", snapshot["failures"])
+        self.assertTrue(snapshot["runtime_ready"])
+        self.assertFalse(snapshot["release_ready"])
         self.assertIs(snapshot["git"]["worktree_clean"], False)
         self.assertIs(snapshot["git"]["status_porcelain_nonempty"], True)
+
+    def test_p0_readiness_uses_sealed_dirty_provenance_without_git(self) -> None:
+        def unavailable_git(_root: Path, _args: Sequence[str]) -> dict[str, Any]:
+            return {"returncode": 1, "stdout": "", "stderr": "not a worktree"}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            "os.environ",
+            {
+                "ZF_BUILD_SHA": "b" * 40,
+                "ZF_BUILD_BRANCH": "codex/sealed",
+                "ZF_BUILD_DIRTY": "1",
+            },
+            clear=False,
+        ):
+            root = Path(tmp)
+            _make_minimal_root(root)
+            snapshot = build_p0_readiness_snapshot(root, git_runner=unavailable_git)
+
+        self.assertTrue(snapshot["runtime_ready"])
+        self.assertFalse(snapshot["release_ready"])
+        self.assertEqual(snapshot["git"]["head"], "b" * 40)
+        self.assertEqual(snapshot["git"]["branch"], "codex/sealed")
+        self.assertIs(snapshot["git"]["worktree_clean"], False)
+        self.assertEqual(snapshot["git"]["provenance_source"], "sealed_release")
 
     def test_format_p0_readiness_report_includes_gate_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

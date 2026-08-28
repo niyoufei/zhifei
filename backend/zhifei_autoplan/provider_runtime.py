@@ -4,9 +4,13 @@ import copy
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any
 
 from backend.zhifei_autoplan.model_aliases import latest_runtime_model_for
+
+
+class ProviderRoutingConfigurationError(RuntimeError):
+    code = "MODEL_PROVIDER_CONFIGURATION_BLOCKED"
 
 
 @dataclass(frozen=True)
@@ -18,7 +22,7 @@ class ProviderSlot:
     api_key: str
     key_alias: str
 
-    def as_payload(self) -> Dict[str, str]:
+    def as_payload(self) -> dict[str, str]:
         return {
             "slot": self.slot,
             "provider": self.provider,
@@ -149,8 +153,8 @@ def _gemini_image_model_backup() -> str:
     return _env_first("GEMINI_IMAGE_MODEL_B", "GEMINI_IMAGE_MODEL_A", "ZF_GEMINI_IMAGE_MODEL", "ZF_GOOGLE_IMAGE_MODEL") or _gemini_image_model()
 
 
-def resolve_text_slots() -> List[ProviderSlot]:
-    slots: List[ProviderSlot] = []
+def resolve_text_slots() -> list[ProviderSlot]:
+    slots: list[ProviderSlot] = []
 
     configured_main_provider = _env_first("ZF_LLM_MAIN_PROVIDER").lower()
     if configured_main_provider:
@@ -305,8 +309,8 @@ def resolve_automation_slot() -> ProviderSlot | None:
     )
 
 
-def resolve_image_slots() -> List[ProviderSlot]:
-    slots: List[ProviderSlot] = []
+def resolve_image_slots() -> list[ProviderSlot]:
+    slots: list[ProviderSlot] = []
     configured_main = _env_first("ZF_IMAGE_MAIN_PROVIDER").lower()
     if configured_main:
         if configured_main == "openai":
@@ -368,7 +372,7 @@ def resolve_image_slots() -> List[ProviderSlot]:
     return slots
 
 
-def build_server_text_payload_chain() -> List[Dict[str, str]]:
+def build_server_text_payload_chain() -> list[dict[str, str]]:
     return [slot.as_payload() for slot in build_server_text_slots()]
 
 
@@ -376,22 +380,24 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _load_quota_policy() -> Dict[str, Any]:
+def _load_quota_policy() -> dict[str, Any]:
     try:
         from backend.zhifei_autoplan.quota_policy import load_quota_policy
-    except Exception:
+    except ImportError:
         return {}
     try:
         doc = load_quota_policy()
-    except Exception:
+    # Quota policy is optional configuration.  Syntax, storage, or adapter
+    # failures fall back to the built-in provider ordering.
+    except Exception:  # noqa: BLE001
         return {}
     return doc if isinstance(doc, dict) else {}
 
 
-def resolve_text_chain_profiles() -> Dict[str, List[str]]:
+def resolve_text_chain_profiles() -> dict[str, list[str]]:
     doc = _load_quota_policy()
     raw = doc.get("text_chain_profiles") if isinstance(doc.get("text_chain_profiles"), dict) else {}
-    normalized: Dict[str, List[str]] = {}
+    normalized: dict[str, list[str]] = {}
     for name, profile in raw.items():
         key = _clean_text(name)
         if not key or not isinstance(profile, dict):
@@ -431,7 +437,7 @@ def resolve_text_chain_profiles() -> Dict[str, List[str]]:
     return normalized
 
 
-def build_server_text_slots(*, profile: str | None = None) -> List[ProviderSlot]:
+def build_server_text_slots(*, profile: str | None = None) -> list[ProviderSlot]:
     slots = resolve_text_slots()
     if not slots:
         return []
@@ -439,7 +445,7 @@ def build_server_text_slots(*, profile: str | None = None) -> List[ProviderSlot]
     profiles = resolve_text_chain_profiles()
     profile_name = _clean_text(profile) or "default"
     order = profiles.get(profile_name) or profiles.get("default") or []
-    ordered: List[ProviderSlot] = []
+    ordered: list[ProviderSlot] = []
     seen: set[str] = set()
     for slot_name in order:
         slot = slot_map.get(slot_name)
@@ -455,7 +461,7 @@ def build_server_text_slots(*, profile: str | None = None) -> List[ProviderSlot]
     return ordered
 
 
-def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
+def apply_server_provider_routing(payload: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(payload if isinstance(payload, dict) else {})
     text_chain_profile = _clean_text(out.get("text_chain_profile")) or "default"
     chain = [slot.as_payload() for slot in build_server_text_slots(profile=text_chain_profile)]
@@ -465,6 +471,15 @@ def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
     out.pop("providers", None)
     out.pop("model_map", None)
     out.pop("provider_chain", None)
+    # Provider endpoints and credentials are server-owned.  Client-controlled
+    # overrides would bypass admission and could route requests to an unreviewed
+    # endpoint.
+    out.pop("base_url", None)
+    out.pop("secret_key", None)
+    out.pop("token_url", None)
+    out.pop("_provider_admitted_image_slots", None)
+    out["_server_provider_routing_enforced"] = True
+    out["_provider_admission_required"] = not bool(out.get("dry_run", False))
     if not chain:
         if bool(out.get("dry_run", False)):
             out["provider_chain"] = []
@@ -478,8 +493,20 @@ def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "routing_mode": "dry_run_no_text_chain",
             }
             return out
-        raise RuntimeError(
+        raise ProviderRoutingConfigurationError(
             "text_provider_not_configured: no configured credential for the server-side primary or fallback text chain"
+        )
+    unsupported = sorted(
+        {
+            str(item.get("provider") or "").strip().lower()
+            for item in chain
+            if str(item.get("provider") or "").strip().lower()
+            not in {"openai", "anthropic", "google"}
+        }
+    )
+    if unsupported:
+        raise ProviderRoutingConfigurationError(
+            "text_provider_not_admission_capable: " + ",".join(unsupported)
         )
     out["provider_chain"] = chain
     out["provider"] = str(chain[0]["provider"])
@@ -491,7 +518,24 @@ def apply_server_provider_routing(payload: Dict[str, Any]) -> Dict[str, Any]:
         "automation": bool(resolve_automation_slot()),
         "image_chain": [f"{item.slot}:{item.provider}/{item.model}" for item in resolve_image_slots()],
         "resolved_at": int(time.time()),
+        "routing_mode": "server_allowlist",
     }
+    require_document_render = (
+        str(out.get("delivery_scope") or "document").strip().lower()
+        != "chapter_validation"
+    )
+    document_slot = resolve_document_render_slot() if require_document_render else None
+    out["_provider_admission_extra_slots"] = (
+        [document_slot.as_payload()] if document_slot is not None else []
+    )
+    # Independent review is a required role, not an optional enhancement.
+    # Leaving it in the required set when no slot is configured makes provider
+    # admission fail closed instead of silently turning a drafting model into
+    # its own reviewer.
+    required_roles = ["text_draft", "text_review"]
+    if require_document_render:
+        required_roles.append("document_render")
+    out["_provider_admission_required_roles"] = required_roles
     return out
 
 
@@ -516,6 +560,81 @@ def resolve_text_slot_credentials(slot_id: str | None, provider: str | None) -> 
     return None, None
 
 
+def resolve_provider_slot_credentials(
+    slot_id: str | None,
+    provider: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve a server-owned credential without exposing it in route payloads."""
+
+    normalized_slot = _clean_text(slot_id).lower()
+    if normalized_slot == "document_render":
+        slot = resolve_document_render_slot()
+        if slot is not None:
+            return slot.api_key, slot.key_alias
+        return None, None
+    return resolve_text_slot_credentials(normalized_slot, provider)
+
+
+def build_server_provider_admission_candidates(
+    *,
+    profile: str | None = None,
+    allow_fable_escalation: bool = False,
+) -> list[Any]:
+    """Return the current credential-bound route for offline admission checks.
+
+    Credentials remain only on ephemeral ``ProviderCandidate`` objects. Callers
+    must use the provider-admission public projection before serialization.
+    """
+
+    from backend.zhifei_autoplan.provider_admission import ProviderCandidate
+
+    slots = [
+        slot
+        for slot in build_server_text_slots(profile=profile)
+        if allow_fable_escalation or slot.role != "text_escalation"
+    ]
+    document_slot = resolve_document_render_slot()
+    if document_slot is not None:
+        slots.append(document_slot)
+    candidates: list[ProviderCandidate] = []
+    for slot in slots:
+        stream_required = str(slot.role).startswith("text_")
+        candidates.append(
+            ProviderCandidate(
+                slot=slot.slot,
+                role=slot.role,
+                provider=slot.provider,
+                model=slot.model,
+                credential=slot.api_key,
+                key_alias=slot.key_alias,
+                stream_required=stream_required,
+                stream_supported=(
+                    slot.provider in {"openai", "anthropic", "google"}
+                    if stream_required
+                    else True
+                ),
+            )
+        )
+    return candidates
+
+
+def server_provider_admission_required_roles(
+    candidates: list[Any] | None = None,
+    *,
+    require_review: bool = True,
+    require_document_render: bool = True,
+) -> list[str]:
+    # Candidate presence is evaluated later by ``decide_required_roles``; this
+    # function declares the invariant roles even when a role is absent.
+    _ = candidates
+    required = ["text_draft"]
+    if require_review:
+        required.append("text_review")
+    if require_document_render:
+        required.append("document_render")
+    return required
+
+
 def resolve_automation_credentials() -> tuple[str | None, str | None, str | None]:
     slot = resolve_automation_slot()
     if not slot:
@@ -536,11 +655,11 @@ def resolve_image_slot_credentials(slot_id: str | None = None) -> tuple[str | No
     return first.provider, first.model, first.api_key, first.key_alias
 
 
-def iterate_image_failover_slots() -> List[ProviderSlot]:
+def iterate_image_failover_slots() -> list[ProviderSlot]:
     return resolve_image_slots()
 
 
-def frontend_provider_status() -> Dict[str, Dict[str, Any]]:
+def frontend_provider_status() -> dict[str, dict[str, Any]]:
     text_slots = resolve_text_slots()
     image_slots = resolve_image_slots()
     automation = resolve_automation_slot()

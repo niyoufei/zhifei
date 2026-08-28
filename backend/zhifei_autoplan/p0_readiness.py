@@ -74,14 +74,21 @@ def build_p0_readiness_snapshot(
         failures.append("sanitized_demo_project_missing_or_invalid")
     if git["index_lock_present"]:
         failures.append("git_index_lock_present")
+    release_failures = list(failures)
+    runtime_failures = list(failures)
     if git["worktree_clean"] is False:
-        failures.append("worktree_not_clean")
+        release_failures.append("worktree_not_clean")
 
-    status = "PASS_P0_READINESS_STATIC" if not failures else "NO-GO_P0_READINESS_STATIC"
+    failures = release_failures
+    status = "PASS_P0_READINESS_STATIC" if not release_failures else "NO-GO_P0_READINESS_STATIC"
 
     return {
         "status": status,
         "failures": failures,
+        "runtime_ready": not runtime_failures,
+        "release_ready": not release_failures,
+        "runtime_failures": runtime_failures,
+        "release_failures": release_failures,
         "workspace_root": str(repo_root),
         "scope": {
             "phase": "P0",
@@ -138,9 +145,19 @@ def _git_snapshot(root: Path, *, git_runner: GitRunner | None = None) -> dict[st
     upstream_head = _git_value(root, ("rev-parse", "@{u}"), git_runner)
     porcelain = _git_value(root, ("status", "--porcelain=v1", "--untracked-files=all"), git_runner)
 
+    sealed_head = str(os.environ.get("ZF_BUILD_SHA") or "").strip()
+    sealed_branch = str(os.environ.get("ZF_BUILD_BRANCH") or "").strip()
+    sealed_dirty_raw = str(os.environ.get("ZF_BUILD_DIRTY") or "").strip()
+    if head is None and sealed_head:
+        head = sealed_head
+    if branch is None and sealed_branch:
+        branch = sealed_branch
+
     worktree_clean = None
     if porcelain is not None:
         worktree_clean = porcelain.strip() == ""
+    elif sealed_dirty_raw in {"0", "1"}:
+        worktree_clean = sealed_dirty_raw == "0"
 
     return {
         "toplevel": toplevel,
@@ -152,6 +169,11 @@ def _git_snapshot(root: Path, *, git_runner: GitRunner | None = None) -> dict[st
         "status_porcelain_nonempty": None if porcelain is None else bool(porcelain.strip()),
         "index_lock_present": index_lock.exists(),
         "network_refreshed": False,
+        "provenance_source": (
+            "sealed_release"
+            if porcelain is None and sealed_dirty_raw in {"0", "1"}
+            else "git_worktree"
+        ),
     }
 
 

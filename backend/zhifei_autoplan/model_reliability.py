@@ -4,9 +4,9 @@ import asyncio
 import random
 import re
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict
-
+from typing import Any
 
 _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
@@ -25,6 +25,23 @@ def sanitize_provider_message(value: Any, *, limit: int = 500) -> str:
     return text[:limit]
 
 
+def _machine_error_code(error: Any) -> str:
+    """Extract a bounded provider machine code without retaining raw payloads."""
+
+    candidates: list[Any] = [getattr(error, "code", None)]
+    body = getattr(error, "body", None)
+    if isinstance(body, Mapping):
+        candidates.append(body.get("code"))
+        nested = body.get("error")
+        if isinstance(nested, Mapping):
+            candidates.append(nested.get("code"))
+    for candidate in candidates:
+        value = str(candidate or "").strip().lower()
+        if value and re.fullmatch(r"[a-z0-9_.-]{1,80}", value):
+            return value
+    return ""
+
+
 def _status_from_error(error: Any, message: str) -> int | None:
     for candidate in (
         getattr(error, "status_code", None),
@@ -35,8 +52,26 @@ def _status_from_error(error: Any, message: str) -> int | None:
                 return int(candidate)
         except (TypeError, ValueError):
             pass
-    match = re.search(r"(?<!\d)(400|401|403|404|408|409|422|429|5\d\d)(?!\d)", message)
-    return int(match.group(1)) if match else None
+    # Do not treat arbitrary three-digit substrings as HTTP statuses.  Internal
+    # requirement identifiers such as ``REQ-CR-E1AF505EF062`` are common in
+    # quality-gate failures and previously turned into a fabricated HTTP 505.
+    status_codes = r"400|401|403|404|408|409|422|429|5\d\d"
+    contextual = re.search(
+        rf"(?i)\b(?:http(?:\s+status)?|status(?:\s+code)?|error(?:\s+code)?|code)"
+        rf"\s*[:=]?\s*({status_codes})(?![A-Za-z0-9])",
+        message,
+    )
+    if contextual:
+        return int(contextual.group(1))
+    described = re.search(
+        rf"(?i)(?<![A-Za-z0-9])({status_codes})(?![A-Za-z0-9])\s*(?:-|:)?\s*"
+        r"(?:bad\s+request|invalid|unauthorized|forbidden|not\s+found|timed?\s*out|"
+        r"timeout|conflict|unprocessable|rate\s+limit|too\s+many\s+requests|"
+        r"internal\s+server\s+error|bad\s+gateway|service\s+unavailable|"
+        r"gateway\s+timeout|provider\s+unavailable|unavailable)",
+        message,
+    )
+    return int(described.group(1)) if described else None
 
 
 def _retry_after(error: Any) -> float | None:
@@ -52,7 +87,7 @@ def _retry_after(error: Any) -> float | None:
     return None
 
 
-_USER_GUIDANCE: Dict[str, tuple[str, str]] = {
+_USER_GUIDANCE: dict[str, tuple[str, str]] = {
     "authentication_failed": ("模型凭据无效或已失效。", "请重新配置对应供应商 API Key 后再试。"),
     "permission_denied": ("当前凭据没有调用该模型的权限。", "请在供应商控制台开通模型权限或改用已授权模型。"),
     "model_not_found": ("配置的模型不存在或当前账户不可见。", "请刷新模型名称并确认账户所在区域和项目。"),
@@ -64,16 +99,21 @@ _USER_GUIDANCE: Dict[str, tuple[str, str]] = {
     "content_filtered": ("模型供应商拒绝了本次内容。", "请检查输入资料和指令中的敏感或不合规内容。"),
     "invalid_request": ("发送给模型的参数或请求格式不受支持。", "请检查模型名称、上下文长度和高级参数。"),
     "no_visible_text": ("模型响应中没有可用正文。", "系统会重试；持续发生时请切换模型或关闭扩展思考。"),
+    "output_truncated": ("模型正文达到输出上限且续写仍未完成。", "请缩小章节范围或提高有界续写预算后重试。"),
     "api_key_missing": ("未找到对应供应商 API Key。", "请在本机安全凭据中配置后再试。"),
     "secret_key_missing": ("未找到对应供应商 Secret Key。", "请在本机安全凭据中配置后再试。"),
     "provider_not_configured": ("模型供应商尚未完成配置。", "请配置供应商、模型名称和本机安全凭据。"),
     "ollama_provider_disabled": ("本地 Ollama 正文调用未启用。", "如确需本地正文调用，请先完成本地模型验收并启用开关。"),
     "circuit_open": ("该模型在本次任务中已被熔断。", "系统将跳过它并尝试健康的备用模型。"),
+    "EXECUTION_BUDGET_EXCEEDED": (
+        "本次任务的模型调用安全预算已用尽。",
+        "请移除过小的手工预算，或按章节数量提高任务级模型调用预算后重新发起任务。",
+    ),
     "provider_error": ("模型调用失败。", "请查看安全诊断码，并确认模型、网络和供应商状态。"),
 }
 
 
-def _with_user_guidance(info: Dict[str, Any]) -> Dict[str, Any]:
+def _with_user_guidance(info: dict[str, Any]) -> dict[str, Any]:
     result = dict(info)
     code = str(result.get("code") or "provider_error")
     user_message, action = _USER_GUIDANCE.get(code, _USER_GUIDANCE["provider_error"])
@@ -88,11 +128,25 @@ def classify_provider_error(
     *,
     provider: str,
     model: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Normalize SDK/provider failures into a stable, non-secret record."""
+
+    is_connection_error = isinstance(error, ConnectionError)
 
     if isinstance(error, dict) and error.get("code"):
         info = dict(error)
+        machine_code = str(info.get("code") or "").strip().lower()
+        if machine_code in {
+            "credit_balance_exhausted",
+            "insufficient_quota",
+            "billing_hard_limit_reached",
+            "billing_limit_exceeded",
+        }:
+            info["code"] = "quota_exhausted"
+            info["retryable"] = False
+        elif machine_code in {"rate_limit_exceeded", "rate_limited"}:
+            info["code"] = "rate_limited"
+            info["retryable"] = True
         info.setdefault("provider", provider)
         info.setdefault("model", model)
         info["message"] = sanitize_provider_message(info.get("message") or info.get("code"))
@@ -105,16 +159,21 @@ def classify_provider_error(
     else:
         message = sanitize_provider_message(error)
         status = _status_from_error(error, message)
-    lower = message.lower()
+    lower = " ".join(part for part in (message.lower(), _machine_error_code(error)) if part)
 
     quota_markers = (
         "insufficient_quota",
+        "credit_balance_exhausted",
         "quota exceeded",
         "quota_exceeded",
+        "billing_hard_limit_reached",
+        "billing_limit_exceeded",
         "credit balance",
         "billing hard limit",
         "billing limit",
         "out of credits",
+        "no credits remaining",
+        "add credits",
         "余额不足",
         "额度不足",
         "配额已用尽",
@@ -136,17 +195,37 @@ def classify_provider_error(
         code, retryable = "timeout", True
     elif status is not None and status >= 500:
         code, retryable = "provider_unavailable", True
-    elif any(x in lower for x in ("connection", "network", "temporarily unavailable", "service unavailable")):
+    elif is_connection_error or any(
+        x in lower
+        for x in (
+            "connection",
+            "network",
+            "temporarily unavailable",
+            "service unavailable",
+        )
+    ):
         code, retryable = "network_error", True
-    elif any(x in lower for x in ("content filter", "safety", "blocked")):
+    elif any(
+        x in lower
+        for x in (
+            "content filter",
+            "content_filter",
+            "content policy",
+            "safety filter",
+            "safety policy",
+            "blocked by safety",
+            "safety blocked",
+            "moderation_blocked",
+        )
+    ):
         code, retryable = "content_filtered", False
     elif any(x in lower for x in ("invalid request", "bad request", "unprocessable")) or status in {400, 409, 422}:
         code, retryable = "invalid_request", False
     elif lower in {"no_visible_text", "empty_response"}:
         code, retryable = "no_visible_text", True
-    elif lower in {"api_key_missing", "secret_key_missing"}:
-        code, retryable = lower, False
-    elif lower in {"provider_not_configured", "ollama_provider_disabled"}:
+    elif lower in {"output_truncated", "max_output_tokens"}:
+        code, retryable = "output_truncated", False
+    elif lower in {"api_key_missing", "secret_key_missing"} or lower in {"provider_not_configured", "ollama_provider_disabled"}:
         code, retryable = lower, False
     else:
         code, retryable = "provider_error", False
@@ -168,17 +247,32 @@ class ModelReliabilityRuntime:
     """Job-local circuit breaker and provider-health ledger."""
 
     failure_threshold: int = 2
-    states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    states: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @staticmethod
-    def key(provider: str, model: str) -> str:
-        return f"{str(provider or '').strip().lower()}::{str(model or '').strip()}"
+    def key(provider: str, model: str, identity: str | None = None) -> str:
+        base = f"{str(provider or '').strip().lower()}::{str(model or '').strip()}"
+        normalized_identity = str(identity or "").strip().lower()
+        return f"{base}::{normalized_identity}" if normalized_identity else base
 
-    def is_open(self, provider: str, model: str) -> bool:
-        return bool(self.states.get(self.key(provider, model), {}).get("open"))
+    def is_open(self, provider: str, model: str, identity: str | None = None) -> bool:
+        exact = self.key(provider, model, identity)
+        if identity:
+            return bool(self.states.get(exact, {}).get("open")) or bool(
+                self.states.get(self.key(provider, model), {}).get("open")
+            )
+        # Compatibility/read-side aggregate for callers that do not know the
+        # credential identity. Runtime model calls always provide one when a
+        # credential exists, so one exhausted key cannot quarantine another.
+        prefix = self.key(provider, model) + "::"
+        return bool(self.states.get(exact, {}).get("open")) or any(
+            bool(value.get("open"))
+            for key, value in self.states.items()
+            if key.startswith(prefix)
+        )
 
-    def record_success(self, provider: str, model: str) -> None:
-        state = self.states.setdefault(self.key(provider, model), {})
+    def record_success(self, provider: str, model: str, identity: str | None = None) -> None:
+        state = self.states.setdefault(self.key(provider, model, identity), {})
         state.update(
             {
                 "open": False,
@@ -190,11 +284,20 @@ class ModelReliabilityRuntime:
         )
         state["successes"] = int(state.get("successes") or 0) + 1
 
-    def record_failure(self, provider: str, model: str, error_info: Dict[str, Any]) -> None:
-        state = self.states.setdefault(self.key(provider, model), {})
+    def record_failure(
+        self,
+        provider: str,
+        model: str,
+        error_info: dict[str, Any],
+        identity: str | None = None,
+    ) -> None:
+        state = self.states.setdefault(self.key(provider, model, identity), {})
         count = int(state.get("consecutive_failures") or 0) + 1
-        terminal = not bool(error_info.get("retryable"))
-        should_open = bool(terminal or count >= max(1, int(self.failure_threshold)))
+        # A single attributable failure is evidence for provider rotation, not
+        # enough evidence to quarantine the provider for the whole run.  This
+        # keeps the circuit contract literal: two consecutive logical failures
+        # open the default breaker, while a successful call resets the streak.
+        should_open = bool(count >= max(1, int(self.failure_threshold)))
         state.update(
             {
                 "consecutive_failures": count,
@@ -206,7 +309,7 @@ class ModelReliabilityRuntime:
             }
         )
 
-    def snapshot(self) -> Dict[str, Dict[str, Any]]:
+    def snapshot(self) -> dict[str, dict[str, Any]]:
         return {key: dict(value) for key, value in sorted(self.states.items())}
 
 

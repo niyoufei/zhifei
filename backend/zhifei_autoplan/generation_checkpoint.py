@@ -20,9 +20,9 @@ import shutil
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
-
+from typing import Any
 
 CHECKPOINT_DIR = Path(
     os.environ.get(
@@ -30,18 +30,64 @@ CHECKPOINT_DIR = Path(
         "backend/data/autoplan/checkpoints",
     )
 )
-SCHEMA_VERSION = "generation-checkpoint-v1"
+SCHEMA_VERSION = "generation-checkpoint-v3"
+CHAPTER_CONTEXT_SCHEMA_VERSION = "chapter-context-v1"
 _LOCK = threading.RLock()
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SECRET_FRAGMENTS = ("api_key", "apikey", "token", "secret", "password", "credential")
+_RAW_PROMPT_KEYS = {
+    "prompt",
+    "messages",
+    "system_prompt",
+    "stable_system_prompt",
+    "shared_context_prompt",
+    "dynamic_prompt",
+}
+_EPHEMERAL_CONTEXT_KEYS = {
+    "accessed_at",
+    "created_at",
+    "ctime",
+    "updated_at",
+    "generated_at",
+    "indexed_at",
+    "last_modified_at",
+    "loaded_at",
+    "mtime",
+    "observed_at",
+    "refreshed_at",
+    "retrieved_at",
+    "saved_at",
+    "timestamp",
+    "time_stamp",
+    "request_started_at",
+    "request_finished_at",
+}
+_CONTEXT_SECRET_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "credential",
+    "access_token",
+    "refresh_token",
+    "bearer_token",
+    "auth_token",
+)
 
 
 class CheckpointIntegrityError(RuntimeError):
     """Raised when persisted checkpoint bytes cannot be trusted."""
 
+    def __init__(self, reason_code: Any):
+        normalized = str(reason_code or "checkpoint_integrity_error").strip()
+        self.reason_code = normalized or "checkpoint_integrity_error"
+        super().__init__(self.reason_code)
+
 
 def _json_safe(value: Any, *, key: str = "") -> Any:
     lowered = str(key or "").lower()
+    if lowered in _RAW_PROMPT_KEYS:
+        return "[OMITTED]"
     if any(fragment in lowered for fragment in _SECRET_FRAGMENTS):
         return "[REDACTED]"
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -67,6 +113,84 @@ def _canonical_json(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _projected_digest(value: Any) -> str:
+    """Digest a value that has already passed the chapter-context sanitizer."""
+
+    canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _chapter_context_safe(value: Any, *, key: str = "") -> Any:
+    """Return a stable, credential-free projection of writer prompt material.
+
+    Dynamic retrieval records may carry observation timestamps or provider
+    credentials that must never influence checkpoint reuse (or be persisted).
+    Project schedule durations remain meaningful and are deliberately kept;
+    only wall-clock metadata and credential-shaped fields are removed.
+    """
+
+    lowered = str(key or "").strip().lower()
+    if lowered in _EPHEMERAL_CONTEXT_KEYS or lowered.endswith("_timestamp"):
+        return None
+    if any(fragment in lowered for fragment in _CONTEXT_SECRET_FRAGMENTS):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        projected: dict[str, Any] = {}
+        for raw_key, raw_value in sorted(
+            value.items(), key=lambda item: str(item[0])
+        ):
+            safe_key = str(raw_key)
+            key_lowered = safe_key.strip().lower()
+            if key_lowered in _EPHEMERAL_CONTEXT_KEYS or key_lowered.endswith(
+                "_timestamp"
+            ):
+                continue
+            if any(
+                fragment in key_lowered
+                for fragment in _CONTEXT_SECRET_FRAGMENTS
+            ):
+                continue
+            projected[safe_key] = _chapter_context_safe(raw_value, key=safe_key)
+        return projected
+    if isinstance(value, (list, tuple)):
+        return [_chapter_context_safe(item) for item in value]
+    if isinstance(value, set):
+        projected = [_chapter_context_safe(item) for item in value]
+        return sorted(projected, key=_canonical_json)
+    return str(value)
+
+
+def build_chapter_context_digest(
+    *,
+    chapter_index: int,
+    chapter_title: Any,
+    delivery_scope: Any,
+    writer_context: Mapping[str, Any],
+) -> str:
+    """Digest the exact per-chapter material available to ``SectionWriter``.
+
+    The digest is intentionally separate from the generation binding: drift in
+    one chapter's retrieval context rejects only that chapter checkpoint while
+    chapters with unchanged context remain reusable.
+    """
+
+    core = {
+        "schema_version": CHAPTER_CONTEXT_SCHEMA_VERSION,
+        "chapter_index": int(chapter_index),
+        "chapter_title": str(chapter_title or "").strip(),
+        "delivery_scope": str(delivery_scope or "document").strip().lower(),
+        "writer_context": _chapter_context_safe(dict(writer_context)),
+    }
+    return _projected_digest(core)
 
 
 def _validate_name(value: Any, *, field: str) -> str:
@@ -100,6 +224,14 @@ def build_generation_binding(
     project_fact_digest: Any,
     requirement_plan_digest: Any,
     provider_routes: Any,
+    delivery_scope: Any = "document",
+    provider_admission_digest: Any = None,
+    compliance_registry_authority_digest: Any = None,
+    prompt_contract: Any = None,
+    job_id: Any = None,
+    attempt_id: Any = None,
+    owner_instance_id: Any = None,
+    job_revision: Any = None,
 ) -> dict[str, Any]:
     """Build the immutable metadata identity for one generation attempt."""
 
@@ -116,6 +248,14 @@ def build_generation_binding(
         )
     core = {
         "schema_version": SCHEMA_VERSION,
+        "job_id": str(job_id or "").strip() or None,
+        "attempt_id": str(attempt_id or "").strip() or None,
+        "owner_instance_id": str(owner_instance_id or "").strip() or None,
+        "job_revision": (
+            int(job_revision)
+            if isinstance(job_revision, int) and not isinstance(job_revision, bool)
+            else None
+        ),
         "topic": str(topic or "").strip(),
         "project_id": str(project_id or "").strip() or None,
         "project_type": str(project_type or "").strip() or None,
@@ -123,9 +263,18 @@ def build_generation_binding(
         "style": _json_safe(style if isinstance(style, Mapping) else {}),
         "chapter_pages": _json_safe(chapter_pages if isinstance(chapter_pages, Mapping) else {}),
         "variant_id": str(variant_id or "").strip() or None,
+        "delivery_scope": str(delivery_scope or "document").strip().lower(),
         "project_fact_digest": str(project_fact_digest or "").strip() or None,
         "requirement_plan_digest": str(requirement_plan_digest or "").strip() or None,
+        "provider_admission_digest": str(provider_admission_digest or "").strip() or None,
+        "compliance_registry_authority_digest": str(
+            compliance_registry_authority_digest or ""
+        ).strip()
+        or None,
         "provider_routes": safe_routes,
+        # Store only a digest: this invalidates reuse whenever any prompt-shaping
+        # input changes without duplicating project material in checkpoint files.
+        "prompt_contract_digest": _digest(prompt_contract),
     }
     return {**core, "binding_digest": _digest(core)}
 
@@ -146,6 +295,28 @@ def _read_verified(path: Path) -> dict[str, Any] | None:
     if str(record.get("schema_version") or "") != SCHEMA_VERSION:
         raise CheckpointIntegrityError("checkpoint_schema_mismatch")
     return record
+
+
+def read_verified_generation_checkpoint(
+    *,
+    namespace: Any,
+    scope: Any,
+    root: Path | str | None = None,
+) -> dict[str, Any] | None:
+    """Return an integrity-verified checkpoint snapshot without binding input.
+
+    Formal delivery consumers need to inspect the persisted terminal binding
+    itself rather than reconstructing caller-controlled prompt material.  The
+    returned JSON round-trip copy cannot mutate the in-memory record observed
+    under the checkpoint lock.
+    """
+
+    path = _checkpoint_path(namespace, scope, root=root)
+    with _LOCK:
+        record = _read_verified(path)
+    if record is None:
+        return None
+    return json.loads(json.dumps(record, ensure_ascii=False))
 
 
 def _empty_record(binding: Mapping[str, Any]) -> dict[str, Any]:
@@ -212,6 +383,7 @@ def load_section_checkpoint(
     binding: Mapping[str, Any],
     chapter_index: int,
     chapter_title: str,
+    chapter_context_digest: Any,
     root: Path | str | None = None,
 ) -> dict[str, Any] | None:
     record = load_generation_checkpoint(
@@ -230,6 +402,14 @@ def load_section_checkpoint(
         raise CheckpointIntegrityError("checkpoint_section_index_mismatch")
     if str(section.get("chapter_title") or "") != str(chapter_title or ""):
         return None
+    expected_context_digest = str(chapter_context_digest or "").strip()
+    if not expected_context_digest:
+        return None
+    if (
+        str(section.get("chapter_context_digest") or "").strip()
+        != expected_context_digest
+    ):
+        return None
     claimed = str(section.get("section_digest") or "")
     core = {k: v for k, v in section.items() if k != "section_digest"}
     if not claimed or claimed != _digest(core):
@@ -245,6 +425,7 @@ def save_section_checkpoint(
     binding: Mapping[str, Any],
     chapter_index: int,
     chapter_title: str,
+    chapter_context_digest: Any,
     result: Mapping[str, Any],
     root: Path | str | None = None,
 ) -> dict[str, Any]:
@@ -254,11 +435,15 @@ def save_section_checkpoint(
         expected = str(binding.get("binding_digest") or "").strip()
         if not expected:
             raise ValueError("checkpoint binding digest is required")
+        context_digest = str(chapter_context_digest or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", context_digest):
+            raise ValueError("checkpoint chapter context digest is required")
         if record is None or str(record.get("binding_digest") or "") != expected:
             record = _empty_record(binding)
         section_core = {
             "chapter_index": int(chapter_index),
             "chapter_title": str(chapter_title or ""),
+            "chapter_context_digest": context_digest,
             "saved_at": time.time(),
             "result": _json_safe(dict(result)),
         }
@@ -284,9 +469,38 @@ def finalize_generation_checkpoint(
     with _LOCK:
         record = _read_verified(path) if path.exists() else None
         expected = str(binding.get("binding_digest") or "").strip()
+        target_status = str(status or "complete")
+        allowed_statuses = {
+            "complete",
+            "draft_complete",
+            "failed_partial",
+            "failed_empty",
+            "interrupted_recoverable",
+        }
+        if target_status not in allowed_statuses:
+            raise ValueError("invalid checkpoint terminal status")
         if record is None or str(record.get("binding_digest") or "") != expected:
+            if target_status in {"complete", "draft_complete"}:
+                raise CheckpointIntegrityError("checkpoint_finalize_binding_mismatch")
             record = _empty_record(binding)
-        record["status"] = str(status or "complete")
+        if target_status in {"complete", "draft_complete"}:
+            outline = list((record.get("binding") or {}).get("outline") or [])
+            if not outline:
+                raise CheckpointIntegrityError("checkpoint_finalize_empty_outline")
+            sections = record.get("sections") if isinstance(record.get("sections"), Mapping) else {}
+            expected_indexes = {str(index) for index in range(len(outline))}
+            if set(sections) != expected_indexes:
+                raise CheckpointIntegrityError("checkpoint_finalize_incomplete_sections")
+            for index, section in sections.items():
+                if not isinstance(section, Mapping):
+                    raise CheckpointIntegrityError("checkpoint_section_invalid")
+                claimed = str(section.get("section_digest") or "")
+                section_core = {key: value for key, value in section.items() if key != "section_digest"}
+                if not claimed or claimed != _digest(section_core):
+                    raise CheckpointIntegrityError(
+                        f"checkpoint_section_integrity_mismatch:{index}"
+                    )
+        record["status"] = target_status
         record["updated_at"] = time.time()
         _write_atomic(path, record)
     return checkpoint_summary(record)
@@ -301,8 +515,68 @@ def checkpoint_summary(record: Mapping[str, Any] | None) -> dict[str, Any]:
         "status": str(data.get("status") or "missing"),
         "saved_chapter_count": len(sections),
         "saved_chapter_indexes": sorted(int(x) for x in sections if str(x).isdigit()),
+        "chapters_total": len((data.get("binding") or {}).get("outline") or [])
+        if isinstance(data.get("binding"), Mapping)
+        else 0,
         "updated_at": data.get("updated_at"),
     }
+
+
+def mark_checkpoint_namespace_interrupted(
+    namespace: Any,
+    *,
+    root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Mark every verified scope in a job namespace as explicitly recoverable."""
+
+    safe_namespace = _validate_name(namespace, field="namespace")
+    base = Path(root) if root is not None else CHECKPOINT_DIR
+    target = base / safe_namespace
+    summaries: list[dict[str, Any]] = []
+    if not target.exists():
+        return summaries
+    with _LOCK:
+        for path in sorted(target.glob("*.json")):
+            record = _read_verified(path)
+            if record is None:
+                continue
+            record["status"] = "interrupted_recoverable"
+            record["updated_at"] = time.time()
+            _write_atomic(path, record)
+            summaries.append(checkpoint_summary(record))
+    return summaries
+
+
+def mark_failed_checkpoint_namespace(
+    namespace: Any,
+    *,
+    root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Repair legacy failed jobs whose checkpoints were mislabeled complete."""
+
+    safe_namespace = _validate_name(namespace, field="namespace")
+    base = Path(root) if root is not None else CHECKPOINT_DIR
+    target = base / safe_namespace
+    summaries: list[dict[str, Any]] = []
+    if not target.exists():
+        return summaries
+    with _LOCK:
+        # Verify the entire namespace before mutating any scope.  In particular,
+        # a retained v2 record must fail closed without being rewritten as v3 or
+        # leaving a mixed namespace only partly sealed.
+        verified: list[tuple[Path, dict[str, Any]]] = []
+        for path in sorted(target.glob("*.json")):
+            record = _read_verified(path)
+            if record is None:
+                continue
+            verified.append((path, record))
+        for path, record in verified:
+            sections = record.get("sections") if isinstance(record.get("sections"), Mapping) else {}
+            record["status"] = "failed_partial" if sections else "failed_empty"
+            record["updated_at"] = time.time()
+            _write_atomic(path, record)
+            summaries.append(checkpoint_summary(record))
+    return summaries
 
 
 def cleanup_checkpoint_namespace(

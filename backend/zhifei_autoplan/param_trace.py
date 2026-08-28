@@ -134,10 +134,9 @@ PROJECTS_DIR = Path("backend/data/autoplan/projects")
 
 
 def _safe_project_id(project_id: str, limit: int = 80) -> str:
-    pid = (project_id or "").strip()
-    out = re.sub(r"[^A-Za-z0-9_\\-\\.\\u4e00-\\u9fff]+", "_", pid)
-    out = out.strip("_")
-    return (out[:limit] or "project").strip("_")
+    from backend.zhifei_autoplan.project_namespace import project_storage_key
+
+    return project_storage_key(project_id, limit=limit)
 
 
 def receipt_path(project_id: str | None = None) -> Path:

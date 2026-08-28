@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
 from openpyxl import Workbook
 
-from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
 from backend.zhifei_autoplan.models import BoQItem, ConstructionProcess, Resource
+from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
 
 
 class TestBoQParserToFloat:
@@ -61,6 +62,12 @@ class TestBoQParserToFloat:
         # Current implementation strips non-digit/dot chars
         result = self.parser._to_float("-50.5")
         assert result == 50.5
+
+    def test_strict_quantity_rejects_feature_text_and_negative_values(self):
+        assert self.parser._to_quantity("1、规格：250x200x5x8", unit="t") is None
+        assert self.parser._to_quantity("-59.214", unit="t") is None
+        assert self.parser._to_quantity("59.214t", unit="t") == 59.214
+        assert self.parser._to_quantity("59.214m3", unit="t") is None
 
 
 class TestBoQParserMapBoqToProcess:
@@ -132,7 +139,7 @@ class TestBoQParserMapBoqToProcess:
         """First matching keyword wins"""
         # "混凝土钢筋" contains both 混凝土 and 钢筋, 混凝土 comes first in mapping
         item = BoQItem(boq_code="008", name="混凝土钢筋", quantity=100.0)
-        proc, res = self.parser.map_boq_to_process(item)
+        proc, _res = self.parser.map_boq_to_process(item)
         assert proc.name == "混凝土浇筑"
 
 
@@ -326,6 +333,27 @@ class TestBoQParserReadExcel:
         assert rows[0]["code"] == "001"
         assert rows[0]["name"] == "管道"
 
+    def test_read_excel_five_column_unpriced_shape(self, tmp_path):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "分部分项"
+        ws.append(["序号", "项目名称", "项目特征描述", "计量单位", "工程量"])
+        ws.append([79, "钢梁", "1、Q355B\n2、规格：WH600*280*10*14", "t", 59.214])
+        path = tmp_path / "工程量清单.xlsx"
+        wb.save(path)
+
+        rows = self.parser._read_excel(str(path))
+        item = self.parser._row_to_item(rows[0])
+
+        assert item.name == "钢梁"
+        assert item.project_feature.startswith("1、Q355B")
+        assert item.quantity == 59.214
+        assert item.unit == "t"
+        assert item.unit_price is None
+        assert item.total_price is None
+        assert item.source_locator["row_index"] == 2
+        assert item.source_locator["locator"].startswith("boq:")
+
     def test_read_excel_missing_columns(self, tmp_path):
         """Missing columns use empty strings"""
         wb = Workbook()
@@ -390,11 +418,11 @@ class TestBoQParserReadPdfTables:
         """Multiple pages with tables"""
         mock_page1 = MagicMock()
         mock_page1.extract_tables.return_value = [
-            [["h1", "h2", "h3", "h4"], ["001", "A", "10", "m"]]
+            [["编码", "名称", "数量", "单位"], ["001", "A", "10", "m"]]
         ]
         mock_page2 = MagicMock()
         mock_page2.extract_tables.return_value = [
-            [["h1", "h2", "h3", "h4"], ["002", "B", "20", "t"]]
+            [["编码", "名称", "数量", "单位"], ["002", "B", "20", "t"]]
         ]
         mock_pdf = MagicMock()
         mock_pdf.pages = [mock_page1, mock_page2]
@@ -411,7 +439,7 @@ class TestBoQParserReadPdfTables:
         """Rows with less than 4 columns are skipped"""
         mock_page = MagicMock()
         mock_page.extract_tables.return_value = [
-            [["h1", "h2", "h3", "h4"],
+            [["编码", "名称", "数量", "单位"],
              ["001", "A"],  # short row
              ["002", "B", "20", "t"]]
         ]
@@ -431,7 +459,7 @@ class TestBoQParserReadPdfTables:
         """None rows are skipped"""
         mock_page = MagicMock()
         mock_page.extract_tables.return_value = [
-            [["h1", "h2", "h3", "h4"],
+            [["编码", "名称", "数量", "单位"],
              None,
              ["001", "A", "10", "m"]]
         ]
@@ -465,7 +493,7 @@ class TestBoQParserReadPdfTables:
         """None cell values are handled"""
         mock_page = MagicMock()
         mock_page.extract_tables.return_value = [
-            [["h1", "h2", "h3", "h4"],
+            [["编码", "名称", "数量", "单位"],
              [None, "A", None, "m"]]
         ]
         mock_pdf = MagicMock()
@@ -479,6 +507,69 @@ class TestBoQParserReadPdfTables:
         assert len(rows) == 1
         assert rows[0]["code"] == ""
         assert rows[0]["name"] == "A"
+
+    @patch("backend.zhifei_autoplan.parsers.boq_parser.pdfplumber.open")
+    def test_read_pdf_real_five_column_rows_are_header_driven(self, mock_open):
+        mock_page = MagicMock()
+        mock_page.extract_tables.return_value = [
+            [
+                ["序\n号", "项目名称", "项目特征描述", "计量\n单位", "工程量"],
+                ["", "钢结构工程", None, "", ""],
+                ["79", "钢梁", "1、Q355B\n2、规格：WH600*280*10*14", "t", "59.214"],
+                ["49", "普通灯具", "1、名称：600x600LED平板灯", "套", "133.000"],
+                ["50", "普通灯具", "1、名称：300x300LED平板灯", "套", "8.000"],
+                ["228", "预制钢筋混凝土管桩", "3、规格：PHC-550AB125-C80", "根", "239.000"],
+            ]
+        ]
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=False)
+        mock_open.return_value = mock_pdf
+
+        rows = self.parser._read_pdf_tables("/fake/工程量清单及编制说明.pdf")
+        items = [self.parser._row_to_item(row) for row in rows if self.parser._is_leaf_row(row)]
+
+        assert [(item.name, item.quantity, item.unit) for item in items] == [
+            ("钢梁", 59.214, "t"),
+            ("普通灯具", 133.0, "套"),
+            ("普通灯具", 8.0, "套"),
+            ("预制钢筋混凝土管桩", 239.0, "根"),
+        ]
+        assert all(item.unit_price is None and item.total_price is None for item in items)
+        assert all(item.source_locator["page"] == 1 for item in items)
+        assert items[0].project_feature.startswith("1、Q355B")
+
+    @patch("backend.zhifei_autoplan.parsers.boq_parser.pdfplumber.open")
+    def test_unknown_five_column_table_is_not_positionally_guessed(self, mock_open):
+        mock_page = MagicMock()
+        mock_page.extract_tables.return_value = [
+            [["h1", "h2", "h3", "h4", "h5"], ["79", "钢梁", "Q355B", "t", "59.214"]]
+        ]
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=False)
+        mock_open.return_value = mock_pdf
+
+        assert self.parser._read_pdf_tables("/fake/path.pdf") == []
+
+    @patch("backend.zhifei_autoplan.parsers.boq_parser.pdfplumber.open")
+    def test_unrelated_four_column_table_is_not_positionally_guessed(self, mock_open):
+        mock_page = MagicMock()
+        mock_page.extract_tables.return_value = [
+            [
+                ["项目", "数量", "单位", "备注"],
+                ["钢梁进场协调", "59.214", "项", "会议安排"],
+            ]
+        ]
+        mock_pdf = MagicMock()
+        mock_pdf.pages = [mock_page]
+        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+        mock_pdf.__exit__ = MagicMock(return_value=False)
+        mock_open.return_value = mock_pdf
+
+        assert self.parser._read_pdf_tables("/fake/会议纪要.pdf") == []
 
 
 class TestBoQParserParse:
@@ -510,7 +601,7 @@ class TestBoQParserParse:
             {"code": "001", "name": "钢筋", "qty": 50.0, "unit": "t"}
         ]
         
-        items, stats = await self.parser.parse("/path/to/file.xls")
+        items, _stats = await self.parser.parse("/path/to/file.xls")
         
         assert len(items) == 1
         mock_read.assert_called_once()
@@ -523,7 +614,7 @@ class TestBoQParserParse:
             {"code": "001", "name": "Test", "qty": 10.0, "unit": "m"}
         ]
         
-        items, stats = await self.parser.parse("/path/to/file.XLSX")
+        items, _stats = await self.parser.parse("/path/to/file.XLSX")
         
         assert len(items) == 1
 
@@ -535,7 +626,7 @@ class TestBoQParserParse:
             {"code": "001", "name": "管道", "qty": 200.0, "unit": "m"}
         ]
         
-        items, stats = await self.parser.parse("/path/to/file.pdf")
+        items, _stats = await self.parser.parse("/path/to/file.pdf")
         
         assert len(items) == 1
         assert items[0].name == "管道"
@@ -549,7 +640,7 @@ class TestBoQParserParse:
             {"code": "001", "name": "Test", "qty": 10.0, "unit": "m"}
         ]
         
-        items, stats = await self.parser.parse("/path/to/file.PDF")
+        items, _stats = await self.parser.parse("/path/to/file.PDF")
         
         assert len(items) == 1
 
@@ -564,7 +655,7 @@ class TestBoQParserParse:
     @pytest.mark.asyncio
     async def test_parse_docx_unsupported(self):
         """DOCX is unsupported"""
-        items, stats = await self.parser.parse("/path/to/file.docx")
+        items, _stats = await self.parser.parse("/path/to/file.docx")
         
         assert len(items) == 0
 
@@ -578,11 +669,26 @@ class TestBoQParserParse:
             {"code": "003", "name": None, "qty": 30.0, "unit": "m"},
         ]
         
-        items, stats = await self.parser.parse("/path/to/file.xlsx")
+        items, _stats = await self.parser.parse("/path/to/file.xlsx")
         
         # Only row with non-empty name is included
         assert len(items) == 1
         assert items[0].name == "有效项"
+
+    @pytest.mark.asyncio
+    @patch.object(BoQParser, "_read_pdf_tables")
+    async def test_parse_filters_section_headings_and_invalid_quantities(self, mock_read):
+        mock_read.return_value = [
+            {"code": "", "name": "钢结构工程", "qty": "", "unit": ""},
+            {"code": "79", "name": "钢梁", "qty": "Q355B 250x200x5x8", "unit": "t"},
+            {"code": "79", "name": "钢梁", "qty": "59.214", "unit": "t"},
+        ]
+
+        items, stats = await self.parser.parse("/path/to/file.pdf")
+
+        assert len(items) == 1
+        assert items[0].quantity == 59.214
+        assert stats["total_quantity"] == 59.214
 
     @pytest.mark.asyncio
     @patch.object(BoQParser, "_read_excel")

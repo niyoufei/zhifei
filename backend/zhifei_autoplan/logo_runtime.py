@@ -3,17 +3,31 @@ from __future__ import annotations
 import hashlib
 import json
 import ipaddress
+import os
 import re
 import socket
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-import requests
 from urllib.parse import urlparse, urljoin
 
 
 ASSET_DIR = Path("backend/data/autoplan/assets")
-ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _external_logo_fetch_enabled() -> bool:
+    """External logo discovery is a server-owned, default-deny capability."""
+    return str(os.getenv("ZF_EXTERNAL_LOGO_FETCH_ENABLED") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _ensure_asset_dir() -> Path:
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    return ASSET_DIR
 
 
 def _safe_name(s: str, limit: int = 80) -> str:
@@ -138,9 +152,16 @@ def _safe_fetch(url: str, timeout: int = 20, max_bytes: int = 2_000_000, max_red
     - size limit
     - manual redirects with re-check
     """
+    if not _external_logo_fetch_enabled():
+        return None
     u = (url or "").strip()
     if not u:
         return None
+    # Keep the network dependency out of module import.  Besides avoiding
+    # import-time socket capability probes, this makes the default-deny path
+    # observable as strictly zero external-I/O.
+    import requests
+
     for _ in range(max(0, int(max_redirects)) + 1):
         parsed = urlparse(u)
         if parsed.scheme not in {"http", "https"}:
@@ -208,7 +229,7 @@ def download_logo_from_url(url: str, timeout: int = 20) -> Optional[str]:
             ext = "webp"
         elif "jpeg" in ctype or url.lower().endswith(".jpg") or url.lower().endswith(".jpeg"):
             ext = "jpg"
-        out = ASSET_DIR / f"logo_{digest}.{ext}"
+        out = _ensure_asset_dir() / f"logo_{digest}.{ext}"
         out.write_bytes(data)
         return str(out)
     except Exception:
@@ -233,7 +254,7 @@ def prepare_logo_for_embedding(path: str) -> Optional[str]:
 
         with Image.open(p) as im:
             im = im.convert("RGBA")
-            out = ASSET_DIR / f"{p.stem}_embed.png"
+            out = _ensure_asset_dir() / f"{p.stem}_embed.png"
             im.save(out, format="PNG")
         return str(out)
     except Exception:
@@ -241,6 +262,8 @@ def prepare_logo_for_embedding(path: str) -> Optional[str]:
 
 
 def resolve_logo_from_domain(domain: str) -> Optional[str]:
+    if not _external_logo_fetch_enabled():
+        return None
     d = (domain or "").strip()
     if not d:
         return None
@@ -264,7 +287,11 @@ def _wiki_api(lang: str) -> str:
 
 
 def _wiki_opensearch(company: str, lang: str) -> Optional[str]:
+    if not _external_logo_fetch_enabled():
+        return None
     try:
+        import requests
+
         api = _wiki_api(lang)
         params = {"action": "opensearch", "search": company, "limit": 1, "namespace": 0, "format": "json"}
         r = requests.get(api, params=params, timeout=12, headers={"User-Agent": "autoplan/0.1"})
@@ -280,7 +307,11 @@ def _wiki_opensearch(company: str, lang: str) -> Optional[str]:
 
 
 def _wiki_page_image(title: str, lang: str) -> Optional[str]:
+    if not _external_logo_fetch_enabled():
+        return None
     try:
+        import requests
+
         api = _wiki_api(lang)
         params = {
             "action": "query",
@@ -313,6 +344,8 @@ def resolve_logo_from_wikipedia(company_name: str) -> Optional[str]:
     """
     Best-effort public source. Not guaranteed "official standard", but often good enough as a starting point.
     """
+    if not _external_logo_fetch_enabled():
+        return None
     company = (company_name or "").strip()
     if not company:
         return None
@@ -339,17 +372,11 @@ def resolve_logo(
 ) -> Optional[str]:
     """
     Resolution order:
-    1) direct URL (user provided)
-    1.5) locked branding (project-level)
+    1) locked branding (project-level)
     2) latest ingested logo asset
-    3) domain (clearbit/favicon) best-effort
-    4) wikipedia best-effort (requires company name)
+    3) optional external sources, only when the server explicitly enables
+       ``ZF_EXTERNAL_LOGO_FETCH_ENABLED`` (disabled by default)
     """
-    if isinstance(logo_url, str) and logo_url.strip():
-        p = download_logo_from_url(logo_url.strip())
-        if p:
-            _lock_logo(project_id, p, source="url", bidder_company=bidder_company, bidder_domain=bidder_domain, logo_url=logo_url)
-            return p
     locked = _load_locked_logo(project_id)
     if locked:
         return locked
@@ -357,6 +384,13 @@ def resolve_logo(
     if p:
         _lock_logo(project_id, p, source="ingest", bidder_company=bidder_company, bidder_domain=bidder_domain, logo_url=logo_url)
         return p
+    if not _external_logo_fetch_enabled():
+        return None
+    if isinstance(logo_url, str) and logo_url.strip():
+        p = download_logo_from_url(logo_url.strip())
+        if p:
+            _lock_logo(project_id, p, source="url", bidder_company=bidder_company, bidder_domain=bidder_domain, logo_url=logo_url)
+            return p
     if isinstance(bidder_domain, str) and bidder_domain.strip():
         p = resolve_logo_from_domain(bidder_domain.strip())
         if p:

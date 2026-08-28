@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Dict, Any, Optional
+
+from backend.zhifei_autoplan.project_namespace import project_storage_key
 
 
 BOQ_DIR = Path("backend/data/autoplan")
@@ -13,10 +14,7 @@ PROJECTS_DIR = BOQ_DIR / "projects"
 
 
 def _safe_project_id(project_id: str, limit: int = 80) -> str:
-    pid = (project_id or "").strip()
-    out = re.sub(r"[^A-Za-z0-9_\\-\\.\\u4e00-\\u9fff]+", "_", pid)
-    out = out.strip("_")
-    return (out[:limit] or "project").strip("_")
+    return project_storage_key(project_id, limit=limit)
 
 
 def boq_data_path(project_id: str | None = None) -> Path:

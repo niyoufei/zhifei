@@ -1,11 +1,69 @@
 from __future__ import annotations
 
+import copy
 import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
+
+
+@pytest.fixture(autouse=True)
+def _admitted_review_chain(monkeypatch):
+    """Keep review behavior tests offline; admission has separate contract tests."""
+
+    from backend.app.routers import actions_bridge
+
+    async def fake_admission(payload):
+        payload["_provider_admission_run_coordinator"] = object()
+        payload.setdefault("provider_chain", [])
+
+    monkeypatch.setattr(
+        actions_bridge,
+        "_ensure_review_provider_admission",
+        fake_admission,
+    )
+    # These behavior tests isolate review transformation from the formal
+    # delivery/CAS boundary, which has dedicated atomicity tests.
+    monkeypatch.setattr(
+        actions_bridge,
+        "_require_formal_document_mutation",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_capture_promotion_revision",
+        lambda _job: ("succeeded", 7),
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_promote_job_result_cas",
+        lambda **kwargs: {
+            "status": kwargs["initial_status"],
+            "revision": int(kwargs["initial_revision"]) + 1,
+        },
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_validate_rollback_snapshot",
+        lambda **kwargs: copy.deepcopy(kwargs["revision"]["variants"]),
+    )
+
+    def finalize_with_test_rebuild(results, **kwargs):
+        return actions_bridge._rebuild_postprocessed_artifacts(
+            results,
+            payload=kwargs.get("payload") or {},
+            report=None,
+            params={},
+            fail_closed=bool(kwargs.get("fail_closed")),
+        )
+
+    monkeypatch.setattr(
+        actions_bridge,
+        "_finalize_variant_derivatives",
+        finalize_with_test_rebuild,
+    )
 
 
 @pytest.mark.asyncio
@@ -45,7 +103,7 @@ async def test_actions_review_apply_calls_remediation_and_persists_copy(tmp_path
     )
     monkeypatch.setattr(actions_bridge, "apply_remediation", fake_apply_remediation)
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
     def fake_rebuild(results, **kwargs):
         results[0]["quality_checks"] = {"issue_list": [], "auto_revision_suggestions": []}
 
@@ -59,7 +117,7 @@ async def test_actions_review_apply_calls_remediation_and_persists_copy(tmp_path
     monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
     monkeypatch.setattr(actions_bridge, "create_revision_snapshot", review_revision.create_revision_snapshot)
 
-    async def fake_professional_render(*, job_id, outputs, progress_callback=None):
+    async def fake_professional_render(*, job_id, outputs, **_kwargs):
         return dict(outputs)
 
     monkeypatch.setattr(actions_bridge, "_render_professional_outputs_for_job", fake_professional_render)
@@ -95,6 +153,8 @@ async def test_actions_review_apply_calls_remediation_and_persists_copy(tmp_path
     assert output_json.exists()
     assert target["sections"][0]["content"] == "原始内容"
     assert response["revision_id"].startswith("REV-")
+    promotion_rows = review_revision.list_revision_snapshots(job_id="job-review-1")
+    assert promotion_rows[0]["promotion"]["state"] == "committed"
 
 
 @pytest.mark.asyncio
@@ -129,9 +189,11 @@ async def test_actions_review_apply_rejects_stale_issue_list(monkeypatch):
         expected_variant_version=versions["variant_version"],
         expected_issue_digest="stale-digest",
     )
-    with patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False):
-        with pytest.raises(HTTPException) as exc:
-            await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
+    with (
+        patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
     assert exc.value.status_code == 409
     assert exc.value.detail["code"] == "STALE_REVIEW_STATE"
 
@@ -165,7 +227,7 @@ async def test_actions_review_apply_render_failure_keeps_live_result(tmp_path: P
     monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
     monkeypatch.setattr(actions_bridge, "create_revision_snapshot", review_revision.create_revision_snapshot)
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
     monkeypatch.setattr(
         actions_bridge,
         "apply_remediation",
@@ -197,9 +259,11 @@ async def test_actions_review_apply_render_failure_keeps_live_result(tmp_path: P
         expected_variant_version=versions["variant_version"],
         expected_issue_digest=versions["issue_digest"],
     )
-    with patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False):
-        with pytest.raises(RuntimeError, match="render failed"):
-            await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
+    with (
+        patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False),
+        pytest.raises(RuntimeError, match="render failed"),
+    ):
+        await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
     assert target["sections"][0]["content"] == "原始正文"
     assert promoted == []
 
@@ -232,7 +296,7 @@ async def test_actions_review_apply_blocks_remaining_high_risk(tmp_path: Path, m
     monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
     monkeypatch.setattr(actions_bridge, "create_revision_snapshot", review_revision.create_revision_snapshot)
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
     monkeypatch.setattr(actions_bridge, "apply_remediation", lambda *args, **kwargs: None)
     monkeypatch.setattr(actions_bridge, "_rebuild_postprocessed_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(actions_bridge, "_save_outputs", lambda *args, **kwargs: pytest.fail("must not persist"))
@@ -244,9 +308,11 @@ async def test_actions_review_apply_blocks_remaining_high_risk(tmp_path: Path, m
         expected_variant_version=versions["variant_version"],
         expected_issue_digest=versions["issue_digest"],
     )
-    with patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False):
-        with pytest.raises(HTTPException) as exc:
-            await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
+    with (
+        patch.dict(os.environ, {"ZF_ACTIONS_KEY": "test-actions-key"}, clear=False),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await actions_bridge.actions_review_apply(request, x_actions_key="test-actions-key")
     assert exc.value.status_code == 409
     assert exc.value.detail["code"] == "REVIEW_HIGH_RISK_REMAINS"
     assert target["sections"][0]["content"] == "原始正文"
@@ -326,7 +392,7 @@ async def test_actions_review_apply_runs_ai_recheck_and_second_round(tmp_path: P
     )
     monkeypatch.setattr(actions_bridge, "_rewrite_review_section", fake_rewrite)
     monkeypatch.setattr(actions_bridge, "strip_nonconcrete_language", lambda value: value)
-    monkeypatch.setattr(actions_bridge, "load_params", lambda: {})
+    monkeypatch.setattr(actions_bridge, "load_params", dict)
     monkeypatch.setattr(actions_bridge, "_rebuild_postprocessed_artifacts", fake_rebuild)
     saved: dict[str, object] = {}
 
@@ -339,7 +405,7 @@ async def test_actions_review_apply_runs_ai_recheck_and_second_round(tmp_path: P
     monkeypatch.setattr(review_revision, "REVISION_ROOT", tmp_path / "revisions")
     monkeypatch.setattr(actions_bridge, "create_revision_snapshot", review_revision.create_revision_snapshot)
 
-    async def fake_professional_render(*, job_id, outputs, progress_callback=None):
+    async def fake_professional_render(*, job_id, outputs, **_kwargs):
         return dict(outputs)
 
     monkeypatch.setattr(actions_bridge, "_render_professional_outputs_for_job", fake_professional_render)
@@ -382,7 +448,19 @@ def test_review_postprocess_can_fail_closed(monkeypatch):
     monkeypatch.setattr(plan_consistency, "normalize_metrics_in_sections", lambda sections: {"ok": True})
     monkeypatch.setattr(param_trace, "build_param_receipt", lambda sections, params: {"ok": True})
     monkeypatch.setattr(param_trace, "save_latest_receipt", lambda *args, **kwargs: "receipt.json")
-    monkeypatch.setattr(cross_index, "build_cross_index", lambda **kwargs: {"rows": []})
+    monkeypatch.setattr(
+        cross_index,
+        "build_cross_index",
+        lambda **kwargs: {
+            "ok": True,
+            "focus_count": 0,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        },
+    )
 
     def fail_evidence(**kwargs):
         raise ValueError("evidence rebuild failed")
@@ -394,6 +472,335 @@ def test_review_postprocess_can_fail_closed(monkeypatch):
             [result], payload={}, report=None, params={}, fail_closed=True
         )
     assert result["postprocess_errors"][0]["stage"] == "evidence_tracking"
+
+
+def test_delivery_quality_block_is_not_misclassified_as_rebuild_failure(monkeypatch):
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan import (
+        cross_index,
+        drawing_index,
+        param_trace,
+        plan_consistency,
+        standard_index,
+    )
+
+    monkeypatch.setattr(actions_bridge, "load_tender_matrix", lambda **kwargs: {})
+    monkeypatch.setattr(actions_bridge, "load_boq_data", lambda **kwargs: {})
+    monkeypatch.setattr(actions_bridge, "recommend_four_new", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        actions_bridge,
+        "run_quality_checks",
+        lambda *args, **kwargs: {"issue_list": []},
+    )
+    monkeypatch.setattr(
+        plan_consistency,
+        "normalize_metrics_in_sections",
+        lambda sections: {"ok": True},
+    )
+    monkeypatch.setattr(
+        param_trace,
+        "build_param_receipt",
+        lambda sections, params: {"ok": True},
+    )
+    monkeypatch.setattr(
+        param_trace,
+        "save_latest_receipt",
+        lambda *args, **kwargs: "receipt.json",
+    )
+    monkeypatch.setattr(
+        cross_index,
+        "build_cross_index",
+        lambda **kwargs: {
+            "ok": True,
+            "focus_count": 0,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        },
+    )
+    current_drawing_index = {"ok": True, "project_id": "P-CURRENT"}
+    current_standard_index = {
+        "ok": False,
+        "project_id": "P-CURRENT",
+        "official_registry_path": "/trusted/compliance/_official_registry.json",
+        "standards": [],
+        "text_index_status": "no_standards",
+    }
+    rebuilt_outlines = {}
+    rebuilt_workspaces = {}
+
+    def rebuild_drawing(*args, **kwargs):
+        rebuilt_outlines["drawing"] = list(args[1])
+        rebuilt_workspaces["drawing"] = kwargs.get("workspace_dir")
+        return current_drawing_index
+
+    def rebuild_standard(*args, **kwargs):
+        rebuilt_outlines["standard"] = list(args[1])
+        rebuilt_workspaces["standard"] = kwargs.get("workspace_dir")
+        return current_standard_index
+
+    monkeypatch.setattr(
+        drawing_index,
+        "build_drawing_index",
+        rebuild_drawing,
+    )
+    monkeypatch.setattr(
+        standard_index,
+        "build_standard_index",
+        rebuild_standard,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "build_evidence_tracking",
+        lambda **kwargs: {"rows": [], "summary": {}},
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "audit_standard_citations",
+        lambda *args, **kwargs: {"ok": True},
+    )
+    captured_gate_kwargs = {}
+
+    def fake_delivery_gate(**kwargs):
+        captured_gate_kwargs.update(kwargs)
+        return {
+            "delivery_allowed": False,
+            "decision_digest": "blocked-but-not-rebuild-error",
+            "blockers": [{"code": "CONTENT_REVIEW_BLOCKED"}],
+        }
+
+    monkeypatch.setattr(actions_bridge, "build_delivery_quality_gate", fake_delivery_gate)
+
+    parameter_report = {"schema_version": "missing-parameter-probe-v2"}
+    fact_ledger = {"schema_version": "project-fact-ledger-v1"}
+    result = {
+        "sections": [{"title": "质量管理", "content": "正文"}],
+        "outline": [],
+        "drawing_index": {"stale": True},
+        "standard_index": {"stale": True},
+        "missing_parameters": parameter_report,
+        "project_fact_ledger": fact_ledger,
+    }
+    actions_bridge._rebuild_postprocessed_artifacts(
+        [result],
+        payload={
+            "quality_strict": False,
+            "project_id": "P-CURRENT",
+            "workspace_dir": "/tenant/workspace",
+        },
+        report=None,
+        params={},
+        fail_closed=True,
+    )
+
+    assert "postprocess_errors" not in result
+    assert result["delivery_quality_gate"]["delivery_allowed"] is False
+    assert captured_gate_kwargs["formal_delivery_required"] is True
+    assert captured_gate_kwargs["model_review_required"] is True
+    assert captured_gate_kwargs["project_parameters"] is parameter_report
+    assert captured_gate_kwargs["project_fact_ledger"] is fact_ledger
+    assert captured_gate_kwargs["sections"] == result["sections"]
+    assert result["drawing_index"] is current_drawing_index
+    assert result["standard_index"] is current_standard_index
+    assert captured_gate_kwargs["standard_index"] is current_standard_index
+    assert captured_gate_kwargs["standard_workspace_dir"] == "/tenant/workspace"
+    assert captured_gate_kwargs["standard_compliance_root"] == Path(
+        "/trusted/compliance"
+    )
+    assert rebuilt_workspaces == {
+        "drawing": "/tenant/workspace",
+        "standard": "/tenant/workspace",
+    }
+    assert rebuilt_outlines == {
+        "drawing": ["质量管理"],
+        "standard": ["质量管理"],
+    }
+
+
+def test_formal_postprocess_fails_closed_when_current_index_rebuild_raises(
+    monkeypatch,
+):
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan import (
+        cross_index,
+        drawing_index,
+        param_trace,
+        plan_consistency,
+        standard_index,
+    )
+
+    monkeypatch.setattr(actions_bridge, "load_tender_matrix", lambda **kwargs: {})
+    monkeypatch.setattr(actions_bridge, "load_boq_data", lambda **kwargs: {})
+    monkeypatch.setattr(
+        actions_bridge, "recommend_four_new", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "run_quality_checks",
+        lambda *args, **kwargs: {"issue_list": []},
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "build_evidence_tracking",
+        lambda **kwargs: {"rows": [], "summary": {}},
+    )
+    monkeypatch.setattr(
+        plan_consistency,
+        "normalize_metrics_in_sections",
+        lambda sections: {"ok": True},
+    )
+    monkeypatch.setattr(
+        param_trace,
+        "build_param_receipt",
+        lambda sections, params: {"ok": True},
+    )
+    monkeypatch.setattr(
+        param_trace,
+        "save_latest_receipt",
+        lambda *args, **kwargs: "receipt.json",
+    )
+    monkeypatch.setattr(
+        cross_index,
+        "build_cross_index",
+        lambda **kwargs: {
+            "ok": True,
+            "focus_count": 0,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        },
+    )
+    monkeypatch.setattr(
+        drawing_index,
+        "build_drawing_index",
+        lambda *args, **kwargs: {"ok": True},
+    )
+
+    def fail_standard_index(*args, **kwargs):
+        raise ValueError("trusted standard bytes changed")
+
+    monkeypatch.setattr(standard_index, "build_standard_index", fail_standard_index)
+    result = {
+        "sections": [{"title": "质量管理", "content": "正文"}],
+        "outline": ["质量管理"],
+        "drawing_index": {"stale": True},
+        "standard_index": {"stale": True},
+    }
+
+    with pytest.raises(RuntimeError, match="POSTPROCESS_REBUILD_FAILED"):
+        actions_bridge._rebuild_postprocessed_artifacts(
+            [result],
+            payload={"project_id": "P-CURRENT"},
+            report=None,
+            params={},
+            fail_closed=True,
+        )
+
+    assert result["drawing_index"] == {}
+    assert result["standard_index"] == {}
+    assert result["postprocess_errors"][0]["stage"] == "current_evidence_indexes"
+
+
+def test_review_postprocess_rejects_unrelated_traceable_locator(monkeypatch):
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan import cross_index, param_trace, plan_consistency
+    from backend.zhifei_autoplan.requirement_evidence_matrix import (
+        build_requirement_evidence_plan,
+    )
+
+    tender = {
+        "items": [
+            {
+                "dimension": "扣分项",
+                "keywords": ["质量验收闭环"],
+                "source_spans": [
+                    {
+                        "file_name": "/private/uploads/招标文件.pdf",
+                        "page": 3,
+                        "start": 88,
+                        "end": 96,
+                        "snippet": "质量验收闭环",
+                    }
+                ],
+            }
+        ]
+    }
+    contract = {
+        "chapters": [
+            {
+                "chapter_id": "CH-001",
+                "title": "质量管理",
+                "agents": {"master": "章节主笔Agent", "compliance": "规范合规Agent"},
+            }
+        ]
+    }
+    plan = build_requirement_evidence_plan(
+        tender=tender,
+        chapter_requirements={},
+        global_requirements=[],
+        agent_contract=contract,
+    )
+    requirement_id = plan["rows"][0]["requirement_id"]
+    result = {
+        "sections": [
+            {
+                "title": "质量管理",
+                "content": (
+                    f"落实质量验收闭环。【要求:{requirement_id}】"
+                    "【证据:无关资料.pdf#p1_deadbeef@9】"
+                ),
+            }
+        ],
+        "outline": ["质量管理"],
+        "requirement_evidence_plan": plan,
+    }
+    monkeypatch.setattr(actions_bridge, "load_tender_matrix", lambda **kwargs: tender)
+    monkeypatch.setattr(actions_bridge, "load_boq_data", lambda **kwargs: {})
+    monkeypatch.setattr(actions_bridge, "recommend_four_new", lambda *args, **kwargs: [])
+    monkeypatch.setattr(actions_bridge, "run_quality_checks", lambda *args, **kwargs: {"issue_list": []})
+    monkeypatch.setattr(plan_consistency, "normalize_metrics_in_sections", lambda sections: {"ok": True})
+    monkeypatch.setattr(param_trace, "build_param_receipt", lambda sections, params: {"ok": True})
+    monkeypatch.setattr(param_trace, "save_latest_receipt", lambda *args, **kwargs: "receipt.json")
+    monkeypatch.setattr(
+        cross_index,
+        "build_cross_index",
+        lambda **kwargs: {
+            "ok": True,
+            "focus_count": 0,
+            "mentioned_count": 0,
+            "closed_ok_count": 0,
+            "missing_drawing_locator_count": 0,
+            "missing_standard_locator_count": 0,
+            "focus_items": [],
+        },
+    )
+    monkeypatch.setattr(actions_bridge, "audit_standard_citations", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(
+        actions_bridge,
+        "build_delivery_quality_gate",
+        lambda **kwargs: {"delivery_allowed": True, "blockers": []},
+    )
+
+    with pytest.raises(RuntimeError, match="POSTPROCESS_REBUILD_FAILED"):
+        actions_bridge._rebuild_postprocessed_artifacts(
+            [result],
+            payload={"quality_strict": True, "requirement_evidence_hard_gate": True},
+            report=None,
+            params={},
+            fail_closed=True,
+        )
+    assert result["requirement_evidence_chapter_gates"][0]["ok"] is False
+    assert result["requirement_evidence_chapter_gates"][0]["rows"][0]["status"] == (
+        "EVIDENCE_SOURCE_MISMATCH"
+    )
+    assert any(
+        row["stage"] == "requirement_evidence_chapter_gate"
+        for row in result["postprocess_errors"]
+    )
 
 
 @pytest.mark.asyncio
@@ -429,7 +836,12 @@ async def test_actions_review_rollback_restores_snapshot_atomically(tmp_path: Pa
     promoted: list[object] = []
     monkeypatch.setattr(actions_bridge, "_save_outputs", fake_save)
     monkeypatch.setattr(actions_bridge, "_render_professional_outputs_for_job", fake_render)
-    monkeypatch.setattr(actions_bridge, "update_job", lambda *args, **kwargs: promoted.append((args, kwargs)))
+    monkeypatch.setattr(
+        actions_bridge,
+        "_promote_job_result_cas",
+        lambda **kwargs: promoted.append(kwargs)
+        or {"status": "succeeded", "revision": int(kwargs["initial_revision"]) + 1},
+    )
     request = actions_bridge.ActionsReviewRollbackRequest(
         job_id="job-rollback",
         revision_id=old_revision["revision_id"],
@@ -449,3 +861,4 @@ async def test_actions_review_rollback_restores_snapshot_atomically(tmp_path: Pa
     assert len(rows) == 2
     safety = next(row for row in rows if row["revision_id"] == response["safety_revision_id"])
     assert safety["promotion"]["operation"] == "rollback"
+    assert safety["promotion"]["state"] == "committed"

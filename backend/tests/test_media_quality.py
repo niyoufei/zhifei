@@ -110,6 +110,7 @@ def test_figure_delivery_manifest_requires_complete_traceability() -> None:
     )
 
     assert report["schema_version"] == "docx_figure_delivery.v2"
+    assert report["figure_count"] == 1
     assert report["status"] == "pass"
     assert report["delivery_allowed"] is True
     assert len(report["decision_digest"]) == 64
@@ -206,6 +207,7 @@ def test_export_writes_verified_figure_manifest(tmp_path: Path) -> None:
 
     manifest = json.loads(output_path.with_suffix(".figure_manifest.json").read_text(encoding="utf-8"))
     assert manifest["delivery_allowed"] is True
+    assert manifest["figure_count"] == 1
     assert manifest["insertions"][0]["source_ref"] == "施工总平面图.pdf"
     assert manifest["insertions"][0]["chapter_title"] == "第一章 施工总体部署"
     assert manifest["embedded_media_verification"]["ok"] is True

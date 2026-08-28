@@ -1,33 +1,49 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any
 
 import pdfplumber
 
+from backend.zhifei_autoplan.models import (
+    SourceSpan,
+    TenderDimension,
+    TenderIndexItem,
+    TenderIndexMatrix,
+)
 from backend.zhifei_autoplan.requirement_decisions import (
     build_requirement_decision_matrix,
     style_from_requirement_matrix,
 )
-
-from backend.zhifei_autoplan.models import (
-    TenderIndexMatrix,
-    TenderIndexItem,
-    TenderDimension,
-    SourceSpan,
+from backend.zhifei_autoplan.requirement_evidence_matrix import (
+    classify_chapter_requirement_quality,
 )
 from backend.zhifei_autoplan.utils.llm_client import LLMClient
+
+_RECTIFICATION_DEADLINE_VALUE = "在监理人规定时间内按要求完成整改"
+_RECTIFICATION_DEADLINE_RE = re.compile(
+    r"在[\s\u3000]*监[\s\u3000]*理[\s\u3000]*人[\s\u3000]*规"
+    r"[\s\u3000]*定[\s\u3000]*时[\s\u3000]*间[\s\u3000]*内"
+    r"[\s\u3000]*按[\s\u3000]*要[\s\u3000]*求[\s\u3000]*完"
+    r"[\s\u3000]*成[\s\u3000]*整[\s\u3000]*改"
+)
+_PLANNED_DURATION_RE = re.compile(
+    r"(?:计划工期|总工期|合同工期|工期要求)"
+    r"[\s\u3000]*(?:为|共|[:：])?[\s\u3000]*"
+    r"(?P<value>\d+(?:\.\d+)?)\s*(?:日历天|天|日)"
+)
 
 
 @dataclass
 class Section:
     title: str
     text: str
-    page_spans: List[Tuple[int, int, int]]  # (page, start, end)
+    page_spans: list[tuple[int, int, int]]  # (page, start, end)
 
 
 class TenderParser:
@@ -37,14 +53,41 @@ class TenderParser:
     - 答疑为准：同时上传答疑/澄清文件时，优先使用答疑文本进行修正
     """
 
-    def __init__(self, llm: Optional[LLMClient] = None):
+    def __init__(self, llm: LLMClient | None = None):
         self.llm = llm
 
-    async def parse(self, pdf_paths: List[str]) -> TenderIndexMatrix:
-        # 并发读取多份资料（PDF 优先，其它格式走统一解析器）
-        texts = await asyncio.gather(
-            *[asyncio.to_thread(self._read_source_text, p) for p in pdf_paths]
-        )
+    async def parse(
+        self,
+        pdf_paths: list[str],
+        *,
+        cached_texts: dict[str, str] | None = None,
+    ) -> TenderIndexMatrix:
+        # Ingest already extracted and content-addressed these sources.  Reuse
+        # only caller-supplied, parser-version-validated text; uncached paths
+        # retain the existing PDF/UnifiedParser fallback.
+        cache = cached_texts or {}
+
+        async def _load(path: str) -> tuple[str, str]:
+            cached = cache.get(path)
+            if isinstance(cached, str):
+                return path, cached
+            return await asyncio.to_thread(self._read_source_text, path)
+
+        texts = await asyncio.gather(*[_load(path) for path in pdf_paths])
+
+        # Section splitting, outline/style extraction and evidence projection
+        # scan the complete tender corpus repeatedly.  Keep that CPU-bound
+        # rules pipeline off the caller's event-loop thread; otherwise a large
+        # tender can make FastAPI's lightweight /health endpoint time out even
+        # though the backend process is still healthy.
+        matrix = await asyncio.to_thread(self._build_matrix_from_texts, texts)
+        if self.llm:
+            await self._complete_index_prompts()
+        return matrix
+
+    def _build_matrix_from_texts(
+        self, texts: list[tuple[str, str]]
+    ) -> TenderIndexMatrix:
 
         qa_texts = [t for p, t in texts if self._is_qa_file(p, t)]
         base_texts = [t for p, t in texts if not self._is_qa_file(p, t)]
@@ -53,10 +96,10 @@ class TenderParser:
             merged_text = merged_text + "\n\n【答疑优先文本】\n" + "\n\n".join(qa_texts)
 
         sections = self._split_sections(merged_text)
-        items = await self._extract_index_matrix(sections, texts)
+        items = self._extract_index_matrix_sync(sections, texts)
         outline, outline_meta = self._extract_outline(merged_text)
         style, style_meta = self._extract_style_requirements(merged_text)
-        style_sources: List[Dict[str, Any]] = []
+        style_sources: list[dict[str, Any]] = []
         for source_index, (source_path, source_text) in enumerate(texts):
             extracted_style, _ = self._extract_style_requirements(source_text)
             if not extracted_style:
@@ -82,16 +125,28 @@ class TenderParser:
             style = style_from_requirement_matrix(style_decision_matrix)
             style_meta["source"] = "source_decision_matrix"
         chapter_pages = self._extract_chapter_page_targets(merged_text, outline)
-        chapter_requirements = self._extract_chapter_requirements(merged_text, outline)
+        (
+            chapter_requirements,
+            chapter_requirement_review,
+        ) = self._extract_chapter_requirement_candidates(merged_text, outline)
         project_name, project_code = self._extract_project_meta(merged_text)
+        project_facts = self._extract_project_facts(texts)
         global_requirements = []
         global_requirements.extend(style_meta.get("global_requirements") or [])
         global_requirements.extend(outline_meta.get("global_requirements") or [])
-        extraction_meta: Dict[str, Any] = {
+        extraction_meta: dict[str, Any] = {
             "outline": outline_meta,
             "style": style_meta,
             "requirement_decision_matrix": style_decision_matrix,
+            "chapter_requirement_review": {
+                "status": "NEEDS_REVIEW" if chapter_requirement_review else "READY",
+                "count": len(chapter_requirement_review),
+                "prompt_excluded_count": len(chapter_requirement_review),
+                "rows": chapter_requirement_review,
+            },
         }
+        if project_facts:
+            extraction_meta["project_facts"] = project_facts
         return TenderIndexMatrix(
             project_name=project_name,
             project_code=project_code,
@@ -105,6 +160,17 @@ class TenderParser:
             global_requirements=global_requirements,
             extraction_meta=extraction_meta,
         )
+
+    async def _complete_index_prompts(self) -> None:
+        if not self.llm:
+            return
+        for dim in TenderDimension:
+            prompt = f"从招标文本中提取 {dim.value} 的关键指标，输出关键词列表。"
+            await self.llm.complete(
+                prompt,
+                project_id="tender-ingestion",
+                task_type="tender_index_extraction",
+            )
 
     def _extract_project_meta(self, text: str) -> tuple[str | None, str | None]:
         lines = [ln.strip() for ln in (text or "").splitlines() if ln and ln.strip()]
@@ -268,12 +334,15 @@ class TenderParser:
         name = max(name_candidates, default=(-1, None), key=lambda item: item[0])[1]
         return name or None, code or None
 
-    def _read_pdf(self, path: str) -> Tuple[str, str]:
-        texts: List[str] = []
+    def _read_pdf(self, path: str) -> tuple[str, str]:
+        texts: list[str] = []
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages:
                 texts.append(page.extract_text() or "")
-        extracted = "\n".join(texts)
+        # A form-feed is an executable evidence boundary: downstream facts use
+        # it to recover the one-based PDF page and the page-local text hash.
+        # A plain newline makes page 92 indistinguishable from adjacent clauses.
+        extracted = "\f".join(texts)
 
         # OCR fallback: only when file exists on disk AND text is likely from a scanned PDF.
         try:
@@ -287,13 +356,161 @@ class TenderParser:
                     ocr = ocr_pdf_path(path, max_pages=18, scale=2.2, stop_on_catalog=True)
                     if ocr.text:
                         extracted = (extracted + "\n\n" + ocr.text).strip()
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional OCR must not break parsing
             # OCR is best-effort; never break core parsing.
-            pass
+            return path, extracted
 
         return path, extracted
 
-    def _read_source_text(self, path: str) -> Tuple[str, str]:
+    @staticmethod
+    def _file_sha256(path: str) -> str:
+        source = Path(path)
+        if not source.is_file():
+            return ""
+        digest = hashlib.sha256()
+        try:
+            with source.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            return ""
+        return digest.hexdigest()
+
+    def _extract_project_facts(
+        self, texts: list[tuple[str, str]]
+    ) -> dict[str, Any]:
+        """Project exact tender facts with reversible, content-bound evidence.
+
+        Duration is admitted only from an explicit duration label/value/unit
+        clause.  The rectification deadline is procedural rather than numeric,
+        so it deliberately matches only the exact supervision-notice rule and
+        never borrows a nearby number such as a 48-hour inspection notice.
+        """
+        deadline_candidates: list[
+            tuple[int, int, int, int, dict[str, Any]]
+        ] = []
+        duration_candidates: list[
+            tuple[int, int, int, int, dict[str, Any]]
+        ] = []
+        for source_index, (source_path, source_text) in enumerate(texts):
+            document_sha256 = self._file_sha256(source_path)
+            if not document_sha256 or not isinstance(source_text, str):
+                continue
+            page_offset = 0
+            pages = source_text.split("\f")
+            for page_index, page_text in enumerate(pages):
+                for match in _RECTIFICATION_DEADLINE_RE.finditer(page_text):
+                    start = page_offset + match.start()
+                    end = page_offset + match.end()
+                    page_number = page_index + 1
+                    page_text_sha256 = hashlib.sha256(
+                        page_text.encode("utf-8")
+                    ).hexdigest()
+                    file_name = Path(source_path).name
+                    locator = (
+                        f"{file_name}#document_sha256={document_sha256}"
+                        f"&page={page_number}"
+                        f"&page_text_sha256={page_text_sha256}"
+                        f"&offset={start}"
+                    )
+                    snippet_start = max(0, match.start() - 80)
+                    snippet_end = min(len(page_text), match.end() + 80)
+                    fact = {
+                        "value": _RECTIFICATION_DEADLINE_VALUE,
+                        "unit": "",
+                        "status": "verified",
+                        "confidence": 1.0,
+                        "evidence": {
+                            "file_name": file_name,
+                            "page": page_number,
+                            "locator": locator,
+                            "document_sha256": document_sha256,
+                            "source_sha256": document_sha256,
+                            "page_text_sha256": page_text_sha256,
+                            "start": start,
+                            "end": end,
+                            "page_start": match.start(),
+                            "page_end": match.end(),
+                            "snippet": page_text[snippet_start:snippet_end],
+                        },
+                    }
+                    source_rank = 0 if self._is_qa_file(source_path, source_text) else 1
+                    deadline_candidates.append(
+                        (source_rank, source_index, page_number, start, fact)
+                    )
+                for match in _PLANNED_DURATION_RE.finditer(page_text):
+                    start = page_offset + match.start()
+                    end = page_offset + match.end()
+                    page_number = page_index + 1
+                    page_text_sha256 = hashlib.sha256(
+                        page_text.encode("utf-8")
+                    ).hexdigest()
+                    file_name = Path(source_path).name
+                    document_locator = (
+                        f"{file_name}#document_sha256={document_sha256}"
+                        f"&page={page_number}"
+                        f"&page_text_sha256={page_text_sha256}"
+                        f"&offset={start}"
+                    )
+                    raw_value = float(match.group("value"))
+                    duration_value: int | float = (
+                        int(raw_value) if raw_value.is_integer() else raw_value
+                    )
+                    snippet_start = max(0, match.start() - 80)
+                    snippet_end = min(len(page_text), match.end() + 80)
+                    duration_fact = {
+                        "value": duration_value,
+                        "unit": "天",
+                        "status": "verified",
+                        "confidence": 1.0,
+                        "evidence": {
+                            "file_name": file_name,
+                            "page": page_number,
+                            "locator": document_locator,
+                            "document_sha256": document_sha256,
+                            "source_sha256": document_sha256,
+                            "page_text_sha256": page_text_sha256,
+                            "offset": start,
+                            "start": start,
+                            "end": end,
+                            "page_start": match.start(),
+                            "page_end": match.end(),
+                            "match_text_sha256": hashlib.sha256(
+                                match.group(0).encode("utf-8")
+                            ).hexdigest(),
+                            "snippet": page_text[
+                                snippet_start:snippet_end
+                            ],
+                        },
+                    }
+                    source_rank = (
+                        0
+                        if self._is_qa_file(source_path, source_text)
+                        else 1
+                    )
+                    duration_candidates.append(
+                        (
+                            source_rank,
+                            source_index,
+                            page_number,
+                            start,
+                            duration_fact,
+                        )
+                    )
+                page_offset += len(page_text)
+                if page_index < len(pages) - 1:
+                    page_offset += 1
+
+        facts: dict[str, Any] = {}
+        if deadline_candidates:
+            deadline_candidates.sort(key=lambda row: row[:4])
+            facts["deviation_action_deadline"] = deadline_candidates[0][4]
+        if duration_candidates:
+            duration_candidates.sort(key=lambda row: row[:4])
+            facts["planned_duration_days"] = duration_candidates[0][4]
+        return facts
+
+    def _read_source_text(self, path: str) -> tuple[str, str]:
         if Path(path).suffix.lower() == ".pdf":
             return self._read_pdf(path)
         try:
@@ -303,7 +520,7 @@ class TenderParser:
             if not text and isinstance(parsed.get("meta"), dict):
                 text = json.dumps(parsed.get("meta"), ensure_ascii=False)
             return path, text
-        except Exception:
+        except Exception:  # noqa: BLE001 - external parser compatibility boundary
             return path, ""
 
     def _is_qa_file(self, path: str, text: str) -> bool:
@@ -311,7 +528,7 @@ class TenderParser:
         text_hit = any(k in text for k in ("答疑", "澄清", "补遗", "变更"))
         return name_hit or text_hit
 
-    def _split_sections(self, text: str) -> List[Section]:
+    def _split_sections(self, text: str) -> list[Section]:
         # 语义分区（规则版）
         title_patterns = [
             r"(前言|编制说明)",
@@ -325,10 +542,10 @@ class TenderParser:
         title_re = re.compile("|".join(title_patterns))
         lines = text.splitlines()
 
-        sections: List[Section] = []
+        sections: list[Section] = []
         cur_title = "未分类"
-        cur_lines: List[str] = []
-        cur_spans: List[Tuple[int, int, int]] = []
+        cur_lines: list[str] = []
+        cur_spans: list[tuple[int, int, int]] = []
 
         for line in lines:
             m = title_re.search(line)
@@ -726,7 +943,7 @@ class TenderParser:
         输出的 style dict 尽量与 exporter._normalize_style 兼容。
         """
         merged = text or ""
-        meta: Dict[str, Any] = {"source": "rules", "global_requirements": []}
+        meta: dict[str, Any] = {"source": "rules", "global_requirements": []}
         if not merged.strip():
             return {}, {"source": "none", "global_requirements": []}
 
@@ -770,10 +987,7 @@ class TenderParser:
             m = re.search(r"(\d+(?:\.\d+)?)", s)
             if not m:
                 return None
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
+            return float(m.group(1))
 
         # 纸张
         paper = None
@@ -841,29 +1055,20 @@ class TenderParser:
         line_spacing_pt = None
         m_ls = re.search(r"行距[^。\n]{0,10}?[:：]?\s*(\d+(?:\.\d+)?)\s*倍", merged)
         if m_ls:
-            try:
-                line_spacing = float(m_ls.group(1))
-            except Exception:
-                line_spacing = None
+            line_spacing = float(m_ls.group(1))
         if line_spacing is None:
             m_lsp = re.search(r"(?:行距[^。\n]{0,8}?固定值|行距|固定值)[：:\s]*?(\d+(?:\.\d+)?)\s*磅", merged)
             if m_lsp:
-                try:
-                    line_spacing_pt = float(m_lsp.group(1))
-                except Exception:
-                    line_spacing_pt = None
+                line_spacing_pt = float(m_lsp.group(1))
 
         # 页边距（cm/厘米）
-        margins_cm: Dict[str, float] = {}
+        margins_cm: dict[str, float] = {}
         unit_re = r"(?:cm|厘\s*米|㎝)"
         side_map = {"上": "top", "下": "bottom", "左": "left", "右": "right"}
         for zh, key in side_map.items():
             m_side = re.search(rf"{zh}\s*(\d+(?:\.\d+)?)\s*{unit_re}", merged, flags=re.IGNORECASE)
             if m_side:
-                try:
-                    margins_cm[key] = float(m_side.group(1))
-                except Exception:
-                    pass
+                margins_cm[key] = float(m_side.group(1))
         # 常见写法：页边距：上2.5cm 下2.0cm 左2.0cm 右2.0cm
         m_margins = re.search(
             rf"页边距[:：]?\s*上(?P<top>\d+(?:\.\d+)?)\s*{unit_re}\s*下(?P<bottom>\d+(?:\.\d+)?)\s*{unit_re}\s*左(?P<left>\d+(?:\.\d+)?)\s*{unit_re}\s*右(?P<right>\d+(?:\.\d+)?)\s*{unit_re}",
@@ -872,10 +1077,7 @@ class TenderParser:
         )
         if m_margins:
             for k in ("top", "bottom", "left", "right"):
-                try:
-                    margins_cm[k] = float(m_margins.group(k))
-                except Exception:
-                    pass
+                margins_cm[k] = float(m_margins.group(k))
         # 写法：页边距：上2.5厘米，其余均为2.0厘米
         m_top_other = re.search(
             rf"页边距[^。\n]{{0,40}}?上\s*(?P<top>\d+(?:\.\d+)?)\s*{unit_re}[,，;；、\s]*(?:其余|其他|其它)[^。\n]{{0,8}}?(?:均为|为)\s*(?P<other>\d+(?:\.\d+)?)\s*{unit_re}",
@@ -883,15 +1085,12 @@ class TenderParser:
             flags=re.IGNORECASE,
         )
         if m_top_other:
-            try:
-                top = float(m_top_other.group("top"))
-                other = float(m_top_other.group("other"))
-                margins_cm["top"] = top
-                margins_cm.setdefault("right", other)
-                margins_cm.setdefault("bottom", other)
-                margins_cm.setdefault("left", other)
-            except Exception:
-                pass
+            top = float(m_top_other.group("top"))
+            other = float(m_top_other.group("other"))
+            margins_cm["top"] = top
+            margins_cm.setdefault("right", other)
+            margins_cm.setdefault("bottom", other)
+            margins_cm.setdefault("left", other)
 
         # 总页数限制（若出现）
         max_pages = None
@@ -900,8 +1099,8 @@ class TenderParser:
             max_pages = int(m_pages.group(1))
             meta["global_requirements"].append(f"总页数不超过{max_pages}页。")
 
-        style: Dict[str, Any] = {}
-        font_cfg: Dict[str, Any] = {}
+        style: dict[str, Any] = {}
+        font_cfg: dict[str, Any] = {}
         if body_font:
             if body_font in {"Times New Roman", "Arial"}:
                 font_cfg["latin"] = body_font
@@ -957,7 +1156,7 @@ class TenderParser:
                 meta["global_requirements"].append("版式要求：" + "，".join(summary) + "。")
         return style, meta
 
-    def _extract_chapter_page_targets(self, text: str, outline: list[str]) -> Dict[str, Any]:
+    def _extract_chapter_page_targets(self, text: str, outline: list[str]) -> dict[str, Any]:
         """
         抽取章节页数目标（若招标明确给出）。
         仅做轻量规则：识别“章节名（x-y页）/（x页）”或“章节名：x页”。
@@ -965,7 +1164,7 @@ class TenderParser:
         merged = text or ""
         if not merged.strip() or not outline:
             return {}
-        chapter_pages: Dict[str, Any] = {}
+        chapter_pages: dict[str, Any] = {}
 
         def _norm_title(t: str) -> str:
             return re.sub(r"\s+", "", t or "")
@@ -995,26 +1194,45 @@ class TenderParser:
                 continue
         return chapter_pages
 
-    def _extract_chapter_requirements(self, text: str, outline: list[str]) -> Dict[str, Any]:
+    def _extract_chapter_requirements(self, text: str, outline: list[str]) -> dict[str, Any]:
+        requirements, _review = self._extract_chapter_requirement_candidates(
+            text, outline
+        )
+        return requirements
+
+    def _extract_chapter_requirement_candidates(
+        self, text: str, outline: list[str]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """
-        抽取与章节标题强相关的“应包含/要求/提供”条款。
-        规则：以标题为锚点向后截取少量文本，抓取含关键动词的句子。
+        抽取可执行章节条款，并把评分残句/截断残句隔离为待复核记录。
+
+        ``chapter_requirements`` 只返回可进入模型提示词的完整要求；待复核
+        记录保留在 extraction_meta 中，供人工修复来源文本，不参与 mandatory gate。
         """
         merged = text or ""
         if not merged.strip() or not outline:
-            return {}
+            return {}, []
         lines = [ln.strip() for ln in merged.splitlines() if ln.strip()]
         joined = "\n".join(lines)
-        chapter_reqs: Dict[str, Any] = {}
+        chapter_reqs: dict[str, Any] = {}
+        review_rows: list[dict[str, Any]] = []
         verbs = ("应", "必须", "提供", "包含", "阐述", "说明", "明确")
         for title in outline[:30]:
             # 简单锚点：找到标题出现位置后截取一段
             idx = joined.find(title)
             if idx < 0:
                 continue
-            chunk = joined[idx : idx + 600]
-            cand = []
-            for sent in re.split(r"[。；;\n]", chunk):
+            window_end = min(len(joined), idx + 600)
+            chunk = joined[idx:window_end]
+            window_truncated = (
+                window_end < len(joined)
+                and bool(chunk)
+                and chunk[-1] not in "。；;\n"
+            )
+            sentences = re.split(r"[。；;\n]", chunk)
+            cand: list[str] = []
+            chapter_review_count = 0
+            for sentence_index, sent in enumerate(sentences):
                 s = sent.strip()
                 if not s or len(s) < 6:
                     continue
@@ -1022,16 +1240,50 @@ class TenderParser:
                     # 避免把目录行本身当要求
                     if title in s and len(s) < len(title) + 8:
                         continue
-                    cand.append(s[:120])
+                    quality_input: Any = s
+                    if window_truncated and sentence_index == len(sentences) - 1:
+                        quality_input = {
+                            "requirement": s,
+                            "planning_status": "NEEDS_REVIEW",
+                            "review_reason_codes": ["EXTRACTION_WINDOW_TRUNCATED"],
+                        }
+                    quality = classify_chapter_requirement_quality(quality_input)
+                    if quality["quality_status"] == "READY":
+                        if s not in cand:
+                            cand.append(s)
+                    elif chapter_review_count < 6:
+                        review_rows.append(
+                            {
+                                "chapter_title": title,
+                                "requirement": s,
+                                "status": "NEEDS_REVIEW",
+                                "mandatory": False,
+                                "prompt_eligible": False,
+                                "reason_codes": list(
+                                    quality.get("review_reason_codes") or []
+                                ),
+                            }
+                        )
+                        chapter_review_count += 1
                 if len(cand) >= 6:
                     break
             if cand:
                 chapter_reqs[title] = cand
-        return chapter_reqs
+        return chapter_reqs, review_rows
 
     async def _extract_index_matrix(
-        self, sections: List[Section], sources: List[Tuple[str, str]]
-    ) -> List[TenderIndexItem]:
+        self, sections: list[Section], sources: list[tuple[str, str]]
+    ) -> list[TenderIndexItem]:
+        items = await asyncio.to_thread(
+            self._extract_index_matrix_sync, sections, sources
+        )
+        if self.llm:
+            await self._complete_index_prompts()
+        return items
+
+    def _extract_index_matrix_sync(
+        self, sections: list[Section], sources: list[tuple[str, str]]
+    ) -> list[TenderIndexItem]:
         dim_keywords = {
             TenderDimension.QUALITY: ["质量", "验收", "标准", "合格", "优良"],
             TenderDimension.SAFETY: ["安全", "文明施工", "风险", "事故"],
@@ -1041,7 +1293,7 @@ class TenderParser:
             TenderDimension.PENALTY: ["扣分", "废标", "否决", "重大偏差"],
         }
 
-        items: List[TenderIndexItem] = []
+        items: list[TenderIndexItem] = []
         for dim, kws in dim_keywords.items():
             hits = []
             spans = []
@@ -1053,9 +1305,49 @@ class TenderParser:
                         weight = min(1.0, weight + 0.1)
 
             for path, txt in sources:
+                document_sha256 = self._file_sha256(path)
+                if not document_sha256:
+                    continue
+                if dim == TenderDimension.SCHEDULE:
+                    page_offset = 0
+                    source_pages = txt.split("\f")
+                    for page_index, page_text in enumerate(
+                        source_pages,
+                        start=1,
+                    ):
+                        page_text_sha256 = hashlib.sha256(
+                            page_text.encode("utf-8")
+                        ).hexdigest()
+                        for match in _PLANNED_DURATION_RE.finditer(page_text):
+                            start = page_offset + match.start()
+                            end = page_offset + match.end()
+                            spans.append(
+                                SourceSpan(
+                                    file_name=path,
+                                    page=page_index,
+                                    start=start,
+                                    end=end,
+                                    snippet=page_text[
+                                        max(0, match.start() - 80) : min(
+                                            len(page_text),
+                                            match.end() + 80,
+                                        )
+                                    ],
+                                    document_sha256=document_sha256,
+                                    source_sha256=document_sha256,
+                                    page_text_sha256=page_text_sha256,
+                                    page_start=match.start(),
+                                    page_end=match.end(),
+                                )
+                            )
+                        page_offset += len(page_text)
+                        if page_index < len(source_pages):
+                            page_offset += 1
                 for kw in kws:
                     if kw in txt:
                         idx = txt.find(kw)
+                        if dim == TenderDimension.SCHEDULE and spans:
+                            break
                         spans.append(
                             SourceSpan(
                                 file_name=path,
@@ -1063,13 +1355,11 @@ class TenderParser:
                                 start=idx,
                                 end=idx + len(kw),
                                 snippet=txt[max(0, idx - 30) : idx + 30],
+                                document_sha256=document_sha256,
+                                source_sha256=document_sha256,
                             )
                         )
                         break
-
-            if self.llm:
-                prompt = f"从招标文本中提取 {dim.value} 的关键指标，输出关键词列表。"
-                await self.llm.complete(prompt)
 
             items.append(
                 TenderIndexItem(

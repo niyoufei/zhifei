@@ -4,6 +4,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Production stop is identity-bound to the selected immutable supervisor.  It
+# never scans workspace pid files or ports.  The legacy process cleanup below
+# is retained solely for an explicitly requested mutable-workspace diagnostic.
+if [ "${ZF_DEV_WORKSPACE_MODE:-0}" != "1" ]; then
+  BOOTSTRAP_PYTHON="/usr/bin/python3"
+  OS_HOME="$("$BOOTSTRAP_PYTHON" -I -B -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+  case "$OS_HOME" in /*) ;; *) exit 2 ;; esac
+  TRUSTED_BOOTSTRAP="${OS_HOME}/Library/Application Support/com.zhifei.construction-expert/bootstrap/launch_current.py"
+  if [ ! -x "$BOOTSTRAP_PYTHON" ] || [ ! -f "$TRUSTED_BOOTSTRAP" ] || [ -L "$TRUSTED_BOOTSTRAP" ]; then
+    printf '%s\n' \
+      '{"ok":false,"error_code":"LAUNCH_BOOTSTRAP_MISSING","message":"固定外置可信启动入口不可用，请重新执行本地封存"}' \
+      >&2
+    exit 2
+  fi
+  exec "$BOOTSTRAP_PYTHON" -I -B "$TRUSTED_BOOTSTRAP" --stop
+fi
+
 BACKEND_PORT="${BACKEND_PORT:-8010}"
 WEB_PORT="${WEB_PORT:-8501}"
 RUNTIME_DIR="${ZF_RUNTIME_DIR:-$ROOT/.runtime/docgen}"

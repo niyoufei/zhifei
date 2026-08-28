@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import datetime as _dt
+import copy
 import json
 import math
+import os
 import re
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Dict, Any, List
 
 from docx import Document
+from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -55,22 +60,28 @@ _GENERIC_COVER_IMAGE_STEMS = {
 }
 
 _FONT_ALIASES = {
-    # The application runs on macOS.  SimSun/SimHei are Windows family names;
-    # LibreOffice on macOS silently substitutes them with a Latin face, which
-    # turns Chinese submission text into tofu/blank glyphs.  STSong and Heiti
-    # SC are installed system Chinese faces and remain recognisable to Word's
-    # font substitution engine when the DOCX is opened on Windows.
+    # Store the portable Chinese family name in OOXML.  Platform-specific
+    # alternatives are declared in fontTable.xml instead of silently replacing
+    # w:eastAsia, so Windows/Word receives the required 宋体 declaration while
+    # macOS/LibreOffice can still fall back to STSong for rendering.
+    "宋体": "宋体",
+    "simsun": "宋体",
+    "stsong": "宋体",
+    "songti sc": "宋体",
+    "仿宋": "仿宋体",
+    "仿宋体": "仿宋体",
+    "fangsong": "仿宋体",
+    "stfangsong": "仿宋体",
+    "黑体": "黑体",
+    "simhei": "黑体",
+    "heiti sc": "黑体",
+    "stheiti": "黑体",
+}
+
+_FONT_FALLBACKS = {
     "宋体": "STSong",
-    "simsun": "STSong",
-    "stsong": "STSong",
-    "songti sc": "STSong",
-    "仿宋": "STFangsong",
     "仿宋体": "STFangsong",
-    "fangsong": "STFangsong",
     "黑体": "Heiti SC",
-    "simhei": "Heiti SC",
-    "heiti sc": "Heiti SC",
-    "stheiti": "Heiti SC",
 }
 _SUBMISSION_EVIDENCE_RE = re.compile(r"【证据\s*[:：][^】]{0,600}】")
 _SUBMISSION_GRAPH_RE = re.compile(r"【(?:图谱节点|图谱经验值)\s*[:：][^】]{0,600}】")
@@ -162,7 +173,7 @@ _RISK_TRIPLET_RE = re.compile(
     r"(?:验证|验证方式)\s*[：:]\s*(?P<verification>.+)$"
 )
 _INLINE_MARKDOWN_RE = re.compile(r"(\*\*|__)(.+?)\1")
-_MAX_SUBMISSION_IMAGES = 24
+_MAX_SUBMISSION_IMAGES = 40
 _INVALID_XML_10_RE = re.compile(
     "[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]"
 )
@@ -204,6 +215,8 @@ def _sanitize_docx_payload(value: Any) -> Any:
 
 def _local_adapter_export_error(export_kind: str, issues: Any) -> RuntimeError:
     payload = {
+        "code": "LOCAL_ADAPTER_EXPORT_BLOCKED",
+        "message": "输出未通过本地正式交付适配器门禁。",
         "status": "blocked",
         "export_allowed": False,
         "export_kind": export_kind,
@@ -240,6 +253,248 @@ def _resolve_docx_font_name(value: Any) -> str:
     if not raw:
         return raw
     return _FONT_ALIASES.get(raw, _FONT_ALIASES.get(raw.lower(), raw))
+
+
+def _set_first_line_chars(target: Any, chars: int) -> None:
+    """Set Word's character-based first-line indent deterministically.
+
+    ``python-docx`` exposes only distance-based indentation.  Chinese tender
+    documents require ``w:firstLineChars=200`` (two ideographic characters),
+    which remains stable when fonts are substituted across Word/WPS/macOS.
+    """
+
+    try:
+        if hasattr(target, "_p"):
+            p_pr = target._p.get_or_add_pPr()
+        else:
+            p_pr = target._element.get_or_add_pPr()
+        ind = p_pr.find(qn("w:ind"))
+        if ind is None:
+            ind = OxmlElement("w:ind")
+            p_pr.append(ind)
+        for name in ("firstLine", "hanging", "hangingChars"):
+            ind.attrib.pop(qn(f"w:{name}"), None)
+        ind.set(qn("w:firstLineChars"), str(max(0, int(chars))))
+    except Exception:
+        pass
+
+
+def _iter_story_paragraphs(doc: Document):
+    """Yield paragraphs from the body, tables, headers and footers once."""
+
+    seen: set[int] = set()
+
+    def _yield_container(container: Any):
+        for paragraph in getattr(container, "paragraphs", ()):
+            marker = id(paragraph._p)
+            if marker not in seen:
+                seen.add(marker)
+                yield paragraph
+        for table in getattr(container, "tables", ()):
+            for row in table.rows:
+                for cell in row.cells:
+                    yield from _yield_container(cell)
+
+    yield from _yield_container(doc)
+    for section in doc.sections:
+        for story in (section.header, section.first_page_header, section.even_page_header,
+                      section.footer, section.first_page_footer, section.even_page_footer):
+            yield from _yield_container(story)
+
+
+def _enforce_chinese_paragraph_geometry(doc: Document) -> None:
+    """Apply two-character indentation only to real body paragraphs.
+
+    Headings, captions, lists, table cells and drawing host paragraphs must
+    remain flush-left/centred.  Normal prose receives character-based
+    indentation and exact zero before/after spacing.
+    """
+
+    def _inside_table(paragraph: Any) -> bool:
+        node = paragraph._p.getparent()
+        while node is not None:
+            try:
+                if node.tag == qn("w:tc"):
+                    return True
+            except Exception:
+                pass
+            node = node.getparent()
+        return False
+
+    for paragraph in _iter_story_paragraphs(doc):
+        style_name = str(getattr(getattr(paragraph, "style", None), "name", "") or "")
+        xml = paragraph._p.xml
+        is_body = (
+            style_name in {"Normal", "正文"}
+            and not _inside_table(paragraph)
+            and "<w:drawing" not in xml
+            and "<w:pict" not in xml
+            and "<w:fldChar" not in xml
+            and str(paragraph.text or "").strip() != ""
+        )
+        _set_first_line_chars(paragraph, 200 if is_body else 0)
+
+
+def _scrub_document_properties(doc: Document) -> None:
+    """Clear authoring identity and machine metadata before package save."""
+
+    try:
+        props = doc.core_properties
+        for name in (
+            "author", "last_modified_by", "comments", "category", "content_status",
+            "identifier", "keywords", "language", "subject", "title", "version",
+        ):
+            try:
+                setattr(props, name, "")
+            except Exception:
+                pass
+        for name in ("created", "modified", "last_printed"):
+            try:
+                setattr(props, name, None)
+            except Exception:
+                pass
+        try:
+            props.revision = 1
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _materialize_section_story_references(doc: Document) -> None:
+    """Persist explicit default header/footer refs on every content section."""
+
+    inherited_default: dict[str, Any] = {}
+    for index, section in enumerate(doc.sections):
+        if index > 0:
+            section.different_first_page_header_footer = False
+        for tag_name in ("headerReference", "footerReference"):
+            default_nodes = [
+                node
+                for node in section._sectPr.findall(qn(f"w:{tag_name}"))
+                if str(node.get(qn("w:type")) or "default") == "default"
+            ]
+            if index == 0 and default_nodes:
+                inherited_default[tag_name] = default_nodes[0]
+                continue
+            prior = inherited_default.get(tag_name)
+            if prior is None:
+                continue
+            for node in list(section._sectPr.findall(qn(f"w:{tag_name}"))):
+                section._sectPr.remove(node)
+            # Writer can select first/even page styles for continued landscape
+            # tables even when Word would use the default story.  Point all
+            # three variants at the verified non-empty default part.
+            for story_type in ("even", "first", "default"):
+                explicit = copy.deepcopy(prior)
+                explicit.set(qn("w:type"), story_type)
+                section._sectPr.insert(0, explicit)
+
+
+def _secure_docx_package(path: str | Path) -> None:
+    """Strip generated-package metadata/custom XML and add font fallbacks.
+
+    The rewrite is atomic and preserves all unrelated ZIP members byte-for-byte.
+    It also removes the default bibliography customXml part added by the
+    python-docx template, preventing custom XML from becoming an unnoticed
+    sensitive-data channel.
+    """
+
+    source = Path(path)
+    handle = tempfile.NamedTemporaryFile(
+        mode="wb", dir=str(source.parent), prefix=f".{source.name}.", suffix=".tmp", delete=False
+    )
+    temp_path = Path(handle.name)
+    handle.close()
+    try:
+        with zipfile.ZipFile(source, "r") as reader, zipfile.ZipFile(temp_path, "w") as writer:
+            for info in reader.infolist():
+                name = info.filename
+                if name.startswith("customXml/") or name == "docProps/custom.xml":
+                    continue
+                data = reader.read(name)
+                if name.endswith(".rels") or name == "[Content_Types].xml":
+                    try:
+                        from lxml import etree
+
+                        root = etree.fromstring(data)
+                        if name.endswith(".rels"):
+                            for rel in list(root):
+                                target = str(rel.get("Target") or "")
+                                rel_type = str(rel.get("Type") or "")
+                                if "customXml" in rel_type or target.startswith("../customXml/") or target == "docProps/custom.xml":
+                                    root.remove(rel)
+                        else:
+                            for child in list(root):
+                                part_name = str(child.get("PartName") or "")
+                                content_type = str(child.get("ContentType") or "")
+                                if part_name.startswith("/customXml/") or part_name == "/docProps/custom.xml" or "custom-properties" in content_type:
+                                    root.remove(child)
+                        data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+                    except Exception:
+                        pass
+                elif name == "docProps/core.xml":
+                    try:
+                        from lxml import etree
+
+                        root = etree.fromstring(data)
+                        for child in root:
+                            local = etree.QName(child).localname
+                            if local in {
+                                "creator", "lastModifiedBy", "description", "keywords", "subject",
+                                "title", "category", "contentStatus", "identifier", "language", "version",
+                                "created", "modified", "lastPrinted",
+                            }:
+                                child.text = ""
+                        data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+                    except Exception:
+                        pass
+                elif name == "docProps/app.xml":
+                    try:
+                        from lxml import etree
+
+                        root = etree.fromstring(data)
+                        for child in root:
+                            if etree.QName(child).localname in {"Company", "Manager"}:
+                                child.text = ""
+                        data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+                    except Exception:
+                        pass
+                elif name == "word/fontTable.xml":
+                    try:
+                        from lxml import etree
+
+                        root = etree.fromstring(data)
+                        ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                        for declared, fallback in _FONT_FALLBACKS.items():
+                            font = next(
+                                (item for item in root.findall(f"{{{ns}}}font") if item.get(f"{{{ns}}}name") == declared),
+                                None,
+                            )
+                            if font is None:
+                                font = etree.SubElement(root, f"{{{ns}}}font")
+                                font.set(f"{{{ns}}}name", declared)
+                            alt = font.find(f"{{{ns}}}altName")
+                            if alt is None:
+                                alt = etree.SubElement(font, f"{{{ns}}}altName")
+                            alt.set(f"{{{ns}}}val", fallback)
+                        data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+                    except Exception:
+                        pass
+                writer.writestr(info, data)
+        os.replace(temp_path, source)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _save_docx_secure(doc: Document, output_path: str | Path) -> None:
+    _enforce_chinese_paragraph_geometry(doc)
+    _scrub_document_properties(doc)
+    _materialize_section_story_references(doc)
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(target))
+    _secure_docx_package(target)
 
 
 def _rewrite_submission_notation(value: str) -> str:
@@ -1495,7 +1750,7 @@ def _normalize_style(style: Dict[str, Any]) -> Dict[str, Any]:
     title_latin_font = style.get("title_latin_font") or headings_cfg.get("latin") or body_latin_font
     title_size = _to_float(style.get("title_size") or headings_cfg.get("h2_size") or max(body_size + 2, 14), 14.0)
     doc_title_size = _to_float(
-        style.get("doc_title_size") or headings_cfg.get("h1_size") or max(title_size + 2, 16),
+        style.get("doc_title_size") or headings_cfg.get("h1_size") or title_size or 16,
         16.0,
     )
 
@@ -1581,6 +1836,7 @@ def _set_run_font(run, east_font: str, latin_font: str, size_pt: float):
     if latin_font:
         rfonts.set(qn("w:ascii"), latin_font)
         rfonts.set(qn("w:hAnsi"), latin_font)
+    rfonts.set(qn("w:cs"), east_font or latin_font)
 
 
 def _set_style_font(style, *, east_font: str, latin_font: str, size_pt: float | None = None) -> None:
@@ -1598,6 +1854,7 @@ def _set_style_font(style, *, east_font: str, latin_font: str, size_pt: float | 
         if latin_font:
             rfonts.set(qn("w:ascii"), latin_font)
             rfonts.set(qn("w:hAnsi"), latin_font)
+        rfonts.set(qn("w:cs"), east_font or latin_font)
     except Exception:
         pass
 
@@ -1617,7 +1874,7 @@ def _configure_professional_named_styles(doc: Document, style_cfg: Dict[str, Any
             caption,
             east_font=cfg["body_font"],
             latin_font=cfg["body_latin_font"],
-            size_pt=10.5,
+            size_pt=cfg["body_size"],
         )
         caption.font.italic = False
         caption.font.color.rgb = RGBColor.from_string(palette["muted"])
@@ -1645,7 +1902,11 @@ def _configure_professional_named_styles(doc: Document, style_cfg: Dict[str, Any
         bullet.paragraph_format.widow_control = True
     except Exception:
         pass
-    for style_name, left_cm, size_pt in (("TOC 1", 0.0, 11.5), ("TOC 2", 0.55, 11.0), ("TOC 3", 1.1, 10.5)):
+    for style_name, left_cm, size_pt in (
+        ("TOC 1", 0.0, cfg["body_size"]),
+        ("TOC 2", 0.55, cfg["body_size"]),
+        ("TOC 3", 1.1, cfg["body_size"]),
+    ):
         try:
             toc_style = doc.styles[style_name]
             _set_style_font(
@@ -1974,7 +2235,7 @@ def _toc_entry_style(style_cfg: Dict[str, Any], level: int) -> Dict[str, Any]:
         return {
             "font_east": title_font,
             "font_latin": title_latin,
-            "size_pt": max(title_size, body_size + 2.0),
+            "size_pt": title_size,
             "bold": True,
             "left_indent_cm": 0.0,
             "color_rgb": tuple(int(str(palette.get("accent_dark") or "103B52")[i : i + 2], 16) for i in (0, 2, 4)),
@@ -1983,7 +2244,7 @@ def _toc_entry_style(style_cfg: Dict[str, Any], level: int) -> Dict[str, Any]:
         return {
             "font_east": body_font,
             "font_latin": body_latin,
-            "size_pt": max(body_size + 1.0, 14.5),
+            "size_pt": body_size,
             "bold": False,
             "left_indent_cm": 1.0,
             "color_rgb": accent_rgb,
@@ -1991,7 +2252,7 @@ def _toc_entry_style(style_cfg: Dict[str, Any], level: int) -> Dict[str, Any]:
     return {
         "font_east": body_font,
         "font_latin": body_latin,
-        "size_pt": max(body_size, 13.5),
+        "size_pt": body_size,
         "bold": False,
         "left_indent_cm": 2.0,
         "color_rgb": (0, 0, 0),
@@ -2014,7 +2275,7 @@ def _render_toc_line(
         paragraph.paragraph_format.first_line_indent = Cm(0)
         paragraph.paragraph_format.left_indent = Cm(float(line_cfg["left_indent_cm"]))
         paragraph.paragraph_format.space_before = Pt(0)
-        paragraph.paragraph_format.space_after = Pt(4 if level == 1 else 2)
+        paragraph.paragraph_format.space_after = Pt(0)
         paragraph.paragraph_format.line_spacing = Pt(22)
         p_pr = paragraph._p.get_or_add_pPr()
         tabs = p_pr.find(qn("w:tabs"))
@@ -2057,50 +2318,40 @@ def _insert_auto_toc(
     toc_pages: int = 1,
     toc_entries: List[Dict[str, Any]] | None = None,
 ) -> None:
-    page_chunks = _paginate_toc_entries(toc_entries or [], max(1, int(toc_pages or 1)))
     style = style_cfg if isinstance(style_cfg, dict) else {}
     title_font = str(style.get("title_font") or "宋体")
     title_latin = str(style.get("title_latin_font") or style.get("body_latin_font") or title_font)
-    title_size = max(_to_float(style.get("doc_title_size"), 18.0), 18.0)
-    for page_idx, page_entries in enumerate(page_chunks):
-        heading = doc.add_paragraph()
-        try:
-            heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            heading.paragraph_format.first_line_indent = Cm(0)
-            heading.paragraph_format.space_before = Pt(6)
-            heading.paragraph_format.space_after = Pt(10)
-            heading.paragraph_format.line_spacing = Pt(24)
-        except Exception:
-            pass
-        title_run = heading.add_run("目录" if page_idx == 0 else "目录（续）")
-        _set_run_font(title_run, title_font, title_latin, title_size)
-        try:
-            title_run.bold = True
-            title_run.font.color.rgb = RGBColor(15, 89, 102)
-        except Exception:
-            pass
+    title_size = _to_float(style.get("doc_title_size"), 16.0)
+    heading = doc.add_paragraph()
+    try:
+        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        heading.paragraph_format.first_line_indent = Cm(0)
+        heading.paragraph_format.space_before = Pt(6)
+        heading.paragraph_format.space_after = Pt(10)
+        heading.paragraph_format.line_spacing = Pt(22)
+    except Exception:
+        pass
+    title_run = heading.add_run("目录")
+    _set_run_font(title_run, title_font, title_latin, title_size)
+    try:
+        title_run.bold = True
+        title_run.font.color.rgb = RGBColor(15, 89, 102)
+    except Exception:
+        pass
 
-        field_paragraph = doc.add_paragraph()
-        _append_field_run(field_paragraph, 'TOC \\o "1-2" \\h \\z \\u')
-        apply_paragraph(field_paragraph)
-        _hide_paragraph(field_paragraph)
-        try:
-            field_paragraph.paragraph_format.first_line_indent = Cm(0)
-        except Exception:
-            pass
-
-        if page_entries:
-            for entry in page_entries:
-                _render_toc_line(doc, entry, style_cfg=style)
-        elif page_idx == 0:
-            empty = doc.add_paragraph("当前无章节目录。")
-            apply_paragraph(empty)
-            try:
-                empty.paragraph_format.first_line_indent = Cm(0)
-                empty.paragraph_format.left_indent = Cm(0)
-            except Exception:
-                pass
-        doc.add_page_break()
+    # A visible live TOC is the sole directory representation.  The former
+    # hidden TOC plus hand-built duplicate directory left sensitive hidden text
+    # and produced two directories after Word refreshed fields.
+    field_paragraph = doc.add_paragraph()
+    _append_field_run(field_paragraph, 'TOC \\o "1-3" \\h \\z \\u')
+    apply_paragraph(field_paragraph)
+    try:
+        field_paragraph.paragraph_format.first_line_indent = Cm(0)
+        field_paragraph.paragraph_format.space_before = Pt(0)
+        field_paragraph.paragraph_format.space_after = Pt(0)
+    except Exception:
+        pass
+    doc.add_page_break()
 
 
 def _usable_page_width_cm(doc: Document) -> float:
@@ -2367,7 +2618,7 @@ def _apply_semantic_table_layout(
                 except Exception:
                     pass
                 for run in paragraph.runs:
-                    _set_run_font(run, cfg["body_font"], cfg["body_latin_font"], 10.5 if row_index else 11.0)
+                    _set_run_font(run, cfg["body_font"], cfg["body_latin_font"], cfg["body_size"])
                     if row_index == 0 or (row_index > 0 and col == 0 and emphasize_first):
                         run.bold = True
                     if row_index == 0:
@@ -2575,21 +2826,21 @@ def _apply_footer_page_numbers(
                 pass
         elif str(document_label or "").strip():
             run_label = p_left.add_run(str(document_label).strip())
-            _set_run_font(run_label, font_east, font_latin, 10.5)
+            _set_run_font(run_label, font_east, font_latin, 14.0)
             try:
                 run_label.font.color.rgb = RGBColor(15, 89, 102)
             except Exception:
                 pass
         prefix = p_right.add_run("第 ")
-        _set_run_font(prefix, font_east, font_latin, 9.5)
+        _set_run_font(prefix, font_east, font_latin, 14.0)
         _append_field_run(p_right, "PAGE")
         middle = p_right.add_run(" 页 / 共 ")
-        _set_run_font(middle, font_east, font_latin, 9.5)
+        _set_run_font(middle, font_east, font_latin, 14.0)
         _append_field_run(p_right, "NUMPAGES")
         suffix = p_right.add_run(" 页")
-        _set_run_font(suffix, font_east, font_latin, 9.5)
+        _set_run_font(suffix, font_east, font_latin, 14.0)
         for run in p_right.runs:
-            _set_run_font(run, font_east, font_latin, 9.5)
+            _set_run_font(run, font_east, font_latin, 14.0)
             try:
                 run.font.color.rgb = RGBColor(83, 101, 110)
             except Exception:
@@ -2851,7 +3102,7 @@ def _insert_cover_page(doc: Document, style_cfg: Dict[str, Any], cover_meta: Dic
             doc.add_paragraph(),
             east_font=body_font,
             latin_font=body_latin,
-            size_pt=10.5,
+            size_pt=cfg["body_size"],
             text=cover_image_caption,
             color_rgb=(90, 98, 102),
             space_before_pt=4,
@@ -2910,16 +3161,17 @@ def _apply_style(doc: Document, style: Dict[str, Any]):
         else:
             st.paragraph_format.line_spacing = cfg["line_spacing"]
         st.paragraph_format.space_before = Pt(0)
-        st.paragraph_format.space_after = Pt(4)
+        st.paragraph_format.space_after = Pt(0)
         st.paragraph_format.alignment = cfg["body_align"]
         st.paragraph_format.first_line_indent = Cm(cfg["first_line_indent_cm"])
+        _set_first_line_chars(st, 200)
         st.paragraph_format.widow_control = True
     except Exception:
         pass
     heading_sizes = {
         "Heading 1": cfg["doc_title_size"],
         "Heading 2": cfg["title_size"],
-        "Heading 3": max(cfg["body_size"] + 1.0, 12.0),
+        "Heading 3": cfg["title_size"],
     }
     palette = cfg["palette"]
     heading_colors = {
@@ -2958,9 +3210,10 @@ def _apply_style(doc: Document, style: Dict[str, Any]):
             else:
                 p.paragraph_format.line_spacing = cfg["line_spacing"]
             p.paragraph_format.widow_control = True
-            p.paragraph_format.space_after = Pt(4 if not is_title else 6)
+            p.paragraph_format.space_before = Pt(0 if not is_title else 8)
+            p.paragraph_format.space_after = Pt(0 if not is_title else 6)
             if not is_title and cfg["first_line_indent_cm"] > 0:
-                p.paragraph_format.first_line_indent = Cm(cfg["first_line_indent_cm"])
+                _set_first_line_chars(p, 200)
             align = cfg["title_align"] if is_title else cfg["body_align"]
             if align is not None:
                 p.paragraph_format.alignment = align
@@ -3405,7 +3658,7 @@ def _append_submission_markdown_table(
         apply_paragraph(paragraph)
         paragraph.paragraph_format.first_line_indent = Cm(0)
         for run in paragraph.runs:
-            run.font.size = Pt(11.5)
+            run.font.size = Pt(style_cfg.get("body_size") or 14.0)
     for row_index, row in enumerate(table_rows, 1):
         for col, value in enumerate(row):
             cell = table.rows[row_index].cells[col]
@@ -3422,9 +3675,194 @@ def _append_submission_markdown_table(
             paragraph.paragraph_format.first_line_indent = Cm(0)
             paragraph.paragraph_format.space_after = Pt(0)
             for run in paragraph.runs:
-                run.font.size = Pt(11.0)
+                run.font.size = Pt(style_cfg.get("body_size") or 14.0)
     _style_professional_table(table, style_cfg)
     _apply_semantic_table_layout(table, table_headers, table_rows, style_cfg)
+
+
+def _set_a4_section_geometry(
+    section: Any,
+    *,
+    landscape: bool,
+    style_cfg: Dict[str, Any],
+    previous_section: Any | None = None,
+) -> None:
+    # LibreOffice does not reliably resolve Word's implicit "linked to
+    # previous" header/footer when a new section only contains page geometry.
+    # Reuse the explicit default story relationships so every orientation
+    # change retains the branding header and PAGE/NUMPAGES footer.
+    if previous_section is not None:
+        for tag_name in ("headerReference", "footerReference"):
+            for node in list(section._sectPr.findall(qn(f"w:{tag_name}"))):
+                section._sectPr.remove(node)
+            for node in previous_section._sectPr.findall(qn(f"w:{tag_name}")):
+                if str(node.get(qn("w:type")) or "default") == "default":
+                    section._sectPr.insert(0, copy.deepcopy(node))
+        section.different_first_page_header_footer = False
+    section.orientation = WD_ORIENT.LANDSCAPE if landscape else WD_ORIENT.PORTRAIT
+    section.page_width = Cm(29.7 if landscape else 21.0)
+    section.page_height = Cm(21.0 if landscape else 29.7)
+    section.top_margin = Cm(float(style_cfg.get("margin_top_cm") or 2.5))
+    section.right_margin = Cm(float(style_cfg.get("margin_right_cm") or 2.0))
+    section.bottom_margin = Cm(float(style_cfg.get("margin_bottom_cm") or 2.0))
+    section.left_margin = Cm(float(style_cfg.get("margin_left_cm") or 2.0))
+
+
+def _append_nested_table(
+    cell: Any,
+    nested: Dict[str, Any],
+    *,
+    style_cfg: Dict[str, Any],
+) -> None:
+    headers = [str(value or "").strip() for value in (nested.get("headers") or [])]
+    raw_rows = nested.get("rows") or []
+    if not headers or not isinstance(raw_rows, list):
+        return
+    rows = [
+        [str(value or "").strip() for value in row]
+        for row in raw_rows
+        if isinstance(row, (list, tuple))
+    ]
+    rows = [(row + [""] * len(headers))[: len(headers)] for row in rows]
+    table = cell.add_table(rows=1 + len(rows), cols=len(headers))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for col, header in enumerate(headers):
+        table.rows[0].cells[col].text = header
+    for row_index, row in enumerate(rows, start=1):
+        for col, value in enumerate(row):
+            table.rows[row_index].cells[col].text = value
+    _style_professional_table(table, style_cfg)
+    _apply_semantic_table_layout(table, headers, rows, style_cfg)
+
+
+def _append_structured_tables(
+    doc: Document,
+    apply_paragraph: Any,
+    definitions: Any,
+    style_cfg: Dict[str, Any],
+    *,
+    restore_portrait: bool = True,
+) -> bool:
+    """Render explicit tender tables, including wide/merged/nested variants."""
+
+    if definitions in (None, []):
+        return False
+    if not isinstance(definitions, list):
+        raise ValueError("tables must be a list")
+    current_landscape = False
+    for table_index, definition in enumerate(definitions, start=1):
+        if not isinstance(definition, dict):
+            raise ValueError(f"tables[{table_index - 1}] must be an object")
+        headers = [str(value or "").strip() for value in (definition.get("headers") or [])]
+        raw_rows = definition.get("rows") or []
+        if not headers or not isinstance(raw_rows, list):
+            continue
+        column_count = min(12, len(headers))
+        headers = headers[:column_count]
+        rows: List[List[Any]] = []
+        for raw_row in raw_rows:
+            if not isinstance(raw_row, (list, tuple)):
+                continue
+            rows.append((list(raw_row) + [""] * column_count)[:column_count])
+
+        landscape = str(definition.get("orientation") or definition.get("layout") or "").strip().lower() in {
+            "landscape",
+            "horizontal",
+            "横向",
+        }
+        if landscape != current_landscape:
+            previous_section = doc.sections[-1]
+            new_section = doc.add_section(WD_SECTION.NEW_PAGE)
+            _set_a4_section_geometry(
+                new_section,
+                landscape=landscape,
+                style_cfg=style_cfg,
+                previous_section=previous_section,
+            )
+            current_landscape = landscape
+
+        title = str(definition.get("title") or f"附表{table_index}").strip()
+        if title:
+            heading = doc.add_heading(title, level=2)
+            apply_paragraph(heading, is_title=True)
+
+        merge_groups = definition.get("merge_header_groups") or []
+        has_group_header = isinstance(merge_groups, list) and any(isinstance(item, dict) for item in merge_groups)
+        header_rows = 2 if has_group_header else 1
+        table = doc.add_table(rows=header_rows + len(rows), cols=column_count)
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+        total_width_cm = 25.7 if landscape else 16.2
+        text_rows = [
+            [str(value.get("text") or "") if isinstance(value, dict) else str(value or "") for value in row]
+            for row in rows
+        ]
+        widths = _suggest_table_column_widths(headers, text_rows, total_width_cm=total_width_cm)
+
+        if has_group_header:
+            covered: set[int] = set()
+            for group in merge_groups:
+                if not isinstance(group, dict):
+                    continue
+                start = max(0, min(column_count - 1, _to_int(group.get("start"), 0)))
+                end = max(start, min(column_count - 1, _to_int(group.get("end"), start)))
+                merged = table.rows[0].cells[start]
+                if end > start:
+                    merged = merged.merge(table.rows[0].cells[end])
+                merged.text = str(group.get("label") or "").strip()
+                covered.update(range(start, end + 1))
+            for col in range(column_count):
+                if col not in covered:
+                    table.rows[0].cells[col].text = headers[col]
+            _mark_table_header_row(table)
+            second_tr_pr = table.rows[1]._tr.get_or_add_trPr()
+            if second_tr_pr.find(qn("w:tblHeader")) is None:
+                second_tr_pr.append(OxmlElement("w:tblHeader"))
+
+        header_row = table.rows[header_rows - 1]
+        for col, header in enumerate(headers):
+            header_row.cells[col].text = header
+            _set_cell_width(header_row.cells[col], widths[col])
+
+        for row_index, row in enumerate(rows, start=header_rows):
+            for col, raw_value in enumerate(row):
+                cell = table.rows[row_index].cells[col]
+                _set_cell_width(cell, widths[col])
+                if isinstance(raw_value, dict):
+                    cell.text = str(raw_value.get("text") or "").strip()
+                    nested = raw_value.get("nested")
+                    if isinstance(nested, dict):
+                        _append_nested_table(cell, nested, style_cfg=style_cfg)
+                else:
+                    cell.text = str(raw_value or "")
+
+        _style_professional_table(table, style_cfg)
+        _apply_semantic_table_layout(table, headers, text_rows, style_cfg)
+        if has_group_header:
+            palette = _normalize_style(style_cfg)["palette"]
+            for group_row_index in (0, 1):
+                for cell in table.rows[group_row_index].cells:
+                    _set_cell_shading(cell, palette["table_header"])
+                    for paragraph in cell.paragraphs:
+                        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        paragraph.paragraph_format.first_line_indent = Cm(0)
+                        for run in paragraph.runs:
+                            _set_run_font(run, style_cfg["body_font"], style_cfg["body_latin_font"], style_cfg["body_size"])
+                            run.bold = True
+                            run.font.color.rgb = RGBColor.from_string("FFFFFF")
+
+    if current_landscape and restore_portrait:
+        previous_section = doc.sections[-1]
+        new_section = doc.add_section(WD_SECTION.NEW_PAGE)
+        _set_a4_section_geometry(
+            new_section,
+            landscape=False,
+            style_cfg=style_cfg,
+            previous_section=previous_section,
+        )
+        return True
+    return False
 
 
 def _append_submission_content(
@@ -4144,7 +4582,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
                 pc.paragraph_format.space_after = Pt(8)
                 pc.paragraph_format.keep_together = True
                 for run in pc.runs:
-                    _set_run_font(run, style_cfg["body_font"], style_cfg["body_latin_font"], 10.5)
+                    _set_run_font(run, style_cfg["body_font"], style_cfg["body_latin_font"], style_cfg["body_size"])
                     run.font.color.rgb = RGBColor(24, 82, 112)
             except Exception:
                 pass
@@ -4260,7 +4698,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
                 caption_paragraph.paragraph_format.space_after = Pt(2)
                 caption_paragraph.paragraph_format.keep_together = True
                 for run in caption_paragraph.runs:
-                    _set_run_font(run, style_cfg["body_font"], style_cfg["body_latin_font"], 10.5)
+                    _set_run_font(run, style_cfg["body_font"], style_cfg["body_latin_font"], style_cfg["body_size"])
                     run.font.color.rgb = RGBColor.from_string(style_cfg["palette"]["muted"])
                 asset_hash = str(receipt.get("sha256") or "")
                 if asset_hash:
@@ -4436,6 +4874,23 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
                 item = chapter_candidates[0]
                 if _append_media_item(item, chapter_title=str(title)):
                     consumed_media.add(_media_identity(item))
+
+    tables_restored_portrait = _append_structured_tables(
+        doc,
+        apply_paragraph,
+        data.get("tables"),
+        style_cfg,
+        restore_portrait=bool(
+            (media_all and not chart_mode_auto_density)
+            or (
+                internal_review
+                and any(
+                    data.get(name)
+                    for name in ("drawing_index", "standard_index", "cross_index", "param_trace", "quality_checks")
+                )
+            )
+        ),
+    )
 
     # 图纸证据索引（可追溯）
     drawing_index = data.get("drawing_index") or {}
@@ -4635,7 +5090,14 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         else [item for item in media_all if _media_identity(item) not in consumed_media]
     )
     if remaining_media:
-        doc.add_page_break()
+        # add_section(NEW_PAGE) already moved the cursor to a fresh portrait
+        # page after a trailing landscape table.  Adding another page break at
+        # that exact point creates a branded but otherwise empty page.  Public
+        # exports have no intervening annexes, so the figure heading can safely
+        # occupy the restored page.  Internal-review annexes do intervene and
+        # retain the explicit page break below.
+        if not (tables_restored_portrait and not internal_review):
+            doc.add_page_break()
         hm = doc.add_heading("图表与插图", level=1)
         apply_paragraph(hm, is_title=True)
         for item in remaining_media:
@@ -4671,8 +5133,7 @@ def export_autoplan_docx(data: Dict[str, Any], output_path: str) -> str:
         )
 
     _enable_field_updates(doc)
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    doc.save(output_path)
+    _save_docx_secure(doc, output_path)
     embedded_media_verification = verify_docx_media_hashes(output_path, inserted_media_hashes)
     source_media_summary = {
             "accepted_count": int(media_quality.get("accepted_count") or 0),
@@ -4776,8 +5237,8 @@ def export_autoplan_compare_docx(data: Dict[str, Any], output_path: str) -> str:
         p = doc.add_paragraph("暂无可对比的章节（需使用 LLM 整改且保留 original_content）。")
         apply_paragraph(p)
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    doc.save(output_path)
+    _enable_field_updates(doc)
+    _save_docx_secure(doc, output_path)
     return output_path
 
 
@@ -6121,6 +6582,6 @@ def export_expert_review_brief_docx(data: Dict[str, Any], output_path: str) -> s
             p2 = doc.add_paragraph((content[:360] + "...") if len(content) > 360 else content)
             apply_paragraph(p2)
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    doc.save(output_path)
+    _enable_field_updates(doc)
+    _save_docx_secure(doc, output_path)
     return str(output_path)

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import base64
-import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
+
+from backend.zhifei_autoplan.engineering_graphics import render_engineering_graphic, spec_from_rows
 
 CSCEC_VI = {
     "blue": "#005BAC",
@@ -195,6 +196,7 @@ def _extract_image_bytes(resp: Any) -> bytes | None:
 def _try_gemini_imagen(prompt: str, output: Path, *, model: str, api_key: str | None) -> Dict[str, Any]:
     if not api_key:
         return {"ok": False, "provider": "google", "model": model, "error": "missing_api_key"}
+    client = None
     try:
         from google import genai
 
@@ -206,8 +208,17 @@ def _try_gemini_imagen(prompt: str, output: Path, *, model: str, api_key: str | 
                 output.write_bytes(raw)
                 return {"ok": True, "provider": "google", "model": model, "mode": "imagen"}
         return {"ok": False, "provider": "google", "model": model, "error": "generate_images_unavailable"}
-    except Exception as exc:
-        return {"ok": False, "provider": "google", "model": model, "error": str(exc)}
+    except Exception:
+        return {
+            "ok": False,
+            "provider": "google",
+            "model": model,
+            "error": "IMAGE_PROVIDER_REQUEST_FAILED",
+        }
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
 
 def _build_prompt(*, visual_type: str, index_matrix: Dict[str, Any]) -> str:
@@ -220,19 +231,36 @@ def _build_prompt(*, visual_type: str, index_matrix: Dict[str, Any]) -> str:
 
 
 def _fallback_draw(visual_type: str, index_matrix: Dict[str, Any], output: Path) -> None:
-    if visual_type == "样板":
-        _draw_template(index_matrix, output)
-        return
-    if visual_type == "流程":
-        _draw_flow(index_matrix, output)
-        return
-    if visual_type == "思维导图":
-        _draw_mindmap(index_matrix, output)
-        return
-    if visual_type == "智慧绿色四新":
-        _draw_innovation(index_matrix, output)
-        return
-    _write_fallback_png(output)
+    rows = []
+    for index, item in enumerate(index_matrix.get("index_matrix") or []):
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "point": str(item.get("dimension") or f"控制维度{index + 1}"),
+                "verify": str(
+                    item.get("response_strategy")
+                    or item.get("evidence_requirement")
+                    or "按项目事实台账复核"
+                ),
+            }
+        )
+    if not rows:
+        rows = [
+            {"point": "工程特点", "verify": "项目事实台账"},
+            {"point": "施工准备", "verify": "资源与条件核验"},
+            {"point": "过程控制", "verify": "检查检测记录"},
+            {"point": "验收关闭", "verify": "责任人签认"},
+        ]
+    layout = "tree" if visual_type == "思维导图" else ("two_row" if len(rows) > 4 else "auto")
+    spec = spec_from_rows(
+        title=f"{visual_type}工程图示",
+        subtitle=str(index_matrix.get("project_name") or "施工组织设计")[:36],
+        rows=rows,
+        layout=layout,
+        caption="中文文字由程序化矢量层排版，参数以项目资料为准",
+    )
+    render_engineering_graphic(spec, png_path=output, svg_path=output.with_suffix(".svg"))
 
 
 def generate_document_visual_assets(
@@ -249,16 +277,22 @@ def generate_document_visual_assets(
     assets: List[Dict[str, Any]] = []
     provider_used = provider
     model_used = model
-    if api_key is None:
-        api_key = os.getenv("ZF_GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
     for idx, visual_type in enumerate(VISUAL_TYPES, start=1):
         name = _safe_name(f"{idx:02d}_{visual_type}.png")
         path = out_dir / name
         prompt = _build_prompt(visual_type=visual_type, index_matrix=index_matrix)
         result = {"ok": False, "provider": provider, "model": model, "error": "fallback_only"}
-        if provider == "google":
-            result = _try_gemini_imagen(prompt, path, model=model, api_key=api_key)
+        # External image models are disabled until a dedicated image-provider
+        # admission capability is implemented.  A raw caller/env key is not a
+        # substitute for admission.  The deterministic engineering renderer
+        # remains available and produces the deliverable asset below.
+        if provider == "google" and api_key:
+            result = {
+                "ok": False,
+                "provider": provider,
+                "model": model,
+                "error": "IMAGE_PROVIDER_ADMISSION_REQUIRED",
+            }
         if not result.get("ok"):
             _fallback_draw(visual_type, index_matrix, path)
         assets.append(

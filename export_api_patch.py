@@ -3,12 +3,12 @@ from fastapi.responses import FileResponse, JSONResponse
 import json, os
 from datetime import datetime
 from pathlib import Path
+from routes import recommend
 
 app = FastAPI()
 
 app.include_router(recommend.router)
-EXPORT_DIR = Path("exports")
-EXPORT_DIR.mkdir(exist_ok=True)
+EXPORT_DIR = Path(os.environ.get("ZF_EXPORT_DIR") or "artifacts/exports")
 
 @app.get("/export")
 def export_latest(response_type: str = "json"):
@@ -33,6 +33,7 @@ def export_latest(response_type: str = "json"):
     }
 
     # 生成导出文件（JSON）
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = EXPORT_DIR / f"{export_name}.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump({"meta": meta, "data": data}, f, ensure_ascii=False, indent=2)
@@ -49,5 +50,5 @@ def export_latest(response_type: str = "json"):
 
 if __name__ == "__main__":
     import uvicorn
-from routes import recommend
+
     uvicorn.run(app, host="0.0.0.0", port=8080)

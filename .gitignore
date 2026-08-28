@@ -72,6 +72,13 @@ __pycache__/
 
 # ===== Root-level runtime snapshots =====
 /audit_trail.jsonl
+/backend/data/autoplan/claude_usage/
+/backend/data/autoplan/checkpoints/
+/backend/data/autoplan/events/
+/backend/data/autoplan/ingest_cache/
+/backend/data/autoplan/ingest_spool/
+/backend/data/autoplan/jobs/
+/backend/data/autoplan/provider_admission/
 /last_publish_*.json
 /last_score_response.json
 /score_result.json

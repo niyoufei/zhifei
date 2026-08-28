@@ -21,8 +21,64 @@ import os
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
+
+
+_SENSITIVE_GENERATION_FIELDS = {
+    "api_key",
+    "base_url",
+    "secret_key",
+    "token_url",
+    "image_api_key",
+}
+
+_SUCCESS_JOB_STATUSES = {"done", "succeeded"}
+_TERMINAL_JOB_STATUSES = {
+    *_SUCCESS_JOB_STATUSES,
+    "failed",
+    "cancelled",
+    "interrupted_recoverable",
+}
+
+
+def _require_loopback_base_url(value: str) -> str:
+    """Keep the Actions credential and project material on this Mac."""
+    raw = str(value or "").strip().rstrip("/")
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            "LOCAL_BACKEND_LOOPBACK_REQUIRED: 后端地址必须是本机 127.0.0.1"
+        ) from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or port is None
+        or not 1 <= port <= 65535
+    ):
+        raise ValueError(
+            "LOCAL_BACKEND_LOOPBACK_REQUIRED: 后端地址必须是本机 127.0.0.1"
+        )
+    return f"http://127.0.0.1:{port}"
+
+
+def _server_routed_generation_payload(payload: dict) -> dict:
+    """Drop credentials and client-side provider routes before serialization."""
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key not in _SENSITIVE_GENERATION_FIELDS
+        and key not in {"provider", "model", "image_provider", "image_model"}
+    }
 
 
 def _hdr(actions_key: str) -> dict:
@@ -38,12 +94,17 @@ def _post_json(
     params: dict | None = None,
     timeout: int = 120,
 ) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
+    wire_payload = (
+        _server_routed_generation_payload(payload)
+        if path in {"/actions/generate_async", "/actions/runs"}
+        else dict(payload or {})
+    )
     r = requests.post(
         url,
         headers={**_hdr(actions_key), "Content-Type": "application/json"},
         params=params or {},
-        json=payload,
+        json=wire_payload,
         timeout=timeout,
     )
     if r.status_code >= 400:
@@ -52,7 +113,7 @@ def _post_json(
 
 
 def _get_json(base: str, path: str, actions_key: str, params: dict | None = None, timeout: int = 60) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
     r = requests.get(url, headers=_hdr(actions_key), params=params or {}, timeout=timeout)
     if r.status_code >= 400:
         raise RuntimeError(f"GET {path} failed: {r.status_code} {r.text[:500]}")
@@ -69,7 +130,7 @@ def _post_files(
     params: dict | None = None,
     timeout: int = 300,
 ) -> dict:
-    url = base + path
+    url = _require_loopback_base_url(base) + path
     files = []
     handles = []
     try:
@@ -91,7 +152,7 @@ def _post_files(
 
 
 def _ingest_files(base: str, file_paths: list[str], *, project_id: str | None = None, timeout: int = 300) -> dict:
-    url = base + "/ingest/upload"
+    url = _require_loopback_base_url(base) + "/ingest/upload"
     files = []
     handles = []
     try:
@@ -114,7 +175,7 @@ def _ingest_files(base: str, file_paths: list[str], *, project_id: str | None = 
 
 
 def _download(base: str, actions_key: str, job_id: str, kind: str, variant: int, out_path: Path, timeout: int = 300):
-    url = base + "/actions/download"
+    url = _require_loopback_base_url(base) + "/actions/download"
     r = requests.get(
         url,
         headers=_hdr(actions_key),
@@ -221,23 +282,47 @@ def main() -> int:
     ap.add_argument("--outline", action="append", default=[], help="Override outline for this run (repeatable)")
     ap.add_argument("--requirements", action="append", default=[], help="Extra requirements (repeatable)")
     ap.add_argument("--variants", type=int, default=1, help="Number of variants")
+    ap.add_argument(
+        "--delivery-scope",
+        choices=["document", "chapter_validation"],
+        default="document",
+        help="Formal document delivery or bounded real-model chapter validation",
+    )
+    ap.add_argument(
+        "--resume-from-job-id",
+        default="",
+        help="Resume a compatible failed/cancelled job from its sealed checkpoint",
+    )
     ap.add_argument("--quality-strict", action="store_true", default=True, help="Enable strict quality checks")
     ap.add_argument("--no-quality-strict", dest="quality_strict", action="store_false", help="Disable strict quality checks")
     ap.add_argument("--auto-remediate", action="store_true", default=True, help="Enable auto remediation")
     ap.add_argument("--no-auto-remediate", dest="auto_remediate", action="store_false", help="Disable auto remediation")
     ap.add_argument("--remediate-mode", default="template", choices=["template", "llm"], help="Remediation mode")
     ap.add_argument("--dry-run", action="store_true", default=False, help="Do not call external LLMs (will use fallback template)")
+    ap.add_argument(
+        "--generate-images",
+        action="store_true",
+        default=False,
+        help="Generate optional document images (disabled by default for bounded validation runs)",
+    )
     ap.add_argument("--no-gate", action="store_true", default=False, help="Do not fail the process even if quality gate fails")
     ap.add_argument("--timeout-sec", type=int, default=900, help="Polling timeout seconds")
     ap.add_argument("--poll-sec", type=float, default=2.0, help="Polling interval seconds")
     ap.add_argument("--download", action="store_true", default=True, help="Download artifacts to build/actions_runs/<job_id>/")
     ap.add_argument("--no-download", dest="download", action="store_false", help="Do not download artifacts")
-    ap.add_argument("--provider", default="", help="Optional LLM provider override")
-    ap.add_argument("--model", default="", help="Optional LLM model override")
-    ap.add_argument("--api-key", default=os.environ.get("ZF_DEFAULT_API_KEY", ""), help="Optional API key override")
+    # Retained only so old invocations fail safely instead of silently changing
+    # meaning.  Provider routing and credentials are server-owned and these
+    # values are never serialized.
+    ap.add_argument("--provider", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--model", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--api-key", default="", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
-    base = (args.base_url or "").rstrip("/")
+    try:
+        base = _require_loopback_base_url(args.base_url)
+    except ValueError as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 2
     if not args.actions_key.strip():
         print("[FAIL] missing actions key: set env ZF_ACTIONS_KEY or pass --actions-key", file=sys.stderr)
         return 2
@@ -289,20 +374,21 @@ def main() -> int:
         "outline": outline,
         "requirements": args.requirements,
         "variants": max(1, int(args.variants or 1)),
+        "delivery_scope": args.delivery_scope,
         "quality_strict": bool(args.quality_strict),
         "auto_remediate": bool(args.auto_remediate),
         "remediate_mode": args.remediate_mode,
         "compare_mode": "summary",
         "compare_max_chars": 1200,
-        "generate_images": True,
+        "generate_images": bool(args.generate_images),
         "dry_run": bool(args.dry_run),
     }
-    if args.provider:
-        gen["provider"] = args.provider
-    if args.model:
-        gen["model"] = args.model
-    if args.api_key:
-        gen["api_key"] = args.api_key
+    resume_from_job_id = str(args.resume_from_job_id or "").strip()
+    if resume_from_job_id:
+        gen["resume_from_job_id"] = resume_from_job_id
+    if args.provider or args.model or args.api_key:
+        print("[WARN] 已忽略客户端模型路由或密钥；生成仅使用后端已准入供应商。")
+    gen = _server_routed_generation_payload(gen)
 
     ret = _post_json(base, "/actions/generate_async", args.actions_key, gen)
     job_id = ret.get("job_id") or ""
@@ -323,18 +409,36 @@ def main() -> int:
             time.sleep(float(args.poll_sec))
             continue
         job = js.get("job") or {}
-        status = job.get("status") or ""
-        if status in ("done", "failed"):
+        status = str(job.get("status") or "").strip().lower()
+        if status in _TERMINAL_JOB_STATUSES:
             break
         time.sleep(float(args.poll_sec))
-    if status != "done":
+    if status not in _SUCCESS_JOB_STATUSES:
         print(f"[FAIL] job not done: status={status}", file=sys.stderr)
         return 3
 
     print("[7/8] read result")
     rr = _get_json(base, "/actions/result", args.actions_key, params={"job_id": job_id, "variant": 1, "include_sections": False})
+    if args.delivery_scope == "chapter_validation":
+        if (
+            str(rr.get("delivery_scope") or "") != "chapter_validation"
+            or rr.get("delivery_ready") is not False
+        ):
+            print("[FAIL] chapter validation result attempted delivery promotion", file=sys.stderr)
+            return 11
+        print("[OK] chapter validation completed without formal delivery promotion")
     qc = rr.get("quality_checks") or {}
     _print_quality(qc)
+    formal_delivery_ready = (
+        args.delivery_scope == "document" and rr.get("delivery_ready") is True
+    )
+    if (
+        args.delivery_scope == "document"
+        and not args.dry_run
+        and not formal_delivery_ready
+    ):
+        print("[FAIL] formal document result is not sealed for delivery", file=sys.stderr)
+        return 11
 
     if args.download:
         print("[8/8] download artifacts")
@@ -342,37 +446,38 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         # json
         _download(base, args.actions_key, job_id, "json", 1, out_dir / f"autoplan_{job_id}.json")
-        # docx + compare_docx
         variants = int(args.variants or 1)
-        for v in range(1, variants + 1):
-            _download(base, args.actions_key, job_id, "docx", v, out_dir / f"autoplan_{job_id}_v{v}.docx")
-            _download(base, args.actions_key, job_id, "compare_docx", v, out_dir / f"autoplan_{job_id}_compare_v{v}.docx")
-            try:
-                _download(base, args.actions_key, job_id, "focus_xlsx", v, out_dir / f"autoplan_{job_id}_focus_v{v}.xlsx")
-            except Exception:
-                pass
-            try:
-                _download(
-                    base,
-                    args.actions_key,
-                    job_id,
-                    "score_overview_xlsx",
-                    v,
-                    out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx",
-                )
-            except Exception:
-                pass
-            try:
-                _download(
-                    base,
-                    args.actions_key,
-                    job_id,
-                    "expert_review_docx",
-                    v,
-                    out_dir / f"autoplan_{job_id}_专家复核提要版_v{v}.docx",
-                )
-            except Exception:
-                pass
+        if formal_delivery_ready:
+            # Formal artifacts are unavailable by design for chapter validation.
+            for v in range(1, variants + 1):
+                _download(base, args.actions_key, job_id, "docx", v, out_dir / f"autoplan_{job_id}_v{v}.docx")
+                _download(base, args.actions_key, job_id, "compare_docx", v, out_dir / f"autoplan_{job_id}_compare_v{v}.docx")
+                try:
+                    _download(base, args.actions_key, job_id, "focus_xlsx", v, out_dir / f"autoplan_{job_id}_focus_v{v}.xlsx")
+                except Exception:
+                    pass
+                try:
+                    _download(
+                        base,
+                        args.actions_key,
+                        job_id,
+                        "score_overview_xlsx",
+                        v,
+                        out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx",
+                    )
+                except Exception:
+                    pass
+                try:
+                    _download(
+                        base,
+                        args.actions_key,
+                        job_id,
+                        "expert_review_docx",
+                        v,
+                        out_dir / f"autoplan_{job_id}_专家复核提要版_v{v}.docx",
+                    )
+                except Exception:
+                    pass
         print(f"saved_to={out_dir}")
         for v in range(1, variants + 1):
             p1 = out_dir / f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx"
@@ -396,6 +501,17 @@ def main() -> int:
         "standard_evidence",
         "boq_focus_item_typed_evidence",
     ]
+    if args.delivery_scope == "chapter_validation":
+        hard_keys = [
+            "structure",
+            "officialese",
+            "risk_triplet",
+            "logic_template_adherence",
+            "quantitative",
+            "required_topics_detail",
+            "evidence_traceability",
+            "standard_evidence",
+        ]
     hard_fail = []
     for k in hard_keys:
         item = qc.get(k) or {}

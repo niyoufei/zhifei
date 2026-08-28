@@ -1,66 +1,54 @@
 #!/usr/bin/env bash
-# 安装 macOS launchd 服务，使 Web 控制台（后端 + Streamlit）在后台常驻运行，无需依赖终端。
-# 用法：
-#   ZF_ACTIONS_KEY=... ZF_GOOGLE_API_KEY=... ./scripts/install_web_ui_launchd.sh
+# Install one macOS LaunchAgent whose only target is the fixed current bootstrap.
+# The bootstrap resolves and verifies the selected immutable release on every
+# launchd start; the plist never pins one release, runtime, identity or secret.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PLIST_ID="com.youfeini.docgen.runtime-supervisor"
+BOOTSTRAP_PYTHON="/usr/bin/python3"
+OS_HOME="$("$BOOTSTRAP_PYTHON" -I -B -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+case "$OS_HOME" in /*) ;; *) exit 2 ;; esac
+PLIST_DIR="$OS_HOME/Library/LaunchAgents"
+PLIST_PATH="$PLIST_DIR/${PLIST_ID}.plist"
+BASE="$OS_HOME/Library/Application Support/com.zhifei.construction-expert"
+TRUSTED_BOOTSTRAP="$BASE/bootstrap/launch_current.py"
+LOG_DIR="$BASE/state/supervisor/logs"
 
-# macOS TCC: LaunchAgent background processes may be blocked from Desktop/Documents paths.
-# If the project is in protected folders, prefer direct startup script instead of launchd.
-if [[ "$ROOT_DIR" == "$HOME/Desktop/"* || "$ROOT_DIR" == "$HOME/Documents/"* ]]; then
-  echo "[WARN] 当前项目位于受保护目录：$ROOT_DIR"
-  echo "[WARN] 为避免 launchd 无权限导致“页面打不开”，本次不安装 launchd。"
-  echo "[OK] 请使用：./scripts/run_web_ui.sh --background"
-  exit 0
+if [ ! -d "$BASE" ] || [ -L "$BASE" ]; then
+  echo "[FAIL] immutable release base is unavailable" >&2
+  exit 1
 fi
-
-PLIST_ID_BACKEND="com.youfeini.docgen.webui.backend"
-PLIST_ID_STREAMLIT="com.youfeini.docgen.webui.streamlit"
-PLIST_ID_WATCHDOG="com.youfeini.docgen.webui.watchdog"
-PLIST_DIR="$HOME/Library/LaunchAgents"
-PLIST_PATH_BACKEND="$PLIST_DIR/${PLIST_ID_BACKEND}.plist"
-PLIST_PATH_STREAMLIT="$PLIST_DIR/${PLIST_ID_STREAMLIT}.plist"
-PLIST_PATH_WATCHDOG="$PLIST_DIR/${PLIST_ID_WATCHDOG}.plist"
-
-HOST="${ZF_HOST:-127.0.0.1}"
-BACKEND_PORT="${ZF_BACKEND_PORT:-8010}"
-WEB_PORT="${ZF_WEB_PORT:-8501}"
-SYSTEM_ID="${ZF_SYSTEM_ID:-docgen-system}"
-
-PYTHON=""
-if [ -x "$ROOT_DIR/venv/bin/python3" ]; then
-  PYTHON="$ROOT_DIR/venv/bin/python3"
-elif [ -x "$ROOT_DIR/.venv/bin/python3" ]; then
-  PYTHON="$ROOT_DIR/.venv/bin/python3"
-else
-  PYTHON="$(python3 -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
-  if [ -z "${PYTHON:-}" ] || [ ! -x "${PYTHON:-}" ]; then
-    PYTHON="$(command -v python3 || true)"
-  fi
+BASE_MODE="$(stat -f '%Lp' "$BASE" 2>/dev/null || stat -c '%a' "$BASE" 2>/dev/null || true)"
+BASE_OWNER="$(stat -f '%u' "$BASE" 2>/dev/null || stat -c '%u' "$BASE" 2>/dev/null || true)"
+if [ "$BASE_MODE" != "700" ] || [ "$BASE_OWNER" != "$UID" ]; then
+  echo "[FAIL] immutable release base must be owned by this user with mode 0700" >&2
+  exit 1
 fi
-if [ -z "${PYTHON:-}" ] || [ ! -x "${PYTHON:-}" ]; then
-  echo "[FAIL] python3 not found"
+if [ ! -f "$TRUSTED_BOOTSTRAP" ] || [ -L "$TRUSTED_BOOTSTRAP" ]; then
+  echo "[FAIL] fixed external trust-root bootstrap is unavailable" >&2
+  exit 1
+fi
+BOOTSTRAP_MODE="$(stat -f '%Lp' "$TRUSTED_BOOTSTRAP" 2>/dev/null || stat -c '%a' "$TRUSTED_BOOTSTRAP" 2>/dev/null || true)"
+BOOTSTRAP_OWNER="$(stat -f '%u' "$TRUSTED_BOOTSTRAP" 2>/dev/null || stat -c '%u' "$TRUSTED_BOOTSTRAP" 2>/dev/null || true)"
+if [ "$BOOTSTRAP_MODE" != "444" ] || [ "$BOOTSTRAP_OWNER" != "$UID" ]; then
+  echo "[FAIL] fixed external trust-root bootstrap must be owned by this user with mode 0444" >&2
+  exit 1
+fi
+if [ ! -d "$LOG_DIR" ] || [ -L "$LOG_DIR" ]; then
+  echo "[FAIL] immutable supervisor log directory is unavailable" >&2
+  exit 1
+fi
+LOG_MODE="$(stat -f '%Lp' "$LOG_DIR" 2>/dev/null || stat -c '%a' "$LOG_DIR" 2>/dev/null || true)"
+LOG_OWNER="$(stat -f '%u' "$LOG_DIR" 2>/dev/null || stat -c '%u' "$LOG_DIR" 2>/dev/null || true)"
+if [ "$LOG_MODE" != "700" ] || [ "$LOG_OWNER" != "$UID" ]; then
+  echo "[FAIL] immutable supervisor log directory must have mode 0700" >&2
+  exit 1
+fi
+if [ ! -x "$BOOTSTRAP_PYTHON" ]; then
+  echo "[FAIL] trusted macOS bootstrap Python is unavailable" >&2
   exit 1
 fi
 
-PY_LAUNCH_XML="      <string>${PYTHON}</string>"
-HOST_SUPPORTS_ARM64="$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)"
-if [ "$HOST_SUPPORTS_ARM64" = "1" ]; then
-  # Force arm64 slice under launchd to avoid x86_64/Rosetta mismatches.
-  if command -v arch >/dev/null 2>&1 && arch -arm64 "$PYTHON" -c 'import pydantic_core' >/dev/null 2>&1; then
-    PY_LAUNCH_XML="      <string>/usr/bin/arch</string>
-      <string>-arm64</string>
-      <string>${PYTHON}</string>"
-  fi
-fi
-
-mkdir -p "$PLIST_DIR"
-mkdir -p "$ROOT_DIR/logs"
-
-ZF_ACTIONS_KEY="${ZF_ACTIONS_KEY:-zf-webui-key}"
-ZF_GOOGLE_API_KEY="${ZF_GOOGLE_API_KEY:-${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}}"
 UTF8_LOCALE="${ZF_LOCALE:-}"
 if [ -z "$UTF8_LOCALE" ] && command -v locale >/dev/null 2>&1; then
   if locale -a 2>/dev/null | grep -Eiq '^zh_CN\.UTF-8$'; then
@@ -71,88 +59,87 @@ if [ -z "$UTF8_LOCALE" ] && command -v locale >/dev/null 2>&1; then
 fi
 [ -n "$UTF8_LOCALE" ] || UTF8_LOCALE="en_US.UTF-8"
 
-# 清理旧的双进程 LaunchAgent，避免与 watchdog 互相抢占。
-for old_id in "$PLIST_ID_BACKEND" "$PLIST_ID_STREAMLIT"; do
-  set +e
-  launchctl bootout "gui/$UID/${old_id}" >/dev/null 2>&1
-  launchctl bootout "gui/$UID" "$PLIST_DIR/${old_id}.plist" >/dev/null 2>&1
-  set -e
-  rm -f "$PLIST_DIR/${old_id}.plist"
+mkdir -p "$PLIST_DIR"
+
+# Retire historical multi-process/watchdog agents.  This installer never
+# searches ports or kills arbitrary processes; all targets are fixed labels.
+LEGACY_IDS=(
+  "com.youfeini.docgen.webui.backend"
+  "com.youfeini.docgen.webui.streamlit"
+  "com.youfeini.docgen.webui.watchdog"
+  "com.youfeini.docgen.autoplan"
+  "com.youfeini.docgen.autoplan.watcher"
+)
+for old_id in "${LEGACY_IDS[@]}"; do
+  old_path="$PLIST_DIR/${old_id}.plist"
+  launchctl bootout "gui/$UID/${old_id}" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$UID" "$old_path" >/dev/null 2>&1 || true
+  rm -f "$old_path"
 done
 
-# 单一 watchdog 服务：统一守护后端+Streamlit，掉线自动拉起。
-cat >"$PLIST_PATH_WATCHDOG" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>${PLIST_ID_WATCHDOG}</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>WorkingDirectory</key>
-    <string>${ROOT_DIR}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-      <key>PYTHONPATH</key>
-      <string>${ROOT_DIR}</string>
-      <key>LANG</key>
-      <string>${UTF8_LOCALE}</string>
-      <key>LC_ALL</key>
-      <string>${UTF8_LOCALE}</string>
-      <key>PYTHONUTF8</key>
-      <string>1</string>
-      <key>ZF_SYSTEM_ID</key>
-      <string>${SYSTEM_ID}</string>
-      <key>ZF_ACTIONS_KEY</key>
-      <string>${ZF_ACTIONS_KEY}</string>
-      <key>ZF_GOOGLE_API_KEY</key>
-      <string>${ZF_GOOGLE_API_KEY}</string>
-      <key>BACKEND_PORT</key>
-      <string>${BACKEND_PORT}</string>
-      <key>WEB_PORT</key>
-      <string>${WEB_PORT}</string>
-      <key>ZF_WATCHDOG_INTERVAL</key>
-      <string>6</string>
-    </dict>
-    <key>ProgramArguments</key>
-    <array>
-      <string>/bin/bash</string>
-      <string>${ROOT_DIR}/scripts/web_ui_watchdog.sh</string>
-    </array>
-    <key>StandardOutPath</key>
-    <string>${ROOT_DIR}/logs/webui_watchdog.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>${ROOT_DIR}/logs/webui_watchdog.err.log</string>
-    <key>SoftResourceLimits</key>
-    <dict>
-      <key>NumberOfFiles</key>
-      <integer>8192</integer>
-    </dict>
-    <key>HardResourceLimits</key>
-    <dict>
-      <key>NumberOfFiles</key>
-      <integer>65536</integer>
-    </dict>
-  </dict>
-</plist>
-EOF
+# plistlib performs XML escaping.  The external bootstrap is independent of
+# current and verifies every selected byte before the frozen Python executes.
+/usr/bin/python3 -I -B - \
+  "$PLIST_PATH" "$PLIST_ID" "$BASE" "$BOOTSTRAP_PYTHON" "$TRUSTED_BOOTSTRAP" \
+  "$LOG_DIR" "$UTF8_LOCALE" <<'PY'
+import os
+import plistlib
+import sys
+import tempfile
+from pathlib import Path
 
-echo "[OK] wrote: $PLIST_PATH_WATCHDOG"
+plist_path, label, base, bootstrap_python, trusted_bootstrap, log_dir, locale = sys.argv[1:]
+program_arguments = [
+    bootstrap_python,
+    "-I",
+    "-B",
+    trusted_bootstrap,
+    "--supervise",
+]
+payload = {
+    "Label": label,
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ThrottleInterval": 10,
+    "WorkingDirectory": base,
+    "EnvironmentVariables": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "LANG": locale,
+        "LC_ALL": locale,
+        "PYTHONUTF8": "1",
+    },
+    "ProgramArguments": program_arguments,
+    "StandardOutPath": str(Path(log_dir) / "runtime-supervisor.out.log"),
+    "StandardErrorPath": str(Path(log_dir) / "runtime-supervisor.err.log"),
+    "SoftResourceLimits": {"NumberOfFiles": 8192},
+    "HardResourceLimits": {"NumberOfFiles": 65536},
+}
 
-# (Re)load
-set +e
-launchctl bootout "gui/$UID" "$PLIST_PATH_WATCHDOG" >/dev/null 2>&1
-set -e
+target = Path(plist_path)
+fd, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+try:
+    with os.fdopen(fd, "wb") as handle:
+        plistlib.dump(payload, handle, fmt=plistlib.FMT_XML, sort_keys=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary_name, 0o644)
+    os.replace(temporary_name, target)
+finally:
+    try:
+        os.unlink(temporary_name)
+    except FileNotFoundError:
+        pass
+PY
 
-launchctl bootstrap "gui/$UID" "$PLIST_PATH_WATCHDOG"
-launchctl kickstart -k "gui/$UID/${PLIST_ID_WATCHDOG}" >/dev/null 2>&1 || true
+# Updating current alone never stops a running supervisor.  Installation (or
+# an operator's explicit bootout/kickstart) is the deliberate cutover point.
+launchctl bootout "gui/$UID/${PLIST_ID}" >/dev/null 2>&1 || true
+launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/$UID" "$PLIST_PATH"
+launchctl enable "gui/$UID/${PLIST_ID}" >/dev/null 2>&1 || true
+launchctl kickstart -k "gui/$UID/${PLIST_ID}" >/dev/null 2>&1 || true
 
-echo "[OK] Web UI launchd 已安装并启动"
-echo "     后端: http://${HOST}:${BACKEND_PORT}/health"
-echo "     Web 控制台: http://${HOST}:${WEB_PORT}"
-echo "     日志: logs/webui_watchdog.*.log, logs/webui_backend.*.log, logs/streamlit.*.log"
-echo ""
-echo "     卸载: ./scripts/uninstall_web_ui_launchd.sh"
+echo "[OK] current-aware runtime supervisor LaunchAgent installed: $PLIST_ID"
+echo "     bootstrap: $TRUSTED_BOOTSTRAP"
+echo "     logs:    $LOG_DIR"
+echo "     uninstall: ./scripts/uninstall_web_ui_launchd.sh"

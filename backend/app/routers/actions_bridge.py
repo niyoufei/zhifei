@@ -2,61 +2,74 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
+import logging
+import math
 import os
 import re
+import stat
 import tempfile
 import threading
+import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, UploadFile, File
-from pydantic import BaseModel
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
-from backend.zhifei_autoplan.job_store import create_job, get_job, heartbeat_job, update_job
+from backend.app.routers.ingest import (
+    _handle_upload as _handle_ingest_upload,
+)
+from backend.app.routers.ingest import (
+    _resolve_workspace_context as _resolve_ingest_workspace_context,
+)
+from backend.app.routers.ingest import (
+    resolve_ingested_file_ids,
+    resolve_ingested_tender_sources,
+)
+from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
 from backend.zhifei_autoplan import export_docx_service as export_docx_core
-from backend.zhifei_autoplan.orchestrator import (
-    _build_boq_focus,
-    _normalize_provider_chain,
-    _provider_chain_for_role,
-    _resolve_provider_api_key,
-    run_autoplan,
-)
-from backend.zhifei_autoplan.multi_agent_runtime import AGENT_ROLE_DIRECTIVES
-from backend.zhifei_autoplan.output_artifacts import save_outputs as save_output_artifacts
-from backend.zhifei_autoplan.professional_document_renderer import (
-    ProfessionalRenderError,
-    render_professional_document,
-)
-from backend.zhifei_autoplan.plan_store import load_plan, save_plan
-from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
-from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
-from backend.zhifei_autoplan.tender_store import save_tender_matrix
-from backend.zhifei_autoplan.boq_store import save_boq_data
-from backend.zhifei_autoplan.tender_store import load_tender_matrix
-from backend.zhifei_autoplan.boq_store import load_boq_data
-from backend.zhifei_autoplan.quality_check import apply_remediation, run_quality_checks, strip_nonconcrete_language
-from backend.zhifei_autoplan.utils.llm_client import LLMClient
-from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
-from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
-from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
-from backend.zhifei_autoplan.requirement_evidence_matrix import (
-    finalize_requirement_evidence_matrix,
-    validate_requirement_evidence_matrix,
-)
-from backend.zhifei_autoplan.compliance_policy import audit_standard_citations
-from backend.zhifei_autoplan.params_runtime import load_params, save_params
-from backend.zhifei_autoplan.four_new_tech import recommend_four_new
-from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
-from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
+from backend.zhifei_autoplan.boq_store import load_boq_data, save_boq_data
 from backend.zhifei_autoplan.case_library_service import (
     CASE_LIBRARY_SCOPE,
     case_library_record_id,
     list_case_library_items,
     normalize_case_library_options,
+)
+from backend.zhifei_autoplan.compliance_policy import (
+    audit_standard_citations,
+    build_project_applicable_standards_manifest,
+    canonical_standard_code,
+)
+from backend.zhifei_autoplan.delivery_quality import (
+    FORMAL_DELIVERY_CONTRACT_VERSION,
+    build_delivery_quality_gate,
+)
+from backend.zhifei_autoplan.delivery_receipt import (
+    build_delivery_receipt,
+    canonical_delivery_receipt_digest,
+)
+from backend.zhifei_autoplan.evidence import resolve_trusted_ingest_record
+from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
+from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
+from backend.zhifei_autoplan.four_new_tech import recommend_four_new
+from backend.zhifei_autoplan.generation_checkpoint import (
+    CheckpointIntegrityError,
+    mark_failed_checkpoint_namespace,
+    read_verified_generation_checkpoint,
 )
 from backend.zhifei_autoplan.image_library import (
     IMAGE_LIBRARY_SCOPE,
@@ -65,7 +78,91 @@ from backend.zhifei_autoplan.image_library import (
     normalize_image_library_options,
     normalize_text_list,
 )
-from backend.zhifei_autoplan.ollama_preview import run_ollama_preview, run_ollama_section_review
+from backend.zhifei_autoplan.job_store import (
+    JobLeaseLostError,
+    acquire_job_lease,
+    create_job,
+    get_job,
+    heartbeat_job,
+    job_lease_active,
+    merge_job,
+    run_with_job_lease,
+    transition_job,
+    update_job,  # noqa: F401 - stable no-write test sentinel/patch surface
+)
+from backend.zhifei_autoplan.local_job_queue import submit_isolated_job
+from backend.zhifei_autoplan.model_reliability import classify_provider_error
+from backend.zhifei_autoplan.multi_agent_runtime import AGENT_ROLE_DIRECTIVES
+from backend.zhifei_autoplan.ollama_preview import (
+    run_ollama_preview,
+    run_ollama_section_review,
+)
+from backend.zhifei_autoplan.orchestrator import (
+    _build_boq_focus,
+    _normalize_provider_chain,
+    _provider_chain_for_role,
+    _resolve_provider_api_key,
+    new_provider_admission_run_coordinator,
+    probe_provider_candidate,
+    run_autoplan,
+)
+from backend.zhifei_autoplan.output_artifacts import (
+    save_outputs as save_output_artifacts,
+)
+from backend.zhifei_autoplan.params_runtime import load_params, save_params
+from backend.zhifei_autoplan.parsers.boq_parser import BoQParser
+from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
+from backend.zhifei_autoplan.plan_store import load_plan, save_plan
+from backend.zhifei_autoplan.professional_document_renderer import (
+    ProfessionalRenderError,
+    canonical_professional_render_receipt_digest,
+    render_professional_document,
+)
+from backend.zhifei_autoplan.project_fact_approval_audit import (
+    ProjectFactApprovalAuditError,
+    append_project_fact_approval_event,
+    build_project_fact_approval_event,
+)
+from backend.zhifei_autoplan.provider_runtime import (
+    ProviderRoutingConfigurationError,
+    ProviderSlot,
+    apply_server_provider_routing,
+    build_server_provider_admission_candidates,
+    server_provider_admission_required_roles,
+)
+from backend.zhifei_autoplan.quality_check import (
+    apply_remediation,
+    run_quality_checks,
+    strip_nonconcrete_language,
+)
+from backend.zhifei_autoplan.requirement_evidence_matrix import (
+    finalize_requirement_evidence_matrix,
+    validate_chapter_requirement_evidence,
+    validate_requirement_evidence_matrix,
+)
+from backend.zhifei_autoplan.review_revision import (
+    artifact_manifest,
+    canonical_digest,
+    commit_revision_promotion,
+    create_revision_snapshot,
+    issue_set_digest,
+    list_revision_snapshots,
+    load_revision_snapshot,
+    prepare_revision_promotion,
+    result_version,
+    stable_issue_id,
+    variant_version,
+)
+from backend.zhifei_autoplan.runtime_events import (
+    MAX_EVENT_BYTES,
+    append_runtime_event,
+    event_journal_path,
+)
+from backend.zhifei_autoplan.sealed_compliance import (
+    SealedComplianceError,
+    load_sealed_registry_authority,
+    validate_registry_authority_projection,
+)
 from backend.zhifei_autoplan.section_drafts import (
     apply_section_draft,
     build_section_draft,
@@ -73,33 +170,698 @@ from backend.zhifei_autoplan.section_drafts import (
     reject_section_draft,
     rollback_section_draft,
 )
-from backend.zhifei_autoplan.review_revision import (
-    artifact_manifest,
-    canonical_digest,
-    create_revision_snapshot,
-    finalize_revision_snapshot,
-    issue_set_digest,
-    list_revision_snapshots,
-    load_revision_snapshot,
-    result_version,
-    stable_issue_id,
-    variant_version,
+from backend.zhifei_autoplan.tender_store import load_tender_matrix, save_tender_matrix
+from backend.zhifei_autoplan.utils.llm_client import LLMClient
+from backend.zhifei_autoplan.variant_cycle import reserve_variant_ids
+from backend.zhifei_autoplan.zbid_snapshot_mapper import (
+    map_zbid_snapshot_to_zdoc_draft_input,
 )
-from backend.zhifei_autoplan.zbid_snapshot_mapper import map_zbid_snapshot_to_zdoc_draft_input
-from backend.app.routers.ingest import _handle_upload as _handle_ingest_upload
-from backend.app.routers.ingest import _resolve_workspace_context as _resolve_ingest_workspace_context
-from backend.app.routers.ingest import workspace_paths as ingest_workspace_paths
-
 
 router = APIRouter(prefix="/actions", tags=["Actions Bridge"])
+logger = logging.getLogger(__name__)
+
+
+def _generation_release_identity_from_environment() -> dict[str, Any]:
+    """Freeze the sealed release identity carried by generated evidence."""
+
+    return {
+        "schema_version": "autoplan-generation-release-v1",
+        "system_id": str(os.environ.get("ZF_SYSTEM_ID") or "docgen-system").strip(),
+        "release_id": str(os.environ.get("ZF_RELEASE_ID") or "").strip(),
+        "manifest_digest": str(
+            os.environ.get("ZF_RELEASE_MANIFEST_DIGEST") or ""
+        ).strip(),
+        "source_digest": str(
+            os.environ.get("ZF_RELEASE_SOURCE_DIGEST") or ""
+        ).strip(),
+        "runtime_digest": str(os.environ.get("ZF_RUNTIME_DIGEST") or "").strip(),
+        "release_root": str(os.environ.get("ZF_RELEASE_ROOT") or "").strip(),
+        "runtime_mode": str(os.environ.get("ZF_RUNTIME_MODE") or "development").strip(),
+        "release_managed": str(os.environ.get("ZF_RELEASE_MANAGED") or "") == "1",
+    }
+
+
+_GENERATION_RELEASE_IDENTITY_AT_START = _generation_release_identity_from_environment()
+
+
+def _generation_compliance_registry_authority_from_environment() -> dict[str, Any] | None:
+    identity = _GENERATION_RELEASE_IDENTITY_AT_START
+    if identity.get("release_managed") is not True:
+        return None
+    authority = load_sealed_registry_authority(
+        str(identity.get("release_root") or ""),
+        expected_release_id=str(identity.get("release_id") or ""),
+        expected_manifest_digest=str(identity.get("manifest_digest") or ""),
+        expected_source_digest=str(identity.get("source_digest") or ""),
+        expected_runtime_digest=str(identity.get("runtime_digest") or ""),
+    )
+    return dict(authority.projection)
+
+
+def _bind_generation_release_identity(
+    results: list[dict[str, Any]],
+    *,
+    compliance_registry_authority: dict[str, Any] | None = None,
+) -> None:
+    identity = dict(_GENERATION_RELEASE_IDENTITY_AT_START)
+    for result in results:
+        result["generation_release_identity"] = dict(identity)
+        if compliance_registry_authority is not None:
+            result["compliance_registry_authority"] = dict(
+                compliance_registry_authority
+            )
+
+
+def _provider_admission_api_projection(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+
+    def _chain_entry(item: Any) -> dict[str, Any]:
+        row = item if isinstance(item, dict) else {}
+        return {
+            "slot": str(row.get("slot") or "")[:80],
+            "role": str(row.get("role") or "")[:80],
+            "provider": str(row.get("provider") or "")[:80],
+            "model": str(row.get("model") or "")[:160],
+        }
+
+    slots: list[dict[str, Any]] = []
+    for item in raw.get("slots") if isinstance(raw.get("slots"), list) else []:
+        row = _chain_entry(item)
+        source = item if isinstance(item, dict) else {}
+        safe_layers: dict[str, Any] = {}
+        layers = source.get("layers") if isinstance(source.get("layers"), dict) else {}
+        for name in ("configuration", "credentials", "model", "quota", "stream", "circuit"):
+            layer = layers.get(name) if isinstance(layers.get(name), dict) else {}
+            safe_layers[name] = {
+                "status": str(layer.get("status") or "unknown")[:24],
+                "code": str(layer.get("code") or "status_unknown")[:80],
+            }
+        row.update(
+            {
+                "admitted": bool(source.get("admitted")),
+                "layers": safe_layers,
+                "reason_codes": [
+                    str(code)[:80]
+                    for code in (source.get("reason_codes") or [])[:20]
+                    if isinstance(code, str)
+                ],
+                "probe_duration_ms": max(
+                    0, int(source.get("probe_duration_ms") or 0)
+                ),
+            }
+        )
+        slots.append(row)
+    return {
+        "schema_version": str(raw.get("schema_version") or "provider-admission-v1")[:80],
+        "status": str(raw.get("status") or "missing")[:80],
+        "configured_slots": max(0, int(raw.get("configured_slots") or 0)),
+        "receipt_slots": max(0, int(raw.get("receipt_slots") or 0)),
+        "required_roles": [
+            str(role)[:80]
+            for role in (raw.get("required_roles") or [])[:20]
+            if isinstance(role, str)
+        ],
+        "slots": slots,
+        "admitted_chain": [
+            _chain_entry(item)
+            for item in (raw.get("admitted_chain") or [])[:20]
+            if isinstance(item, dict)
+        ],
+        "missing_roles": [
+            str(role)[:80]
+            for role in (raw.get("missing_roles") or [])[:20]
+            if isinstance(role, str)
+        ],
+        "generation_allowed": bool(raw.get("generation_allowed")),
+        "fallback_configured": bool(raw.get("fallback_configured")),
+        "fallback_ready": bool(raw.get("fallback_ready")),
+        "resilience_degraded": bool(raw.get("resilience_degraded")),
+        "degraded": bool(raw.get("degraded")),
+        "public_digest": str(raw.get("public_digest") or "")[:64],
+    }
+
+
+@router.get("/provider_admission")
+def actions_provider_admission(
+    x_actions_key: str | None = Header(default=None),
+):
+    """Return a credential-free, offline re-evaluation of the latest receipt."""
+
+    _auth_actions_key(x_actions_key)
+    from backend.zhifei_autoplan.provider_admission import evaluate_latest_snapshot
+    from backend.zhifei_autoplan.provider_runtime import (
+        build_server_provider_admission_candidates,
+        server_provider_admission_required_roles,
+    )
+
+    candidates = build_server_provider_admission_candidates()
+    required_roles = server_provider_admission_required_roles(candidates)
+    admission = evaluate_latest_snapshot(
+        candidates,
+        required_roles,
+        root=os.environ.get("ZF_PROVIDER_ADMISSION_STATE_DIR") or None,
+    )
+    return {"ok": True, "admission": _provider_admission_api_projection(admission)}
+
+
+@router.get("/claude_usage_stats")
+def actions_claude_usage_stats(
+    project_id: str | None = Query(default=None, max_length=160),
+    task_type: str | None = Query(default=None, max_length=120),
+    x_actions_key: str | None = Header(default=None),
+):
+    """Return prompt-cache/token aggregates without prompts or credentials."""
+
+    _auth_actions_key(x_actions_key)
+    from backend.zhifei_autoplan.claude_usage import claude_usage_stats
+
+    return {
+        "ok": True,
+        "stats": claude_usage_stats(project_id=project_id, task_type=task_type),
+    }
+
+
+def _public_provider_error(value: Any) -> dict[str, Any]:
+    """Reduce a provider diagnostic to stable, user-safe fields."""
+
+    raw = dict(value) if isinstance(value, dict) else {"message": str(value or "provider_error")}
+    classification_input: Any = raw
+    if not str(raw.get("code") or "").strip():
+        classification_input = str(raw.get("message") or "provider_error")
+    info = classify_provider_error(
+        classification_input,
+        provider=str(raw.get("provider") or ""),
+        model=str(raw.get("model") or ""),
+    )
+    return {
+        "code": str(info.get("code") or "provider_error")[:80],
+        "message": str(info.get("user_message") or "模型调用失败。")[:300],
+        "action": str(info.get("action") or "请确认模型、网络和供应商状态后重试。")[:300],
+        "retryable": bool(info.get("retryable")),
+        "severity": str(info.get("severity") or "error")[:20],
+    }
+
+
+def _public_provider_state(value: Any) -> dict[str, Any]:
+    """Return provider runtime state without raw SDK/billing/network messages."""
+
+    if not isinstance(value, dict):
+        return {}
+
+    def _scrub(node: Any, *, key: str = "") -> Any:
+        if key in {"last_error", "error"} and node:
+            return _public_provider_error(node)
+        if isinstance(node, dict):
+            result: dict[str, Any] = {}
+            for child_key, child_value in node.items():
+                normalized = str(child_key).strip().lower().replace("-", "_")
+                if (
+                    normalized
+                    in {
+                        "api_key",
+                        "api_keys",
+                        "authorization",
+                        "credential",
+                        "credentials",
+                        "headers",
+                        "key_alias",
+                        "prompt",
+                        "raw",
+                        "raw_error",
+                        "raw_response",
+                        "request_body",
+                        "response_body",
+                        "secret",
+                        "secret_key",
+                        "token",
+                        "token_url",
+                        "url",
+                    }
+                    or normalized.endswith(("_api_key", "_secret", "_token"))
+                ):
+                    continue
+                if normalized == "message":
+                    result[str(child_key)] = "模型供应商诊断已脱敏。"
+                else:
+                    result[str(child_key)] = _scrub(child_value, key=normalized)
+            return result
+        if isinstance(node, list):
+            return [_scrub(item) for item in node]
+        return node
+
+    scrubbed = _scrub(value)
+    return scrubbed if isinstance(scrubbed, dict) else {}
+
+
+_DELIVERY_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
+    "DELIVERY_CONTENT_QUALITY_BLOCKED": (
+        "独立内容质量审核未通过。",
+        "请按内容审核阻断项修订章节后从检查点恢复。",
+    ),
+    "DELIVERY_PLAN_CONSISTENCY_BLOCKED": (
+        "工期、资源峰值或关键线路的一致性校验未通过。",
+        "请统一计划参数与关键线路口径后从检查点恢复。",
+    ),
+    "DELIVERY_STANDARD_EVIDENCE_BLOCKED": (
+        "存在未核验、过期或冲突的规范引用。",
+        "请修正规范引用与核验依据后从检查点恢复。",
+    ),
+    "DELIVERY_REQUIREMENT_EVIDENCE_BLOCKED": (
+        "招标要求尚未全部形成可反查证据闭环。",
+        "请补齐要求标记和来源定位后从检查点恢复。",
+    ),
+    "DELIVERY_CROSS_INDEX_BLOCKED": (
+        "重点清单项未全部形成章节与依据闭环。",
+        "请补齐重点清单项的章节、图纸或规范定位后从检查点恢复。",
+    ),
+    "DELIVERY_CROSS_INDEX_UNAVAILABLE": (
+        "重点清单项交叉索引构建失败，系统已按失败关闭。",
+        "请修复交叉索引构建错误后从检查点恢复。",
+    ),
+    "DELIVERY_MODEL_REVIEW_BLOCKED": (
+        "关键章节精修或全文一致性终审未给出明确无冲突结论。",
+        "请完成模型复核或修订冲突章节后从检查点恢复。",
+    ),
+}
+
+_CHAPTER_VALIDATION_BLOCKER_GUIDANCE: dict[str, tuple[str, str]] = {
+    "CHAPTER_CHECK_STRUCTURE_BLOCKED": (
+        "所选章节结构不完整。",
+        "请补齐所选章节及其正文后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_OFFICIALESE_BLOCKED": (
+        "所选章节存在空泛或公文化表达。",
+        "请改为可执行动作、参数、频次和验收标准后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_RISK_TRIPLET_BLOCKED": (
+        "所选章节的风险、控制和验证闭环未被完整识别。",
+        "请补齐风险、控制、验证和记录后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_LOGIC_TEMPLATE_ADHERENCE_BLOCKED": (
+        "所选章节未遵循选定的章节逻辑模板。",
+        "请按模板锚点重组章节后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_QUANTITATIVE_BLOCKED": (
+        "所选章节缺少必要的量化工程参数。",
+        "请补齐数值、单位、频次或阈值后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_REQUIRED_TOPICS_DETAIL_BLOCKED": (
+        "专项主题细则不完整。",
+        "请在正式全文的责任章节补齐专项主题；单章验证不会据此阻断。",
+    ),
+    "CHAPTER_CHECK_EVIDENCE_TRACEABILITY_BLOCKED": (
+        "所选章节的关键结论缺少可反查证据。",
+        "请补齐来源定位后从检查点恢复。",
+    ),
+    "CHAPTER_CHECK_STANDARD_EVIDENCE_BLOCKED": (
+        "所选章节的规范依据未通过核验。",
+        "请修正规范名称、编号、版本或来源后从检查点恢复。",
+    ),
+    "CHAPTER_SECTION_QUALITY_BLOCKED": (
+        "所选章节的独立内容评分低于章节阈值。",
+        "请按独立内容审核意见修订后从检查点恢复。",
+    ),
+    "CHAPTER_AGENT_CONTRACT_BLOCKED": (
+        "所选章节未满足责任 Agent 的输出合同。",
+        "请补齐责任字段和验收闭环后从检查点恢复。",
+    ),
+    "CHAPTER_MODEL_REVIEW_BLOCKED": (
+        "独立模型复核未给出通过结论。",
+        "请完成模型复核或修订冲突内容后从检查点恢复。",
+    ),
+}
+
+
+def _public_runtime_error(error: Any) -> dict[str, Any]:
+    """Return a stable, bounded error object without repr/prompt leakage."""
+
+    raw = str(error or "").strip()
+    candidates = [raw]
+    if raw.startswith("RuntimeError(") and raw.endswith(")"):
+        inner = raw[len("RuntimeError(") : -1].strip()
+        if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in {"'", '"'}:
+            try:
+                import ast
+
+                candidates.insert(0, str(ast.literal_eval(inner)))
+            except (SyntaxError, ValueError):
+                logger.debug("runtime error wrapper was not a Python literal")
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            code = str(parsed.get("code") or "RUNTIME_FAILED")[:80]
+            failures = parsed.get("failures") if isinstance(parsed.get("failures"), list) else []
+            safe_failures = []
+            for item in failures[:20]:
+                if not isinstance(item, dict):
+                    continue
+                raw_failure = str(
+                    item.get("error") or item.get("message") or "provider_error"
+                )
+                structured_gate_failure = (
+                    str(item.get("failure_kind") or "") == "quality_gate"
+                    or str(item.get("code") or "")
+                    == "requirement_evidence_failed"
+                    or raw_failure.startswith(
+                        "requirement_evidence_precheckpoint_blocked"
+                    )
+                )
+                if (
+                    code == "REQUIREMENT_EVIDENCE_CHAPTER_BLOCKED"
+                    and structured_gate_failure
+                ):
+                    blocking_candidates = list(
+                        item.get("blocking_requirement_ids") or []
+                    )
+                    if not blocking_candidates and ":" in raw_failure:
+                        blocking_candidates = raw_failure.split(":", 1)[1].split(",")
+                    blocking_ids = [
+                        str(value).strip()[:160]
+                        for value in blocking_candidates
+                        if str(value).strip()
+                        and re.fullmatch(
+                            r"[A-Za-z0-9_.-]{1,160}", str(value).strip()
+                        )
+                    ][:20]
+                    provider_error = {
+                        "code": "requirement_evidence_failed",
+                        "message": "章节正文未满足全部招标要求证据绑定。",
+                        "action": "请按阻断要求补充同段要求与证据标记后，从已保存检查点显式恢复。",
+                        "retryable": False,
+                        "severity": "error",
+                        **(
+                            {"blocking_requirement_ids": blocking_ids}
+                            if blocking_ids
+                            else {}
+                        ),
+                    }
+                else:
+                    provider_error = _public_provider_error(
+                        {
+                            "message": raw_failure,
+                            "provider": str(item.get("provider") or ""),
+                            "model": str(item.get("model") or ""),
+                            **({"code": str(item.get("code"))} if item.get("code") else {}),
+                        }
+                    )
+                safe_failures.append(
+                    {
+                        "title": str(item.get("title") or "")[:200],
+                        "provider": str(item.get("provider") or "")[:80],
+                        "model": str(item.get("model") or "")[:120],
+                        "error": provider_error["code"],
+                        **provider_error,
+                    }
+                )
+            return {
+                "code": code,
+                "message": str(parsed.get("message") or "任务执行失败。")[:500],
+                "action": (
+                    "请按阻断要求修订失败章节，并从已保存检查点显式恢复。"
+                    if code == "REQUIREMENT_EVIDENCE_CHAPTER_BLOCKED"
+                    else (
+                        "请移除过小的手工预算，或按章节数量提高任务级模型调用预算后重新发起任务。"
+                        if code == "EXECUTION_BUDGET_EXCEEDED"
+                        else "请核对失败章节与模型健康状态后显式重试。"
+                    )
+                ),
+                "failures": safe_failures,
+            }
+    validation_guidance = (
+        (
+            "CHAPTER_VALIDATION_QUALITY_BLOCKED",
+            "CHAPTER_VALIDATION_QUALITY_BLOCKED",
+            "章节真实模型验证质量门未通过。",
+            "请按章节质量阻断项修订后，以相同交付范围从检查点恢复。",
+        ),
+        (
+            "严格正式交付目录与招标目录不一致",
+            "TENDER_OUTLINE_MISMATCH",
+            "正式交付目录与招标目录不完全一致，系统未调用模型。",
+            "请使用完整招标目录，或将小范围实跑明确设为 chapter_validation。",
+        ),
+        (
+            "章节验证目录包含招标目录外章节",
+            "CHAPTER_VALIDATION_OUTLINE_INVALID",
+            "章节验证请求包含招标目录外章节，系统未调用模型。",
+            "请仅选择招标目录中的章节进行验证。",
+        ),
+        (
+            "招标文件/澄清答疑存在同优先级版式冲突",
+            "TENDER_STYLE_CONFLICT",
+            "招标版式要求存在同优先级冲突，系统未自行裁决。",
+            "请确认冲突处理值后重新生成。",
+        ),
+        (
+            "项目事实台账",
+            "PROJECT_FACTS_INVALID",
+            "项目事实台账未通过完整性或冲突校验。",
+            "请确认项目事实或冲突处理值后重新生成。",
+        ),
+        (
+            "项目适用规范生成前预检未通过",
+            "COMPLIANCE_PREFLIGHT_BLOCKED",
+            "项目适用规范生成前预检未通过。",
+            "请补齐可核验的现行规范元数据后重新生成。",
+        ),
+        (
+            "招标要求—证据计划完整性校验失败",
+            "REQUIREMENT_EVIDENCE_PLAN_INVALID",
+            "招标要求与证据计划未通过完整性校验。",
+            "请补齐要求与章节证据绑定后重新生成。",
+        ),
+        (
+            "招标要求—证据生成前准入失败",
+            "REQUIREMENT_EVIDENCE_PREFLIGHT_BLOCKED",
+            "招标要求的来源定位未通过生成前准入，系统尚未调用模型。",
+            "请补齐阻断要求的可反查来源后重新生成。",
+        ),
+        (
+            "项目适用规范核验未通过",
+            "STANDARD_COMPLIANCE_BLOCKED",
+            "章节初稿已保存，但项目适用规范核验未通过。",
+            "请核对违规规范引用后从检查点恢复。",
+        ),
+        (
+            "招标要求—证据矩阵完整性校验失败",
+            "REQUIREMENT_EVIDENCE_INVALID",
+            "章节初稿已保存，但招标要求与证据矩阵不完整。",
+            "请补齐缺失证据绑定后从检查点恢复。",
+        ),
+        (
+            "招标要求—证据交付硬门未通过",
+            "REQUIREMENT_EVIDENCE_BLOCKED",
+            "章节初稿已保存，但招标要求证据仍存在不可反查项。",
+            "请修复阻断要求后从检查点恢复。",
+        ),
+        (
+            "最终专业交付质量门未通过",
+            "DELIVERY_QUALITY_BLOCKED",
+            "章节初稿已保存，但最终专业交付质量门未通过。",
+            "请根据质量门阻断项修订后从检查点恢复。",
+        ),
+    )
+    for marker, code, message, action in validation_guidance:
+        if marker in raw:
+            result = {
+                "code": code,
+                "message": message,
+                "action": action,
+                "error_type": type(error).__name__ if isinstance(error, BaseException) else None,
+            }
+            if code == "DELIVERY_QUALITY_BLOCKED":
+                blocker_codes = [
+                    value
+                    for value in re.findall(r"DELIVERY_[A-Z_]+", raw)
+                    if value in _DELIVERY_BLOCKER_GUIDANCE
+                ]
+                if blocker_codes:
+                    result["failures"] = [
+                        {
+                            "error": blocker_code,
+                            "code": blocker_code,
+                            "message": _DELIVERY_BLOCKER_GUIDANCE[blocker_code][0],
+                            "action": _DELIVERY_BLOCKER_GUIDANCE[blocker_code][1],
+                            "retryable": False,
+                            "severity": "error",
+                        }
+                        for blocker_code in dict.fromkeys(blocker_codes)
+                    ]
+            elif code == "CHAPTER_VALIDATION_QUALITY_BLOCKED":
+                blocker_codes = [
+                    value
+                    for value in re.findall(r"CHAPTER_[A-Z_]+_BLOCKED", raw)
+                    if value in _CHAPTER_VALIDATION_BLOCKER_GUIDANCE
+                ]
+                if blocker_codes:
+                    result["failures"] = [
+                        {
+                            "error": blocker_code,
+                            "code": blocker_code,
+                            "message": _CHAPTER_VALIDATION_BLOCKER_GUIDANCE[
+                                blocker_code
+                            ][0],
+                            "action": _CHAPTER_VALIDATION_BLOCKER_GUIDANCE[
+                                blocker_code
+                            ][1],
+                            "retryable": False,
+                            "severity": "error",
+                        }
+                        for blocker_code in dict.fromkeys(blocker_codes)
+                    ]
+            return result
+    if isinstance(error, ValueError):
+        return {
+            "code": "VALIDATION_FAILED",
+            "message": "任务未通过输入或质量校验。",
+            "action": "请核对运行阶段和已保存检查点后修正并重试。",
+            "error_type": type(error).__name__,
+        }
+    error_info = classify_provider_error(raw, provider="", model="")
+    return {
+        "code": str(error_info.get("code") or "RUNTIME_FAILED"),
+        "message": str(error_info.get("user_message") or "任务执行失败。")[:500],
+        "action": str(error_info.get("action") or "请查看运行事件后重试。")[:500],
+        "error_type": type(error).__name__ if isinstance(error, BaseException) else None,
+    }
+
+
+def _runtime_failure_transition(
+    error: Any,
+    prior_job: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    """Build a truthful failure transition without discarding a complete draft."""
+
+    prior = dict(prior_job or {})
+    prior_progress = dict(prior.get("progress") or {})
+    chapters = dict(prior_progress.get("chapters") or {})
+    checkpoint = dict(prior_progress.get("checkpoint") or {})
+    total = max(0, int(chapters.get("total") or 0))
+    succeeded = max(0, int(chapters.get("succeeded") or 0))
+    failed = max(0, int(chapters.get("failed") or 0))
+    complete_draft = (
+        isinstance(error, ValueError)
+        and total > 0
+        and succeeded == total
+        and failed == 0
+        and str(checkpoint.get("status") or "") in {"draft_complete", "complete"}
+    )
+    public_error = _public_runtime_error(error)
+    phase = str(prior_progress.get("phase") or "generation")
+    stage = "failed"
+    recovery_result: dict[str, Any] | None = None
+    if complete_draft:
+        phase = "quality_review"
+        stage = "quality_review_failed"
+        if public_error.get("code") == "VALIDATION_FAILED":
+            public_error = {
+                "code": "POST_GENERATION_QUALITY_BLOCKED",
+                "message": "章节初稿已全部保存，但生成后质量校验未通过。",
+                "action": "请保留检查点，核对规范、证据矩阵和交付质量门后显式恢复。",
+                "error_type": "ValueError",
+            }
+        recovery_result = dict(prior.get("result") or {})
+        recovery_result.update(
+            {
+                "section_count": succeeded,
+                "checkpoint_status": str(checkpoint.get("status") or "draft_complete"),
+                "recoverable": True,
+                "delivery_ready": False,
+            }
+        )
+    progress = {
+        "percent": min(99, int(prior_progress.get("percent") or 0)),
+        "stage": stage,
+        "phase": phase,
+        "work_state": "idle",
+        "detail": str(public_error.get("message") or "任务执行失败。"),
+    }
+    return public_error, progress, recovery_result
+
+
+def _seal_failed_run_checkpoints(job_id: str) -> dict[str, Any] | None:
+    """Make persisted checkpoint scopes agree with a failed run terminal state."""
+
+    try:
+        scopes = mark_failed_checkpoint_namespace(job_id)
+    except Exception:  # noqa: BLE001 - checkpoint failure sealing must not mask the primary job failure
+        append_runtime_event(
+            job_id,
+            "checkpoint_terminal_update_failed",
+            code="CHECKPOINT_TERMINAL_UPDATE_FAILED",
+        )
+        return None
+    if not scopes:
+        return None
+    saved = sum(max(0, int(item.get("saved_chapter_count") or 0)) for item in scopes)
+    status = "failed_partial" if saved else "failed_empty"
+    projection = {
+        "status": status,
+        "saved_chapter_count": saved,
+        "scopes": scopes,
+    }
+    append_runtime_event(
+        job_id,
+        "checkpoint_terminal_updated",
+        checkpoint_status=status,
+        saved_chapter_count=saved,
+    )
+    return projection
+
+
+def _successful_checkpoint_projection(
+    results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Aggregate only fully finalized variant checkpoints for job success."""
+
+    if not results:
+        return None
+    scopes: list[dict[str, Any]] = []
+    for result in results:
+        checkpoint = (
+            result.get("generation_checkpoint")
+            if isinstance(result, dict)
+            else None
+        )
+        if (
+            not isinstance(checkpoint, dict)
+            or str(checkpoint.get("status") or "").strip().lower() != "complete"
+        ):
+            return None
+        scopes.append(dict(checkpoint))
+    return {
+        "status": "complete",
+        "saved_chapter_count": sum(
+            max(0, int(scope.get("saved_chapter_count") or 0))
+            for scope in scopes
+        ),
+        "scopes": scopes,
+    }
 
 
 def _auth_actions_key(x_actions_key: str | None):
-    expected = os.environ.get("ZF_ACTIONS_KEY", "zf-webui-key").strip()
+    expected = os.environ.get("ZF_ACTIONS_KEY", "").strip()
     if not expected:
-        raise HTTPException(status_code=503, detail="actions key not configured")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SYSTEM_ACTIONS_KEY_NOT_CONFIGURED",
+                "message": "系统内部操作凭据尚未配置，已阻断请求。",
+                "action": "请通过受监管运行环境生成本机凭据后重启服务。",
+            },
+        )
     if (x_actions_key or "").strip() != expected:
-        raise HTTPException(status_code=401, detail="invalid actions key")
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "SYSTEM_ACTIONS_KEY_INVALID",
+                "message": "系统内部操作凭据不匹配，已阻断请求。",
+                "action": "请从最新受监管版本重新打开页面。",
+            },
+        )
 
 
 class ActionsGenerateRequest(BaseModel):
@@ -107,19 +869,23 @@ class ActionsGenerateRequest(BaseModel):
     project_id: str | None = None
     project_type: str | None = None
     generation_mode: str | None = None
-    outline: List[str] = []
-    requirements: List[str] = []
+    delivery_scope: Literal["document", "chapter_validation"] = "document"
+    outline: list[str] = []
+    requirements: list[str] = []
     global_instruction: str | None = None
     chapter_requirements: dict | None = None
+    chapter_summaries: list[dict | str] = []
+    project_stage_context: str | None = None
+    common_construction_requirements: list[str] = []
     provider: str | None = None
     model: str | None = None
-    provider_chain: List[dict] | None = None
-    providers: List[str] = []
+    provider_chain: list[dict] | None = None
+    providers: list[str] = []
     model_map: dict | None = None
     style: dict | None = None
     variants: int = 1
     # 可选模板（A/B/C/D/E）；若提供则按所选模板逐份生成。
-    selected_templates: List[str] | None = None
+    selected_templates: list[str] | None = None
     # 并行控制：章节级 Agent 并行数（单份方案内），以及多份方案并行数（A/B/C/D/E 之间）。
     agent_parallelism: int | None = None
     variant_parallelism: int | None = None
@@ -127,6 +893,9 @@ class ActionsGenerateRequest(BaseModel):
     max_model_attempts: int | None = None
     max_model_input_chars: int | None = None
     max_model_output_tokens: int | None = None
+    max_chapter_output_tokens: int | None = None
+    model_request_timeout_seconds: int | None = None
+    chapter_deadline_seconds: int | None = None
     strict_tender_outline: bool | None = None
     total_pages_target: int | None = None
     chapter_pages: dict | None = None
@@ -163,16 +932,18 @@ class ActionsGenerateRequest(BaseModel):
     # job. A changed project, outline, style, requirement plan or model route
     # produces a different binding and therefore cannot reuse old content.
     resume_from_job_id: str | None = None
+    project_facts: dict[str, Any] | None = None
+    approved_project_fact_resolutions: dict[str, Any] | None = None
 
 
 class ActionsPlanRequest(BaseModel):
-    outline: List[str]
+    outline: list[str]
     style: dict = {}
     project_type: str | None = None
     generation_mode: str | None = None
     global_instruction: str | None = None
     variants: int = 1
-    selected_templates: List[str] | None = None
+    selected_templates: list[str] | None = None
     strict_tender_outline: bool | None = None
     total_pages_target: int | None = None
     chapter_requirements: dict = {}
@@ -185,6 +956,8 @@ class ActionsPlanRequest(BaseModel):
     compare_titles: list[str] | None = None
     case_library: dict | None = None
     image_library: dict | None = None
+    project_facts: dict[str, Any] | None = None
+    approved_project_fact_resolutions: dict[str, Any] | None = None
 
 
 class ActionsSection(BaseModel):
@@ -195,17 +968,19 @@ class ActionsSection(BaseModel):
 
 class ActionsQualityCheckRequest(BaseModel):
     project_id: str | None = None
-    outline: List[str] = []
-    sections: List[ActionsSection]
+    outline: list[str] = []
+    sections: list[ActionsSection]
     strict: bool = True
 
 
 class ActionsExportRequest(BaseModel):
     topic: str
+    source_job_id: str | None = None
+    variant: int = 1
     project_id: str | None = None
     style: dict | None = None
-    outline: List[str] = []
-    sections: List[ActionsSection]
+    outline: list[str] = []
+    sections: list[ActionsSection]
     quality_checks: dict | None = None
     generate_images: bool = True
     # Images / mindmap (prefer Gemini "banana" model)
@@ -216,7 +991,7 @@ class ActionsExportRequest(BaseModel):
     bidder_company: str | None = None
     bidder_domain: str | None = None
     logo_url: str | None = None
-    media: List[dict] | None = None
+    media: list[dict] | None = None
     image_selection_pack: dict | None = None
     case_reference_pack: dict | None = None
 
@@ -250,7 +1025,7 @@ class ActionsReviewApplyRequest(BaseModel):
     job_id: str
     variant: int = 1
     apply_all: bool = False
-    decisions: List[ActionsReviewDecision] = []
+    decisions: list[ActionsReviewDecision] = []
     expected_result_version: str = ""
     expected_variant_version: str = ""
     expected_issue_digest: str = ""
@@ -303,8 +1078,8 @@ class ActionsOllamaSectionDraftDecisionRequest(BaseModel):
 
 class ActionsOllamaMainChainSmokeRequest(BaseModel):
     topic: str | None = None
-    outline: List[str] = []
-    requirements: List[str] = []
+    outline: list[str] = []
+    requirements: list[str] = []
     global_instruction: str | None = None
     section_title: str | None = None
     section_content: str | None = None
@@ -331,10 +1106,14 @@ async def actions_params_set(req: ActionsParamsSetRequest, project_id: str | Non
     after = load_params()
     diff = None
     try:
-        from backend.zhifei_autoplan.param_trace import load_latest_receipt, diff_params_with_receipt
+        from backend.zhifei_autoplan.param_trace import (
+            diff_params_with_receipt,
+            load_latest_receipt,
+        )
 
         diff = diff_params_with_receipt(before, after, load_latest_receipt(project_id=project_id))
-    except Exception:
+    except (ImportError, OSError, TypeError, ValueError):
+        logger.warning("parameter receipt diff unavailable after parameter update", exc_info=True)
         diff = None
     return {"ok": True, "saved_at": path, "params": after, "diff": diff}
 
@@ -359,10 +1138,14 @@ async def actions_params_diff(req: ActionsParamsDiffRequest, project_id: str | N
         after = update
     diff = None
     try:
-        from backend.zhifei_autoplan.param_trace import load_latest_receipt, diff_params_with_receipt
+        from backend.zhifei_autoplan.param_trace import (
+            diff_params_with_receipt,
+            load_latest_receipt,
+        )
 
         diff = diff_params_with_receipt(before, after, load_latest_receipt(project_id=project_id))
-    except Exception:
+    except (ImportError, OSError, TypeError, ValueError):
+        logger.warning("parameter receipt diff unavailable during preview", exc_info=True)
         diff = None
     return {"ok": True, "before": before, "after": after, "diff": diff}
 
@@ -375,8 +1158,17 @@ async def actions_params_receipt_get(project_id: str | None = None, x_actions_ke
 
         receipt = load_latest_receipt(project_id=project_id) or {}
         return {"ok": True, "receipt": receipt}
-    except Exception as e:
-        return {"ok": False, "error": repr(e), "receipt": {}}
+    except (ImportError, OSError, TypeError, ValueError):
+        logger.warning("parameter receipt unavailable", exc_info=True)
+        return {
+            "ok": False,
+            "error": {
+                "code": "PARAM_RECEIPT_UNAVAILABLE",
+                "message": "参数回执暂时无法读取。",
+                "action": "请稍后重试；如持续失败，请检查受监管服务状态。",
+            },
+            "receipt": {},
+        }
 
 
 async def _save_upload(uf: UploadFile) -> str:
@@ -401,7 +1193,7 @@ def _to_positive_int(v: Any) -> int | None:
     try:
         n = int(float(v))
         return n if n > 0 else None
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
@@ -430,9 +1222,43 @@ def _normalize_logic_template_id(raw: Any) -> str | None:
     return alias.get(s)
 
 
-def _normalize_selected_templates(raw: Any) -> List[str]:
+_VARIANT_PAIR_RE = re.compile(r"^v(\d+)_v(\d+)$")
+
+
+def _parse_variant_pair(raw: Any) -> tuple[int, int] | None:
+    match = _VARIANT_PAIR_RE.fullmatch(str(raw or "").strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _delivery_progress_for_run(
+    *,
+    dry_run: bool,
+    delivery_scope: str = "document",
+) -> dict[str, str]:
+    if dry_run:
+        return {
+            "stage": "dry_run_done",
+            "phase": "dry_run_done",
+            "detail": "dry-run 预览已完成；未生成专业终稿或正式交付回执",
+        }
+    if str(delivery_scope or "document") == "chapter_validation":
+        return {
+            "stage": "chapter_validation_done",
+            "phase": "chapter_validation_done",
+            "detail": "章节真实模型验证已完成；未生成或冒充正式交付文件",
+        }
+    return {
+        "stage": "done",
+        "phase": "done",
+        "detail": "专业 Word 已完成，可直接下载",
+    }
+
+
+def _normalize_selected_templates(raw: Any) -> list[str]:
     arr = raw if isinstance(raw, list) else ([raw] if raw is not None else [])
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
     for x in arr:
         tid = _normalize_logic_template_id(x)
@@ -445,7 +1271,7 @@ def _normalize_selected_templates(raw: Any) -> List[str]:
     return out
 
 
-def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
+def _build_variant_plan(payload: dict) -> list[dict[str, Any]]:
     pid = str(payload.get("project_id") or "").strip() or None
     selected = _normalize_selected_templates(payload.get("selected_templates"))
     explicit_variant_id = payload.get("variant_id")
@@ -467,7 +1293,7 @@ def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
 
     try:
         variants = int(payload.get("variants") or 1)
-    except Exception:
+    except (TypeError, ValueError):
         variants = 1
     variants = max(1, min(5, variants))
     variant_ids = reserve_variant_ids(
@@ -479,6 +1305,102 @@ def _build_variant_plan(payload: dict) -> List[Dict[str, Any]]:
     if explicit_template_id:
         return [{"variant_id": int(vid), "logic_template_id": explicit_template_id} for vid in variant_ids]
     return [{"variant_id": int(vid)} for vid in variant_ids]
+
+
+def _build_resume_variant_plan(payload: dict, source_job: dict) -> list[dict[str, Any]]:
+    """Reuse the source job's immutable variant identities for checkpoint recovery."""
+
+    source_payload = (
+        source_job.get("payload") if isinstance(source_job.get("payload"), dict) else {}
+    )
+    requested_project_id = str(payload.get("project_id") or "").strip()
+    source_project_id = str(source_payload.get("project_id") or "").strip()
+    if (
+        not requested_project_id
+        or not source_project_id
+        or requested_project_id != source_project_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_PROJECT_SCOPE_MISMATCH",
+                "message": "恢复请求与原任务的项目身份不一致，不能复用方案或检查点。",
+            },
+        )
+    requested_scope = str(payload.get("delivery_scope") or "document").strip().lower()
+    source_scope = str(source_payload.get("delivery_scope") or "document").strip().lower()
+    if requested_scope != source_scope:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_DELIVERY_SCOPE_MISMATCH",
+                "message": "恢复请求不能跨正式交付与章节验证范围复用检查点。",
+            },
+        )
+    source_plan = source_payload.get("_variant_plan")
+    normalized: list[dict[str, Any]] = []
+    seen_variant_ids: set[int] = set()
+    source_plan_invalid = not isinstance(source_plan, list) or not 1 <= len(source_plan) <= 5
+    if isinstance(source_plan, list):
+        for item in source_plan:
+            if not isinstance(item, dict):
+                source_plan_invalid = True
+                continue
+            try:
+                variant_id = int(item.get("variant_id") or 0)
+            except (TypeError, ValueError):
+                variant_id = 0
+            if variant_id <= 0:
+                source_plan_invalid = True
+                continue
+            if variant_id in seen_variant_ids:
+                source_plan_invalid = True
+                continue
+            seen_variant_ids.add(variant_id)
+            row: dict[str, Any] = {"variant_id": variant_id}
+            template_id = _normalize_logic_template_id(item.get("logic_template_id"))
+            if template_id:
+                row["logic_template_id"] = template_id
+            normalized.append(row)
+    if source_plan_invalid or not normalized:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_VARIANT_IDENTITY_INVALID",
+                "message": "原任务的方案身份缺失、重复或超出安全范围，不能复用检查点。",
+            },
+        )
+
+    requested_templates = _normalize_selected_templates(payload.get("selected_templates"))
+    source_templates = [
+        str(item.get("logic_template_id") or "") for item in normalized
+    ]
+    if requested_templates and requested_templates != source_templates:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_VARIANT_TEMPLATE_MISMATCH",
+                "message": "恢复请求的模板集合与原任务不一致。",
+            },
+        )
+    try:
+        requested_count = int(payload.get("variants") or 1)
+    except (TypeError, ValueError):
+        requested_count = 1
+    if requested_templates:
+        requested_count = len(requested_templates)
+    if max(1, min(5, requested_count)) != len(normalized):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_VARIANT_COUNT_MISMATCH",
+                "message": "恢复请求的方案数量与原任务不一致。",
+            },
+        )
+    if not requested_templates and all(source_templates):
+        payload["selected_templates"] = source_templates
+    payload["variants"] = len(normalized)
+    return normalized
 
 
 def _page_target_value(v: Any) -> int | None:
@@ -495,7 +1417,7 @@ def _planned_total_pages(payload: dict) -> int:
     if not chapter_pages:
         return 0
     s = 0
-    for _, raw in chapter_pages.items():
+    for raw in chapter_pages.values():
         n = _page_target_value(raw)
         if n:
             s += int(n)
@@ -508,6 +1430,11 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
         mode = "quality_200"
     pages = _planned_total_pages(payload)
     auto_switched = False
+    explicit_validation_non_strict = (
+        str(payload.get("delivery_scope") or "document").strip().lower()
+        == "chapter_validation"
+        and payload.get("quality_strict") is False
+    )
 
     if mode == "quality_200" and pages > 500:
         mode = "hq_speed_500"
@@ -544,17 +1471,171 @@ def _apply_generation_mode_policy(payload: dict) -> dict:
     payload["generation_mode"] = mode
     payload.setdefault("model_preflight", True)
     payload.setdefault("fail_on_model_exhaustion", True)
+    if explicit_validation_non_strict:
+        # A bounded chapter validation produces JSON diagnostics only and can
+        # honor an explicit non-strict request. Formal document modes remain
+        # unconditionally strict.
+        payload["quality_strict"] = False
+    # A dry-run is a connectivity-free diagnostic preview, not a professional
+    # delivery attempt.  Keep the real generation modes strict, but do not let
+    # their defaults turn an offline preview into a failed delivery-quality
+    # run or trigger remediation/model admission work.
+    dry_run = bool(payload.get("dry_run"))
+    if dry_run:
+        payload["quality_strict"] = False
+        payload["auto_remediate"] = False
+        payload["model_preflight"] = False
+        payload["fail_on_model_exhaustion"] = False
     payload["_mode_policy"] = {
         "mode_effective": mode,
         "auto_switched": bool(auto_switched),
         "planned_total_pages": int(pages),
+        "dry_run": dry_run,
+        "chapter_validation_non_strict": bool(
+            explicit_validation_non_strict and not dry_run
+        ),
     }
     return payload
+
+
+_PROJECT_FACT_PLAN_FIELDS = (
+    "project_facts",
+    "approved_project_fact_resolutions",
+)
+
+_PROJECT_FACT_INGEST_AUDIT_PATH = Path("backend/data/audit/ingest.jsonl")
+_PROJECT_FACT_APPROVAL_AUDIT_PATH = Path(
+    "backend/data/audit/project_fact_approvals.jsonl"
+)
+
+
+def _inherit_project_fact_plan_fields(payload: dict, plan: dict) -> dict:
+    """Inherit only omitted fact maps; an explicit empty map remains a clear."""
+
+    for field in _PROJECT_FACT_PLAN_FIELDS:
+        if payload.get(field) is None and isinstance(plan.get(field), dict):
+            payload[field] = dict(plan[field])
+    return payload
+
+
+def _latest_trusted_project_fact_approval_source(
+    *,
+    project_id: str,
+    source_sha256: str,
+) -> dict[str, Any]:
+    digest = str(source_sha256 or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_INVALID",
+            "批准参数来源摘要无效",
+        )
+    audit_path = _PROJECT_FACT_INGEST_AUDIT_PATH
+    if audit_path.is_symlink() or not audit_path.is_file():
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "当前入库审计不存在或不可信",
+        )
+    try:
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "当前入库审计无法读取",
+        ) from exc
+    latest: dict[str, Any] | None = None
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        if (
+            str(row.get("project_id") or "").strip() == project_id
+            and str(row.get("sha256") or "").strip().lower() == digest
+        ):
+            latest = row
+            break
+    if (
+        latest is None
+        or latest.get("enabled") is not True
+        or latest.get("usable") is not True
+    ):
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "批准参数来源不是当前启用且可用记录",
+        )
+    trusted = resolve_trusted_ingest_record(
+        latest,
+        workspace_root=audit_path.parent.parent,
+    )
+    if trusted.get("ok") is not True:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_SOURCE_NOT_CURRENT",
+            "批准参数来源当前字节验证失败",
+        )
+    return {**trusted, "enabled": True, "usable": True}
+
+
+def _persist_explicit_project_fact_approvals(
+    resolutions: dict[str, Any],
+    *,
+    project_id: str | None,
+    actor: dict[str, str],
+) -> dict[str, Any]:
+    if not resolutions:
+        return {}
+    pid = str(project_id or "").strip()
+    if not pid:
+        raise ProjectFactApprovalAuditError(
+            "PROJECT_FACT_APPROVAL_PROJECT_INVALID",
+            "显式批准项目参数必须绑定项目ID",
+        )
+    prepared: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for field in sorted(resolutions):
+        raw = resolutions[field]
+        if not isinstance(raw, dict):
+            raise ProjectFactApprovalAuditError(
+                "PROJECT_FACT_APPROVAL_RESOLUTION_INVALID",
+                "批准参数必须是结构化对象",
+            )
+        evidence = raw.get("evidence")
+        if not isinstance(evidence, dict):
+            raise ProjectFactApprovalAuditError(
+                "PROJECT_FACT_APPROVAL_SOURCE_INVALID",
+                "批准参数缺少来源证据",
+            )
+        trusted_source = _latest_trusted_project_fact_approval_source(
+            project_id=pid,
+            source_sha256=str(
+                evidence.get("document_sha256")
+                or evidence.get("source_sha256")
+                or ""
+            ),
+        )
+        event = build_project_fact_approval_event(
+            project_id=pid,
+            field=field,
+            resolution=raw,
+            trusted_source=trusted_source,
+            actor=actor,
+        )
+        prepared.append((field, raw, event))
+
+    persisted: dict[str, Any] = {}
+    for field, raw, event in prepared:
+        appended = append_project_fact_approval_event(
+            _PROJECT_FACT_APPROVAL_AUDIT_PATH,
+            event,
+        )
+        persisted[field] = {**raw, "approval_event": appended["locator"]}
+    return persisted
 
 
 def _merge_plan_defaults(payload: dict) -> dict:
     pid = str(payload.get("project_id") or "").strip() or None
     plan = load_plan(project_id=pid) or {}
+    payload = _inherit_project_fact_plan_fields(payload, plan)
     tender = load_tender_matrix(project_id=pid) or {}
     if not payload.get("outline"):
         payload["outline"] = plan.get("outline") or []
@@ -612,7 +1693,56 @@ def _merge_plan_defaults(payload: dict) -> dict:
     return _apply_generation_mode_policy(payload)
 
 
-def _save_outputs(base_name: str, results: list[dict]) -> dict:
+def _assert_mandatory_generation_sources(payload: dict) -> None:
+    if bool(payload.get("dry_run")):
+        return
+    project_scope = str(payload.get("project_id") or "").strip() or None
+    if project_scope is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROJECT_SCOPE_REQUIRED",
+                "message": "真实生成必须绑定明确项目，禁止使用全局资料池。",
+            },
+        )
+    missing_sources: list[str] = []
+    tender_source = load_tender_matrix(project_id=project_scope) or {}
+    boq_source = load_boq_data(project_id=project_scope) or {}
+    if not isinstance(tender_source.get("outline"), list) or not tender_source.get("outline"):
+        missing_sources.append("tender")
+    if not isinstance(boq_source.get("items"), list) or not boq_source.get("items"):
+        missing_sources.append("boq")
+    if missing_sources:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MANDATORY_SOURCE_NOT_READY",
+                "message": "招标/答疑与工程量清单必须全部解析成功后才能生成。",
+                "missing": missing_sources,
+            },
+        )
+
+
+def _apply_server_provider_routing_or_503(payload: dict) -> dict:
+    try:
+        return apply_server_provider_routing(payload)
+    except ProviderRoutingConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_CONFIGURATION_BLOCKED",
+                "message": "服务端模型路由未配置完整或尚不支持准入，已阻止生成。",
+                "action": "请检查本机主模型、备用模型和文档渲染模型配置。",
+            },
+        ) from exc
+
+
+def _save_outputs(
+    base_name: str,
+    results: list[dict],
+    *,
+    preview_only: bool = False,
+) -> dict:
     postprocess_blocked = [
         {
             "variant": index,
@@ -632,17 +1762,51 @@ def _save_outputs(base_name: str, results: list[dict]) -> dict:
                 ensure_ascii=False,
             )
         )
-    blocked = [
-        {
-            "variant": index,
-            "decision_digest": (row.get("delivery_quality_gate") or {}).get("decision_digest"),
-            "blockers": (row.get("delivery_quality_gate") or {}).get("blockers") or [],
-        }
-        for index, row in enumerate(results, start=1)
-        if isinstance(row, dict)
-        and isinstance(row.get("delivery_quality_gate"), dict)
-        and not bool((row.get("delivery_quality_gate") or {}).get("delivery_allowed"))
-    ]
+    blocked: list[dict[str, Any]] = []
+    if not preview_only:
+        if not results:
+            blocked.append(
+                {
+                    "variant": 0,
+                    "decision_digest": None,
+                    "blockers": [],
+                    "reasons": ["variant_set_empty"],
+                }
+            )
+        for index, row in enumerate(results, start=1):
+            gate = (
+                row.get("delivery_quality_gate")
+                if isinstance(row, dict)
+                and isinstance(row.get("delivery_quality_gate"), dict)
+                else None
+            )
+            reasons: list[str] = []
+            if not isinstance(row, dict):
+                reasons.append("variant_invalid")
+            if gate is None:
+                reasons.append("delivery_gate_missing")
+            else:
+                if gate.get("delivery_allowed") is not True:
+                    reasons.append("delivery_not_allowed")
+                if not export_docx_core.delivery_gate_digest_is_valid(gate):
+                    reasons.append("decision_digest_invalid")
+            if reasons:
+                blocked.append(
+                    {
+                        "variant": index,
+                        "decision_digest": (
+                            gate.get("decision_digest")
+                            if isinstance(gate, dict)
+                            else None
+                        ),
+                        "blockers": (
+                            gate.get("blockers") or []
+                            if isinstance(gate, dict)
+                            else []
+                        ),
+                        "reasons": reasons,
+                    }
+                )
     if blocked:
         raise RuntimeError(
             json.dumps(
@@ -654,13 +1818,15 @@ def _save_outputs(base_name: str, results: list[dict]) -> dict:
                 ensure_ascii=False,
             )
         )
+    if preview_only:
+        return save_output_artifacts(base_name, results, preview_only=True)
     return save_output_artifacts(base_name, results)
 
 
 def _clamp_execution_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
-    except Exception:
+    except (TypeError, ValueError):
         parsed = int(default)
     return max(int(minimum), min(int(maximum), parsed))
 
@@ -691,11 +1857,17 @@ def _prepare_execution_control(
         1,
         5,
     )
+    raw_max_model_parallelism = payload.get("max_model_parallelism")
+    default_model_parallelism = min(agent_parallelism, 2)
+    model_parallelism_source = "request"
+    if raw_max_model_parallelism is None or raw_max_model_parallelism == "":
+        raw_max_model_parallelism = default_model_parallelism
+        model_parallelism_source = "safe_default"
     max_model_parallelism = _clamp_execution_int(
-        payload.get("max_model_parallelism") or 8,
-        8,
+        raw_max_model_parallelism,
+        default_model_parallelism,
         1,
-        16,
+        2,
     )
     variant_parallelism = min(variant_parallelism, variants_total, max_model_parallelism)
     agent_parallelism = min(
@@ -739,6 +1911,7 @@ def _prepare_execution_control(
     policy = {
         "schema_version": "execution-policy-v1",
         "max_model_parallelism": max_model_parallelism,
+        "model_parallelism_source": model_parallelism_source,
         "chapter_task_parallelism": agent_parallelism,
         "variant_parallelism": variant_parallelism,
         **runtime.snapshot()["limits"],
@@ -759,12 +1932,116 @@ def _set_output_variant_path(result: dict[str, Any], key: str, variant: int, val
     result[key] = values
 
 
+def _output_variant_value(result: dict[str, Any], key: str, variant: int) -> Any:
+    value = result.get(key)
+    if not isinstance(value, list):
+        return value
+    index = variant - 1
+    return value[index] if 0 <= index < len(value) else None
+
+
+def _professional_artifact_lists(
+    result: dict[str, Any],
+    *,
+    variant_count: int,
+) -> tuple[list[str], list[str], list[str]]:
+    sources = result.get("source_docx")
+    professional = result.get("professional_docx")
+    receipts = result.get("professional_render_receipt")
+    if not all(isinstance(value, list) for value in (sources, professional, receipts)):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DELIVERY_ARTIFACT_SET_INVALID",
+                "message": "正式交付制品集合不完整，不能执行受控重渲染。",
+            },
+        )
+    source_paths = [str(value or "") for value in sources]
+    professional_paths = [str(value or "") for value in professional]
+    receipt_paths = [str(value or "") for value in receipts]
+    if (
+        len(source_paths) != variant_count
+        or len(professional_paths) != variant_count
+        or len(receipt_paths) != variant_count
+        or not all(source_paths + professional_paths + receipt_paths)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DELIVERY_ARTIFACT_SET_INVALID",
+                "message": "正式交付制品数量或路径不一致，不能执行受控重渲染。",
+            },
+        )
+    return source_paths, professional_paths, receipt_paths
+
+
+def _reseal_professional_variant(
+    *,
+    job_id: str,
+    result: dict[str, Any],
+    variant: int,
+    variant_count: int,
+    rendered: dict[str, Any],
+) -> dict[str, Any]:
+    source_paths, _, _ = _professional_artifact_lists(
+        result,
+        variant_count=variant_count,
+    )
+    candidate = copy.deepcopy(result)
+    _set_output_variant_path(candidate, "professional_docx", variant, str(rendered["professional_docx"]))
+    _set_output_variant_path(candidate, "professional_json", variant, str(rendered["professional_json"]))
+    _set_output_variant_path(
+        candidate,
+        "professional_render_receipt",
+        variant,
+        str(rendered["professional_render_receipt"]),
+    )
+    professional_paths = [str(value) for value in candidate["professional_docx"]]
+    receipt_paths = [str(value) for value in candidate["professional_render_receipt"]]
+    receipt_path = (
+        Path(str(rendered["professional_docx"])).parent
+        / f"delivery_receipt_{job_id}_rerender_{uuid.uuid4().hex}.json"
+    )
+    sealed = build_delivery_receipt(
+        job_id=job_id,
+        source_docx=source_paths,
+        professional_docx=professional_paths,
+        professional_json=candidate.get("professional_json"),
+        professional_receipts=receipt_paths,
+        compare_docx=candidate.get("compare_docx"),
+        focus_xlsx=candidate.get("focus_xlsx"),
+        score_overview_xlsx=candidate.get("score_overview_xlsx"),
+        expert_review_docx=candidate.get("expert_review_docx"),
+        receipt_path=receipt_path,
+        job_execution_identity=(
+            candidate.get("job_execution_identity")
+            if isinstance(candidate.get("job_execution_identity"), dict)
+            else None
+        ),
+        compliance_registry_authority=(
+            candidate.get("compliance_registry_authority")
+            if isinstance(candidate.get("compliance_registry_authority"), dict)
+            else None
+        ),
+    )
+    candidate["docx"] = list(professional_paths)
+    candidate["delivery_profile"] = "sonnet5_professional_word"
+    candidate["delivery_ready"] = True
+    candidate["validation_scope"] = "document"
+    candidate["delivery_receipt"] = str(sealed["receipt"])
+    candidate["delivery_decision_digest"] = str(sealed["decision_digest"])
+    return candidate
+
+
 async def _render_professional_outputs_for_job(
     *,
     job_id: str,
     outputs: dict[str, Any],
+    artifact_namespace: str | None = None,
     progress_callback: Any | None = None,
     execution_runtime: ExecutionControlRuntime | None = None,
+    slot_override: ProviderSlot | None = None,
+    job_execution_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Promote Sonnet-refined DOCX files to the only user-facing Word outputs.
 
@@ -782,6 +2059,10 @@ async def _render_professional_outputs_for_job(
         raise ProfessionalRenderError("中间 Word 不存在，无法自动生成专业交付版")
     if not delivery.get("json"):
         raise ProfessionalRenderError("生成结果 JSON 不存在，无法自动生成专业交付版")
+    if slot_override is None:
+        slot_override = await _admit_current_server_route_for_existing_evidence(
+            execution_runtime=execution_runtime
+        )
 
     render_source = dict(delivery)
     render_source["docx"] = list(source_docx)
@@ -797,8 +2078,12 @@ async def _render_professional_outputs_for_job(
             "variant": variant,
             "result": render_source,
         }
+        if artifact_namespace:
+            render_kwargs["artifact_namespace"] = artifact_namespace
         if execution_runtime is not None:
             render_kwargs["execution_runtime"] = execution_runtime
+        if slot_override is not None:
+            render_kwargs["slot_override"] = slot_override
         rendered = await render_professional_document(**render_kwargs)
         professional_docx.append(str(rendered["professional_docx"]))
         professional_json.append(str(rendered["professional_json"]))
@@ -812,15 +2097,230 @@ async def _render_professional_outputs_for_job(
     delivery["professional_render_receipt"] = professional_receipts
     delivery["docx"] = list(professional_docx)
     delivery["delivery_profile"] = "sonnet5_professional_word"
-    sealed_delivery = build_delivery_receipt(
-        job_id=job_id,
-        source_docx=source_docx,
-        professional_docx=professional_docx,
-        professional_receipts=professional_receipts,
-    )
+    if isinstance(job_execution_identity, Mapping):
+        delivery["job_execution_identity"] = dict(job_execution_identity)
+    delivery_receipt_kwargs: dict[str, Any] = {
+        "job_id": job_id,
+        "source_docx": source_docx,
+        "professional_docx": professional_docx,
+        "professional_json": professional_json,
+        "professional_receipts": professional_receipts,
+        "compare_docx": delivery.get("compare_docx"),
+        "focus_xlsx": delivery.get("focus_xlsx"),
+        "score_overview_xlsx": delivery.get("score_overview_xlsx"),
+        "expert_review_docx": delivery.get("expert_review_docx"),
+        "job_execution_identity": (
+            dict(job_execution_identity)
+            if isinstance(job_execution_identity, Mapping)
+            else None
+        ),
+        "compliance_registry_authority": (
+            dict(delivery.get("compliance_registry_authority") or {})
+            if isinstance(delivery.get("compliance_registry_authority"), Mapping)
+            else None
+        ),
+    }
+    if artifact_namespace:
+        safe_namespace = re.sub(
+            r"[^A-Za-z0-9_.-]+",
+            "_",
+            str(artifact_namespace),
+        ).strip("._") or "candidate"
+        delivery_receipt_kwargs["receipt_path"] = (
+            Path(professional_docx[0]).parent
+            / f"delivery_receipt_{safe_namespace}_{uuid.uuid4().hex}.json"
+        )
+    sealed_delivery = build_delivery_receipt(**delivery_receipt_kwargs)
     delivery["delivery_receipt"] = str(sealed_delivery["receipt"])
     delivery["delivery_decision_digest"] = str(sealed_delivery["decision_digest"])
+    delivery["delivery_ready"] = True
+    delivery["validation_scope"] = "document"
     return delivery
+
+
+def _admitted_document_render_slot(coordinator: Any) -> ProviderSlot:
+    candidate = (
+        coordinator.admitted_candidate("document_render")
+        if coordinator is not None
+        and callable(getattr(coordinator, "admitted_candidate", None))
+        else None
+    )
+    if candidate is None:
+        raise ProfessionalRenderError(
+            "文档渲染模型未通过本次运行的供应商准入，已阻止专业终稿生成"
+        )
+    return ProviderSlot(
+        slot=candidate.slot,
+        role=candidate.role,
+        provider=candidate.provider,
+        model=candidate.model,
+        api_key=candidate.credential,
+        key_alias="",
+    )
+
+
+async def _admit_current_server_chain_for_existing_evidence(
+    *,
+    execution_runtime: ExecutionControlRuntime | None = None,
+    require_document_render: bool = True,
+) -> Any:
+    """Freshly admit the full current route for an existing-evidence action."""
+
+    candidates = build_server_provider_admission_candidates()
+    required_roles = server_provider_admission_required_roles(
+        candidates,
+        require_document_render=require_document_render,
+    )
+    coordinator = new_provider_admission_run_coordinator({})
+    snapshot = await coordinator.admit_chain_once(
+        candidates=candidates,
+        probe=lambda candidate: probe_provider_candidate(
+            candidate,
+            execution_runtime=execution_runtime,
+        ),
+        required_roles=required_roles,
+    )
+    if not bool(snapshot.get("generation_allowed")):
+        from backend.zhifei_autoplan.provider_admission import public_snapshot
+
+        admission = public_snapshot(snapshot)
+        raise ProfessionalRenderError(
+            "MODEL_PROVIDER_ADMISSION_BLOCKED: 模型供应商准入未通过；"
+            + "、".join(admission.get("missing_roles") or ["unknown"])
+        )
+    return coordinator
+
+
+async def _admit_current_server_route_for_existing_evidence(
+    *,
+    execution_runtime: ExecutionControlRuntime | None = None,
+) -> ProviderSlot:
+    """Freshly admit the full current route before a controlled re-render."""
+
+    coordinator = await _admit_current_server_chain_for_existing_evidence(
+        execution_runtime=execution_runtime
+    )
+    return _admitted_document_render_slot(coordinator)
+
+
+async def _ensure_review_provider_admission(payload: dict[str, Any]) -> Any:
+    """Bind review calls to one fresh, server-owned admission receipt."""
+
+    existing = payload.get("_provider_admission_run_coordinator")
+    if existing is not None:
+        return existing
+    try:
+        routed = apply_server_provider_routing(payload)
+        coordinator = await _admit_current_server_chain_for_existing_evidence(
+            require_document_render=False,
+        )
+    except ProviderRoutingConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_CONFIGURATION_BLOCKED",
+                "message": "服务端模型路由未配置完整，已阻止复核调用。",
+            },
+        ) from exc
+    except ProfessionalRenderError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_ADMISSION_BLOCKED",
+                "message": "模型供应商准入未通过，已在复核模型调用前停止。",
+                "action": "请检查凭据、模型、配额和流式能力。",
+            },
+        ) from exc
+
+    admitted_chain: list[dict[str, Any]] = []
+    for candidate in coordinator.bound_candidates:
+        if not str(candidate.role or "").startswith("text_"):
+            continue
+        admitted = coordinator.admitted_candidate(candidate.role)
+        if admitted is None or admitted.identity_digest != candidate.identity_digest:
+            continue
+        admitted_chain.append(
+            {
+                "slot": candidate.slot,
+                "role": candidate.role,
+                "provider": candidate.provider,
+                "model": candidate.model,
+                # Ephemeral only: payload is a private per-request copy and is
+                # never written back to the job record or response.
+                "api_key": candidate.credential,
+            }
+        )
+    if not admitted_chain:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_PROVIDER_ADMISSION_EMPTY",
+                "message": "没有可用的已准入复核模型，已停止调用。",
+            },
+        )
+    routed["provider_chain"] = admitted_chain
+    routed["provider"] = admitted_chain[0]["provider"]
+    routed["model"] = admitted_chain[0]["model"]
+    routed["_provider_admission_run_coordinator"] = coordinator
+    payload.clear()
+    payload.update(routed)
+    return coordinator
+
+
+def _professional_render_failure_result(
+    outputs: dict[str, Any], error: Exception
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Preserve source artifacts without presenting them as final delivery."""
+
+    delivery = copy.deepcopy(outputs or {})
+    raw_sources = delivery.get("source_docx") or delivery.get("docx") or []
+    if isinstance(raw_sources, (str, Path)):
+        raw_sources = [raw_sources]
+    if not isinstance(raw_sources, list):
+        raw_sources = []
+    source_docx = [str(path) for path in raw_sources if str(path)]
+    delivery["source_docx"] = source_docx
+
+    for key in (
+        "docx",
+        "professional_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "delivery_receipt",
+        "delivery_decision_digest",
+    ):
+        delivery.pop(key, None)
+
+    if isinstance(error, ProfessionalRenderError):
+        error_info: dict[str, Any] = {
+            "code": "professional_quality_gate_failed",
+            "message": "professional render quality gate failed",
+            "retryable": False,
+            "provider": "anthropic",
+            "model": "claude-sonnet-5",
+            "user_message": "专业终稿未通过质量门槛。",
+            "action": "请检查专业渲染报告后修正，禁止交付中间稿。",
+            "severity": "error",
+        }
+    else:
+        error_info = classify_provider_error(
+            error,
+            provider="anthropic",
+            model="claude-sonnet-5",
+        )
+
+    delivery["delivery_profile"] = "professional_render_incomplete"
+    delivery["delivery_ready"] = False
+    delivery["validation_scope"] = "professional_render_failed"
+    delivery["professional_render_status"] = {
+        "status": "failed",
+        "retryable": bool(error_info.get("retryable")),
+        "code": str(error_info.get("code") or "provider_error"),
+        "message": str(error_info.get("user_message") or "专业终稿渲染未完成。"),
+        "action": str(error_info.get("action") or ""),
+        "source_preserved": bool(source_docx),
+    }
+    return delivery, error_info
 
 
 def _rebuild_postprocessed_artifacts(
@@ -841,6 +2341,57 @@ def _rebuild_postprocessed_artifacts(
     """
     pid = str(payload.get("project_id") or "").strip() or None
     strict = bool(payload.get("quality_strict", True))
+    formal_delivery_required = bool(
+        str(payload.get("delivery_scope") or "document").strip().lower()
+        == "document"
+        and not bool(payload.get("dry_run"))
+    )
+    raw_workspace_dir = payload.get("workspace_dir")
+    workspace_dir = (
+        str(raw_workspace_dir).strip()
+        if isinstance(raw_workspace_dir, (str, Path))
+        and str(raw_workspace_dir).strip()
+        else None
+    )
+    effective_workspace_dir = workspace_dir or "backend/data"
+    compliance_registry_authority = None
+    compliance_registry_bytes: bytes | None = None
+    compliance_registry_path: Path | None = None
+    authority_error: dict[str, str] | None = None
+    if formal_delivery_required:
+        try:
+            projection = _generation_compliance_registry_authority_from_environment()
+            if projection is not None:
+                authority = load_sealed_registry_authority(
+                    str(
+                        _GENERATION_RELEASE_IDENTITY_AT_START.get("release_root")
+                        or ""
+                    ),
+                    expected_release_id=str(projection.get("release_id") or ""),
+                    expected_manifest_digest=str(
+                        projection.get("manifest_digest") or ""
+                    ),
+                    expected_source_digest=str(
+                        projection.get("source_digest") or ""
+                    ),
+                    expected_runtime_digest=str(
+                        projection.get("runtime_digest") or ""
+                    ),
+                )
+                compliance_registry_authority = dict(authority.projection)
+                compliance_registry_bytes = authority.raw
+                compliance_registry_path = authority.path
+        except Exception as exc:  # noqa: BLE001 - formal postprocess records fail-closed authority errors
+            compliance_registry_authority = None
+            compliance_registry_bytes = None
+            compliance_registry_path = None
+            authority_error = {
+                "stage": "compliance_registry_authority",
+                "error_type": type(exc).__name__,
+                "message": "COMPLIANCE_REGISTRY_AUTHORITY_UNTRUSTED",
+            }
+        else:
+            authority_error = None
 
     # Load latest tender/boq for this project scope (best-effort).
     tender = load_tender_matrix(project_id=pid) or {}
@@ -867,9 +2418,11 @@ def _rebuild_postprocessed_artifacts(
         if isinstance(recs, list) and recs:
             base_focus["four_new_recommendations"] = recs
     except Exception:
-        pass
+        logger.warning("four-new recommendations unavailable during post-processing", exc_info=True)
 
     postprocess_errors: list[dict[str, str]] = []
+    if formal_delivery_required and authority_error is not None:
+        postprocess_errors.append(authority_error)
 
     # Normalize per-variant derived artifacts.
     for v in results:
@@ -882,31 +2435,39 @@ def _rebuild_postprocessed_artifacts(
             outline = [str(s.get("title") or "").strip() for s in sections if isinstance(s, dict) and str(s.get("title") or "").strip()]
 
         boq_focus = v.get("boq_focus") if isinstance(v.get("boq_focus"), dict) else base_focus
-        if isinstance(boq_focus, dict) and isinstance(base_focus.get("four_new_recommendations"), list):
-            if not isinstance(boq_focus.get("four_new_recommendations"), list):
-                merged = dict(boq_focus)
-                merged["four_new_recommendations"] = base_focus.get("four_new_recommendations") or []
-                boq_focus = merged
-                v["boq_focus"] = merged
+        if (
+            isinstance(boq_focus, dict)
+            and isinstance(base_focus.get("four_new_recommendations"), list)
+            and not isinstance(boq_focus.get("four_new_recommendations"), list)
+        ):
+            merged = dict(boq_focus)
+            merged["four_new_recommendations"] = base_focus.get("four_new_recommendations") or []
+            boq_focus = merged
+            v["boq_focus"] = merged
 
         # Plan consistency normalization (in-place section edits).
         try:
-            from backend.zhifei_autoplan.plan_consistency import normalize_metrics_in_sections
+            from backend.zhifei_autoplan.plan_consistency import (
+                normalize_metrics_in_sections,
+            )
 
             v["plan_consistency"] = normalize_metrics_in_sections(sections)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {"stage": "plan_consistency", "error_type": type(exc).__name__, "message": str(exc)}
             )
 
         # Param trace receipt (in-place placeholder substitution).
         try:
-            from backend.zhifei_autoplan.param_trace import build_param_receipt, save_latest_receipt
+            from backend.zhifei_autoplan.param_trace import (
+                build_param_receipt,
+                save_latest_receipt,
+            )
 
             receipt = build_param_receipt(sections, params)
             saved_at = save_latest_receipt(receipt, project_id=str(pid) if pid else None)
             v["param_trace"] = {"ok": True, "saved_at": saved_at, "receipt": receipt}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {"stage": "param_trace", "error_type": type(exc).__name__, "message": str(exc)}
             )
@@ -963,22 +2524,80 @@ def _rebuild_postprocessed_artifacts(
 
         v["quality_checks"] = qc
 
+        # A formal post-process may run long after the original generation.
+        # Rebuild the evidence indexes from the current trusted ingest audit so
+        # stale or since-tampered bytes cannot be carried into the final gate.
+        if formal_delivery_required:
+            try:
+                from backend.zhifei_autoplan.drawing_index import (
+                    build_drawing_index,
+                )
+                from backend.zhifei_autoplan.standard_index import (
+                    build_standard_index,
+                )
+
+                current_outline = list(outline)
+                current_topic = str(
+                    payload.get("topic") or v.get("topic") or ""
+                )
+                v["drawing_index"] = build_drawing_index(
+                    current_topic,
+                    current_outline,
+                    project_id=pid,
+                    workspace_dir=effective_workspace_dir,
+                )
+                v["standard_index"] = build_standard_index(
+                    current_topic,
+                    current_outline,
+                    project_id=pid,
+                    workspace_dir=effective_workspace_dir,
+                    official_registry_bytes=compliance_registry_bytes,
+                    official_registry_path=compliance_registry_path,
+                )
+                if compliance_registry_authority is not None and (
+                    str(v["standard_index"].get("official_registry_sha256") or "")
+                    != str(compliance_registry_authority.get("registry_sha256") or "")
+                    or Path(
+                        str(v["standard_index"].get("official_registry_path") or "")
+                    )
+                    != compliance_registry_path
+                ):
+                    raise RuntimeError(
+                        "COMPLIANCE_STANDARD_INDEX_AUTHORITY_MISMATCH"
+                    )
+            except Exception as exc:  # noqa: BLE001 - current evidence is mandatory for formal delivery
+                v["drawing_index"] = {}
+                v["standard_index"] = {}
+                postprocess_errors.append(
+                    {
+                        "stage": "current_evidence_indexes",
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+
         # Cross-index rebuild (depends on latest qc + final section text).
         try:
-            from backend.zhifei_autoplan.cross_index import build_cross_index
+            from backend.zhifei_autoplan.cross_index import (
+                build_cross_index,
+                validate_cross_index_contract,
+            )
 
             drawing_index = v.get("drawing_index") if isinstance(v.get("drawing_index"), dict) else None
             standard_index = v.get("standard_index") if isinstance(v.get("standard_index"), dict) else None
-            v["cross_index"] = build_cross_index(
-                boq=boq,
-                sections=sections,
-                boq_focus=boq_focus,
-                drawing_index=drawing_index,
-                standard_index=standard_index,
-                quality_checks=qc,
-                project_id=pid,
+            v["cross_index"] = validate_cross_index_contract(
+                build_cross_index(
+                    boq=boq,
+                    sections=sections,
+                    boq_focus=boq_focus,
+                    drawing_index=drawing_index,
+                    standard_index=standard_index,
+                    quality_checks=qc,
+                    project_id=pid,
+                ),
+                expected_names=(boq_focus or {}).get("must_cover_keywords") or [],
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {"stage": "cross_index", "error_type": type(exc).__name__, "message": str(exc)}
             )
@@ -988,7 +2607,7 @@ def _rebuild_postprocessed_artifacts(
                 tender=tender,
                 chapter_pages=v.get("chapter_pages") if isinstance(v.get("chapter_pages"), dict) else {},
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             v["evidence_tracking"] = {"rows": [], "summary": {}}
             postprocess_errors.append(
                 {"stage": "evidence_tracking", "error_type": type(exc).__name__, "message": str(exc)}
@@ -1013,7 +2632,44 @@ def _rebuild_postprocessed_artifacts(
             v["requirement_evidence_validation"] = validate_requirement_evidence_matrix(
                 requirement_matrix
             )
-        except Exception as exc:
+            chapter_gates: list[dict[str, Any]] = []
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                chapter_gates.append(
+                    validate_chapter_requirement_evidence(
+                        plan=requirement_plan,
+                        title=str(section.get("title") or ""),
+                        section=section,
+                    )
+                )
+            v["requirement_evidence_chapter_gates"] = chapter_gates
+            blocking_requirement_ids = sorted(
+                {
+                    str(requirement_id)
+                    for gate in chapter_gates
+                    for requirement_id in (gate.get("blocking_requirement_ids") or [])
+                    if str(requirement_id).strip()
+                }
+            )
+            requirement_hard_gate = bool(
+                payload.get("requirement_evidence_hard_gate", bool(tender))
+            )
+            if strict and requirement_hard_gate and blocking_requirement_ids:
+                postprocess_errors.append(
+                    {
+                        "stage": "requirement_evidence_chapter_gate",
+                        "error_type": "RequirementEvidencePostprocessBlocked",
+                        "message": json.dumps(
+                            {
+                                "code": "REQUIREMENT_EVIDENCE_POSTPROCESS_BLOCKED",
+                                "blocking_requirement_ids": blocking_requirement_ids,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {
                     "stage": "requirement_evidence_matrix",
@@ -1023,16 +2679,15 @@ def _rebuild_postprocessed_artifacts(
             )
 
         try:
-            standards_manifest = (
-                v.get("project_applicable_standards")
-                if isinstance(v.get("project_applicable_standards"), dict)
-                else {}
+            standards_manifest = build_project_applicable_standards_manifest(
+                sections
             )
+            v["project_applicable_standards"] = standards_manifest
             v["standard_citation_audit"] = audit_standard_citations(
                 sections,
                 standards_manifest,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {
                     "stage": "standard_citation_audit",
@@ -1043,6 +2698,17 @@ def _rebuild_postprocessed_artifacts(
 
         try:
             routing = v.get("model_routing") if isinstance(v.get("model_routing"), dict) else {}
+            current_standard_index = (
+                v.get("standard_index")
+                if isinstance(v.get("standard_index"), dict)
+                else {}
+            )
+            registry_path = Path(
+                str(current_standard_index.get("official_registry_path") or "")
+            )
+            standard_compliance_root = (
+                registry_path.parent if registry_path.is_absolute() else None
+            )
             delivery_gate = build_delivery_quality_gate(
                 strict=strict,
                 content_review=(
@@ -1073,25 +2739,33 @@ def _rebuild_postprocessed_artifacts(
                 cross_index=(
                     v.get("cross_index") if isinstance(v.get("cross_index"), dict) else {}
                 ),
-                model_review_required=(
-                    str(routing.get("mode") or "") == "anthropic_tiered"
-                    and not bool(payload.get("dry_run"))
+                model_review_required=formal_delivery_required,
+                formal_delivery_required=formal_delivery_required,
+                project_parameters=(
+                    v.get("missing_parameters")
+                    if isinstance(v.get("missing_parameters"), dict)
+                    else {}
                 ),
+                project_fact_ledger=(
+                    v.get("project_fact_ledger")
+                    if isinstance(v.get("project_fact_ledger"), dict)
+                    else {}
+                ),
+                sections=sections,
+                standard_index=current_standard_index,
+                standard_workspace_dir=effective_workspace_dir,
+                standard_compliance_root=standard_compliance_root,
+                trusted_standard_registry_bytes=compliance_registry_bytes,
             )
             v["delivery_quality_gate"] = delivery_gate
             qc["delivery_quality_gate"] = delivery_gate
-            if not bool(delivery_gate.get("delivery_allowed")):
-                postprocess_errors.append(
-                    {
-                        "stage": "delivery_quality_gate",
-                        "error_type": "DeliveryQualityGateBlocked",
-                        "message": json.dumps(
-                            delivery_gate.get("blockers") or [],
-                            ensure_ascii=False,
-                        ),
-                    }
-                )
-        except Exception as exc:
+            # A quality decision is not a rebuild failure.  Keep it on the
+            # dedicated delivery gate so formal exports fail with the precise
+            # DELIVERY_QUALITY_GATE_BLOCKED code while an explicit dry-run
+            # preview may still persist non-deliverable diagnostic artifacts.
+            # Genuine derivation failures above remain fail-closed through
+            # ``postprocess_errors``.
+        except Exception as exc:  # noqa: BLE001 - rebuild aggregator records arbitrary stage failures
             postprocess_errors.append(
                 {
                     "stage": "delivery_quality_gate",
@@ -1119,21 +2793,1390 @@ def _rebuild_postprocessed_artifacts(
         )
 
 
-def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
+def _strict_formal_generation(payload: dict[str, Any]) -> bool:
+    return (
+        str(payload.get("delivery_scope") or "document").strip().lower()
+        == "document"
+        and not bool(payload.get("dry_run"))
+        and bool(payload.get("quality_strict", True))
+    )
+
+
+def _finalize_variant_derivatives(
+    results: list[dict[str, Any]],
+    *,
+    payload: dict[str, Any],
+    allow_diversity_autofix: bool = True,
+    force_rebuild: bool = False,
+    fail_closed: bool | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any] | None:
+    """Recompute cross-variant diversity and every derivative before export.
+
+    Formal strict generation must never continue to persistence when diversity
+    calculation, deterministic remediation, or derivative rebuilding fails.
+    Validation and dry-run scopes keep this diagnostic best-effort behavior but
+    remain non-deliverable.
+    """
+
+    if not results or (len(results) < 2 and not force_rebuild):
+        return None
+    enforce = _strict_formal_generation(payload) if fail_closed is None else bool(fail_closed)
+    try:
+        params = load_params()
+        overrides = payload.get("params_override")
+        if isinstance(overrides, dict) and overrides:
+            for key, value in overrides.items():
+                if isinstance(value, dict) and isinstance(params.get(key), dict):
+                    merged = dict(params.get(key) or {})
+                    merged.update(value)
+                    params[key] = merged
+                else:
+                    params[key] = value
+
+        report: dict[str, Any] | None = None
+        if len(results) >= 2:
+            from backend.zhifei_autoplan.diversity_autofix import (
+                apply_diversity_autofix,
+            )
+            from backend.zhifei_autoplan.variant_similarity import (
+                compute_variant_similarity,
+            )
+
+            div_cfg = (
+                params.get("variant_diversity")
+                if isinstance(params.get("variant_diversity"), dict)
+                else {}
+            )
+
+            def _run_report() -> dict[str, Any]:
+                return compute_variant_similarity(
+                    results,
+                    chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
+                    overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
+                    min_chars=int(div_cfg.get("min_chars") or 800),
+                    ignore_title_keywords=(
+                        div_cfg.get("ignore_title_keywords")
+                        if isinstance(div_cfg.get("ignore_title_keywords"), list)
+                        else None
+                    ),
+                    relaxed_title_keywords=(
+                        div_cfg.get("relaxed_title_keywords")
+                        if isinstance(div_cfg.get("relaxed_title_keywords"), list)
+                        else None
+                    ),
+                    relaxed_chapter_threshold=(
+                        float(div_cfg.get("relaxed_chapter_threshold"))
+                        if div_cfg.get("relaxed_chapter_threshold") is not None
+                        else None
+                    ),
+                )
+
+            report = _run_report()
+            max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
+            max_rounds = max(0, max_rounds) if allow_diversity_autofix else 0
+            rounds = 0
+            while (
+                rounds < max_rounds
+                and report.get("ok") is False
+                and report.get("flagged")
+            ):
+                changed_any = False
+                for finding in (report.get("flagged") or [])[:24]:
+                    title = str(finding.get("title") or "").strip()
+                    pair = str(finding.get("pair") or "").strip()
+                    pair_indexes = _parse_variant_pair(pair)
+                    if not pair_indexes or not title:
+                        continue
+                    target_index = max(pair_indexes)
+                    if target_index <= 1 or target_index > len(results):
+                        continue
+                    sections = results[target_index - 1].get("sections")
+                    if not isinstance(sections, list):
+                        continue
+                    for section in sections:
+                        if not isinstance(section, dict):
+                            continue
+                        if str(section.get("title") or "").strip() != title:
+                            continue
+                        if apply_diversity_autofix(
+                            section,
+                            params=params,
+                            evidence_hint=pair,
+                        ):
+                            changed_any = True
+                        break
+                if not changed_any:
+                    break
+                report = _run_report()
+                rounds += 1
+
+        if callable(progress_callback):
+            progress_callback()
+        _rebuild_postprocessed_artifacts(
+            results,
+            payload=payload,
+            report=report,
+            params=params,
+            fail_closed=enforce,
+        )
+        if enforce and isinstance(report, dict) and report.get("ok") is False:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "VARIANT_DIVERSITY_BLOCKED",
+                        "message": "多方案差异性校验仍未通过，已在正式文件生成前停止。",
+                        "flagged_count": int(report.get("flagged_count") or 0),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return report
+    except Exception as exc:
+        if not enforce:
+            return None
+        try:
+            parsed = json.loads(str(exc))
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("code"):
+            raise
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "code": "POSTPROCESS_REBUILD_FAILED",
+                    "message": "正式交付派生报告重建失败，已在文件生成前停止。",
+                    "error_type": type(exc).__name__,
+                },
+                ensure_ascii=False,
+            )
+        ) from exc
+
+
+def _result_json_untrusted() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "RESULT_JSON_UNTRUSTED",
+            "message": "任务结果证据缺失、损坏或不可信，系统已失败关闭。",
+        },
+    )
+
+
+def _load_result_variants(
+    result: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    json_path = str(result.get("json") or "").strip()
+    if not json_path:
+        raise _result_json_untrusted()
+    try:
+        data = _read_stable_formal_json(
+            Path(json_path),
+            max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+        )
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise _result_json_untrusted() from exc
+    variants = data.get("variants")
+    if (
+        not isinstance(variants, list)
+        or not variants
+        or any(not isinstance(row, dict) for row in variants)
+    ):
+        raise _result_json_untrusted()
+    return data, variants
+
+
+def _load_done_job_variants(
+    job_id: str,
+) -> tuple[dict, dict, dict[str, Any], list[dict[str, Any]]]:
     job = get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="job not found")
-    if str(job.get("status") or "").strip() != "done":
-        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "JOB_NOT_FOUND", "message": "未找到指定任务。"},
+        )
+    if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "JOB_NOT_READY_FOR_RENDER",
+                "message": "任务尚未完成，不能执行专业渲染。",
+            },
+        )
     result = job.get("result") or {}
-    json_path = str(result.get("json") or "").strip()
-    if not json_path or not Path(json_path).exists():
-        raise HTTPException(status_code=404, detail="result json not found")
-    data = json.loads(Path(json_path).read_text(encoding="utf-8", errors="ignore"))
-    variants = data.get("variants") if isinstance(data.get("variants"), list) else []
-    if not variants:
-        raise HTTPException(status_code=404, detail="empty result variants")
+    if not isinstance(result, dict):
+        raise _result_json_untrusted()
+    data, variants = _load_result_variants(result)
     return job, result, data, variants
+
+
+def _require_variant_number(value: Any, variant_count: int) -> int:
+    try:
+        variant = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VARIANT_OUT_OF_RANGE", "message": "方案序号无效。"},
+        ) from exc
+    if variant < 1 or variant > int(variant_count):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VARIANT_OUT_OF_RANGE",
+                "message": f"方案序号必须位于 1..{int(variant_count)}。",
+            },
+        )
+    return variant
+
+
+def _artifact_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _same_artifact_path(left: Any, right: Any) -> bool:
+    try:
+        return Path(str(left)).resolve() == Path(str(right)).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _promotion_audit_state(job: dict, result: dict) -> tuple[bool, str]:
+    """Fail closed while a CAS-winning review promotion is not audit-committed."""
+
+    raw_path = result.get("promotion_audit_receipt")
+    if raw_path is None or not str(raw_path).strip():
+        return True, "promotion_audit_not_applicable"
+    audit_path = Path(str(raw_path))
+    if not audit_path.is_file():
+        return False, "promotion_audit_missing"
+    try:
+        raw_audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "promotion_audit_invalid"
+    if not isinstance(raw_audit, dict):
+        return False, "promotion_audit_invalid"
+    expected_job_id = str(job.get("job_id") or "").strip()
+    revision_id = str(raw_audit.get("revision_id") or "").strip()
+    if (
+        raw_audit.get("schema_version") != "review-revision-v1"
+        or not str(raw_audit.get("snapshot_digest") or "").strip()
+        or not expected_job_id
+        or str(raw_audit.get("job_id") or "").strip() != expected_job_id
+        or not revision_id
+    ):
+        return False, "promotion_audit_invalid"
+    try:
+        sealed_audit = load_revision_snapshot(
+            job_id=expected_job_id,
+            revision_id=revision_id,
+        )
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        return False, "promotion_audit_invalid"
+    if not _same_artifact_path(sealed_audit.get("path"), audit_path):
+        return False, "promotion_audit_path_mismatch"
+    promotion = sealed_audit.get("promotion")
+    if not isinstance(promotion, dict):
+        return False, "promotion_audit_invalid"
+    state = str(promotion.get("state") or "").strip().lower()
+    if state == "candidate_prepared":
+        return False, "promotion_audit_pending"
+    if state != "committed":
+        return False, "promotion_audit_invalid"
+    try:
+        promoted_revision = int(promotion.get("promoted_job_revision") or 0)
+        current_revision = int(job.get("revision") or 0)
+    except (TypeError, ValueError):
+        return False, "promotion_audit_invalid"
+    if (
+        promoted_revision <= 0
+        or current_revision < promoted_revision
+        or str(promotion.get("promoted_job_status") or "").strip().lower()
+        not in {"done", "succeeded"}
+        or not str(promotion.get("candidate_artifact_digest") or "").strip()
+    ):
+        return False, "promotion_audit_invalid"
+    return True, "promotion_audit_committed"
+
+
+_MAX_FORMAL_RUNTIME_JSON_BYTES = 64 * 1024 * 1024
+
+
+def _formal_execution_identity(job: Mapping[str, Any]) -> dict[str, Any] | None:
+    job_id = str(job.get("job_id") or "").strip().lower()
+    attempt_id = str(job.get("last_attempt_id") or "").strip().lower()
+    owner_instance_id = str(
+        job.get("last_owner_instance_id") or ""
+    ).strip().lower()
+    job_revision = job.get("last_job_revision")
+    if (
+        re.fullmatch(r"[0-9a-f]{32}", job_id) is None
+        or re.fullmatch(r"[0-9a-f]{32}", attempt_id) is None
+        or re.fullmatch(r"[0-9a-f]{32}", owner_instance_id) is None
+        or isinstance(job_revision, bool)
+        or not isinstance(job_revision, int)
+        or job_revision <= 0
+    ):
+        return None
+    return {
+        "job_id": job_id,
+        "attempt_id": attempt_id,
+        "owner_instance_id": owner_instance_id,
+        "job_revision": job_revision,
+    }
+
+
+def _read_stable_formal_bytes(path: Path, *, max_bytes: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            raise ValueError("formal_json_untrusted")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode")
+    current = path.lstat()
+    if (
+        path.is_symlink()
+        or len(raw) != before.st_size
+        or len(raw) > max_bytes
+        or any(
+            getattr(before, field) != getattr(after, field)
+            or getattr(after, field) != getattr(current, field)
+            for field in stable_fields
+        )
+    ):
+        raise ValueError("formal_json_changed")
+    return raw
+
+
+def _read_stable_formal_json_witness(
+    path: Path,
+    *,
+    max_bytes: int,
+) -> tuple[dict[str, Any], str]:
+    raw = _read_stable_formal_bytes(path, max_bytes=max_bytes)
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError("formal_json_invalid")
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
+def _read_stable_formal_json(path: Path, *, max_bytes: int) -> dict[str, Any]:
+    payload, _sha256 = _read_stable_formal_json_witness(
+        path,
+        max_bytes=max_bytes,
+    )
+    return payload
+
+
+def _formal_receipt_artifact(
+    receipt_variant: Mapping[str, Any],
+    name: str,
+) -> Mapping[str, Any]:
+    artifact = receipt_variant.get(name)
+    if not isinstance(artifact, Mapping):
+        raise TypeError("formal_task_receipt_artifact_invalid")
+    return artifact
+
+
+def _read_formal_runtime_events(job_id: str) -> list[dict[str, Any]]:
+    path = event_journal_path(job_id)
+    if path is None:
+        raise ValueError("formal_event_journal_missing")
+    payload = _read_stable_formal_json_lines(path, max_bytes=MAX_EVENT_BYTES)
+    previous_timestamp: float | None = None
+    events: list[dict[str, Any]] = []
+    for row in payload:
+        if (
+            str(row.get("job_id") or "").strip().lower() != job_id
+            or isinstance(row.get("ts"), bool)
+            or not isinstance(row.get("ts"), (int, float))
+        ):
+            raise ValueError("formal_event_identity_invalid")
+        timestamp = float(row["ts"])
+        if (
+            not math.isfinite(timestamp)
+            or (previous_timestamp is not None and timestamp < previous_timestamp)
+        ):
+            raise ValueError("formal_event_chronology_invalid")
+        previous_timestamp = timestamp
+        events.append(row)
+    if not events:
+        raise ValueError("formal_event_journal_empty")
+    return events
+
+
+def _read_stable_formal_json_lines(
+    path: Path,
+    *,
+    max_bytes: int,
+) -> list[dict[str, Any]]:
+    raw = _read_stable_formal_bytes(path, max_bytes=max_bytes)
+    rows: list[dict[str, Any]] = []
+    for line in raw.decode("utf-8").splitlines():
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise TypeError("formal_event_record_invalid")
+        rows.append(value)
+    return rows
+
+
+def _formal_runtime_evidence_state(
+    *,
+    job: Mapping[str, Any],
+    result: Mapping[str, Any],
+    variants: list[dict[str, Any]],
+    source_json_path: str,
+    professional_json_paths: list[str | None],
+    professional_render_receipt_paths: list[str | None],
+    task_receipt: Mapping[str, Any],
+    expected_generation_release: Mapping[str, Any],
+    expected_registry_authority: Mapping[str, Any],
+) -> tuple[bool, str]:
+    expected_execution = _formal_execution_identity(job)
+    if (
+        expected_execution is None
+        or result.get("job_execution_identity") != expected_execution
+        or task_receipt.get("job_execution_identity") != expected_execution
+    ):
+        return False, "generation_execution_identity_invalid"
+    try:
+        trusted_authority = validate_registry_authority_projection(
+            expected_registry_authority
+        )
+    except SealedComplianceError:
+        return False, "compliance_registry_authority_untrusted"
+    if dict(trusted_authority) != dict(expected_registry_authority):
+        return False, "compliance_registry_authority_untrusted"
+
+    try:
+        if not source_json_path:
+            raise ValueError("formal_source_json_missing")
+        source_json, source_json_sha256 = _read_stable_formal_json_witness(
+            Path(source_json_path),
+            max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+        )
+        source_variants = source_json.get("variants")
+        receipt_variants = task_receipt.get("variants")
+        if (
+            not isinstance(source_variants, list)
+            or not source_variants
+            or any(not isinstance(row, dict) for row in source_variants)
+            or not isinstance(receipt_variants, list)
+            or len(receipt_variants) != len(variants)
+            or len(professional_json_paths) != len(variants)
+            or len(professional_render_receipt_paths) != len(variants)
+        ):
+            raise ValueError("formal_source_json_invalid")
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        return False, "professional_render_receipt_binding_invalid"
+
+    try:
+        events = _read_formal_runtime_events(expected_execution["job_id"])
+
+        def belongs(row: Mapping[str, Any]) -> bool:
+            return all(
+                row.get(field) == value
+                for field, value in expected_execution.items()
+                if field != "job_id"
+            )
+
+        started = [
+            index
+            for index, row in enumerate(events)
+            if row.get("event") == "job_started" and belongs(row)
+        ]
+        succeeded = [
+            index
+            for index, row in enumerate(events)
+            if row.get("event") == "job_succeeded" and belongs(row)
+        ]
+        if len(started) != 1 or len(succeeded) != 1 or started[0] >= succeeded[0]:
+            raise ValueError("formal_event_terminal_invalid")
+        current = events[started[0] : succeeded[0] + 1]
+        if any(not belongs(row) for row in current):
+            raise ValueError("formal_event_lineage_mixed")
+        if any(
+            belongs(row) and not (started[0] <= index <= succeeded[0])
+            for index, row in enumerate(events)
+        ):
+            raise ValueError("formal_event_lineage_outside_terminal")
+        start_event = current[0]
+        success_event = current[-1]
+        if (
+            start_event.get("generation_release_identity")
+            != dict(expected_generation_release)
+            or success_event.get("generation_release_identity")
+            != dict(expected_generation_release)
+            or start_event.get("compliance_registry_authority")
+            != dict(trusted_authority)
+            or success_event.get("compliance_registry_authority")
+            != dict(trusted_authority)
+            or success_event.get("dry_run") is not False
+            or success_event.get("delivery_scope") != "document"
+        ):
+            raise ValueError("formal_event_authority_invalid")
+        admission_started = [
+            index
+            for index, row in enumerate(current)
+            if row.get("event") == "provider_admission_started"
+        ]
+        if len(admission_started) != 1:
+            raise ValueError("formal_event_admission_invalid")
+        expected_variant_ids = {
+            int(row.get("variant_id")) for row in variants
+        }
+        if (
+            len(expected_variant_ids) != len(variants)
+            or any(value <= 0 for value in expected_variant_ids)
+        ):
+            raise ValueError("formal_variant_identity_invalid")
+        preflights = [
+            row
+            for index, row in enumerate(current)
+            if row.get("event") == "compliance_preflight"
+            and 0 < index < admission_started[0]
+        ]
+        preflight_ids = [row.get("variant_id") for row in preflights]
+        if (
+            len(preflights) != len(expected_variant_ids)
+            or set(preflight_ids) != expected_variant_ids
+            or len(preflight_ids) != len(set(preflight_ids))
+            or any(
+                row.get("ready") is not True
+                or row.get("authority_digest")
+                != trusted_authority["authority_digest"]
+                or row.get("official_registry_sha256")
+                != trusted_authority["registry_sha256"]
+                or isinstance(row.get("verified_standard_count"), bool)
+                or not isinstance(row.get("verified_standard_count"), int)
+                or row.get("verified_standard_count", 0) <= 0
+                for row in preflights
+            )
+            or sum(
+                row.get("event") == "compliance_preflight" for row in current
+            )
+            != len(preflights)
+        ):
+            raise ValueError("formal_event_preflight_invalid")
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return False, "runtime_event_evidence_invalid"
+
+    try:
+        for row in variants:
+            variant_id = int(row.get("variant_id"))
+            checkpoint = read_verified_generation_checkpoint(
+                namespace=expected_execution["job_id"],
+                scope=f"variant-{variant_id}",
+            )
+            if not isinstance(checkpoint, dict):
+                raise TypeError("formal_checkpoint_missing")
+            binding = checkpoint.get("binding")
+            summary = row.get("generation_checkpoint")
+            if not isinstance(binding, dict) or not isinstance(summary, dict):
+                raise TypeError("formal_checkpoint_binding_missing")
+            binding_core = {
+                key: value
+                for key, value in binding.items()
+                if key != "binding_digest"
+            }
+            binding_digest = str(binding.get("binding_digest") or "")
+            if (
+                checkpoint.get("status") != "complete"
+                or checkpoint.get("binding_digest") != binding_digest
+                or binding_digest != canonical_digest(binding_core)
+                or binding.get("job_id") != expected_execution["job_id"]
+                or binding.get("attempt_id") != expected_execution["attempt_id"]
+                or binding.get("owner_instance_id")
+                != expected_execution["owner_instance_id"]
+                or binding.get("job_revision")
+                != expected_execution["job_revision"]
+                or str(binding.get("variant_id") or "") != str(variant_id)
+                or binding.get("delivery_scope") != "document"
+                or binding.get("compliance_registry_authority_digest")
+                != trusted_authority["authority_digest"]
+                or summary.get("binding_digest") != binding_digest
+                or summary.get("status") != "complete"
+            ):
+                raise ValueError("formal_checkpoint_binding_invalid")
+    except (
+        CheckpointIntegrityError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return False, "generation_checkpoint_evidence_invalid"
+
+    professional_json_sha256s: list[str] = []
+    try:
+        for index, (source_variant, raw_path) in enumerate(
+            zip(variants, professional_json_paths, strict=True),
+            start=1,
+        ):
+            if raw_path is None:
+                raise ValueError("formal_professional_json_missing")
+            professional, professional_json_sha256 = (
+                _read_stable_formal_json_witness(
+                    Path(raw_path),
+                    max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+                )
+            )
+            professional_json_sha256s.append(professional_json_sha256)
+            professional_variants = professional.get("variants")
+            if (
+                professional.get("professional_render_source_variant") != index
+                or professional.get("generation_release_identity")
+                != dict(expected_generation_release)
+                or professional.get("compliance_registry_authority")
+                != dict(trusted_authority)
+                or not isinstance(professional_variants, list)
+                or len(professional_variants) != 1
+                or not isinstance(professional_variants[0], dict)
+            ):
+                raise ValueError("formal_professional_json_identity_invalid")
+            formal_variant = professional_variants[0]
+            standard_index = formal_variant.get("standard_index")
+            if (
+                formal_variant.get("variant_id")
+                != source_variant.get("variant_id")
+                or formal_variant.get("generation_release_identity")
+                != dict(expected_generation_release)
+                or formal_variant.get("compliance_registry_authority")
+                != dict(trusted_authority)
+                or not isinstance(standard_index, dict)
+                or standard_index.get("official_registry_path")
+                != trusted_authority["registry_path"]
+                or standard_index.get("official_registry_sha256")
+                != trusted_authority["registry_sha256"]
+            ):
+                raise ValueError("formal_professional_variant_invalid")
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        return False, "professional_json_authority_invalid"
+
+    try:
+        for index, (
+            raw_professional_json_path,
+            professional_json_sha256,
+            raw_render_receipt_path,
+        ) in enumerate(
+            zip(
+                professional_json_paths,
+                professional_json_sha256s,
+                professional_render_receipt_paths,
+                strict=True,
+            ),
+            start=1,
+        ):
+            if (
+                raw_professional_json_path is None
+                or raw_render_receipt_path is None
+            ):
+                raise ValueError("formal_render_receipt_missing")
+            render_receipt, render_receipt_sha256 = (
+                _read_stable_formal_json_witness(
+                    Path(raw_render_receipt_path),
+                    max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+                )
+            )
+            task_variant = receipt_variants[index - 1]
+            if not isinstance(task_variant, dict):
+                raise TypeError("formal_task_receipt_variant_invalid")
+
+            task_source_docx = _formal_receipt_artifact(
+                task_variant,
+                "source_docx",
+            )
+            task_professional_docx = _formal_receipt_artifact(
+                task_variant,
+                "professional_docx",
+            )
+            task_professional_json = _formal_receipt_artifact(
+                task_variant,
+                "professional_json",
+            )
+            task_render_receipt = _formal_receipt_artifact(
+                task_variant,
+                "professional_render_receipt",
+            )
+            render_digest = str(render_receipt.get("receipt_digest") or "")
+            if (
+                professional_json_sha256
+                != str(task_professional_json.get("sha256") or "")
+                or render_receipt_sha256
+                != str(task_render_receipt.get("sha256") or "")
+                or not _same_artifact_path(
+                    task_professional_json.get("path"),
+                    raw_professional_json_path,
+                )
+                or not _same_artifact_path(
+                    task_render_receipt.get("path"),
+                    raw_render_receipt_path,
+                )
+                or render_receipt.get("schema")
+                != "zhifei.professional_document_render.v1"
+                or render_receipt.get("job_id") != expected_execution["job_id"]
+                or render_receipt.get("variant") != index
+                or not _same_artifact_path(
+                    render_receipt.get("source_json"),
+                    source_json_path,
+                )
+                or render_receipt.get("source_json_sha256")
+                != source_json_sha256
+                or not _same_artifact_path(
+                    render_receipt.get("source_docx"),
+                    task_source_docx.get("path"),
+                )
+                or render_receipt.get("source_docx_sha256")
+                != task_source_docx.get("sha256")
+                or not _same_artifact_path(
+                    render_receipt.get("professional_docx"),
+                    task_professional_docx.get("path"),
+                )
+                or render_receipt.get("professional_docx_sha256")
+                != task_professional_docx.get("sha256")
+                or not _same_artifact_path(
+                    render_receipt.get("professional_json"),
+                    task_professional_json.get("path"),
+                )
+                or render_receipt.get("professional_json_sha256")
+                != task_professional_json.get("sha256")
+                or render_digest
+                != canonical_professional_render_receipt_digest(render_receipt)
+            ):
+                raise ValueError("formal_render_receipt_binding_invalid")
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        return False, "professional_render_receipt_binding_invalid"
+    return True, "formal_runtime_evidence_valid"
+
+
+def _formal_delivery_state(
+    job: dict,
+    result: dict,
+    variants: list,
+) -> tuple[bool, str]:
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    if bool(payload.get("dry_run")):
+        return False, "dry_run"
+    if (
+        "delivery_scope" not in payload
+        or not str(payload.get("delivery_scope") or "").strip()
+    ):
+        return False, "delivery_scope_missing"
+    payload_scope = str(payload.get("delivery_scope") or "").strip().lower()
+    if payload_scope != "document":
+        return False, payload_scope or "unknown_scope"
+    expected_generation_release = dict(_GENERATION_RELEASE_IDENTITY_AT_START)
+    expected_registry_authority: dict[str, Any] | None = None
+    if expected_generation_release.get("release_managed") is True:
+        try:
+            expected_registry_authority = (
+                _generation_compliance_registry_authority_from_environment()
+            )
+        except Exception:  # noqa: BLE001 - formal mutation fails closed.
+            return False, "compliance_registry_authority_untrusted"
+        agent_runtime = (
+            job.get("agent_runtime")
+            if isinstance(job.get("agent_runtime"), dict)
+            else {}
+        )
+        if (
+            expected_registry_authority is None
+            or result.get("generation_release_identity")
+            != expected_generation_release
+            or agent_runtime.get("generation_release_identity")
+            != expected_generation_release
+            or result.get("compliance_registry_authority")
+            != expected_registry_authority
+            or agent_runtime.get("compliance_registry_authority")
+            != expected_registry_authority
+            or any(
+                row.get("generation_release_identity")
+                != expected_generation_release
+                or row.get("compliance_registry_authority")
+                != expected_registry_authority
+                or str(
+                    (row.get("standard_index") or {}).get(
+                        "official_registry_sha256"
+                    )
+                )
+                != str(expected_registry_authority.get("registry_sha256") or "")
+                or str(
+                    (row.get("standard_index") or {}).get(
+                        "official_registry_path"
+                    )
+                )
+                != str(expected_registry_authority.get("registry_path") or "")
+                for row in variants
+                if isinstance(row, dict)
+            )
+        ):
+            return False, "generation_registry_authority_mismatch"
+    status = str(job.get("status") or "").strip().lower()
+    if status not in {"done", "succeeded"}:
+        return False, "job_not_succeeded"
+    if not variants or any(not isinstance(row, dict) for row in variants):
+        return False, "variant_record_invalid"
+    if any(
+        "delivery_scope" not in row
+        or not str(row.get("delivery_scope") or "").strip()
+        for row in variants
+    ):
+        return False, "variant_scope_missing"
+    record_scopes = {
+        str(row.get("delivery_scope") or "").strip().lower()
+        for row in variants
+        if isinstance(row, dict)
+    }
+    if record_scopes != {"document"}:
+        return False, "variant_scope_mismatch"
+    if any(row.get("delivery_ready") is not True for row in variants):
+        return False, "delivery_not_ready"
+    if any(
+        not export_docx_core.delivery_gate_digest_is_valid(
+            row.get("delivery_quality_gate")
+        )
+        or (row.get("delivery_quality_gate") or {}).get("delivery_allowed")
+        is not True
+        for row in variants
+    ):
+        return False, "delivery_gate_invalid"
+    for row in variants:
+        gate = row.get("delivery_quality_gate")
+        assert isinstance(gate, dict)
+        raw_checks = gate.get("checks")
+        if not isinstance(raw_checks, list):
+            return False, "delivery_gate_contract_stale"
+        checks = {
+            str(check.get("name") or "").strip(): check
+            for check in raw_checks
+            if isinstance(check, dict)
+            and str(check.get("name") or "").strip()
+        }
+        standard_check = checks.get("verified_standards")
+        audit_codes = (
+            standard_check.get("audit_verified_standard_codes")
+            if isinstance(standard_check, dict)
+            else None
+        )
+        index_codes = (
+            standard_check.get("index_verified_standard_codes")
+            if isinstance(standard_check, dict)
+            else None
+        )
+        missing_codes = (
+            standard_check.get("missing_verified_standard_codes")
+            if isinstance(standard_check, dict)
+            else None
+        )
+        current_standard_index = row.get("standard_index")
+        current_standard_audit = row.get("standard_citation_audit")
+        normalized_audit_codes = (
+            [canonical_standard_code(code) for code in audit_codes]
+            if isinstance(audit_codes, list)
+            and all(isinstance(code, str) for code in audit_codes)
+            else []
+        )
+        normalized_index_codes = (
+            [canonical_standard_code(code) for code in index_codes]
+            if isinstance(index_codes, list)
+            and all(isinstance(code, str) for code in index_codes)
+            else []
+        )
+        if (
+            gate.get("formal_contract_version")
+            != FORMAL_DELIVERY_CONTRACT_VERSION
+            or not isinstance(standard_check, dict)
+            or standard_check.get("pass") is not True
+            or standard_check.get("required") is not True
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(standard_check.get("standard_index_digest") or "")
+                .strip()
+                .lower(),
+            )
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(standard_check.get("standard_audit_digest") or "")
+                .strip()
+                .lower(),
+            )
+            or not isinstance(audit_codes, list)
+            or not audit_codes
+            or any(not isinstance(code, str) or not code for code in audit_codes)
+            or not isinstance(index_codes, list)
+            or not index_codes
+            or any(not isinstance(code, str) or not code for code in index_codes)
+            or not isinstance(missing_codes, list)
+            or bool(missing_codes)
+            or any(
+                normalized != supplied
+                for normalized, supplied in zip(
+                    normalized_audit_codes,
+                    audit_codes or [],
+                )
+            )
+            or len(normalized_audit_codes) != len(set(normalized_audit_codes))
+            or any(
+                normalized != supplied
+                for normalized, supplied in zip(
+                    normalized_index_codes,
+                    index_codes or [],
+                )
+            )
+            or len(normalized_index_codes) != len(set(normalized_index_codes))
+            or not set(normalized_audit_codes).issubset(
+                set(normalized_index_codes)
+            )
+            or not isinstance(current_standard_index, dict)
+            or not isinstance(current_standard_audit, dict)
+            or standard_check.get("standard_index_digest")
+            != export_docx_core.canonical_export_digest(current_standard_index)
+            or standard_check.get("standard_audit_digest")
+            != export_docx_core.canonical_export_digest(current_standard_audit)
+        ):
+            return False, "delivery_gate_contract_stale"
+    if not isinstance(result, dict):
+        return False, "delivery_result_invalid"
+    if str(result.get("delivery_profile") or "").strip() != "sonnet5_professional_word":
+        return False, "delivery_profile_mismatch"
+    if result.get("delivery_ready") is not True:
+        return False, "outer_delivery_not_ready"
+    if str(result.get("validation_scope") or "").strip() != "document":
+        return False, "outer_validation_scope_mismatch"
+    audit_ready, audit_reason = _promotion_audit_state(job, result)
+    if not audit_ready:
+        return False, audit_reason
+
+    variant_count = len(variants)
+    required_list_keys = (
+        "source_docx",
+        "docx",
+        "professional_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "compare_docx",
+    )
+    optional_list_keys = (
+        "focus_xlsx",
+        "score_overview_xlsx",
+        "expert_review_docx",
+    )
+    artifact_lists: dict[str, list[str | None]] = {}
+    for key in required_list_keys + optional_list_keys:
+        values = result.get(key)
+        if not isinstance(values, list) or len(values) != variant_count:
+            return False, "delivery_artifact_set_incomplete"
+        normalized = [str(value or "").strip() or None for value in values]
+        if key in required_list_keys and not all(normalized):
+            return False, "delivery_artifact_set_incomplete"
+        identities: set[Path] = set()
+        for value in normalized:
+            if value is None:
+                continue
+            try:
+                identity = Path(value).resolve()
+            except (OSError, RuntimeError, ValueError):
+                return False, "delivery_artifact_path_invalid"
+            if identity in identities:
+                return False, "delivery_artifact_variant_reuse"
+            identities.add(identity)
+        artifact_lists[key] = normalized
+
+    for docx, professional in zip(
+        artifact_lists["docx"], artifact_lists["professional_docx"]
+    ):
+        if not _same_artifact_path(docx, professional):
+            return False, "public_professional_path_mismatch"
+        docx_path = Path(docx)
+        professional_path = Path(professional)
+        if not docx_path.is_file() or not professional_path.is_file():
+            return False, "delivery_artifact_missing"
+        try:
+            if _artifact_sha256(docx_path) != _artifact_sha256(professional_path):
+                return False, "public_professional_hash_mismatch"
+        except OSError:
+            return False, "delivery_artifact_unreadable"
+
+    for key in (
+        "source_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "compare_docx",
+    ):
+        if any(path is None or not Path(path).is_file() for path in artifact_lists[key]):
+            return False, "delivery_artifact_missing"
+    for key in optional_list_keys:
+        if any(
+            path is not None and not Path(path).is_file()
+            for path in artifact_lists[key]
+        ):
+            return False, "delivery_artifact_missing"
+
+    receipt_path_value = str(result.get("delivery_receipt") or "").strip()
+    decision_digest = str(result.get("delivery_decision_digest") or "").strip()
+    if not decision_digest or not receipt_path_value:
+        return False, "delivery_receipt_missing"
+    receipt_path = Path(receipt_path_value)
+    try:
+        task_receipt, _receipt_sha256 = _read_stable_formal_json_witness(
+            receipt_path,
+            max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+        )
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return False, "delivery_receipt_invalid"
+    if not isinstance(task_receipt, dict):
+        return False, "delivery_receipt_invalid"
+    try:
+        receipt_variant_count = int(task_receipt.get("variant_count") or 0)
+    except (TypeError, ValueError):
+        return False, "delivery_receipt_invalid"
+    recorded_digest = str(task_receipt.get("decision_digest") or "").strip()
+    computed_digest = canonical_delivery_receipt_digest(task_receipt)
+    if not recorded_digest or recorded_digest != computed_digest or decision_digest != computed_digest:
+        return False, "delivery_receipt_digest_mismatch"
+    if (
+        task_receipt.get("schema") != "zhifei.delivery_receipt.v2"
+        or task_receipt.get("status") != "pass"
+        or task_receipt.get("delivery_profile") != "sonnet5_professional_word"
+        or receipt_variant_count != variant_count
+        or (
+            expected_registry_authority is not None
+            and task_receipt.get("compliance_registry_authority")
+            != expected_registry_authority
+        )
+    ):
+        return False, "delivery_receipt_invalid"
+    expected_job_id = str(job.get("job_id") or "").strip()
+    if expected_job_id and str(task_receipt.get("job_id") or "") != expected_job_id:
+        return False, "delivery_receipt_job_mismatch"
+    receipt_variants = task_receipt.get("variants")
+    if not isinstance(receipt_variants, list) or len(receipt_variants) != variant_count:
+        return False, "delivery_receipt_variant_mismatch"
+
+    receipt_bindings = (
+        ("source_docx", "source_docx", False),
+        ("professional_docx", "professional_docx", False),
+        ("professional_json", "professional_json", False),
+        ("professional_render_receipt", "professional_render_receipt", False),
+        ("compare_docx", "compare_docx", False),
+        ("focus_xlsx", "focus_xlsx", True),
+        ("score_overview_xlsx", "score_overview_xlsx", True),
+        ("expert_review_docx", "expert_review_docx", True),
+    )
+    for index, row in enumerate(receipt_variants, start=1):
+        if not isinstance(row, dict):
+            return False, "delivery_receipt_variant_mismatch"
+        try:
+            receipt_variant = int(row.get("variant") or 0)
+        except (TypeError, ValueError):
+            return False, "delivery_receipt_variant_mismatch"
+        if receipt_variant != index:
+            return False, "delivery_receipt_variant_mismatch"
+        for result_key, receipt_key, optional in receipt_bindings:
+            if receipt_key not in row:
+                return False, "delivery_receipt_artifact_invalid"
+            artifact = row.get(receipt_key)
+            expected_path = artifact_lists[result_key][index - 1]
+            if optional and expected_path is None:
+                if artifact is not None:
+                    return False, "delivery_receipt_artifact_mismatch"
+                continue
+            if not isinstance(artifact, dict):
+                return False, "delivery_receipt_artifact_invalid"
+            if expected_path is None:
+                return False, "delivery_receipt_artifact_invalid"
+            if not _same_artifact_path(artifact.get("path"), expected_path):
+                return False, "delivery_receipt_artifact_mismatch"
+            path = Path(expected_path)
+            try:
+                actual_sha256 = _artifact_sha256(path)
+            except OSError:
+                return False, "delivery_artifact_unreadable"
+            if str(artifact.get("sha256") or "") != actual_sha256:
+                return False, "delivery_receipt_hash_mismatch"
+    if expected_registry_authority is not None:
+        runtime_ready, runtime_reason = _formal_runtime_evidence_state(
+            job=job,
+            result=result,
+            variants=variants,
+            source_json_path=str(result.get("json") or "").strip(),
+            professional_json_paths=artifact_lists["professional_json"],
+            professional_render_receipt_paths=artifact_lists[
+                "professional_render_receipt"
+            ],
+            task_receipt=task_receipt,
+            expected_generation_release=expected_generation_release,
+            expected_registry_authority=expected_registry_authority,
+        )
+        if not runtime_ready:
+            return False, runtime_reason
+    return True, "formal_document_ready"
+
+
+def _public_job_files(job: dict, result: dict, variants: list) -> dict[str, Any]:
+    formal_ready, reason = _formal_delivery_state(job, result, variants)
+    public = {
+        "json": result.get("json"),
+        "delivery_profile": result.get("delivery_profile"),
+        "delivery_ready": formal_ready,
+        "validation_scope": "document" if formal_ready else None,
+    }
+    formal_keys = (
+        "docx",
+        "professional_docx",
+        "professional_json",
+        "professional_render_receipt",
+        "compare_docx",
+        "delivery_receipt",
+        "delivery_decision_digest",
+        "focus_xlsx",
+        "score_overview_xlsx",
+        "expert_review_docx",
+    )
+    if formal_ready:
+        public.update({key: result.get(key) for key in formal_keys if result.get(key)})
+    elif any(result.get(key) for key in formal_keys):
+        public["artifact_leak_blocked"] = True
+        public["non_delivery_reason"] = reason
+    return public
+
+
+def _require_formal_document_mutation(
+    job: dict,
+    result: dict,
+    variants: list,
+) -> None:
+    formal_ready, reason = _formal_delivery_state(job, result, variants)
+    if not formal_ready:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "NON_DELIVERABLE_MUTATION_FORBIDDEN",
+                "message": "非正式交付任务仅允许只读复核，不能晋升、回滚或渲染正式交付文件。",
+                "reason": reason,
+            },
+        )
+
+
+def _capture_promotion_revision(job: dict) -> tuple[str, int]:
+    status = str(job.get("status") or "").strip().lower()
+    try:
+        revision = int(job.get("revision") or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    if status not in {"done", "succeeded"} or revision <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_PROMOTION",
+                "message": "任务版本状态无效，候选结果未晋升。",
+            },
+        )
+    return status, revision
+
+
+def _promote_job_result_cas(
+    *,
+    job_id: str,
+    initial_status: str,
+    initial_revision: int,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    transitioned = transition_job(
+        job_id,
+        allowed_from={initial_status},
+        status=initial_status,
+        expected_revision=initial_revision,
+        result=result,
+        error=None,
+    )
+    if transitioned is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_PROMOTION",
+                "message": "任务在候选文件生成期间已被其他操作更新；候选结果未晋升。",
+            },
+        )
+    return transitioned
+
+
+def _promote_review_candidate_two_phase(
+    *,
+    job_id: str,
+    revision_id: str,
+    initial_status: str,
+    initial_revision: int,
+    result: dict[str, Any],
+    promotion: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Prepare audit evidence, CAS the job, then commit the audit receipt.
+
+    A prepare failure cannot mutate the live job.  A stale CAS leaves the
+    snapshot explicitly in ``candidate_prepared`` state.  If the final audit
+    commit fails after a successful CAS, the promoted job points back to the
+    still-sealed prepared receipt so recovery can commit it idempotently.
+    """
+
+    candidate_digest = str(promotion.get("candidate_artifact_digest") or "").strip()
+    if not candidate_digest:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PROMOTION_AUDIT_PREPARE_FAILED",
+                "message": "候选制品摘要缺失，旧任务结果保持不变。",
+            },
+        )
+    prepared_payload = dict(promotion)
+    prepared_payload.update(
+        {
+            "expected_job_revision": int(initial_revision),
+            "expected_job_status": str(initial_status),
+            "expected_promoted_job_revision": int(initial_revision) + 1,
+            "recovery": {
+                "operation": "commit_prepared_promotion_after_job_cas_verification",
+                "candidate_artifact_digest": candidate_digest,
+                "expected_promoted_job_revision": int(initial_revision) + 1,
+            },
+        }
+    )
+    try:
+        prepared = prepare_revision_promotion(
+            job_id=job_id,
+            revision_id=revision_id,
+            promotion=prepared_payload,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PROMOTION_AUDIT_PREPARE_FAILED",
+                "message": "候选晋升凭证封印失败，旧任务结果保持不变。",
+                "revision_id": revision_id,
+            },
+        ) from exc
+
+    result["promotion_audit_receipt"] = str(prepared["path"])
+    transitioned = _promote_job_result_cas(
+        job_id=job_id,
+        initial_status=initial_status,
+        initial_revision=initial_revision,
+        result=result,
+    )
+    try:
+        committed = commit_revision_promotion(
+            job_id=job_id,
+            revision_id=revision_id,
+            candidate_artifact_digest=candidate_digest,
+            promoted_job_revision=int(transitioned.get("revision") or 0),
+            promoted_job_status=str(transitioned.get("status") or ""),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "PROMOTION_AUDIT_COMMIT_PENDING",
+                "message": "任务已完成原子晋升，但审计凭证仍处于 candidate_prepared；可按凭证摘要安全续提 committed。",
+                "revision_id": revision_id,
+                "promotion_state": "candidate_prepared",
+                "job_promotion_committed": True,
+                "promoted_job_revision": int(transitioned.get("revision") or 0),
+                "candidate_artifact_digest": candidate_digest,
+                "promotion_audit_receipt": str(prepared["path"]),
+            },
+        ) from exc
+    return transitioned, committed
+
+
+def _validate_rollback_snapshot(
+    *,
+    revision: dict[str, Any],
+    current_job: dict[str, Any],
+    current_result: dict[str, Any],
+    current_variants: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    def _invalid(reason: str) -> HTTPException:
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "ROLLBACK_SNAPSHOT_INVALID",
+                "message": "回滚快照未通过身份与正式交付校验，未创建安全快照或候选文件。",
+                "reason": reason,
+            },
+        )
+
+    if revision.get("schema_version") != "review-revision-v1":
+        raise _invalid("schema_mismatch")
+    if not str(revision.get("snapshot_digest") or "").strip():
+        raise _invalid("snapshot_seal_missing")
+    restored = revision.get("variants")
+    if not isinstance(restored, list) or any(not isinstance(row, dict) for row in restored):
+        raise _invalid("variant_record_invalid")
+    try:
+        revision_variant_count = int(revision.get("variant_count") or 0)
+    except (TypeError, ValueError):
+        raise _invalid("variant_count_mismatch")
+    if revision_variant_count != len(restored) or len(restored) != len(current_variants):
+        raise _invalid("variant_count_mismatch")
+
+    current_ids = [str(row.get("variant_id") or "").strip() for row in current_variants]
+    restored_ids = [str(row.get("variant_id") or "").strip() for row in restored]
+    if (
+        not all(current_ids)
+        or not all(restored_ids)
+        or len(set(current_ids)) != len(current_ids)
+        or restored_ids != current_ids
+    ):
+        raise _invalid("variant_identity_mismatch")
+
+    formal_ready, reason = _formal_delivery_state(
+        current_job,
+        current_result,
+        restored,
+    )
+    if not formal_ready:
+        raise _invalid(f"restored_{reason}")
+    return copy.deepcopy(restored)
 
 
 def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> list[dict]:
@@ -1142,8 +4185,8 @@ def _review_items_for_variant(variant_rec: dict, *, max_excerpt: int = 320) -> l
     recs = qc.get("auto_revision_suggestions") if isinstance(qc.get("auto_revision_suggestions"), list) else []
     sections = variant_rec.get("sections") if isinstance(variant_rec.get("sections"), list) else []
 
-    title_to_excerpt: Dict[str, str] = {}
-    title_to_digest: Dict[str, str] = {}
+    title_to_excerpt: dict[str, str] = {}
+    title_to_digest: dict[str, str] = {}
     for s in sections:
         if not isinstance(s, dict):
             continue
@@ -1364,12 +4407,15 @@ async def _rewrite_review_section(
     if not original:
         audit["error"] = "empty_section_content"
         return "", audit
+    if payload.get("_provider_admission_run_coordinator") is None:
+        audit["error"] = "provider_admission_required"
+        return "", audit
 
     issue_lines = []
     for index, item in enumerate(issues, start=1):
         issue_lines.append(
-            f"{index}. 类型：{str(item.get('type') or 'issue')}；"
-            f"级别：{str(item.get('severity') or 'medium')}；"
+            f"{index}. 类型：{item.get('type') or 'issue'!s}；"
+            f"级别：{item.get('severity') or 'medium'!s}；"
             f"问题：{str(item.get('problem') or '').strip()}；"
             f"修订要求：{str(item.get('suggestion') or '').strip()}"
         )
@@ -1408,15 +4454,26 @@ async def _rewrite_review_section(
             explicit_key=str(entry.get("api_key") or ""),
         )
         attempt: dict[str, Any] = {"slot": slot, "provider": provider, "model": model}
-        client = LLMClient(
-            provider,
-            model,
-            api_key=api_key,
-            base_url=payload.get("base_url"),
-            secret_key=payload.get("secret_key"),
-            token_url=payload.get("token_url"),
-        )
-        response = await client.complete(prompt, timeout=240, max_tokens=12000)
+        client = LLMClient(provider, model, api_key=api_key, retry_attempts=1)
+        try:
+            response = await client.complete(
+                prompt,
+                timeout=240,
+                max_tokens=12000,
+                stream=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - provider boundary classifies and audits every failure
+            info = classify_provider_error(exc, provider=provider, model=model)
+            attempt.update(
+                {
+                    "status": "failed",
+                    "error": str(info.get("code") or "provider_error")[:80],
+                }
+            )
+            audit["attempts"].append(attempt)
+            continue
+        finally:
+            client.close()
         rewritten = _clean_review_rewrite(str(response.get("text") or ""), title=title)
         if rewritten:
             attempt["status"] = "success"
@@ -1433,7 +4490,32 @@ async def _rewrite_review_section(
 @router.post("/plan/save")
 async def actions_plan_save(req: ActionsPlanRequest, project_id: str | None = None, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
-    path = save_plan(req.model_dump(), project_id=project_id)
+    explicit_approvals = req.approved_project_fact_resolutions is not None
+    payload = _inherit_project_fact_plan_fields(
+        req.model_dump(),
+        load_plan(project_id=project_id) or {},
+    )
+    if explicit_approvals:
+        try:
+            payload["approved_project_fact_resolutions"] = (
+                _persist_explicit_project_fact_approvals(
+                    payload.get("approved_project_fact_resolutions") or {},
+                    project_id=project_id,
+                    actor={
+                        "channel": "actions_key",
+                        "actor_id": "system-actions",
+                    },
+                )
+            )
+        except ProjectFactApprovalAuditError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "PROJECT_FACT_APPROVAL_CONFIRMATION_INVALID",
+                    "reason": exc.code,
+                },
+            ) from exc
+    path = save_plan(payload, project_id=project_id)
     return {"ok": True, "saved_at": path}
 
 
@@ -1512,7 +4594,7 @@ async def actions_case_library_items(
 
 @router.post("/case_library/upload")
 async def actions_case_library_upload(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_type: str | None = None,
     title: str | None = None,
     tags: str | None = None,
@@ -1568,7 +4650,7 @@ async def actions_image_library_items(
 
 @router.post("/image_library/upload")
 async def actions_image_library_upload(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
     project_type: str | None = None,
     title: str | None = None,
     tags: str | None = None,
@@ -1818,7 +4900,12 @@ def _ollama_smoke_model(req_model: str | None) -> str:
 
 
 def _ollama_smoke_base_url(req_base_url: str | None) -> str:
-    return (req_base_url or os.environ.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
+    requested = str(
+        req_base_url or os.environ.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+    ).strip().rstrip("/")
+    if requested in {"http://127.0.0.1:11434", "http://localhost:11434"}:
+        return "http://127.0.0.1:11434"
+    return ""
 
 
 def _ollama_smoke_title(req: ActionsOllamaMainChainSmokeRequest) -> str:
@@ -1909,6 +4996,23 @@ async def actions_ollama_main_chain_smoke(
     model = _ollama_smoke_model(req.model)
     base_url = _ollama_smoke_base_url(req.base_url)
     smoke_type = "ollama_main_chain_no_write"
+    if not base_url:
+        return {
+            "ok": False,
+            "enabled": bool(_ollama_smoke_enabled()),
+            "status": "blocked",
+            "provider": "ollama",
+            "model": model,
+            "base_url": "http://127.0.0.1:11434",
+            "section_count": 0,
+            "sections_preview": [],
+            "error": {
+                "code": "LOCAL_OLLAMA_LOOPBACK_REQUIRED",
+                "message": "仅允许本机 Ollama 127.0.0.1:11434，已阻止其他地址。",
+            },
+            "warning": None,
+            "smoke_type": smoke_type,
+        }
     if not _ollama_smoke_enabled():
         return {
             "ok": False,
@@ -1927,7 +5031,7 @@ async def actions_ollama_main_chain_smoke(
     payload = _ollama_smoke_payload(req)
     try:
         result = await run_autoplan(payload)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - smoke endpoint reports arbitrary provider/pipeline failures
         return {
             "ok": False,
             "enabled": True,
@@ -1961,16 +5065,27 @@ async def actions_ollama_main_chain_smoke(
 
 @router.post("/tender/parse")
 async def actions_tender_parse(
-    files: List[UploadFile] = File(...),
+    files: Annotated[list[UploadFile] | None, File()] = None,
+    file_id: Annotated[list[str] | None, Query()] = None,
     project_id: str | None = None,
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
-    if not files:
+    if not files and not file_id:
         raise HTTPException(status_code=400, detail="no files")
-    paths = await asyncio.gather(*[_save_upload(f) for f in files])
+    paths = await asyncio.gather(*[_save_upload(f) for f in (files or [])])
+    cached_texts: dict[str, str] = {}
+    resolved_sources = await asyncio.to_thread(
+        resolve_ingested_tender_sources, file_id
+    )
+    for source in resolved_sources:
+        source_path = str(source["path"])
+        paths.append(source_path)
+        cached_text = source.get("cached_text")
+        if isinstance(cached_text, str):
+            cached_texts[source_path] = cached_text
     parser = TenderParser()
-    matrix = await parser.parse(paths)
+    matrix = await parser.parse(paths, cached_texts=cached_texts)
     matrix_dict = matrix.model_dump()
     parsed_code = _safe_project_scope(matrix_dict.get("project_code"))
     parsed_name = str(matrix_dict.get("project_name") or "").strip() or None
@@ -1978,6 +5093,18 @@ async def actions_tender_parse(
     resolved_project_id = parsed_code or requested_pid
     if not resolved_project_id and parsed_name:
         resolved_project_id = _safe_project_scope(parsed_name)
+    if not resolved_project_id:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PROJECT_SCOPE_REQUIRED", "message": "无法确定招标资料所属项目。"},
+        )
+    if not isinstance(matrix_dict.get("outline"), list) or not matrix_dict.get("outline"):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "TENDER_PARSE_NOT_READY", "message": "未解析出有效招标目录，资料未标记为可生成。"},
+        )
+    matrix_dict["parse_status"] = "ready"
+    matrix_dict["project_id"] = resolved_project_id
     saved_at = save_tender_matrix(matrix_dict, project_id=resolved_project_id)
     return {
         "ok": True,
@@ -1991,22 +5118,41 @@ async def actions_tender_parse(
 
 @router.post("/boq/parse")
 async def actions_boq_parse(
-    file: List[UploadFile] = File(...),
+    file: Annotated[list[UploadFile] | None, File()] = None,
+    file_id: Annotated[list[str] | None, Query()] = None,
     project_id: str | None = None,
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
-    if not file:
+    if not file and not file_id:
         raise HTTPException(status_code=400, detail="no file")
-    paths = await asyncio.gather(*[_save_upload(f) for f in file])
+    paths = await asyncio.gather(*[_save_upload(f) for f in (file or [])])
+    paths.extend(await asyncio.to_thread(resolve_ingested_file_ids, file_id))
     parser = BoQParser()
     merged_items = []
     for p in paths:
         items, _ = await parser.parse(p)
         merged_items.extend(items)
     stats = parser._calc_stats(merged_items)
-    payload = {"items": [it.model_dump() for it in merged_items], "stats": stats, "source_file_count": len(paths)}
-    saved_at = save_boq_data(payload, project_id=project_id)
+    project_scope = _safe_project_scope(project_id)
+    if not project_scope:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PROJECT_SCOPE_REQUIRED", "message": "工程量清单必须绑定明确项目。"},
+        )
+    if not merged_items:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "BOQ_PARSE_NOT_READY", "message": "未解析出有效工程量清单条目，资料未标记为可生成。"},
+        )
+    payload = {
+        "items": [it.model_dump() for it in merged_items],
+        "stats": stats,
+        "source_file_count": len(paths),
+        "parse_status": "ready",
+        "project_id": project_scope,
+    }
+    saved_at = save_boq_data(payload, project_id=project_scope)
     return {**payload, "ok": True, "saved_at": saved_at}
 
 
@@ -2024,7 +5170,7 @@ async def actions_quality_check(req: ActionsQualityCheckRequest, x_actions_key: 
         if isinstance(recs, list) and recs:
             boq_focus["four_new_recommendations"] = recs
     except Exception:
-        pass
+        logger.warning("four-new recommendations unavailable during quality check", exc_info=True)
     sections = [s.model_dump() for s in req.sections]
     qc = run_quality_checks(
         tender,
@@ -2045,8 +5191,70 @@ async def actions_export_docx(
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
+    source_job_id = str(req.source_job_id or "").strip()
+    if not source_job_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "FORMAL_SOURCE_JOB_REQUIRED",
+                "message": "直接导出必须绑定已通过正式交付门的源任务。",
+            },
+        )
+    source_job, source_result, _source_data, variants = (
+        _load_done_job_variants(source_job_id)
+    )
+    _require_formal_document_mutation(source_job, source_result, variants)
+    variant_number = _require_variant_number(req.variant, len(variants))
+    source_variant = variants[variant_number - 1]
+    if not isinstance(source_variant, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FORMAL_SOURCE_VARIANT_INVALID"},
+        )
+    source_gate = source_variant.get("delivery_quality_gate")
+    source_gate = source_gate if isinstance(source_gate, dict) else {}
+    decision_digest = str(source_gate.get("decision_digest") or "").strip()
+    if (
+        source_gate.get("delivery_allowed") is not True
+        or not export_docx_core.delivery_gate_digest_is_valid(source_gate)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FORMAL_SOURCE_DECISION_INVALID"},
+        )
+    try:
+        source_sections_digest = export_docx_core.canonical_sections_digest(
+            source_variant.get("sections")
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FORMAL_SOURCE_SECTIONS_INVALID"},
+        ) from exc
+    raw_request = dict(source_variant)
+    current_generation_release = dict(_GENERATION_RELEASE_IDENTITY_AT_START)
+    current_registry_authority = (
+        _generation_compliance_registry_authority_from_environment()
+    )
+    raw_request.update(
+        {
+            "generate_images": False,
+            "_formal_source_verified": True,
+            "_formal_source_job_id": source_job_id,
+            "_formal_source_delivery_decision_digest": decision_digest,
+            "_formal_source_sections_digest": source_sections_digest,
+            "_formal_source_generation_release_identity": (
+                current_generation_release
+            ),
+            "_formal_source_compliance_registry_authority": (
+                dict(current_registry_authority)
+                if current_registry_authority is not None
+                else None
+            ),
+        }
+    )
     return export_docx_core.execute_export_docx_request(
-        raw_request=req.model_dump(),
+        raw_request=raw_request,
         workspace_dir=str(workspace_dir or "."),
         save_outputs_fn=_save_outputs,
     )
@@ -2061,42 +5269,66 @@ async def actions_professional_render(
 
     _auth_actions_key(x_actions_key)
     job_id = str(req.job_id or "").strip()
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
-    if job.get("status") != "done":
-        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
-    result = dict(job.get("result") or {})
-    variant = max(1, int(req.variant or 1))
+    job, stored_result, _, variants = _load_done_job_variants(job_id)
+    _require_formal_document_mutation(job, stored_result, variants)
+    initial_status, initial_revision = _capture_promotion_revision(job)
+    result = dict(stored_result)
+    variant = _require_variant_number(req.variant, len(variants))
+    _professional_artifact_lists(result, variant_count=len(variants))
     render_source = dict(result)
     source_docx = result.get("source_docx")
     if isinstance(source_docx, list) and source_docx:
         render_source["docx"] = list(source_docx)
+    candidate_namespace = (
+        f"{job_id}-rerender-v{variant}-{uuid.uuid4().hex}"
+    )
     try:
+        admitted_slot = await _admit_current_server_route_for_existing_evidence()
         rendered = await render_professional_document(
             job_id=job_id,
             variant=variant,
             result=render_source,
+            artifact_namespace=candidate_namespace,
+            slot_override=admitted_slot,
         )
     except ProfessionalRenderError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        public_error = _public_runtime_error(exc)
+        status_code = (
+            503
+            if str(public_error.get("code") or "").startswith("MODEL_PROVIDER_")
+            else 422
+        )
+        raise HTTPException(status_code=status_code, detail=public_error) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"专业精修与渲染失败: {exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail=_public_runtime_error(exc),
+        ) from exc
 
-    if not isinstance(result.get("source_docx"), list):
-        existing_docx = result.get("docx")
-        result["source_docx"] = list(existing_docx) if isinstance(existing_docx, list) else []
-    _set_output_variant_path(result, "professional_docx", variant, rendered["professional_docx"])
-    _set_output_variant_path(result, "professional_json", variant, rendered["professional_json"])
-    _set_output_variant_path(
-        result,
-        "professional_render_receipt",
-        variant,
-        rendered["professional_render_receipt"],
+    try:
+        candidate_result = _reseal_professional_variant(
+            job_id=job_id,
+            result=result,
+            variant=variant,
+            variant_count=len(variants),
+            rendered=rendered,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DELIVERY_RECEIPT_RESEAL_FAILED",
+                "message": "专业 Word 已生成，但任务级交付封印重建失败，旧交付结果保持不变。",
+            },
+        ) from exc
+    _promote_job_result_cas(
+        job_id=job_id,
+        initial_status=initial_status,
+        initial_revision=initial_revision,
+        result=candidate_result,
     )
-    _set_output_variant_path(result, "docx", variant, rendered["professional_docx"])
-    result["delivery_profile"] = "sonnet5_professional_word"
-    update_job(job_id, status="done", result=result, error=None)
     return {
         "ok": True,
         "job_id": job_id,
@@ -2116,6 +5348,7 @@ async def actions_professional_render(
 async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | None = Header(default=None)):
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
+    _assert_mandatory_generation_sources(payload)
     resume_from_job_id = str(payload.get("resume_from_job_id") or "").strip()
     if resume_from_job_id:
         if not re.fullmatch(r"[a-f0-9]{32}", resume_from_job_id):
@@ -2123,15 +5356,41 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
         source_job = get_job(resume_from_job_id)
         if not source_job:
             raise HTTPException(status_code=404, detail="resume source job not found")
-        if str(source_job.get("status") or "").strip().lower() not in {"failed", "cancelled"}:
+        if str(source_job.get("status") or "").strip().lower() not in {
+            "failed",
+            "cancelled",
+            "interrupted_recoverable",
+        }:
             raise HTTPException(
                 status_code=409,
-                detail="only failed or cancelled jobs can be resumed",
+                detail="only failed, cancelled or interrupted jobs can be resumed",
             )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RESUME_REQUIRES_ASYNC_JOB",
+                "message": "检查点恢复仅支持异步任务入口，请使用 generate_async。",
+            },
+        )
+    compliance_registry_authority = (
+        _generation_compliance_registry_authority_from_environment()
+    )
+    if compliance_registry_authority is not None:
+        payload["_compliance_registry_authority"] = dict(
+            compliance_registry_authority
+        )
+    payload = _apply_server_provider_routing_or_503(payload)
+    provider_admission_run = (
+        new_provider_admission_run_coordinator(payload)
+        if bool(payload.get("_provider_admission_required"))
+        else None
+    )
     variant_plan = _build_variant_plan(payload)
     payload["_variant_plan"] = variant_plan
     payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
     payload["variants"] = len(variant_plan) if variant_plan else int(payload.get("variants") or 1)
+    if provider_admission_run is not None:
+        provider_admission_run.configure_preflight_variants(payload["_variant_ids"])
     execution_runtime, execution_policy = _prepare_execution_control(payload)
 
     ordered_results: list[dict[str, Any] | None] = [None] * len(variant_plan)
@@ -2145,90 +5404,58 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
             local_payload["logic_template_id"] = tid
         # Runtime/callback objects are deliberately attached only after cloning.
         local_payload["_execution_runtime"] = execution_runtime
-        async with direct_sem:
+        if provider_admission_run is not None:
+            local_payload["_provider_admission_run_coordinator"] = provider_admission_run
+            local_payload["_variant_generation_semaphore"] = direct_sem
+        try:
             ordered_results[position] = await run_autoplan(local_payload)
+        except BaseException:
+            if provider_admission_run is not None:
+                provider_admission_run.abort_preflight_barrier()
+            raise
+        finally:
+            if local_payload.pop("_variant_generation_slot_acquired", False):
+                direct_sem.release()
 
     await asyncio.gather(
         *[_run_direct_variant(i, item) for i, item in enumerate(variant_plan)]
     )
     results = [item for item in ordered_results if isinstance(item, dict)]
-    # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort; does not change outline.
-    if len(results) >= 2:
-        try:
-            from backend.zhifei_autoplan.variant_similarity import compute_variant_similarity
-            from backend.zhifei_autoplan.diversity_autofix import apply_diversity_autofix
-
-            params = load_params()
-            overrides = payload.get("params_override")
-            if isinstance(overrides, dict) and overrides:
-                for k, v in overrides.items():
-                    if isinstance(v, dict) and isinstance(params.get(k), dict):
-                        merged = dict(params.get(k) or {})
-                        merged.update(v)
-                        params[k] = merged
-                    else:
-                        params[k] = v
-            div_cfg = params.get("variant_diversity") if isinstance(params.get("variant_diversity"), dict) else {}
-            def _run_report():
-                return compute_variant_similarity(
-                    results,
-                    chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
-                    overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
-                    min_chars=int(div_cfg.get("min_chars") or 800),
-                    ignore_title_keywords=(div_cfg.get("ignore_title_keywords") if isinstance(div_cfg.get("ignore_title_keywords"), list) else None),
-                    relaxed_title_keywords=(div_cfg.get("relaxed_title_keywords") if isinstance(div_cfg.get("relaxed_title_keywords"), list) else None),
-                    relaxed_chapter_threshold=(float(div_cfg.get("relaxed_chapter_threshold")) if div_cfg.get("relaxed_chapter_threshold") is not None else None),
-                )
-
-            report = _run_report()
-
-            # Auto-fix: reshape only flagged chapters (do not change tender outline).
-            # This is deterministic and avoids "换词" by switching to A/B/C/D/E structural blocks.
-            max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
-            if max_rounds < 0:
-                max_rounds = 0
-            rounds = 0
-            while rounds < max_rounds and report.get("ok") is False and report.get("flagged"):
-                changed_any = False
-                for f in (report.get("flagged") or [])[:24]:
-                    title = str(f.get("title") or "").strip()
-                    pair = str(f.get("pair") or "").strip()
-                    m = re.match(r"^v(\\d+)_v(\\d+)$", pair)
-                    if not m or not title:
-                        continue
-                    a = int(m.group(1))
-                    b = int(m.group(2))
-                    # Rewrite the later variant in the max-sim pair.
-                    target_idx = max(a, b)
-                    if target_idx <= 1 or target_idx > len(results):
-                        continue
-                    target = results[target_idx - 1]
-                    secs = target.get("sections") if isinstance(target, dict) else None
-                    if not isinstance(secs, list):
-                        continue
-                    for sec in secs:
-                        if not isinstance(sec, dict):
-                            continue
-                        if str(sec.get("title") or "").strip() != title:
-                            continue
-                        if apply_diversity_autofix(sec, params=params, evidence_hint=str(pair)):
-                            changed_any = True
-                        break
-                if not changed_any:
-                    break
-                # Recompute report after patching
-                report = _run_report()
-                rounds += 1
-
-            _rebuild_postprocessed_artifacts(results, payload=payload, report=report, params=params)
-        except Exception:
-            pass
-    outputs = _save_outputs("actions_generated", results)
-    outputs = await _render_professional_outputs_for_job(
-        job_id=f"direct-{uuid.uuid4().hex}",
-        outputs=outputs,
-        execution_runtime=execution_runtime,
+    _finalize_variant_derivatives(results, payload=payload)
+    _bind_generation_release_identity(
+        results,
+        compliance_registry_authority=compliance_registry_authority,
     )
+    is_dry_run = bool(payload.get("dry_run"))
+    is_chapter_validation = (
+        str(payload.get("delivery_scope") or "document") == "chapter_validation"
+    )
+    outputs = _save_outputs(
+        "actions_generated",
+        results,
+        preview_only=is_dry_run or is_chapter_validation,
+    )
+    outputs["generation_release_identity"] = dict(
+        _GENERATION_RELEASE_IDENTITY_AT_START
+    )
+    if compliance_registry_authority is not None:
+        outputs["compliance_registry_authority"] = dict(
+            compliance_registry_authority
+        )
+    if is_dry_run:
+        outputs["delivery_profile"] = "dry_run_preview_no_provider_calls"
+        outputs["delivery_ready"] = False
+    elif is_chapter_validation:
+        outputs["delivery_profile"] = "chapter_validation_real_model_no_delivery"
+        outputs["delivery_ready"] = False
+        outputs["validation_scope"] = "chapter_validation"
+    else:
+        outputs = await _render_professional_outputs_for_job(
+            job_id=f"direct-{uuid.uuid4().hex}",
+            outputs=outputs,
+            execution_runtime=execution_runtime,
+            slot_override=_admitted_document_render_slot(provider_admission_run),
+        )
     quality = [v.get("quality_checks") for v in results]
     return {
         "ok": True,
@@ -2239,6 +5466,1035 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
     }
 
 
+def run_actions_generation_job(_job_id: str, _payload: dict):
+    heartbeat_stop = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+    try:
+        lease_record = acquire_job_lease(_job_id)
+        if lease_record is None:
+            return
+        lease_attempt_id = str(lease_record.get("attempt_id") or "")
+        lease_owner_instance_id = str(lease_record.get("owner_instance_id") or "")
+        lease_job_revision = lease_record.get("attempt_revision")
+        if (
+            re.fullmatch(r"[0-9a-f]{32}", lease_attempt_id) is None
+            or re.fullmatch(r"[0-9a-f]{32}", lease_owner_instance_id) is None
+            or isinstance(lease_job_revision, bool)
+            or not isinstance(lease_job_revision, int)
+            or lease_job_revision <= 0
+        ):
+            raise RuntimeError("job_lease_acquisition_invalid")
+        job_execution_identity = {
+            "job_id": _job_id,
+            "attempt_id": lease_attempt_id,
+            "owner_instance_id": lease_owner_instance_id,
+            "job_revision": lease_job_revision,
+        }
+        compliance_registry_authority = (
+            _generation_compliance_registry_authority_from_environment()
+        )
+        if (
+            _GENERATION_RELEASE_IDENTITY_AT_START.get("release_managed") is True
+            and compliance_registry_authority is None
+        ):
+            raise RuntimeError("COMPLIANCE_REGISTRY_AUTHORITY_UNTRUSTED")
+
+        def _lease_active() -> bool:
+            return job_lease_active(
+                _job_id,
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+            )
+
+        def _is_cancelled() -> bool:
+            j = get_job(_job_id) or {}
+            status = str(j.get("status") or "").strip().lower()
+            if status in {
+                "cancel_requested",
+                "cancelled",
+            }:
+                return True
+            return not _lease_active()
+
+        def _lease_side_effect(callback: Any, *args: Any, **kwargs: Any) -> Any:
+            return run_with_job_lease(
+                _job_id,
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+                callback=callback,
+                callback_args=tuple(args),
+                callback_kwargs=dict(kwargs),
+            )
+
+        def _append_active_event(event: str, **fields: Any) -> bool:
+            event_fields = dict(fields)
+            event_fields.update(
+                {
+                    "attempt_id": lease_attempt_id,
+                    "owner_instance_id": lease_owner_instance_id,
+                    "job_revision": lease_job_revision,
+                }
+            )
+            try:
+                _lease_side_effect(
+                    append_runtime_event,
+                    _job_id,
+                    event,
+                    **event_fields,
+                )
+                return True
+            except JobLeaseLostError:
+                return False
+
+        def _mark_cancelled(result: dict[str, Any] | None = None) -> None:
+            if not _lease_active():
+                return
+            prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
+            checkpoint_projection: dict[str, Any]
+            seal_failed = False
+            try:
+                from backend.zhifei_autoplan.generation_checkpoint import (
+                    mark_checkpoint_namespace_interrupted,
+                )
+
+                checkpoints = _lease_side_effect(
+                    mark_checkpoint_namespace_interrupted,
+                    _job_id,
+                )
+                saved_chapter_count = sum(
+                    int(item.get("saved_chapter_count") or 0)
+                    for item in checkpoints
+                    if isinstance(item, dict)
+                )
+                chapters_total = sum(
+                    int(item.get("chapters_total") or 0)
+                    for item in checkpoints
+                    if isinstance(item, dict)
+                )
+                checkpoint_projection = {
+                    "status": (
+                        "interrupted_recoverable"
+                        if checkpoints
+                        else "interrupted_empty"
+                    ),
+                    "saved_chapter_count": saved_chapter_count,
+                    "scopes": checkpoints,
+                }
+            except JobLeaseLostError:
+                return
+            except Exception as seal_error:  # noqa: BLE001 - cancellation sealing records fail-closed state
+                seal_failed = True
+                saved_chapter_count = 0
+                chapters_total = int(prior_progress.get("chapters_total") or 0)
+                checkpoint_projection = {
+                    "status": "interruption_seal_failed",
+                    "saved_chapter_count": 0,
+                    "error_code": "CHECKPOINT_INTERRUPTION_SEAL_FAILED",
+                    "error_type": type(seal_error).__name__,
+                }
+
+            prior_chapters = (
+                prior_progress.get("chapters")
+                if isinstance(prior_progress.get("chapters"), dict)
+                else {}
+            )
+            chapters_total = max(
+                chapters_total,
+                int(prior_chapters.get("total") or 0),
+            )
+            chapters_started = max(
+                saved_chapter_count,
+                int(prior_chapters.get("started") or 0),
+            )
+            values: dict[str, Any] = {
+                "error": {
+                    "code": (
+                        "JOB_CANCELLED_CHECKPOINT_SEAL_FAILED"
+                        if seal_failed
+                        else "JOB_CANCELLED"
+                    ),
+                    "message": (
+                        "用户已取消任务，但检查点封存失败；该故障已显式记录。"
+                        if seal_failed
+                        else "用户已取消任务。"
+                    ),
+                    "action": (
+                        "先检查检查点存储与权限，再决定是否从先前可信断点恢复。"
+                        if seal_failed
+                        else "可从已保存的可信检查点显式恢复。"
+                    ),
+                },
+                "progress": {
+                    "percent": int(prior_progress.get("percent") or 0),
+                    "stage": "cancelled",
+                    "phase": str(prior_progress.get("phase") or "generation"),
+                    "work_state": "idle",
+                    "detail": "用户已取消；未完成章节已停止，已完成章节保留为可信断点。",
+                    "chapters_total": chapters_total,
+                    "chapters_done": saved_chapter_count,
+                    "chapters_succeeded": saved_chapter_count,
+                    "chapters_failed": int(prior_chapters.get("failed") or 0),
+                    "chapters": {
+                        "started": chapters_started,
+                        "succeeded": saved_chapter_count,
+                        "failed": int(prior_chapters.get("failed") or 0),
+                        "total": chapters_total,
+                    },
+                    "checkpoint": checkpoint_projection,
+                },
+            }
+            if isinstance(result, dict):
+                values["result"] = result
+            transitioned = transition_job(
+                _job_id,
+                allowed_from={"running", "cancel_requested"},
+                status="cancelled",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
+                **values,
+            )
+            if transitioned is None:
+                return
+            append_runtime_event(
+                _job_id,
+                "job_cancelled",
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+                job_revision=lease_job_revision,
+            )
+
+        local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
+        local_payload["_job_id"] = _job_id
+        local_payload["_job_attempt_id"] = lease_attempt_id
+        local_payload["_job_owner_instance_id"] = lease_owner_instance_id
+        local_payload["_job_revision"] = lease_job_revision
+        if compliance_registry_authority is not None:
+            local_payload["_compliance_registry_authority"] = dict(
+                compliance_registry_authority
+            )
+        provider_admission_run = (
+            new_provider_admission_run_coordinator(local_payload)
+            if bool(local_payload.get("_provider_admission_required"))
+            else None
+        )
+
+        execution_runtime, execution_policy = _prepare_execution_control(
+            local_payload,
+            cancel_callback=_is_cancelled,
+        )
+        variants_total = int(local_payload["variants"])
+        agent_parallelism = int(execution_policy["chapter_task_parallelism"])
+        variant_parallelism = int(execution_policy["variant_parallelism"])
+        max_model_parallelism = int(execution_policy["max_model_parallelism"])
+
+        agent_runtime = {
+            "mode": "parallel",
+            "master_agent": "主控Agent",
+            "compliance_agent": "合规Agent",
+            "specialist_role_count": len(AGENT_ROLE_DIRECTIVES),
+            "parallelism_semantics": "bounded_chapter_tasks_not_agent_count",
+            "agent_parallelism": agent_parallelism,
+            "variant_parallelism": variant_parallelism,
+            "max_model_parallelism": max_model_parallelism,
+            "variants_total": variants_total,
+            "variants_done": 0,
+            "chapters_total": 0,
+            "chapters_started": 0,
+            "chapters_done": 0,
+            "active_agents": 0,
+            "current_chapters": [],
+            "generation_release_identity": dict(
+                _GENERATION_RELEASE_IDENTITY_AT_START
+            ),
+            "compliance_registry_authority": (
+                dict(compliance_registry_authority)
+                if compliance_registry_authority is not None
+                else None
+            ),
+        }
+        activity_lock = threading.RLock()
+        activity_state: dict[str, Any] = {
+            "activity": "主控Agent正在准备章节任务",
+            "work_state": "idle",
+            "chapter_totals": {},
+            "started": set(),
+            "succeeded": set(),
+            "failed": set(),
+            "active": {},
+            "provider": {},
+        }
+
+        def _activity_snapshot() -> tuple[str, dict[str, Any]]:
+            with activity_lock:
+                runtime = dict(agent_runtime)
+                current = [str(x) for x in activity_state.get("active", {}).values() if str(x).strip()]
+                runtime.update(
+                    {
+                        "chapters_total": int(sum(activity_state.get("chapter_totals", {}).values())),
+                        "chapters_started": len(activity_state.get("started", set())),
+                        "chapters_succeeded": len(activity_state.get("succeeded", set())),
+                        "chapters_failed": len(activity_state.get("failed", set())),
+                        "chapters_done": len(activity_state.get("succeeded", set())),
+                        "active_agents": len(current),
+                        "current_chapters": current[:6],
+                        "provider": dict(activity_state.get("provider") or {}),
+                        "execution_control": execution_runtime.snapshot(),
+                    }
+                )
+                agent_runtime.update(runtime)
+                return str(activity_state.get("activity") or "Agent正在工作"), runtime
+
+        def _heartbeat_loop() -> None:
+            while not heartbeat_stop.is_set():
+                if not _lease_active():
+                    heartbeat_stop.set()
+                    return
+                activity, runtime = _activity_snapshot()
+                heartbeat_job(
+                    _job_id,
+                    activity=activity,
+                    progress_updates={
+                        "phase": "generation",
+                        "work_state": str(activity_state.get("work_state") or "idle"),
+                        "chapters": {
+                            "started": int(runtime.get("chapters_started") or 0),
+                            "succeeded": int(runtime.get("chapters_succeeded") or 0),
+                            "failed": int(runtime.get("chapters_failed") or 0),
+                            "total": int(runtime.get("chapters_total") or 0),
+                        },
+                    },
+                    agent_runtime_updates=runtime,
+                    expected_attempt_id=lease_attempt_id,
+                    expected_owner_instance_id=lease_owner_instance_id,
+                )
+                heartbeat_stop.wait(5.0)
+
+        def _variant_progress_callback(variant_id: int):
+            def _callback(event: dict[str, Any]) -> None:
+                if not _lease_active():
+                    return
+                event_name = str(event.get("event") or "").strip()
+                chapter_idx = int(event.get("chapter_index") or 0)
+                chapter_title = str(event.get("chapter_title") or "").strip()
+                total = max(0, int(event.get("chapters_total") or 0))
+                variant_key = str(int(variant_id))
+                chapter_key = f"{variant_key}:{chapter_idx}"
+                with activity_lock:
+                    if total:
+                        activity_state["chapter_totals"][variant_key] = total
+                    if event_name == "preflight_started":
+                        activity_state["work_state"] = "processing_preflight"
+                        activity_state["activity"] = "正在校验项目事实、清单与生成约束"
+                    elif event_name == "boq_schedule_started":
+                        activity_state["work_state"] = "processing_preflight"
+                        activity_state["activity"] = "正在校验工程量清单并构建有界进度网络"
+                    elif event_name == "boq_schedule_completed":
+                        activity_state["work_state"] = "processing_preflight"
+                        warnings = int(event.get("warning_count") or 0)
+                        activity_state["activity"] = (
+                            "清单进度网络已完成，异常数量已隔离"
+                            if warnings
+                            else "清单进度网络已完成"
+                        )
+                    elif event_name == "compliance_preflight":
+                        verified_count = max(
+                            0,
+                            int(event.get("verified_standard_count") or 0),
+                        )
+                        if bool(event.get("ready")) and verified_count > 0:
+                            activity_state["activity"] = (
+                                f"合规Agent已完成生成前预检：{verified_count}项项目适用规范通过核验"
+                            )
+                        else:
+                            activity_state["activity"] = (
+                                "合规Agent正在核验项目适用规范，尚未进入内容生成"
+                            )
+                    elif event_name == "provider_admission_started":
+                        activity_state["work_state"] = "waiting_provider"
+                        activity_state["provider"] = {
+                            "admission_status": "checking",
+                            "required_roles": list(event.get("required_roles") or []),
+                            "candidate_count": int(event.get("candidate_count") or 0),
+                        }
+                        activity_state["activity"] = "正在执行模型供应商生成前准入检查"
+                    elif event_name == "provider_admission_completed":
+                        activity_state["work_state"] = "processing_chapter"
+                        activity_state["provider"] = {
+                            "admission_status": str(event.get("status") or "unknown"),
+                            "generation_allowed": bool(event.get("generation_allowed")),
+                            "degraded": bool(event.get("degraded")),
+                            "admitted_chain": list(event.get("admitted_chain") or []),
+                            "missing_roles": list(event.get("missing_roles") or []),
+                            "public_digest": str(event.get("public_digest") or ""),
+                        }
+                        activity_state["activity"] = (
+                            "模型供应商已降级准入，准备生成"
+                            if bool(event.get("degraded"))
+                            else "模型供应商准入通过，准备生成"
+                        )
+                    elif event_name == "provider_admission_failed":
+                        activity_state["work_state"] = "idle"
+                        activity_state["provider"] = {
+                            "admission_status": "failed",
+                            "code": str(event.get("code") or "MODEL_PROVIDER_ADMISSION_UNAVAILABLE"),
+                        }
+                        activity_state["activity"] = "模型供应商准入失败，任务已安全停止"
+                    elif event_name == "chapter_started":
+                        activity_state["started"].add(chapter_key)
+                        activity_state["active"][chapter_key] = chapter_title
+                        activity_state["work_state"] = "processing_chapter"
+                    elif event_name == "chapter_resumed":
+                        activity_state["started"].add(chapter_key)
+                        activity_state["succeeded"].add(chapter_key)
+                        activity_state["failed"].discard(chapter_key)
+                        activity_state["active"].pop(chapter_key, None)
+                        activity_state["activity"] = f"已从可信断点恢复章节：{chapter_title}"
+                    elif event_name == "chapter_checkpoint_saved":
+                        activity_state["work_state"] = "checkpointing"
+                        activity_state["activity"] = f"章节已安全保存，可断点续编：{chapter_title}"
+                    elif event_name == "chapter_completed":
+                        activity_state["started"].add(chapter_key)
+                        if bool(event.get("ok")):
+                            activity_state["succeeded"].add(chapter_key)
+                            activity_state["failed"].discard(chapter_key)
+                        else:
+                            activity_state["failed"].add(chapter_key)
+                            activity_state["succeeded"].discard(chapter_key)
+                        activity_state["active"].pop(chapter_key, None)
+                    elif event_name == "provider_attempt_started":
+                        activity_state["work_state"] = "waiting_provider"
+                        activity_state["provider"] = {
+                            "slot": str(event.get("slot") or ""),
+                            "name": str(event.get("provider") or ""),
+                            "model": str(event.get("model") or ""),
+                            "request_started_at": time.time(),
+                            "deadline_at": time.time() + int(event.get("request_timeout_seconds") or 240),
+                        }
+                        activity_state["activity"] = (
+                            f"正在等待模型响应：{event.get('provider')}/{event.get('model')} · {chapter_title}"
+                        )
+                    elif event_name == "provider_attempt_finished":
+                        provider_state = dict(activity_state.get("provider") or {})
+                        provider_state["last_ok"] = bool(event.get("ok"))
+                        provider_state["finished_at"] = time.time()
+                        provider_state["circuits"] = (
+                            dict(event.get("circuits"))
+                            if isinstance(event.get("circuits"), dict)
+                            else provider_state.get("circuits") or {}
+                        )
+                        activity_state["provider"] = provider_state
+                        activity_state["work_state"] = "processing_chapter"
+                    elif event_name == "draft_complete":
+                        activity_state["work_state"] = "checkpointing"
+                        activity_state["activity"] = "章节初稿完成，合规Agent正在复核与校验"
+                    elif event_name == "draft_failed":
+                        activity_state["work_state"] = "idle"
+                        activity_state["activity"] = "章节生成存在失败，正在封存检查点与故障证据"
+
+                    current = [
+                        str(x)
+                        for x in activity_state.get("active", {}).values()
+                        if str(x).strip()
+                    ]
+                    if current:
+                        preview = "、".join(current[:3])
+                        suffix = "…" if len(current) > 3 else ""
+                        activity_state["activity"] = (
+                            f"{len(current)}个章节任务正在编辑：{preview}{suffix}"
+                        )
+                    succeeded = len(activity_state.get("succeeded", set()))
+                    failed = len(activity_state.get("failed", set()))
+                    all_total = int(sum(activity_state.get("chapter_totals", {}).values()))
+
+                progress_updates: dict[str, Any] = {
+                    "chapters_total": all_total,
+                    "chapters_done": succeeded,
+                    "chapters_succeeded": succeeded,
+                    "chapters_failed": failed,
+                    "chapters": {
+                        "started": len(activity_state.get("started", set())),
+                        "succeeded": succeeded,
+                        "failed": failed,
+                        "total": all_total,
+                    },
+                    "phase": "generation",
+                    "work_state": str(activity_state.get("work_state") or "idle"),
+                    "provider": dict(activity_state.get("provider") or {}),
+                }
+                if event.get("checkpoint_status") or event.get("saved_chapter_count") is not None:
+                    progress_updates["checkpoint"] = {
+                        "status": str(event.get("checkpoint_status") or "partial"),
+                        "saved_chapter_count": int(event.get("saved_chapter_count") or 0),
+                    }
+                if all_total > 0:
+                    progress_updates["percent"] = min(75, 15 + int((succeeded / all_total) * 60))
+                activity, runtime = _activity_snapshot()
+                _append_active_event(
+                    event_name or "generation_progress",
+                    variant_id=variant_id,
+                    chapter_index=chapter_idx,
+                    chapter_title=chapter_title,
+                    ok=event.get("ok"),
+                    provider=event.get("provider"),
+                    model=event.get("model"),
+                    slot=event.get("slot"),
+                    schema_version=event.get("schema_version"),
+                    status=event.get("status"),
+                    required_roles=[
+                        str(value)[:80]
+                        for value in (event.get("required_roles") or [])[:20]
+                        if str(value).strip()
+                    ],
+                    candidate_count=event.get("candidate_count"),
+                    generation_allowed=event.get("generation_allowed"),
+                    degraded=event.get("degraded"),
+                    admitted_chain=[
+                        {
+                            "slot": str((value or {}).get("slot") or "")[:80],
+                            "role": str((value or {}).get("role") or "")[:80],
+                            "provider": str((value or {}).get("provider") or "")[:80],
+                            "model": str((value or {}).get("model") or "")[:160],
+                        }
+                        for value in (event.get("admitted_chain") or [])[:20]
+                        if isinstance(value, dict)
+                    ],
+                    missing_roles=[
+                        str(value)[:80]
+                        for value in (event.get("missing_roles") or [])[:20]
+                        if str(value).strip()
+                    ],
+                    public_digest=event.get("public_digest"),
+                    binding_digest=event.get("binding_digest"),
+                    authority_digest=(
+                        event.get("authority_digest")
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    official_registry_sha256=(
+                        event.get("official_registry_sha256")
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    ready=(
+                        event.get("ready")
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    verified_standard_count=(
+                        event.get("verified_standard_count")
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    project_domains=(
+                        [
+                            str(value)[:80]
+                            for value in (event.get("project_domains") or [])[:40]
+                            if str(value).strip()
+                        ]
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    blocking_requirement_ids=[
+                        str(value)[:160]
+                        for value in (event.get("blocking_requirement_ids") or [])[:20]
+                        if str(value).strip()
+                    ],
+                    warning_requirement_ids=[
+                        str(value)[:160]
+                        for value in (event.get("warning_requirement_ids") or [])[:20]
+                        if str(value).strip()
+                    ],
+                    chapters=progress_updates.get("chapters"),
+                )
+                heartbeat_job(
+                    _job_id,
+                    activity=activity,
+                    progress_updates=progress_updates,
+                    agent_runtime_updates=runtime,
+                    expected_attempt_id=lease_attempt_id,
+                    expected_owner_instance_id=lease_owner_instance_id,
+                )
+
+            return _callback
+
+        def _update_progress(percent: int, stage: str, detail: str = "") -> None:
+            p = max(0, min(100, int(percent)))
+            updated = merge_job(
+                _job_id,
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                progress={
+                    "percent": p,
+                    "stage": str(stage or ""),
+                    "phase": str(stage or ""),
+                    "work_state": "idle" if p >= 100 else "processing",
+                    "detail": str(detail or ""),
+                    "variants_total": variants_total,
+                    "variants_done": int(agent_runtime.get("variants_done") or 0),
+                },
+                agent_runtime=agent_runtime,
+            )
+            if updated is None:
+                raise JobLeaseLostError("job_lease_lost")
+
+        agent_runtime["execution_control"] = execution_runtime.snapshot()
+
+        if _is_cancelled():
+            _mark_cancelled()
+            return
+        started = merge_job(
+            _job_id,
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            agent_runtime=agent_runtime,
+        )
+        if started is None:
+            return
+        _append_active_event(
+            "job_started",
+            execution_policy=execution_policy,
+            generation_release_identity=dict(
+                _GENERATION_RELEASE_IDENTITY_AT_START
+            ),
+            compliance_registry_authority=(
+                dict(compliance_registry_authority)
+                if compliance_registry_authority is not None
+                else None
+            ),
+        )
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            name=f"autoplan-heartbeat-{_job_id[:8]}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        _update_progress(5, "job_started", "任务已启动，正在分配多Agent")
+        mode_policy = local_payload.get("_mode_policy") if isinstance(local_payload.get("_mode_policy"), dict) else {}
+        mode_name = str(mode_policy.get("mode_effective") or local_payload.get("generation_mode") or "quality_200")
+        pages_planned = int(mode_policy.get("planned_total_pages") or 0)
+        if bool(mode_policy.get("auto_switched")):
+            _update_progress(
+                8,
+                "mode_switch",
+                f"页数规划={pages_planned}，已自动切换到高质量加速模式（{mode_name}）",
+            )
+        else:
+            _update_progress(
+                8,
+                "mode_ready",
+                f"生成模式={mode_name}，页数规划={pages_planned}",
+            )
+        variant_plan = local_payload.get("_variant_plan")
+        normalized_plan: list[dict[str, Any]] = []
+        if isinstance(variant_plan, list) and variant_plan:
+            for it in variant_plan:
+                if not isinstance(it, dict):
+                    continue
+                try:
+                    vid = int(it.get("variant_id") or 0)
+                except (TypeError, ValueError):
+                    vid = 0
+                if vid <= 0:
+                    continue
+                rec: dict[str, Any] = {"variant_id": vid}
+                tid = _normalize_logic_template_id(it.get("logic_template_id"))
+                if tid:
+                    rec["logic_template_id"] = tid
+                normalized_plan.append(rec)
+        if not normalized_plan:
+            variants = variants_total
+            variant_ids = local_payload.get("_variant_ids")
+            if not isinstance(variant_ids, list) or not variant_ids:
+                variant_ids = reserve_variant_ids(
+                    project_id=str(local_payload.get("project_id") or "").strip() or None,
+                    count=max(1, variants),
+                    explicit_variant_id=local_payload.get("variant_id"),
+                    explicit_template_id=local_payload.get("logic_template_id") or local_payload.get("logic_template"),
+                )
+            for vid in variant_ids:
+                try:
+                    normalized_plan.append({"variant_id": int(vid)})
+                except (TypeError, ValueError):
+                    continue
+        if not normalized_plan:
+            normalized_plan = [{"variant_id": 1}]
+        variant_plan = normalized_plan
+        variants_total = max(1, len(variant_plan))
+        if provider_admission_run is not None:
+            provider_admission_run.configure_preflight_variants(
+                [int(item["variant_id"]) for item in variant_plan]
+            )
+        agent_runtime["variants_total"] = variants_total
+        if variant_parallelism > variants_total:
+            variant_parallelism = variants_total
+            local_payload["variant_parallelism"] = variant_parallelism
+            agent_runtime["variant_parallelism"] = variant_parallelism
+        _update_progress(
+            10,
+            "agent_ready",
+            (
+                f"{len(AGENT_ROLE_DIRECTIVES)}个专业角色已进入任务编排："
+                f"同时编写章节={agent_parallelism}，方案并行={variant_parallelism}"
+            ),
+        )
+
+        async def _run_variants_parallel() -> list[dict]:
+            sem = asyncio.Semaphore(max(1, int(variant_parallelism)))
+            lock = asyncio.Lock()
+            done_count = 0
+            ordered: list[dict | None] = [None for _ in range(len(variant_plan))]
+
+            async def _run_one(pos: int, item: dict[str, Any]):
+                nonlocal done_count
+                if _is_cancelled():
+                    if provider_admission_run is not None:
+                        provider_admission_run.abort_preflight_barrier()
+                    return
+                vid = int(item.get("variant_id") or 1)
+                tid = _normalize_logic_template_id(item.get("logic_template_id"))
+                lp = json.loads(json.dumps(local_payload))
+                lp["variant_id"] = int(vid)
+                if tid:
+                    lp["logic_template_id"] = tid
+                lp["agent_parallelism"] = agent_parallelism
+                lp["_progress_callback"] = _variant_progress_callback(vid)
+                lp["_job_id"] = _job_id
+                lp["_job_attempt_id"] = lease_attempt_id
+                lp["_job_owner_instance_id"] = lease_owner_instance_id
+                lp["_job_revision"] = lease_job_revision
+                # Recovery reads the immutable source namespace but always
+                # writes a complete new checkpoint lineage under this job.
+                lp["_checkpoint_namespace"] = _job_id
+                lp["_resume_checkpoint_namespace"] = str(
+                    local_payload.get("resume_from_job_id") or ""
+                ).strip()
+                lp["_cancel_callback"] = _is_cancelled
+                lp["_checkpoint_write_guard"] = _lease_side_effect
+                lp["_execution_runtime"] = execution_runtime
+                if provider_admission_run is not None:
+                    lp["_provider_admission_run_coordinator"] = provider_admission_run
+                    lp["_variant_generation_semaphore"] = sem
+                try:
+                    if _is_cancelled():
+                        if provider_admission_run is not None:
+                            provider_admission_run.abort_preflight_barrier()
+                        return
+                    detail = f"正在并行编制方案 v{int(vid)}"
+                    if tid:
+                        detail += f"（模板{tid}）"
+                    _update_progress(
+                        15 + int((done_count / max(1, variants_total)) * 65),
+                        "variant_running",
+                        detail,
+                    )
+                    res = await run_autoplan(lp)
+                    ordered[pos] = res
+                except BaseException:
+                    if provider_admission_run is not None:
+                        provider_admission_run.abort_preflight_barrier()
+                    raise
+                finally:
+                    if lp.pop("_variant_generation_slot_acquired", False):
+                        sem.release()
+                async with lock:
+                    done_count += 1
+                    agent_runtime["variants_done"] = int(done_count)
+                    _update_progress(
+                        15 + int((done_count / max(1, variants_total)) * 65),
+                        "variant_running",
+                        f"方案完成进度：{done_count}/{variants_total}",
+                    )
+
+            await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(variant_plan)])
+            return [x for x in ordered if isinstance(x, dict)]
+
+        results = asyncio.run(_run_variants_parallel())
+        agent_runtime["execution_control"] = execution_runtime.snapshot()
+        if _is_cancelled():
+            _mark_cancelled()
+            return
+        _finalize_variant_derivatives(
+            results,
+            payload=local_payload,
+            progress_callback=lambda: _update_progress(
+                86,
+                "cross_variant_check",
+                "正在执行跨方案一致性与差异性审计",
+            ),
+        )
+        _bind_generation_release_identity(
+            results,
+            compliance_registry_authority=compliance_registry_authority,
+        )
+        if _is_cancelled():
+            _mark_cancelled()
+            return
+        _update_progress(91, "exporting_source", "正在生成可追溯中间稿与质控附件")
+        is_dry_run = bool(local_payload.get("dry_run"))
+        delivery_scope = str(local_payload.get("delivery_scope") or "document")
+        is_chapter_validation = delivery_scope == "chapter_validation"
+        outputs = _save_outputs(
+            f"actions_{_job_id}",
+            results,
+            preview_only=is_dry_run or is_chapter_validation,
+        )
+        outputs["generation_release_identity"] = dict(
+            _GENERATION_RELEASE_IDENTITY_AT_START
+        )
+        if compliance_registry_authority is not None:
+            outputs["compliance_registry_authority"] = dict(
+                compliance_registry_authority
+            )
+        if _is_cancelled():
+            _mark_cancelled(outputs)
+            return
+
+        def _professional_progress(variant: int, total: int) -> None:
+            percent = 93 + int(((variant - 1) / max(1, total)) * 6)
+            detail = f"Sonnet 5 正在精修并专业落版：方案 {variant}/{total}"
+            with activity_lock:
+                activity_state["activity"] = detail
+            _update_progress(percent, "professional_rendering", detail)
+
+        if is_dry_run:
+            _update_progress(
+                93,
+                "dry_run_finalizing",
+                "正在封装 dry-run 预览；不会生成专业终稿或正式交付回执",
+            )
+        elif is_chapter_validation:
+            _update_progress(
+                93,
+                "chapter_validation_finalizing",
+                "正在封装章节真实模型验证结果；不会生成正式交付文件",
+            )
+        else:
+            _update_progress(
+                93,
+                "professional_rendering",
+                "Sonnet 5 正在逐章精修、统一视觉规范并执行 Word 质量闸门",
+            )
+        try:
+            if is_dry_run:
+                outputs["delivery_profile"] = "dry_run_preview_no_provider_calls"
+                outputs["delivery_ready"] = False
+            elif is_chapter_validation:
+                outputs["delivery_profile"] = "chapter_validation_real_model_no_delivery"
+                outputs["delivery_ready"] = False
+                outputs["validation_scope"] = "chapter_validation"
+            else:
+                outputs = asyncio.run(
+                    _render_professional_outputs_for_job(
+                        job_id=_job_id,
+                        outputs=outputs,
+                        progress_callback=_professional_progress,
+                        execution_runtime=execution_runtime,
+                        slot_override=_admitted_document_render_slot(
+                            provider_admission_run
+                        ),
+                        job_execution_identity=job_execution_identity,
+                    )
+                )
+        except Exception as render_error:  # noqa: BLE001 - render boundary converts failures to recoverable job state
+            if _is_cancelled():
+                _mark_cancelled()
+                return
+            agent_runtime["execution_control"] = execution_runtime.snapshot()
+            recovery, error_info = _professional_render_failure_result(
+                outputs,
+                render_error,
+            )
+            failed_checkpoint = _lease_side_effect(
+                _seal_failed_run_checkpoints,
+                _job_id,
+            )
+            if failed_checkpoint is not None:
+                saved_chapter_count = int(
+                    failed_checkpoint.get("saved_chapter_count") or 0
+                )
+                recovery.update(
+                    {
+                        "section_count": saved_chapter_count,
+                        "checkpoint_status": str(
+                            failed_checkpoint.get("status") or "failed_partial"
+                        ),
+                        "recoverable": bool(saved_chapter_count),
+                        "delivery_ready": False,
+                    }
+                )
+            detail = (
+                "专业终稿渲染未完成："
+                f"{error_info.get('user_message') or '外部模型连接失败。'} "
+                "已保全中间稿与质控附件；未将中间稿冒充专业终稿。"
+            )
+            failed_transition = transition_job(
+                _job_id,
+                allowed_from={"running"},
+                status="failed",
+                expected_attempt_id=lease_attempt_id,
+                expected_owner_instance_id=lease_owner_instance_id,
+                revoke_lease=True,
+                error={
+                    "code": str(error_info.get("code") or "PROFESSIONAL_RENDER_FAILED"),
+                    "message": detail,
+                    "action": str(error_info.get("action") or "检查模型连接后显式重试专业渲染。"),
+                },
+                result=recovery,
+                agent_runtime=agent_runtime,
+                progress={
+                    "percent": min(99, int(((get_job(_job_id) or {}).get("progress") or {}).get("percent") or 0)),
+                    "stage": "professional_render_failed",
+                    "phase": "professional_rendering",
+                    "work_state": "idle",
+                    "detail": detail,
+                    **(
+                        {"checkpoint": failed_checkpoint}
+                        if failed_checkpoint is not None
+                        else {}
+                    ),
+                },
+            )
+            if failed_transition is not None:
+                append_runtime_event(
+                    _job_id,
+                    "job_failed",
+                    code=str(error_info.get("code") or "PROFESSIONAL_RENDER_FAILED"),
+                    phase="professional_rendering",
+                    attempt_id=lease_attempt_id,
+                    owner_instance_id=lease_owner_instance_id,
+                    job_revision=lease_job_revision,
+                )
+            return
+        agent_runtime["execution_control"] = execution_runtime.snapshot()
+        if _is_cancelled():
+            _mark_cancelled(outputs)
+            return
+        completion = _delivery_progress_for_run(
+            dry_run=is_dry_run,
+            delivery_scope=delivery_scope,
+        )
+        successful_checkpoint = _successful_checkpoint_projection(results)
+        outputs["job_execution_identity"] = dict(job_execution_identity)
+        _update_progress(100, completion["stage"], completion["detail"])
+        succeeded_transition = transition_job(
+            _job_id,
+            allowed_from={"running"},
+            status="succeeded",
+            expected_attempt_id=lease_attempt_id,
+            expected_owner_instance_id=lease_owner_instance_id,
+            revoke_lease=True,
+            result=outputs,
+            agent_runtime=agent_runtime,
+            progress={
+                "stage": completion["stage"],
+                "phase": completion["phase"],
+                "work_state": "idle",
+                "percent": 100,
+                "detail": completion["detail"],
+                **(
+                    {"checkpoint": successful_checkpoint}
+                    if successful_checkpoint is not None
+                    else {}
+                ),
+            },
+        )
+        if succeeded_transition is not None:
+            append_runtime_event(
+                _job_id,
+                "job_succeeded",
+                phase=completion["phase"],
+                dry_run=is_dry_run,
+                delivery_scope=delivery_scope,
+                attempt_id=lease_attempt_id,
+                owner_instance_id=lease_owner_instance_id,
+                job_revision=lease_job_revision,
+                generation_release_identity=dict(
+                    _GENERATION_RELEASE_IDENTITY_AT_START
+                ),
+                compliance_registry_authority=(
+                    dict(compliance_registry_authority)
+                    if compliance_registry_authority is not None
+                    else None
+                ),
+            )
+    except Exception as e:  # noqa: BLE001 - worker boundary persists a safe terminal job projection
+        error_text = str(e)
+        cancel_probe = locals().get("_is_cancelled")
+        was_cancelled = bool(cancel_probe()) if callable(cancel_probe) else False
+        if was_cancelled or "cancelled_by_user" in error_text:
+            cancel_handler = locals().get("_mark_cancelled")
+            if callable(cancel_handler):
+                cancel_handler()
+        else:
+            prior_job = get_job(_job_id) or {}
+            public_error, failure_progress, recovery_result = _runtime_failure_transition(
+                e,
+                prior_job,
+            )
+            failed_checkpoint = None
+            lease_side_effect = locals().get("_lease_side_effect")
+            if callable(lease_side_effect):
+                try:
+                    failed_checkpoint = lease_side_effect(
+                        _seal_failed_run_checkpoints,
+                        _job_id,
+                    )
+                except JobLeaseLostError:
+                    failed_checkpoint = None
+            if failed_checkpoint is not None:
+                failure_progress["checkpoint"] = failed_checkpoint
+                saved_chapter_count = int(
+                    failed_checkpoint.get("saved_chapter_count") or 0
+                )
+                if recovery_result is None and saved_chapter_count:
+                    recovery_result = dict(prior_job.get("result") or {})
+                if recovery_result is not None:
+                    recovery_result.update(
+                        {
+                            "section_count": saved_chapter_count,
+                            "checkpoint_status": str(
+                                failed_checkpoint.get("status") or "failed_partial"
+                            ),
+                            "recoverable": bool(saved_chapter_count),
+                            "delivery_ready": False,
+                        }
+                    )
+            failure_fields: dict[str, Any] = {
+                "error": public_error,
+                "progress": failure_progress,
+            }
+            if recovery_result is not None:
+                failure_fields["result"] = recovery_result
+            active_attempt_id = str(locals().get("lease_attempt_id") or "")
+            active_owner_id = str(locals().get("lease_owner_instance_id") or "")
+            failed_transition = None
+            if active_attempt_id and active_owner_id:
+                failed_transition = transition_job(
+                    _job_id,
+                    allowed_from={"running"},
+                    status="failed",
+                    expected_attempt_id=active_attempt_id,
+                    expected_owner_instance_id=active_owner_id,
+                    revoke_lease=True,
+                    **failure_fields,
+                )
+            if failed_transition is not None:
+                append_runtime_event(
+                    _job_id,
+                    "job_failed",
+                    code=public_error.get("code"),
+                    phase=str(failure_progress.get("phase") or "generation"),
+                    failures=public_error.get("failures"),
+                    attempt_id=active_attempt_id, owner_instance_id=active_owner_id, job_revision=int(
+                            locals().get("lease_job_revision") or 0
+                        ),
+                )
+    finally:
+        heartbeat_stop.set()
+        if heartbeat_thread is not None and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=0.25)
+
 @router.post("/generate_async")
 async def actions_generate_async(
     req: ActionsGenerateRequest,
@@ -2247,434 +6503,38 @@ async def actions_generate_async(
 ):
     _auth_actions_key(x_actions_key)
     payload = _merge_plan_defaults(req.model_dump())
-    variant_plan = _build_variant_plan(payload)
+    _assert_mandatory_generation_sources(payload)
+    resume_source_job: dict[str, Any] | None = None
+    resume_from_job_id = str(payload.get("resume_from_job_id") or "").strip()
+    if resume_from_job_id:
+        if not re.fullmatch(r"[a-f0-9]{32}", resume_from_job_id):
+            raise HTTPException(status_code=400, detail="invalid resume_from_job_id")
+        source_job = get_job(resume_from_job_id)
+        if not source_job:
+            raise HTTPException(status_code=404, detail="resume source job not found")
+        if str(source_job.get("status") or "").strip().lower() not in {
+            "failed",
+            "cancelled",
+            "interrupted_recoverable",
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="only failed, cancelled or interrupted jobs can be resumed",
+            )
+        resume_source_job = source_job
+    payload = _apply_server_provider_routing_or_503(payload)
+    variant_plan = (
+        _build_resume_variant_plan(payload, resume_source_job)
+        if resume_source_job is not None
+        else _build_variant_plan(payload)
+    )
     payload["_variant_plan"] = variant_plan
     payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
     payload["variants"] = len(variant_plan) if variant_plan else int(payload.get("variants") or 1)
     job_id = create_job(payload, user_id=None)
 
-    def _run_job(_job_id: str, _payload: dict):
-        heartbeat_stop = threading.Event()
-        heartbeat_thread: threading.Thread | None = None
-        try:
-            local_payload = _apply_generation_mode_policy(json.loads(json.dumps(_payload)))
-            local_payload["_job_id"] = _job_id
-
-            def _is_cancelled() -> bool:
-                j = get_job(_job_id) or {}
-                return str(j.get("status") or "").strip().lower() == "cancelled"
-
-            execution_runtime, execution_policy = _prepare_execution_control(
-                local_payload,
-                cancel_callback=_is_cancelled,
-            )
-            variants_total = int(local_payload["variants"])
-            agent_parallelism = int(execution_policy["chapter_task_parallelism"])
-            variant_parallelism = int(execution_policy["variant_parallelism"])
-            max_model_parallelism = int(execution_policy["max_model_parallelism"])
-
-            agent_runtime = {
-                "mode": "parallel",
-                "master_agent": "主控Agent",
-                "compliance_agent": "合规Agent",
-                "specialist_role_count": len(AGENT_ROLE_DIRECTIVES),
-                "parallelism_semantics": "bounded_chapter_tasks_not_agent_count",
-                "agent_parallelism": agent_parallelism,
-                "variant_parallelism": variant_parallelism,
-                "max_model_parallelism": max_model_parallelism,
-                "variants_total": variants_total,
-                "variants_done": 0,
-                "chapters_total": 0,
-                "chapters_started": 0,
-                "chapters_done": 0,
-                "active_agents": 0,
-                "current_chapters": [],
-            }
-            activity_lock = threading.RLock()
-            activity_state: Dict[str, Any] = {
-                "activity": "主控Agent正在准备章节任务",
-                "chapter_totals": {},
-                "started": set(),
-                "completed": set(),
-                "active": {},
-            }
-
-            def _activity_snapshot() -> tuple[str, Dict[str, Any]]:
-                with activity_lock:
-                    runtime = dict(agent_runtime)
-                    current = [str(x) for x in activity_state.get("active", {}).values() if str(x).strip()]
-                    runtime.update(
-                        {
-                            "chapters_total": int(sum(activity_state.get("chapter_totals", {}).values())),
-                            "chapters_started": len(activity_state.get("started", set())),
-                            "chapters_done": len(activity_state.get("completed", set())),
-                            "active_agents": len(current),
-                            "current_chapters": current[:6],
-                        }
-                    )
-                    agent_runtime.update(runtime)
-                    return str(activity_state.get("activity") or "Agent正在工作"), runtime
-
-            def _heartbeat_loop() -> None:
-                while not heartbeat_stop.is_set():
-                    activity, runtime = _activity_snapshot()
-                    heartbeat_job(
-                        _job_id,
-                        activity=activity,
-                        agent_runtime_updates=runtime,
-                    )
-                    heartbeat_stop.wait(5.0)
-
-            def _variant_progress_callback(variant_id: int):
-                def _callback(event: Dict[str, Any]) -> None:
-                    event_name = str(event.get("event") or "").strip()
-                    chapter_idx = int(event.get("chapter_index") or 0)
-                    chapter_title = str(event.get("chapter_title") or "").strip()
-                    total = max(0, int(event.get("chapters_total") or 0))
-                    variant_key = str(int(variant_id))
-                    chapter_key = f"{variant_key}:{chapter_idx}"
-                    with activity_lock:
-                        if total:
-                            activity_state["chapter_totals"][variant_key] = total
-                        if event_name == "compliance_preflight":
-                            verified_count = max(
-                                0,
-                                int(event.get("verified_standard_count") or 0),
-                            )
-                            if bool(event.get("ready")) and verified_count > 0:
-                                activity_state["activity"] = (
-                                    f"合规Agent已完成生成前预检：{verified_count}项项目适用规范通过核验"
-                                )
-                            else:
-                                activity_state["activity"] = (
-                                    "合规Agent正在核验项目适用规范，尚未进入内容生成"
-                                )
-                        elif event_name == "chapter_started":
-                            activity_state["started"].add(chapter_key)
-                            activity_state["active"][chapter_key] = chapter_title
-                        elif event_name == "chapter_resumed":
-                            activity_state["started"].add(chapter_key)
-                            activity_state["completed"].add(chapter_key)
-                            activity_state["active"].pop(chapter_key, None)
-                            activity_state["activity"] = f"已从可信断点恢复章节：{chapter_title}"
-                        elif event_name == "chapter_checkpoint_saved":
-                            activity_state["activity"] = f"章节已安全保存，可断点续编：{chapter_title}"
-                        elif event_name == "chapter_completed":
-                            activity_state["started"].add(chapter_key)
-                            activity_state["completed"].add(chapter_key)
-                            activity_state["active"].pop(chapter_key, None)
-                        elif event_name == "draft_complete":
-                            activity_state["activity"] = "章节初稿完成，合规Agent正在复核与校验"
-
-                        current = [
-                            str(x)
-                            for x in activity_state.get("active", {}).values()
-                            if str(x).strip()
-                        ]
-                        if current:
-                            preview = "、".join(current[:3])
-                            suffix = "…" if len(current) > 3 else ""
-                            activity_state["activity"] = (
-                                f"{len(current)}个章节任务正在编辑：{preview}{suffix}"
-                            )
-                        done = len(activity_state.get("completed", set()))
-                        all_total = int(sum(activity_state.get("chapter_totals", {}).values()))
-
-                    progress_updates: Dict[str, Any] = {
-                        "chapters_total": all_total,
-                        "chapters_done": done,
-                    }
-                    if all_total > 0:
-                        progress_updates["percent"] = min(75, 15 + int((done / all_total) * 60))
-                    activity, runtime = _activity_snapshot()
-                    heartbeat_job(
-                        _job_id,
-                        activity=activity,
-                        progress_updates=progress_updates,
-                        agent_runtime_updates=runtime,
-                    )
-
-                return _callback
-
-            def _update_progress(percent: int, stage: str, detail: str = "") -> None:
-                p = max(0, min(100, int(percent)))
-                update_job(
-                    _job_id,
-                    progress={
-                        "percent": p,
-                        "stage": str(stage or ""),
-                        "detail": str(detail or ""),
-                        "variants_total": variants_total,
-                        "variants_done": int(agent_runtime.get("variants_done") or 0),
-                    },
-                    agent_runtime=agent_runtime,
-                )
-
-            agent_runtime["execution_control"] = execution_runtime.snapshot()
-
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            update_job(_job_id, status="running", agent_runtime=agent_runtime)
-            heartbeat_thread = threading.Thread(
-                target=_heartbeat_loop,
-                name=f"autoplan-heartbeat-{_job_id[:8]}",
-                daemon=True,
-            )
-            heartbeat_thread.start()
-            _update_progress(5, "job_started", "任务已启动，正在分配多Agent")
-            mode_policy = local_payload.get("_mode_policy") if isinstance(local_payload.get("_mode_policy"), dict) else {}
-            mode_name = str(mode_policy.get("mode_effective") or local_payload.get("generation_mode") or "quality_200")
-            pages_planned = int(mode_policy.get("planned_total_pages") or 0)
-            if bool(mode_policy.get("auto_switched")):
-                _update_progress(
-                    8,
-                    "mode_switch",
-                    f"页数规划={pages_planned}，已自动切换到高质量加速模式（{mode_name}）",
-                )
-            else:
-                _update_progress(
-                    8,
-                    "mode_ready",
-                    f"生成模式={mode_name}，页数规划={pages_planned}",
-                )
-            variant_plan = local_payload.get("_variant_plan")
-            normalized_plan: List[Dict[str, Any]] = []
-            if isinstance(variant_plan, list) and variant_plan:
-                for it in variant_plan:
-                    if not isinstance(it, dict):
-                        continue
-                    try:
-                        vid = int(it.get("variant_id") or 0)
-                    except Exception:
-                        vid = 0
-                    if vid <= 0:
-                        continue
-                    rec: Dict[str, Any] = {"variant_id": vid}
-                    tid = _normalize_logic_template_id(it.get("logic_template_id"))
-                    if tid:
-                        rec["logic_template_id"] = tid
-                    normalized_plan.append(rec)
-            if not normalized_plan:
-                variants = variants_total
-                variant_ids = local_payload.get("_variant_ids")
-                if not isinstance(variant_ids, list) or not variant_ids:
-                    variant_ids = reserve_variant_ids(
-                        project_id=str(local_payload.get("project_id") or "").strip() or None,
-                        count=max(1, variants),
-                        explicit_variant_id=local_payload.get("variant_id"),
-                        explicit_template_id=local_payload.get("logic_template_id") or local_payload.get("logic_template"),
-                    )
-                for vid in variant_ids:
-                    try:
-                        normalized_plan.append({"variant_id": int(vid)})
-                    except Exception:
-                        continue
-            if not normalized_plan:
-                normalized_plan = [{"variant_id": 1}]
-            variant_plan = normalized_plan
-            variants_total = max(1, len(variant_plan))
-            agent_runtime["variants_total"] = variants_total
-            if variant_parallelism > variants_total:
-                variant_parallelism = variants_total
-                local_payload["variant_parallelism"] = variant_parallelism
-                agent_runtime["variant_parallelism"] = variant_parallelism
-            _update_progress(
-                10,
-                "agent_ready",
-                (
-                    f"{len(AGENT_ROLE_DIRECTIVES)}个专业角色已进入任务编排："
-                    f"同时编写章节={agent_parallelism}，方案并行={variant_parallelism}"
-                ),
-            )
-
-            async def _run_variants_parallel() -> list[dict]:
-                sem = asyncio.Semaphore(max(1, int(variant_parallelism)))
-                lock = asyncio.Lock()
-                done_count = 0
-                ordered: list[dict | None] = [None for _ in range(len(variant_plan))]
-
-                async def _run_one(pos: int, item: Dict[str, Any]):
-                    nonlocal done_count
-                    if _is_cancelled():
-                        return
-                    vid = int(item.get("variant_id") or 1)
-                    tid = _normalize_logic_template_id(item.get("logic_template_id"))
-                    lp = json.loads(json.dumps(local_payload))
-                    lp["variant_id"] = int(vid)
-                    if tid:
-                        lp["logic_template_id"] = tid
-                    lp["agent_parallelism"] = agent_parallelism
-                    lp["_progress_callback"] = _variant_progress_callback(vid)
-                    lp["_job_id"] = _job_id
-                    lp["_checkpoint_namespace"] = str(
-                        local_payload.get("resume_from_job_id") or _job_id
-                    )
-                    lp["_cancel_callback"] = _is_cancelled
-                    lp["_execution_runtime"] = execution_runtime
-                    async with sem:
-                        if _is_cancelled():
-                            return
-                        detail = f"正在并行编制方案 v{int(vid)}"
-                        if tid:
-                            detail += f"（模板{tid}）"
-                        _update_progress(
-                            15 + int((done_count / max(1, variants_total)) * 65),
-                            "variant_running",
-                            detail,
-                        )
-                        res = await run_autoplan(lp)
-                        ordered[pos] = res
-                    async with lock:
-                        done_count += 1
-                        agent_runtime["variants_done"] = int(done_count)
-                        _update_progress(
-                            15 + int((done_count / max(1, variants_total)) * 65),
-                            "variant_running",
-                            f"方案完成进度：{done_count}/{variants_total}",
-                        )
-
-                await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(variant_plan)])
-                return [x for x in ordered if isinstance(x, dict)]
-
-            results = asyncio.run(_run_variants_parallel())
-            agent_runtime["execution_control"] = execution_runtime.snapshot()
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            # Cross-variant similarity (anti-paraphrase diversity gate). Best-effort.
-            if len(results) >= 2:
-                try:
-                    from backend.zhifei_autoplan.variant_similarity import compute_variant_similarity
-                    from backend.zhifei_autoplan.diversity_autofix import apply_diversity_autofix
-
-                    params = load_params()
-                    overrides = local_payload.get("params_override")
-                    if isinstance(overrides, dict) and overrides:
-                        for k, v in overrides.items():
-                            if isinstance(v, dict) and isinstance(params.get(k), dict):
-                                merged = dict(params.get(k) or {})
-                                merged.update(v)
-                                params[k] = merged
-                            else:
-                                params[k] = v
-                    div_cfg = params.get("variant_diversity") if isinstance(params.get("variant_diversity"), dict) else {}
-                    def _run_report():
-                        return compute_variant_similarity(
-                            results,
-                            chapter_threshold=float(div_cfg.get("chapter_threshold") or 0.90),
-                            overall_threshold=float(div_cfg.get("overall_threshold") or 0.85),
-                            min_chars=int(div_cfg.get("min_chars") or 800),
-                            ignore_title_keywords=(div_cfg.get("ignore_title_keywords") if isinstance(div_cfg.get("ignore_title_keywords"), list) else None),
-                            relaxed_title_keywords=(div_cfg.get("relaxed_title_keywords") if isinstance(div_cfg.get("relaxed_title_keywords"), list) else None),
-                            relaxed_chapter_threshold=(float(div_cfg.get("relaxed_chapter_threshold")) if div_cfg.get("relaxed_chapter_threshold") is not None else None),
-                        )
-
-                    report = _run_report()
-
-                    # Auto-fix: deterministic reshape for flagged chapters (do not change tender outline).
-                    max_rounds = int(div_cfg.get("auto_fix_rounds") or 1)
-                    if max_rounds < 0:
-                        max_rounds = 0
-                    rounds = 0
-                    while rounds < max_rounds and report.get("ok") is False and report.get("flagged"):
-                        changed_any = False
-                        for f in (report.get("flagged") or [])[:24]:
-                            title = str(f.get("title") or "").strip()
-                            pair = str(f.get("pair") or "").strip()
-                            m = re.match(r"^v(\\d+)_v(\\d+)$", pair)
-                            if not m or not title:
-                                continue
-                            a = int(m.group(1))
-                            b = int(m.group(2))
-                            target_idx = max(a, b)
-                            if target_idx <= 1 or target_idx > len(results):
-                                continue
-                            target = results[target_idx - 1]
-                            secs = target.get("sections") if isinstance(target, dict) else None
-                            if not isinstance(secs, list):
-                                continue
-                            for sec in secs:
-                                if not isinstance(sec, dict):
-                                    continue
-                                if str(sec.get("title") or "").strip() != title:
-                                    continue
-                                if apply_diversity_autofix(sec, params=params, evidence_hint=str(pair)):
-                                    changed_any = True
-                                break
-                        if not changed_any:
-                            break
-                        report = _run_report()
-                        rounds += 1
-                    _update_progress(86, "cross_variant_check", "正在执行跨方案一致性与差异性审计")
-                    _rebuild_postprocessed_artifacts(results, payload=local_payload, report=report, params=params)
-                except Exception:
-                    pass
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user")
-                return
-            _update_progress(91, "exporting_source", "正在生成可追溯中间稿与质控附件")
-            outputs = _save_outputs(f"actions_{_job_id}", results)
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
-                return
-
-            def _professional_progress(variant: int, total: int) -> None:
-                percent = 93 + int(((variant - 1) / max(1, total)) * 6)
-                detail = f"Sonnet 5 正在精修并专业落版：方案 {variant}/{total}"
-                with activity_lock:
-                    activity_state["activity"] = detail
-                _update_progress(percent, "professional_rendering", detail)
-
-            _update_progress(
-                93,
-                "professional_rendering",
-                "Sonnet 5 正在逐章精修、统一视觉规范并执行 Word 质量闸门",
-            )
-            outputs = asyncio.run(
-                _render_professional_outputs_for_job(
-                    job_id=_job_id,
-                    outputs=outputs,
-                    progress_callback=_professional_progress,
-                    execution_runtime=execution_runtime,
-                )
-            )
-            agent_runtime["execution_control"] = execution_runtime.snapshot()
-            if _is_cancelled():
-                update_job(_job_id, status="cancelled", error="cancelled_by_user", result=outputs)
-                return
-            _update_progress(100, "done", "专业 Word 已完成，可直接下载")
-            update_job(_job_id, status="done", result=outputs, agent_runtime=agent_runtime)
-        except Exception as e:
-            error_text = repr(e)
-            cancel_probe = locals().get("_is_cancelled")
-            was_cancelled = bool(cancel_probe()) if callable(cancel_probe) else False
-            if was_cancelled or "cancelled_by_user" in error_text:
-                prior_progress = ((get_job(_job_id) or {}).get("progress") or {})
-                update_job(
-                    _job_id,
-                    status="cancelled",
-                    error="cancelled_by_user",
-                    progress={
-                        "percent": int(prior_progress.get("percent") or 0),
-                        "stage": "cancelled",
-                        "detail": "用户已取消；未完成章节已停止，已完成章节保留为可信断点。",
-                    },
-                )
-            else:
-                update_job(
-                    _job_id,
-                    status="failed",
-                    error=error_text,
-                    progress={"percent": 100, "stage": "failed", "detail": error_text},
-                )
-        finally:
-            heartbeat_stop.set()
-            if heartbeat_thread is not None and heartbeat_thread.is_alive():
-                heartbeat_thread.join(timeout=0.25)
-
-    background_tasks.add_task(_run_job, job_id, payload)
-    return {"ok": True, "job_id": job_id, "status": "queued"}
+    queue_depth = submit_isolated_job(job_id, run_actions_generation_job, job_id, payload)
+    return {"ok": True, "job_id": job_id, "run_id": job_id, "status": "queued", "queue_depth": queue_depth}
 
 
 @router.post("/job_cancel")
@@ -2687,10 +6547,24 @@ async def actions_job_cancel(req: ActionsJobCancelRequest, x_actions_key: str | 
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     status = str(job.get("status") or "").strip().lower()
-    if status in {"done", "failed", "cancelled"}:
+    if status in {"done", "succeeded", "failed", "cancelled", "interrupted_recoverable"}:
         return {"ok": True, "job_id": job_id, "status": status}
-    update_job(job_id, status="cancelled", error="cancelled_by_user")
-    return {"ok": True, "job_id": job_id, "status": "cancelled"}
+    transitioned = transition_job(
+        job_id,
+        allowed_from={"queued", "running"},
+        status="cancel_requested",
+        error={
+            "code": "JOB_CANCEL_REQUESTED",
+            "message": "已收到取消请求，正在停止活动工作并封存检查点。",
+            "action": "请等待任务确认取消；已完成章节不会被删除。",
+        },
+        progress={"work_state": "cancelling", "stage": "cancel_requested"},
+    )
+    if transitioned is None:
+        latest = get_job(job_id) or {}
+        return {"ok": True, "job_id": job_id, "status": latest.get("status")}
+    append_runtime_event(job_id, "cancel_requested")
+    return {"ok": True, "job_id": job_id, "status": "cancel_requested"}
 
 
 @router.get("/job_status")
@@ -2699,23 +6573,45 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    runtime = job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {}
+    public_provider = _public_provider_state(progress.get("provider") or runtime.get("provider") or {})
+    public_progress = dict(progress)
+    if isinstance(public_progress.get("provider"), dict):
+        public_progress["provider"] = _public_provider_state(public_progress["provider"])
+    public_runtime = dict(runtime)
+    if isinstance(public_runtime.get("provider"), dict):
+        public_runtime["provider"] = _public_provider_state(public_runtime["provider"])
+    chapters = progress.get("chapters") if isinstance(progress.get("chapters"), dict) else {
+        "started": int(progress.get("chapters_started") or runtime.get("chapters_started") or 0),
+        "succeeded": int(progress.get("chapters_succeeded") or runtime.get("chapters_succeeded") or progress.get("chapters_done") or 0),
+        "failed": int(progress.get("chapters_failed") or runtime.get("chapters_failed") or 0),
+        "total": int(progress.get("chapters_total") or runtime.get("chapters_total") or 0),
+    }
     out = {
         "job_id": job.get("job_id"),
+        "run_id": job.get("job_id"),
         "status": job.get("status"),
         "error": job.get("error"),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
-        "progress": job.get("progress") if isinstance(job.get("progress"), dict) else {},
-        "agent_runtime": job.get("agent_runtime") if isinstance(job.get("agent_runtime"), dict) else {},
+        "heartbeat_at": progress.get("heartbeat_at"),
+        "phase": progress.get("phase") or progress.get("stage"),
+        "work_state": progress.get("work_state") or "idle",
+        "chapters": chapters,
+        "provider": public_provider,
+        "checkpoint": progress.get("checkpoint") or {},
+        "warnings": progress.get("warnings") if isinstance(progress.get("warnings"), list) else [],
+        "progress": public_progress,
+        "agent_runtime": public_runtime,
+        "event_journal": str(event_journal_path(job_id) or "") or None,
     }
     result = job.get("result") or {}
     if isinstance(result, dict):
-        out["files"] = result
-        json_path = result.get("json")
-        if json_path and Path(json_path).exists():
+        variants = []
+        if result.get("json"):
             try:
-                data = json.loads(Path(json_path).read_text(encoding="utf-8"))
-                variants = data.get("variants") or []
+                _data, variants = _load_result_variants(result)
                 out["variants"] = len(variants)
                 out["quality_ok"] = [
                     bool((v.get("quality_checks") or {}).get("structure", {}).get("ok"))
@@ -2725,9 +6621,38 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
                     ma = variants[0].get("multi_agent")
                     if isinstance(ma, dict):
                         out["multi_agent"] = ma
-            except Exception:
-                pass
+            except HTTPException:
+                out["result_evidence_untrusted"] = True
+                variants = []
+        out["files"] = _public_job_files(job, result, variants)
     return {"ok": True, "job": out}
+
+
+@router.post("/runs")
+async def actions_create_run(
+    req: ActionsGenerateRequest,
+    background_tasks: BackgroundTasks,
+    x_actions_key: str | None = Header(default=None),
+):
+    """Unified run-creation alias; legacy generate_async remains supported."""
+
+    return await actions_generate_async(req, background_tasks, x_actions_key)
+
+
+@router.get("/runs/{run_id}")
+async def actions_get_run(
+    run_id: str,
+    x_actions_key: str | None = Header(default=None),
+):
+    return await actions_job_status(run_id, x_actions_key)
+
+
+@router.post("/runs/{run_id}/cancel")
+async def actions_cancel_run(
+    run_id: str,
+    x_actions_key: str | None = Header(default=None),
+):
+    return await actions_job_cancel(ActionsJobCancelRequest(job_id=run_id), x_actions_key)
 
 
 @router.get("/review/issues")
@@ -2738,15 +6663,15 @@ async def actions_review_issues(
 ):
     _auth_actions_key(x_actions_key)
     _, _, _, variants = _load_done_job_variants(job_id)
-    v = max(1, int(variant or 1))
-    rec = variants[v - 1] if v <= len(variants) else variants[0]
-    idx = (v - 1) if v <= len(variants) else 0
+    v = _require_variant_number(variant, len(variants))
+    rec = variants[v - 1]
+    idx = v - 1
     items = _review_items_for_variant(rec)
     versions = _review_versions(variants, idx)
     return {
         "ok": True,
         "job_id": job_id,
-        "variant": int(v if v <= len(variants) else 1),
+        "variant": v,
         "count": len(items),
         "items": items,
         **versions,
@@ -2763,9 +6688,11 @@ async def actions_review_apply(
     if not job_id:
         raise HTTPException(status_code=400, detail="job_id required")
     job, current_result, _, variants = _load_done_job_variants(job_id)
+    _require_formal_document_mutation(job, current_result, variants)
+    initial_status, initial_revision = _capture_promotion_revision(job)
 
-    v = max(1, int(req.variant or 1))
-    idx = (v - 1) if v <= len(variants) else 0
+    v = _require_variant_number(req.variant, len(variants))
+    idx = v - 1
     if not isinstance(variants[idx], dict):
         raise HTTPException(status_code=400, detail="invalid variant record")
 
@@ -2868,7 +6795,11 @@ async def actions_review_apply(
     pid = str(target.get("project_id") or (job.get("payload") or {}).get("project_id") or "").strip() or None
     boq_focus = target.get("boq_focus") if isinstance(target.get("boq_focus"), dict) else {}
     params = load_params()
-    payload_obj = (job.get("payload") or {}) if isinstance(job.get("payload"), dict) else {}
+    payload_obj = (
+        copy.deepcopy(job.get("payload") or {})
+        if isinstance(job.get("payload"), dict)
+        else {}
+    )
     overrides = payload_obj.get("params_override")
     if isinstance(overrides, dict) and overrides:
         for k, v in overrides.items():
@@ -2878,6 +6809,13 @@ async def actions_review_apply(
                 params[k] = merged
             else:
                 params[k] = v
+
+    # Manual replacements need no text model.  As soon as an AI rewrite is
+    # required, run one fresh full-chain admission and reuse it for both review
+    # rounds and the final professional renderer.
+    review_admission = None
+    if grouped:
+        review_admission = await _ensure_review_provider_admission(payload_obj)
 
     modified_titles: set[str] = set()
     for section in sections:
@@ -2923,6 +6861,11 @@ async def actions_review_apply(
             project_id=pid,
             boq_focus=boq_focus,
             params=params,
+            project_fact_ledger=(
+                target.get("project_fact_ledger")
+                if isinstance(target.get("project_fact_ledger"), dict)
+                else {}
+            ),
         )
         for item in selected:
             section = _find_review_target_section(sections, item)
@@ -2932,9 +6875,15 @@ async def actions_review_apply(
         if isinstance(sec, dict):
             sec["content"] = strip_nonconcrete_language(str(sec.get("content") or ""))
 
-    # Rebuild receipts/QC/cross-index after round 1. This is the first full-document recheck.
-    _rebuild_postprocessed_artifacts(
-        [target], payload=payload_obj, report=None, params=params, fail_closed=True
+    # Rebuild the complete candidate set after round 1.  Cross-variant
+    # diversity is a document-level invariant; a one-variant rebuild could
+    # otherwise promote a reviewed chapter that duplicates another方案.
+    _finalize_variant_derivatives(
+        candidate_variants,
+        payload=payload_obj,
+        allow_diversity_autofix=False,
+        force_rebuild=True,
+        fail_closed=True,
     )
 
     round_2_recheck_count = 0
@@ -2975,10 +6924,14 @@ async def actions_review_apply(
             for sec in sections:
                 if isinstance(sec, dict):
                     sec["content"] = strip_nonconcrete_language(str(sec.get("content") or ""))
-            # A second rebuild is mandatory after AI round 2 so all derivative
-            # reports, evidence tables and exported files describe final text.
-            _rebuild_postprocessed_artifacts(
-                [target], payload=payload_obj, report=None, params=params, fail_closed=True
+            # A second full-set rebuild is mandatory after AI round 2 so every
+            # derivative and the diversity gate describe the final candidate.
+            _finalize_variant_derivatives(
+                candidate_variants,
+                payload=payload_obj,
+                allow_diversity_autofix=False,
+                force_rebuild=True,
+                fail_closed=True,
             )
 
     final_review_items = _review_items_for_variant(target)
@@ -3023,24 +6976,33 @@ async def actions_review_apply(
     candidate_version = result_version(candidate_variants)
     candidate_suffix = revision["revision_id"].lower()
     out = _save_outputs(f"actions_{job_id}_{candidate_suffix}", candidate_variants)
-    out = await _render_professional_outputs_for_job(
-        job_id=f"{job_id}-{candidate_suffix}",
-        outputs=out,
-    )
+    render_kwargs: dict[str, Any] = {
+        "job_id": job_id,
+        "artifact_namespace": f"{job_id}-{candidate_suffix}",
+        "outputs": out,
+    }
+    if review_admission is not None:
+        render_kwargs["slot_override"] = _admitted_document_render_slot(
+            review_admission
+        )
+    out = await _render_professional_outputs_for_job(**render_kwargs)
     candidate_artifacts = artifact_manifest(out)
-    finalize_revision_snapshot(
+    candidate_artifact_digest = canonical_digest(candidate_artifacts)
+    _promote_review_candidate_two_phase(
         job_id=job_id,
         revision_id=revision["revision_id"],
+        initial_status=initial_status,
+        initial_revision=initial_revision,
+        result=out,
         promotion={
             "actor": str(req.actor or "webui").strip() or "webui",
             "candidate_result_version": candidate_version,
             "candidate_variant_version": variant_version(target),
             "candidate_issue_digest": issue_set_digest(final_review_items),
-            "candidate_artifact_digest": canonical_digest(candidate_artifacts),
+            "candidate_artifact_digest": candidate_artifact_digest,
             "artifacts": candidate_artifacts,
         },
     )
-    update_job(job_id, status="done", result=out, error=None)
 
     return {
         "ok": True,
@@ -3058,7 +7020,7 @@ async def actions_review_apply(
         "result_version": candidate_version,
         "variant_version": variant_version(target),
         "issue_digest": issue_set_digest(final_review_items),
-        "candidate_artifact_digest": canonical_digest(candidate_artifacts),
+        "candidate_artifact_digest": candidate_artifact_digest,
         "files": out,
     }
 
@@ -3083,7 +7045,13 @@ async def actions_review_rollback(
     revision_id = str(req.revision_id or "").strip()
     if not job_id or not revision_id:
         raise HTTPException(status_code=400, detail="job_id and revision_id required")
-    _, current_result, _, current_variants = _load_done_job_variants(job_id)
+    current_job, current_result, _, current_variants = _load_done_job_variants(job_id)
+    _require_formal_document_mutation(
+        current_job,
+        current_result,
+        current_variants,
+    )
+    initial_status, initial_revision = _capture_promotion_revision(current_job)
     _require_review_preconditions(
         variants=current_variants,
         idx=0,
@@ -3096,6 +7064,12 @@ async def actions_review_rollback(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=f"invalid revision: {exc}")
 
+    restored_variants = _validate_rollback_snapshot(
+        revision=revision,
+        current_job=current_job,
+        current_result=current_result,
+        current_variants=current_variants,
+    )
     safety = create_revision_snapshot(
         job_id=job_id,
         variants=copy.deepcopy(current_variants),
@@ -3106,35 +7080,38 @@ async def actions_review_rollback(
             "restore_revision_id": revision_id,
         },
     )
-    restored_variants = copy.deepcopy(revision["variants"])
     restored_version = result_version(restored_variants)
     candidate_suffix = f"rollback-{revision_id.lower()}-{safety['revision_id'].lower()}"
     out = _save_outputs(f"actions_{job_id}_{candidate_suffix}", restored_variants)
     out = await _render_professional_outputs_for_job(
-        job_id=f"{job_id}-{candidate_suffix}",
+        job_id=job_id,
+        artifact_namespace=f"{job_id}-{candidate_suffix}",
         outputs=out,
     )
     rollback_artifacts = artifact_manifest(out)
-    finalize_revision_snapshot(
+    rollback_artifact_digest = canonical_digest(rollback_artifacts)
+    _promote_review_candidate_two_phase(
         job_id=job_id,
         revision_id=safety["revision_id"],
+        initial_status=initial_status,
+        initial_revision=initial_revision,
+        result=out,
         promotion={
             "actor": str(req.actor or "webui").strip() or "webui",
             "operation": "rollback",
             "restored_revision_id": revision_id,
             "candidate_result_version": restored_version,
-            "candidate_artifact_digest": canonical_digest(rollback_artifacts),
+            "candidate_artifact_digest": rollback_artifact_digest,
             "artifacts": rollback_artifacts,
         },
     )
-    update_job(job_id, status="done", result=out, error=None)
     return {
         "ok": True,
         "job_id": job_id,
         "restored_revision_id": revision_id,
         "safety_revision_id": safety["revision_id"],
         "result_version": restored_version,
-        "candidate_artifact_digest": canonical_digest(rollback_artifacts),
+        "candidate_artifact_digest": rollback_artifact_digest,
         "files": out,
     }
 
@@ -3151,48 +7128,87 @@ async def actions_result(
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.get("status") != "done":
+    if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
         return {"ok": False, "status": job.get("status"), "error": job.get("error")}
     result = job.get("result") or {}
-    json_path = result.get("json")
-    if not json_path or not Path(json_path).exists():
-        raise HTTPException(status_code=404, detail="result json not found")
-    data = json.loads(Path(json_path).read_text(encoding="utf-8"))
-    variants = data.get("variants") or []
-    if not variants:
-        raise HTTPException(status_code=404, detail="empty result")
-    v = max(1, int(variant or 1))
-    rec = variants[v - 1] if v <= len(variants) else variants[0]
+    if not isinstance(result, dict):
+        raise _result_json_untrusted()
+    _data, variants = _load_result_variants(result)
+    json_path = str(result.get("json") or "")
+    v = _require_variant_number(variant, len(variants))
+    rec = variants[v - 1]
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    if (
+        "delivery_scope" not in payload
+        or not str(payload.get("delivery_scope") or "").strip()
+        or "delivery_scope" not in rec
+        or not str(rec.get("delivery_scope") or "").strip()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DELIVERY_SCOPE_RESULT_MISSING",
+                "message": "任务请求或结果记录缺少显式交付范围，系统已失败关闭。",
+            },
+        )
+    payload_scope = str(payload.get("delivery_scope") or "").strip().lower()
+    record_scope = str(rec.get("delivery_scope") or "").strip().lower()
+    if payload_scope != record_scope:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DELIVERY_SCOPE_RESULT_MISMATCH",
+                "message": "任务请求与结果记录的交付范围不一致。",
+            },
+        )
+    formal_ready, non_delivery_reason = _formal_delivery_state(job, result, variants)
+    formal_artifact_keys = (
+        "docx",
+        "compare_docx",
+        "focus_xlsx",
+        "score_overview_xlsx",
+        "expert_review_docx",
+        "professional_docx",
+        "professional_render_receipt",
+        "delivery_receipt",
+    )
+    if not formal_ready and any(result.get(key) for key in formal_artifact_keys):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "NON_DELIVERABLE_ARTIFACT_LEAK_BLOCKED",
+                "message": "非正式交付结果包含正式文件引用，系统已阻断暴露。",
+                "reason": non_delivery_reason,
+            },
+        )
+    files = {"json": json_path}
+    if formal_ready:
+        files.update(
+            {
+                "docx": _output_variant_value(result, "docx", v),
+                "compare_docx": _output_variant_value(result, "compare_docx", v),
+                "focus_xlsx": _output_variant_value(result, "focus_xlsx", v),
+                "score_overview_xlsx": _output_variant_value(result, "score_overview_xlsx", v),
+                "expert_review_docx": _output_variant_value(result, "expert_review_docx", v),
+                "professional_docx": _output_variant_value(result, "professional_docx", v),
+                "professional_render_receipt": _output_variant_value(
+                    result,
+                    "professional_render_receipt",
+                    v,
+                ),
+                "delivery_receipt": result.get("delivery_receipt"),
+            }
+        )
     response = {
         "ok": True,
         "variant_id": rec.get("variant_id") or v,
         "topic": rec.get("topic"),
         "outline": rec.get("outline"),
+        "delivery_scope": record_scope,
+        "delivery_ready": formal_ready,
         "boq_focus": rec.get("boq_focus"),
         "quality_checks": rec.get("quality_checks"),
-        "files": {
-            "json": json_path,
-            "docx": (result.get("docx") or [None])[v - 1] if isinstance(result.get("docx"), list) else result.get("docx"),
-            "compare_docx": (result.get("compare_docx") or [None])[v - 1]
-            if isinstance(result.get("compare_docx"), list)
-            else result.get("compare_docx"),
-            "focus_xlsx": (result.get("focus_xlsx") or [None])[v - 1]
-            if isinstance(result.get("focus_xlsx"), list)
-            else result.get("focus_xlsx"),
-            "score_overview_xlsx": (result.get("score_overview_xlsx") or [None])[v - 1]
-            if isinstance(result.get("score_overview_xlsx"), list)
-            else result.get("score_overview_xlsx"),
-            "expert_review_docx": (result.get("expert_review_docx") or [None])[v - 1]
-            if isinstance(result.get("expert_review_docx"), list)
-            else result.get("expert_review_docx"),
-            "professional_docx": (result.get("professional_docx") or [None])[v - 1]
-            if isinstance(result.get("professional_docx"), list)
-            else result.get("professional_docx"),
-            "professional_render_receipt": (result.get("professional_render_receipt") or [None])[v - 1]
-            if isinstance(result.get("professional_render_receipt"), list)
-            else result.get("professional_render_receipt"),
-            "delivery_receipt": result.get("delivery_receipt"),
-        },
+        "files": files,
     }
     if include_sections:
         trimmed = []
@@ -3214,25 +7230,41 @@ async def actions_download(
     x_actions_key: str | None = Header(default=None),
 ):
     _auth_actions_key(x_actions_key)
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
-    if job.get("status") != "done":
-        raise HTTPException(status_code=409, detail=f"job not done: {job.get('status')}")
-    result = job.get("result") or {}
-    path = result.get(kind)
-    if kind in (
+    allowed_kinds = {
+        "json",
         "docx",
         "professional_docx",
         "professional_json",
         "professional_render_receipt",
         "compare_docx",
+        "delivery_receipt",
         "focus_xlsx",
         "score_overview_xlsx",
         "expert_review_docx",
-    ) and isinstance(path, list):
-        v = max(1, int(variant or 1))
-        path = path[v - 1] if v <= len(path) else None
+    }
+    if kind not in allowed_kinds:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "DOWNLOAD_KIND_INVALID", "message": "下载类型不在允许清单中。"},
+        )
+    job, result, _, variants = _load_done_job_variants(job_id)
+    v = _require_variant_number(variant, len(variants))
+    if kind != "json":
+        _require_formal_document_mutation(job, result, variants)
+    path = (
+        _output_variant_value(result, kind, v)
+        if kind in {
+            "docx",
+            "professional_docx",
+            "professional_json",
+            "professional_render_receipt",
+            "compare_docx",
+            "focus_xlsx",
+            "score_overview_xlsx",
+            "expert_review_docx",
+        }
+        else result.get(kind)
+    )
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail="file not found")
     if kind in {"json", "professional_json", "professional_render_receipt", "delivery_receipt"}:
@@ -3243,23 +7275,23 @@ async def actions_download(
             filename = f"autoplan_{job_id}_delivery_receipt.json"
         else:
             suffix = "_professional" if kind == "professional_json" else "_professional_receipt"
-            filename = f"autoplan_{job_id}{suffix}_v{max(1, int(variant or 1))}.json"
+            filename = f"autoplan_{job_id}{suffix}_v{v}.json"
     elif kind == "focus_xlsx":
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        filename = f"autoplan_{job_id}_focus_v{max(1, int(variant or 1))}.xlsx"
+        filename = f"autoplan_{job_id}_focus_v{v}.xlsx"
     elif kind == "score_overview_xlsx":
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        filename = f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{max(1, int(variant or 1))}.xlsx"
+        filename = f"autoplan_{job_id}_评分点覆盖与证据引用总览_v{v}.xlsx"
     elif kind == "expert_review_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = f"autoplan_{job_id}_专家复核提要版_v{max(1, int(variant or 1))}.docx"
+        filename = f"autoplan_{job_id}_专家复核提要版_v{v}.docx"
     elif kind == "professional_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = f"autoplan_{job_id}_Sonnet5专业精修版_v{max(1, int(variant or 1))}.docx"
+        filename = f"autoplan_{job_id}_Sonnet5专业精修版_v{v}.docx"
     elif kind == "compare_docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = f"autoplan_{job_id}_compare_v{max(1, int(variant or 1))}.docx"
+        filename = f"autoplan_{job_id}_compare_v{v}.docx"
     else:
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        filename = f"autoplan_{job_id}_v{max(1, int(variant or 1))}.docx"
+        filename = f"autoplan_{job_id}_v{v}.docx"
     return FileResponse(str(path), media_type=media_type, filename=filename)

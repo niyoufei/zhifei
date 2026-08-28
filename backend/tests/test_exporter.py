@@ -430,7 +430,7 @@ class TestTocRenderingHelpers:
         assert "PAGEREF ZF_CHAPTER_1" in paragraph._element.xml
         assert paragraph.runs[0].bold is True
 
-    def test_insert_auto_toc_renders_field_and_static_entries(self):
+    def test_insert_auto_toc_renders_one_visible_live_field(self):
         doc = Document()
         apply_paragraph = _apply_style(doc, {"body_font": "宋体", "title_font": "黑体"})
 
@@ -449,12 +449,10 @@ class TestTocRenderingHelpers:
         text = "\n".join(p.text for p in doc.paragraphs)
         xml = "\n".join(p._element.xml for p in doc.paragraphs)
         assert "目录" in text
-        assert "目录（续）" in text
-        assert "第一章、工程概况" in text
-        assert "第一节、项目概况" in text
-        assert "一、施工部署" in text
-        assert "TOC" in xml
-        assert "vanish" in xml
+        assert "目录（续）" not in text
+        assert "第一章、工程概况" not in text
+        assert 'TOC \\o "1-3"' in xml
+        assert "vanish" not in xml
 
 
 class TestHeaderFooterHelpers:
@@ -1091,8 +1089,11 @@ class TestExportAutoplanDocx:
         )
         with zipfile.ZipFile(output_path) as zf:
             xml = zf.read("word/styles.xml").decode("utf-8", errors="ignore")
-        assert 'w:eastAsia="STSong"' in xml
-        assert 'w:eastAsia="Heiti SC"' in xml
+            font_table = zf.read("word/fontTable.xml").decode("utf-8", errors="ignore")
+        assert 'w:eastAsia="宋体"' in xml
+        assert 'w:eastAsia="黑体"' in xml
+        assert 'w:name="宋体"' in font_table
+        assert 'w:altName w:val="STSong"' in font_table
         assert 'w:hint="eastAsia"' in xml
 
     def test_cover_defaults_to_real_site_photo_and_project_id(self, temp_dir):
@@ -1197,7 +1198,6 @@ class TestExportAutoplanDocx:
         assert "全文索引" in text
         assert "目录" in text
         assert "01. 第一章 工程概况（约2页）" in text
-        assert "第一章、工程概况" in text
         assert "第一章 工程概况" in text
         assert "负责人：项目经理" not in text
         assert "项目经理" not in text
@@ -1731,6 +1731,112 @@ class TestExportAutoplanDocx:
         captions = [p.text for p in doc.paragraphs if re.match(r"^图\d+：", str(p.text or ""))]
         # Long documents use a lower density; this four-page chapter gets one figure.
         assert len(captions) == 1
+
+    def test_structured_tables_support_landscape_merged_headers_and_nested_tables(self, temp_dir):
+        output_path = Path(temp_dir) / "structured_tables.docx"
+        data = {
+            "topic": "结构化表格验收",
+            "sections": [{"title": "第一章 编制说明", "content": "本样本用于验证结构化表格导出。"}],
+            "tables": [
+                {
+                    "title": "横向资源计划表",
+                    "orientation": "landscape",
+                    "headers": ["序号", "工序", "资源", "数量", "控制措施", "验收记录", "责任人", "状态"],
+                    "merge_header_groups": [
+                        {"start": 0, "end": 1, "label": "工作分解"},
+                        {"start": 2, "end": 3, "label": "资源配置"},
+                        {"start": 4, "end": 7, "label": "执行闭环"},
+                    ],
+                    "rows": [
+                        [
+                            "1",
+                            "测量放线",
+                            {
+                                "text": "测量组",
+                                "nested": {
+                                    "headers": ["设备", "校验"],
+                                    "rows": [["全站仪", "有效期内"]],
+                                },
+                            },
+                            "2套",
+                            "轴线与标高双重复核",
+                            "测量复核记录",
+                            "测量负责人",
+                            "待验收",
+                        ]
+                    ],
+                }
+            ],
+        }
+
+        export_autoplan_docx(data, str(output_path))
+
+        document = Document(str(output_path))
+        assert [round(section.page_width.cm, 1) for section in document.sections] == [21.0, 29.7]
+        assert [round(section.page_height.cm, 1) for section in document.sections] == [29.7, 21.0]
+        assert any("横向资源计划表" in paragraph.text for paragraph in document.paragraphs)
+        assert len(document.tables) == 1
+        with zipfile.ZipFile(output_path) as package:
+            document_xml = package.read("word/document.xml").decode("utf-8")
+        assert document_xml.count("<w:tbl>") >= 2
+        assert document_xml.count("<w:tblHeader") >= 3
+        assert document_xml.count("<w:cantSplit") >= 4
+        assert document_xml.count('w:headerReference w:type="default"') == 2
+        assert document_xml.count('w:footerReference w:type="default"') == 2
+        assert document_xml.count('w:headerReference w:type="first"') == 2
+        assert document_xml.count('w:footerReference w:type="first"') == 2
+        assert document_xml.count('w:headerReference w:type="even"') == 2
+        assert document_xml.count('w:footerReference w:type="even"') == 2
+        receipt = json.loads(output_path.with_suffix(".structural_quality.json").read_text(encoding="utf-8"))
+        assert receipt["status"] == "pass"
+        assert all(
+            item["default_header"] and item["default_footer"]
+            for item in receipt["section_story_references"]
+        )
+        assert receipt["section_story_references"][1]["header_types"] == ["default", "even", "first"]
+        assert receipt["section_story_references"][1]["footer_types"] == ["default", "even", "first"]
+        assert [section["orientation"] for section in receipt["section_metrics"]] == ["portrait", "landscape"]
+
+    def test_portrait_restore_before_media_does_not_insert_an_empty_page(self, temp_dir):
+        from PIL import Image
+
+        output_path = Path(temp_dir) / "landscape_then_media.docx"
+        image_path = Path(temp_dir) / "工程流程图.png"
+        Image.effect_noise((1600, 900), 48).convert("RGB").save(image_path, dpi=(300, 300))
+        data = {
+            "topic": "横向表格后续图片验收",
+            "sections": [{"title": "第一章 编制说明", "content": "验证恢复纵向页面后直接排入图形。"}],
+            "tables": [
+                {
+                    "title": "横向资源表",
+                    "orientation": "landscape",
+                    "headers": ["序号", "工序", "资源", "数量", "措施", "频次", "责任人", "记录"],
+                    "rows": [["1", "测量", "测量组", "2套", "双重复核", "每道工序", "测量员", "复核记录"]],
+                }
+            ],
+            "media": [
+                {
+                    "path": str(image_path),
+                    "caption": "恢复纵向后的工程流程图",
+                    "source_kind": "deterministic_project_diagram",
+                    "source_ref": "qa/工程流程图.png",
+                    "text_verified": True,
+                    "required": True,
+                }
+            ],
+        }
+
+        export_autoplan_docx(data, str(output_path))
+
+        document = Document(str(output_path))
+        assert [round(section.page_width.cm, 1) for section in document.sections] == [21.0, 29.7, 21.0]
+        paragraphs = document.paragraphs
+        figure_heading_index = next(
+            index for index, paragraph in enumerate(paragraphs) if paragraph.text == "图表与插图"
+        )
+        assert paragraphs[figure_heading_index - 1]._p.xpath("./w:pPr/w:sectPr")
+        assert not paragraphs[figure_heading_index - 1]._p.xpath('.//w:br[@w:type="page"]')
+        assert not paragraphs[figure_heading_index]._p.xpath('.//w:br[@w:type="page"]')
 
 
 class TestAutoDensityRules:

@@ -1,9 +1,169 @@
 """Unit tests for backend/zhifei_autoplan/agents/section_writer.py"""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from backend.zhifei_autoplan.agents.section_writer import SectionWriter
+from backend.zhifei_autoplan.requirement_evidence_matrix import (
+    validate_chapter_requirement_evidence,
+)
+
+
+@pytest.mark.asyncio
+async def test_token_limited_chapter_gets_one_evidence_aware_continuation():
+    llm = MagicMock()
+    llm.provider = "anthropic"
+    llm.complete = AsyncMock(
+        side_effect=[
+            {
+                "text": "第一段正文达到上限",
+                "provider": "anthropic",
+                "model": "draft",
+                "stop_reason": "max_tokens",
+            },
+            {
+                "text": (
+                    "【要求:REQ-505-A】续写闭合"
+                    "【证据:招标文件.pdf#p2_deadbeef@120】"
+                ),
+                "provider": "anthropic",
+                "model": "draft",
+                "stop_reason": "end_turn",
+            },
+        ]
+    )
+    writer = SectionWriter(llm=llm)
+
+    evidence_row = {
+        "requirement_id": "REQ-505-A",
+        "requirement": "必须落实工期控制",
+        "target_chapters": ["工期与质量"],
+        "mandatory": True,
+        "evidence_required": True,
+        "responsibility": [],
+        "source_evidence": [
+            {"traceable_locator": "招标文件.pdf#p2_deadbeef@120"}
+        ],
+    }
+
+    result = await writer.write(
+        "工期与质量",
+        {
+            "requirements": [
+                (
+                    "【要求绑定:REQ-505-A】必须落实工期控制；落实段落必须保留"
+                    "【要求:REQ-505-A】标记，并引用"
+                    "【证据:招标文件.pdf#p2_deadbeef@120】。"
+                )
+            ],
+            "requirement_evidence_rows": [evidence_row],
+            "max_chapter_output_tokens": 8192,
+        },
+    )
+
+    assert result["error"] is None
+    assert result["continuation_count"] == 1
+    assert "第一段正文" in result["content"]
+    assert "【要求:REQ-505-A】" in result["content"]
+    continuation_prompt = llm.complete.await_args_list[1].args[0]
+    assert "只续写" in continuation_prompt
+    assert "REQ-505-A" in continuation_prompt
+    gate = validate_chapter_requirement_evidence(
+        plan={"rows": [evidence_row]},
+        title="工期与质量",
+        section={"content": result["content"]},
+    )
+    assert gate["ok"] is True
+
+
+def test_continuation_prompt_does_not_drop_requirement_after_twentieth_row():
+    rows = []
+    for index in range(1, 22):
+        requirement_id = f"REQ-{index:02d}"
+        rows.append(
+            {
+                "requirement_id": requirement_id,
+                "requirement": f"落实第{index}项控制要求",
+                "target_chapters": ["综合管理"],
+                "mandatory": True,
+                "evidence_required": True,
+                "responsibility": [],
+                "source_evidence": [
+                    {
+                        "traceable_locator": (
+                            f"招标文件.pdf#p1_{index:06x}@{index}"
+                        )
+                    }
+                ],
+            }
+        )
+
+    prompt = SectionWriter()._build_continuation_prompt(
+        "综合管理",
+        {"requirement_evidence_rows": rows},
+        partial_text="尚未落实任何强制要求",
+    )
+
+    assert "【要求绑定:REQ-01】" in prompt
+    assert "【要求绑定:REQ-21】" in prompt
+
+
+@pytest.mark.asyncio
+async def test_continuation_repeats_marker_when_token_stop_splits_evidence_pair():
+    llm = MagicMock()
+    llm.provider = "anthropic"
+    llm.complete = AsyncMock(
+        side_effect=[
+            {"text": "工期闭环【要求:REQ-A】", "stop_reason": "max_tokens"},
+            {
+                "text": "工期闭环【要求:REQ-A】【证据:招标文件.pdf#p3_cafebabe@88】",
+                "stop_reason": "end_turn",
+            },
+        ]
+    )
+    row = {
+        "requirement_id": "REQ-A",
+        "requirement": "落实工期闭环",
+        "target_chapters": ["进度管理"],
+        "mandatory": True,
+        "evidence_required": True,
+        "responsibility": [],
+        "source_evidence": [
+            {"traceable_locator": "招标文件.pdf#p3_cafebabe@88"}
+        ],
+    }
+
+    result = await SectionWriter(llm=llm).write(
+        "进度管理", {"requirement_evidence_rows": [row]}
+    )
+
+    continuation_prompt = llm.complete.await_args_list[1].args[0]
+    assert "【要求绑定:REQ-A】" in continuation_prompt
+    gate = validate_chapter_requirement_evidence(
+        plan={"rows": [row]},
+        title="进度管理",
+        section={"content": result["content"]},
+    )
+    assert gate["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_second_token_stop_fails_closed_as_output_truncated():
+    llm = MagicMock()
+    llm.provider = "anthropic"
+    llm.complete = AsyncMock(
+        side_effect=[
+            {"text": "第一段", "stop_reason": "max_tokens"},
+            {"text": "第二段", "stop_reason": "max_tokens"},
+        ]
+    )
+    writer = SectionWriter(llm=llm)
+
+    result = await writer.write("长章节", {})
+
+    assert result["error"] == "output_truncated"
+    assert result["continuation_count"] == 1
 
 
 class TestSectionWriterInit:
@@ -158,6 +318,202 @@ class TestFallback:
         assert "风险：" in result and "控制：" in result and "验证：" in result
         assert "【证据:" in result
 
+    def test_fallback_does_not_inject_unverified_legacy_defaults(self):
+        writer = SectionWriter()
+        result = writer._fallback(
+            "施工方案",
+            {
+                "params": {
+                    "quant_defaults": {
+                        "频次": "2次/日",
+                        "阈值": "偏差≤5mm",
+                        "时长": "4h/作业段",
+                        "人数": "8人/班",
+                        "设备型号": "20t挖机1台",
+                    }
+                }
+            },
+        )
+
+        for legacy in ("2次/日", "偏差≤5mm", "4h/作业段", "8人/班", "20t挖机"):
+            assert legacy not in result
+        assert "待依据图纸/规范/批准制度确认" in result
+
+    def test_fallback_uses_source_bound_accepted_values_not_legacy_defaults(self):
+        writer = SectionWriter()
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "3次/班",
+                    "status": "approved",
+                    "evidence": {"locator": "确认单.pdf#p2_deadbeef@20"},
+                },
+                "quality_threshold": {
+                    "value": "偏差≤3mm",
+                    "status": "verified",
+                    "evidence": {"locator": "结构图.pdf#p8_cafebabe@80"},
+                },
+                "deviation_action_deadline": {
+                    "value": "6小时",
+                    "status": "approved",
+                    "evidence": {"locator": "制度.pdf#p3_feedface@30"},
+                },
+                "resource_peak": {
+                    "value": 72,
+                    "unit": "人",
+                    "status": "derived",
+                    "evidence": {"locator": "资源计划.xlsx#p1_aabbccdd@1"},
+                },
+            }
+        }
+
+        result = writer._fallback("施工方案", {"project_fact_ledger": ledger})
+
+        assert "频次：3次/班" in result
+        assert "阈值：偏差≤3mm" in result
+        assert "时长：待依据图纸/规范/批准制度确认" in result
+        assert "整改时限=6小时" in result
+        assert "时长：6小时" not in result
+        assert "人数：72人" in result
+        assert "2次/日" not in result
+        assert "偏差≤5mm" not in result
+        assert "4h/作业段" not in result
+        assert "8人/班" not in result
+        assert "20t挖机" not in result
+
+    def test_process_bound_quality_bundle_is_rendered_per_process_not_as_dict(self):
+        writer = SectionWriter()
+        locator = f"围墙图.pdf#p1_{'a' * 64}@42"
+        ledger = {
+            "facts": {
+                "quality_threshold": {
+                    "value": {
+                        "mode": "process_bound",
+                        "items": [
+                            {
+                                "id": "wall-foundation-compaction",
+                                "process": "围墙基础持力层压实",
+                                "metric": "压实系数",
+                                "operator": ">=",
+                                "value": 0.97,
+                                "unit": "",
+                                "status": "verified",
+                                "source": "reviewed_design",
+                                "locator": locator,
+                            }
+                        ],
+                    },
+                    "status": "derived",
+                    "evidence": {"locator": "project_parameter_evidence.quality_threshold"},
+                }
+            }
+        }
+
+        quality_prompt = writer._build_prompt(
+            "质量管理与验收", {"project_fact_ledger": ledger}
+        )
+        unrelated_prompt = writer._build_prompt(
+            "施工进度计划", {"project_fact_ledger": ledger}
+        )
+        fallback = writer._fallback(
+            "质量管理与验收", {"project_fact_ledger": ledger}
+        )
+
+        expected = f"围墙基础持力层压实：压实系数>=0.97【证据:{locator}】"
+        assert expected in quality_prompt
+        assert expected in fallback
+        assert "围墙基础持力层压实" not in unrelated_prompt
+        assert "{'mode':" not in quality_prompt
+        assert '"mode":"process_bound"' not in unrelated_prompt
+
+    def test_fallback_preserves_an_approved_value_equal_to_old_default(self):
+        writer = SectionWriter()
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "2次/日",
+                    "status": "approved",
+                    "evidence": {"locator": "确认单.pdf#p2_deadbeef@20"},
+                }
+            }
+        }
+
+        result = writer._fallback("安全管理", {"project_fact_ledger": ledger})
+
+        assert "频次：2次/日" in result
+
+    def test_fallback_neutralizes_unapproved_constraints_from_its_own_templates(self):
+        writer = SectionWriter()
+
+        matrix_content = writer._fallback(
+            "质量安全环保管理", {"logic_template": {"id": "C"}}
+        )
+        redline_content = writer._fallback(
+            "安全管理", {"logic_template": {"id": "D"}}
+        )
+
+        for unapproved in ("1次/周", "2次/日", "48h", "≤55dB"):
+            assert unapproved not in matrix_content
+        for unapproved in ("10min", "2h", "24h"):
+            assert unapproved not in redline_content
+        assert "频次待依据项目事实台账/批准制度确认" in matrix_content
+        assert "阈值待依据项目事实台账/图纸规范确认" in matrix_content
+        assert "时限待依据项目事实台账/批准制度确认" in redline_content
+
+    def test_fallback_preserves_only_exact_source_bound_constraint_values(self):
+        writer = SectionWriter()
+        digest = "a" * 64
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "1次/周",
+                    "status": "approved",
+                    "evidence": {"locator": f"风险制度.pdf#p2_{digest}@20"},
+                },
+                "deviation_action_deadline": {
+                    "value": "24h",
+                    "status": "approved",
+                    "evidence": {"locator": f"整改制度.pdf#p3_{digest}@30"},
+                },
+                "quality_threshold": {
+                    "value": {
+                        "mode": "process_bound",
+                        "items": [
+                            {
+                                "id": "night-noise-limit",
+                                "process": "夜间施工噪声控制",
+                                "metric": "噪声限值",
+                                "operator": "≤",
+                                "value": 55,
+                                "unit": "dB",
+                                "status": "verified",
+                                "source": "reviewed_design",
+                                "locator": f"环保图.pdf#p4_{digest}@40",
+                            }
+                        ],
+                    },
+                    "status": "derived",
+                    "evidence": {
+                        "locator": "project_parameter_evidence.quality_threshold"
+                    },
+                },
+            }
+        }
+
+        content = writer._fallback(
+            "质量安全环保管理",
+            {"logic_template": {"id": "C"}, "project_fact_ledger": ledger},
+        )
+
+        assert "频次：1次/周" in content
+        assert "整改时限=24h" in content
+        assert (
+            "夜间施工噪声控制：噪声限值≤55dB"
+            f"【证据:环保图.pdf#p4_{digest}@40】"
+        ) in content
+        for unapproved in ("2次/日", "48h", "10min"):
+            assert unapproved not in content
+
     def test_fallback_can_use_doc_evidence_as_source(self):
         """Fallback may use doc_evidence as a traceable evidence source."""
         writer = SectionWriter()
@@ -178,20 +534,26 @@ class TestWrite:
         writer = SectionWriter(llm=None)
         result = await writer.write("工程概况", {})
         assert result["title"] == "工程概况"
-        assert "prompt" in result
+        assert "prompt" not in result
+        assert len(result["prompt_digest"]) == 64
+        assert result["prompt_char_count"] > 0
+        assert result["prompt_layout_version"] == "section-envelope-v3"
         assert "【量化指标】" in result["content"]
         assert "【风险→控制→验证】" in result["content"]
         assert "【证据:" in result["content"]
         assert result["generation_mode"] == "fallback"
 
     @pytest.mark.asyncio
-    async def test_write_without_llm_includes_prompt(self):
-        """Test write without LLM still generates prompt."""
+    async def test_write_without_llm_keeps_prompt_ephemeral(self):
+        """Prompt content is used to derive metadata but never returned or persisted."""
         writer = SectionWriter(llm=None)
         context = {"requirements": ["要求1"]}
+        prompt = writer._build_prompt("施工方案", context)
         result = await writer.write("施工方案", context)
-        assert "要求1" in result["prompt"]
-        assert "施工方案" in result["prompt"]
+        assert "要求1" in prompt
+        assert "施工方案" in prompt
+        assert "prompt" not in result
+        assert result["prompt_char_count"] == len(prompt)
 
     @pytest.mark.asyncio
     async def test_write_with_successful_llm_response(self):
@@ -210,6 +572,95 @@ class TestWrite:
         assert result["model"] == "gpt-4"
         assert result["generation_mode"] == "llm"
         mock_llm.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_successful_llm_output_neutralizes_unaccepted_legacy_defaults(self):
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = {
+            "text": (
+                "总工期120天，资源峰值80人，关键线路间隔3天；"
+                "巡检2次/日，偏差≤5mm，处置≤4h；"
+                "每班8人/班，配置20t挖机1台。"
+            ),
+            "provider": "openai",
+            "model": "test-model",
+        }
+
+        result = await SectionWriter(llm=mock_llm).write("施工部署", {})
+
+        content = result["content"]
+        for legacy in (
+            "总工期120天",
+            "资源峰值80人",
+            "关键线路间隔3天",
+            "2次/日",
+            "偏差≤5mm",
+            "≤4h",
+            "8人/班",
+            "20t挖机",
+        ):
+            assert legacy not in content
+        assert "待依据" in content
+        assert result["generation_mode"] == "llm"
+
+    @pytest.mark.asyncio
+    async def test_llm_output_neutralizes_unlisted_numeric_constraints_systemically(self):
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = {
+            "text": (
+                "风险检查频次1次/周；一般风险24h关闭；"
+                "夜间噪声≤55dB。"
+                f"【证据:环保制度.pdf#p1_{'b' * 64}@12】"
+            ),
+            "provider": "openai",
+            "model": "test-model",
+        }
+
+        result = await SectionWriter(llm=mock_llm).write("安全环保管理", {})
+
+        content = result["content"]
+        for unapproved in ("1次/周", "24h", "≤55dB"):
+            assert unapproved not in content
+        assert "频次待依据项目事实台账/批准制度确认" in content
+        assert "时限待依据项目事实台账/批准制度确认" in content
+        assert "阈值待依据项目事实台账/图纸规范确认" in content
+        assert f"【证据:环保制度.pdf#p1_{'b' * 64}@12】" in content
+
+    @pytest.mark.asyncio
+    async def test_similar_approved_values_do_not_authorize_different_constraints(self):
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = {
+            "text": "检查1次/周；一般风险24h关闭；夜间噪声≤55dB。",
+            "provider": "openai",
+            "model": "test-model",
+        }
+        digest = "c" * 64
+        ledger = {
+            "facts": {
+                "risk_inspection_frequency": {
+                    "value": "1次/班",
+                    "status": "approved",
+                    "evidence": {"locator": f"风险制度.pdf#p1_{digest}@10"},
+                },
+                "deviation_action_deadline": {
+                    "value": "6h",
+                    "status": "approved",
+                    "evidence": {"locator": f"整改制度.pdf#p2_{digest}@20"},
+                },
+                "quality_threshold": {
+                    "value": "≤50dB",
+                    "status": "verified",
+                    "evidence": {"locator": f"环保图.pdf#p3_{digest}@30"},
+                },
+            }
+        }
+
+        result = await SectionWriter(llm=mock_llm).write(
+            "安全环保管理", {"project_fact_ledger": ledger}
+        )
+
+        for unapproved in ("1次/周", "24h", "≤55dB"):
+            assert unapproved not in result["content"]
 
     @pytest.mark.asyncio
     async def test_write_with_empty_llm_response_uses_fallback(self):
@@ -284,7 +735,11 @@ class TestWrite:
         result = await writer.write("章节", {})
         assert "title" in result
         assert "content" in result
-        assert "prompt" in result
+        assert "prompt" not in result
+        assert len(result["prompt_digest"]) == 64
+        assert result["prompt_char_count"] > 0
+        assert set(result["prompt_segment_chars"]) == {"stable", "shared", "dynamic"}
+        assert result["prompt_layout_version"] == "section-envelope-v3"
         assert "provider" in result
         assert "model" in result
         assert "error" in result
@@ -372,7 +827,8 @@ class TestEdgeCases:
         result = await writer.write("特殊章节", context)
         # Should not crash
         assert result["title"] == "特殊章节"
-        assert "<script>" in result["prompt"]
+        assert "<script>" in writer._build_prompt("特殊章节", context)
+        assert "prompt" not in result
 
     def test_fallback_different_titles(self):
         """Test fallback generates different content for different titles."""

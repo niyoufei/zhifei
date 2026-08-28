@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from typing import Optional, Dict, Any
 
@@ -13,6 +14,8 @@ from backend.zhifei_autoplan.execution_control import (
     ExecutionBudgetExceededError,
     ExecutionCancelledError,
     ExecutionControlRuntime,
+    model_request_input_chars,
+    model_request_output_tokens,
 )
 
 from backend.zhifei_autoplan.providers.openai_provider import OpenAIProvider
@@ -53,6 +56,7 @@ class LLMClient:
         retry_attempts: int = 1,
         retry_base_delay: float = 0.25,
         execution_runtime: ExecutionControlRuntime | None = None,
+        reliability_identity: str | None = None,
     ):
         self.provider = provider
         self.model = model
@@ -64,6 +68,12 @@ class LLMClient:
         self.retry_attempts = max(1, min(5, int(retry_attempts or 1)))
         self.retry_base_delay = max(0.0, min(8.0, float(retry_base_delay or 0.0)))
         self.execution_runtime = execution_runtime
+        normalized_identity = str(reliability_identity or "").strip().lower()
+        if not normalized_identity and str(api_key or "").strip():
+            normalized_identity = hashlib.sha256(
+                b"model-reliability-v1\x00" + str(api_key).strip().encode("utf-8")
+            ).hexdigest()
+        self.reliability_identity = normalized_identity or None
 
         self._impl = None
         self._init_error = None
@@ -152,7 +162,11 @@ class LLMClient:
             }
 
         runtime = self.reliability_runtime
-        if runtime is not None and runtime.is_open(self.provider, self.model):
+        if runtime is not None and runtime.is_open(
+            self.provider,
+            self.model,
+            self.reliability_identity,
+        ):
             error_info = classify_provider_error(
                 "circuit_open",
                 provider=self.provider,
@@ -177,6 +191,9 @@ class LLMClient:
             }
 
         attempts = max(1, min(5, int(kwargs.pop("retry_attempts", self.retry_attempts) or 1)))
+        if str(self.provider or "").strip().lower() in {"openai", "anthropic", "google"}:
+            kwargs.setdefault("timeout", 240.0)
+            kwargs.setdefault("stream", True)
         last_error: Any = "provider_error"
         last_info: Dict[str, Any] | None = None
         for attempt in range(1, attempts + 1):
@@ -184,12 +201,14 @@ class LLMClient:
                 if self.execution_runtime is None:
                     result = await self._impl.complete(prompt, **kwargs)
                 else:
-                    requested_output_tokens = kwargs.get("max_tokens") or kwargs.get("max_output_tokens") or 0
                     async with self.execution_runtime.model_attempt(
                         provider=self.provider,
                         model=self.model,
-                        prompt_chars=len(str(prompt or "")),
-                        requested_output_tokens=int(requested_output_tokens or 0),
+                        prompt_chars=model_request_input_chars(prompt, kwargs),
+                        requested_output_tokens=model_request_output_tokens(
+                            self.provider,
+                            kwargs,
+                        ),
                     ):
                         result = await self._impl.complete(prompt, **kwargs)
                         if isinstance(result, dict):
@@ -200,7 +219,11 @@ class LLMClient:
                 raw_error = result.get("error")
                 if text and not raw_error:
                     if runtime is not None:
-                        runtime.record_success(self.provider, self.model)
+                        runtime.record_success(
+                            self.provider,
+                            self.model,
+                            self.reliability_identity,
+                        )
                     result.setdefault("provider", self.provider)
                     result.setdefault("model", self.model)
                     result["attempts"] = attempt
@@ -220,9 +243,12 @@ class LLMClient:
                 last_error = repr(exc)
                 last_info = classify_provider_error(exc, provider=self.provider, model=self.model)
 
-            if runtime is not None and last_info is not None:
-                runtime.record_failure(self.provider, self.model, last_info)
-            if not last_info or not bool(last_info.get("retryable")) or attempt >= attempts:
+            retry_code = str((last_info or {}).get("code") or "")
+            # A timed-out generation may still be completing remotely.  Never
+            # duplicate it against the same provider.  Only explicit rate
+            # limiting and provider-side 5xx outages receive one bounded retry.
+            retry_allowed = retry_code in {"rate_limited", "provider_unavailable"}
+            if not retry_allowed or attempt >= min(2, attempts):
                 break
             await bounded_retry_delay(
                 attempt,
@@ -230,30 +256,65 @@ class LLMClient:
                 base_delay=self.retry_base_delay,
             )
 
+        final_info = last_info or classify_provider_error(
+            last_error,
+            provider=self.provider,
+            model=self.model,
+        )
+        if runtime is not None:
+            # Internal retries belong to one logical provider request. Counting
+            # every attempt as a separate failure opens the shared circuit from
+            # a single transient outage and starves parallel chapter agents.
+            runtime.record_failure(
+                self.provider,
+                self.model,
+                final_info,
+                self.reliability_identity,
+            )
         return {
             "provider": self.provider,
             "model": self.model,
             "text": "",
             "error": last_error,
-            "error_info": last_info
-            or classify_provider_error(last_error, provider=self.provider, model=self.model),
+            "error_info": final_info,
             "attempts": attempt,
         }
+
+    def close(self) -> None:
+        impl = self._impl
+        client = getattr(impl, "client", None)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
     async def preflight(self, *, timeout: float = 30.0) -> Dict[str, Any]:
         """Validate credentials/model availability with a minimal visible-text call."""
 
+        # OpenAI Responses rejects requests below 16 output tokens.  Claude
+        # models can spend that entire allowance on an internal thinking block
+        # before emitting the requested visible ``OK`` text, which creates a
+        # false ``no_visible_text`` admission failure.  Keep the probe tiny but
+        # give Anthropic a bounded visible-text margin.
+        preflight_output_tokens = (
+            256 if str(self.provider or "").strip().lower() == "anthropic" else 16
+        )
         result = await self.complete(
             "Reply with exactly OK.",
             timeout=max(5.0, min(60.0, float(timeout or 30.0))),
-            max_tokens=8,
+            max_tokens=preflight_output_tokens,
             retry_attempts=min(2, self.retry_attempts),
+            task_type="provider_preflight",
+            project_id="system",
         )
         text = str(result.get("text") or "").strip() if isinstance(result, dict) else ""
         return {
             "ok": bool(text) and not bool(result.get("error")),
             "provider": self.provider,
             "model": self.model,
+            "streamed": bool(result.get("streamed")),
             "attempts": int(result.get("attempts") or 0),
             "error": result.get("error"),
             "error_info": result.get("error_info"),

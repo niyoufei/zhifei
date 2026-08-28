@@ -8,7 +8,7 @@ from backend.zhifei_autoplan.style_policy import normalize_cn_font_name
 
 DEFAULT_FORMAT_CONFIG: Dict[str, Any] = {
     "body_font": "宋体",
-    "title_font": "黑体",
+    "title_font": "宋体",
     "body_size_pt": 14.0,
     "title_size_pt": 16.0,
     "line_spacing_pt": 22.0,
