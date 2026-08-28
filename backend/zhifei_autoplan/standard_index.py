@@ -16,14 +16,16 @@ from backend.zhifei_autoplan.compliance_policy import (
 )
 from backend.zhifei_autoplan.compliance_runtime import (
     _compliance_root,
-    _load_official_registry,
     _parse_official_registry_bytes,
+    load_runtime_registry_authority,
+    resolve_runtime_registry_snapshot,
 )
 from backend.zhifei_autoplan.evidence import (
     format_hit_locator,
     resolve_trusted_ingest_record,
 )
 from backend.zhifei_autoplan.ingest_tags import effective_record_tags
+from backend.zhifei_autoplan.sealed_compliance import SealedComplianceError
 
 _HAN_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 _MEANINGFUL_TEXT_RE = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]")
@@ -81,7 +83,11 @@ def list_verified_standard_metadata(
     """Read raw official metadata without building or mutating the catalog."""
 
     try:
-        rows = _load_official_registry(_compliance_root(compliance_root))
+        authority = load_runtime_registry_authority(compliance_root)
+        rows = _parse_official_registry_bytes(
+            authority.raw,
+            path=authority.path,
+        )
     except Exception:  # noqa: BLE001 - optional read-only enrichment fails closed
         return []
     return [dict(row) for row in rows if isinstance(row, dict)]
@@ -781,6 +787,7 @@ def build_standard_index(
     *,
     audit_lines: tuple[str, ...] | None = None,
     official_registry_bytes: bytes | None = None,
+    official_registry_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build a project-isolated, page-addressable standard evidence index.
 
@@ -837,8 +844,39 @@ def build_standard_index(
     effective_compliance_root = _compliance_root(compliance_root).resolve(
         strict=False
     )
-    registry_path = effective_compliance_root / "_official_registry.json"
     registry_sha256: str | None = None
+    registry: dict[str, dict[str, Any]] = {}
+    if official_registry_bytes is None:
+        registry_rows = list_verified_standard_metadata(compliance_root)
+        try:
+            authority = load_runtime_registry_authority(compliance_root)
+        except SealedComplianceError:
+            authority = None
+        registry_path = (
+            authority.path
+            if authority is not None
+            else effective_compliance_root / "_official_registry.json"
+        )
+        registry_sha256 = (
+            hashlib.sha256(authority.raw).hexdigest()
+            if authority is not None
+            else None
+        )
+        registry = build_standard_registry_map(registry_rows)
+    else:
+        try:
+            official_registry_bytes, registry_path = resolve_runtime_registry_snapshot(
+                compliance_root,
+                official_registry_bytes=official_registry_bytes,
+                official_registry_path=official_registry_path,
+            )
+        except SealedComplianceError:
+            official_registry_bytes = None
+            registry_path = (
+                Path(official_registry_path)
+                if official_registry_path is not None
+                else effective_compliance_root / "_official_registry.json"
+            )
     if official_registry_bytes is not None:
         registry_sha256 = hashlib.sha256(official_registry_bytes).hexdigest()
         registry = build_standard_registry_map(
@@ -847,14 +885,6 @@ def build_standard_index(
                 path=registry_path,
             )
         )
-    else:
-        try:
-            registry_path.lstat()
-            if registry_path.is_file() and not registry_path.is_symlink():
-                registry_sha256 = hashlib.sha256(registry_path.read_bytes()).hexdigest()
-        except OSError:
-            pass
-        registry = _official_registry_map(effective_compliance_root)
     standards: list[dict[str, Any]] = []
     indexed_sources: list[dict[str, Any]] = []
     seen_content_ids: set[str] = set()

@@ -738,6 +738,20 @@ async def render_professional_document(
     professional_docx = output_dir / f"{stem}.docx"
     receipt_path = output_dir / f"{stem}.receipt.json"
     professional_payload = copy.deepcopy(data)
+    generation_release_identity = professional_variant.get(
+        "generation_release_identity"
+    )
+    compliance_registry_authority = professional_variant.get(
+        "compliance_registry_authority"
+    )
+    if isinstance(generation_release_identity, Mapping):
+        professional_payload["generation_release_identity"] = copy.deepcopy(
+            dict(generation_release_identity)
+        )
+    if isinstance(compliance_registry_authority, Mapping):
+        professional_payload["compliance_registry_authority"] = copy.deepcopy(
+            dict(compliance_registry_authority)
+        )
     professional_payload["variants"] = [professional_variant]
     professional_payload["professional_render_source_variant"] = variant
     _atomic_write_json(professional_json, professional_payload)

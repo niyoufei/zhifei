@@ -27,6 +27,9 @@ def _verified_hit(**overrides):
         "current_version": "GB_50300_2024",
         "latest": True,
         "domain_tags": ["房建工程"],
+        "metadata_only": True,
+        "verified": True,
+        "official_registry_verified": True,
         "clause_no": "5.0.1",
         "tender_evidence_locations": ["tender.pdf#sha@120"],
         "priority": "工程建设强制性规范",
@@ -68,6 +71,34 @@ def test_manifest_rejects_missing_official_source():
     assert manifest["verified_count"] == 0
     assert manifest["unverified_count"] == 1
     assert manifest["unverified_candidates"][0]["eligible_for_citation"] is False
+
+
+def test_manifest_does_not_launder_non_authoritative_mutable_clause() -> None:
+    mutable_hit = _verified_hit(
+        metadata_only=False,
+        verified=False,
+        official_registry_verified=True,
+        clause_source_authoritative=False,
+        locator="mutable.json#node-1",
+        text="施工质量应形成验收记录。",
+    )
+    manifest = build_project_applicable_standards_manifest(
+        [{"title": "质量管理", "compliance_hits": [mutable_hit]}]
+    )
+
+    assert manifest["verified_count"] == 0
+    assert manifest["unverified_count"] == 1
+    assert manifest["unverified_candidates"][0]["eligible_for_citation"] is False
+
+
+def test_manifest_keeps_sealed_metadata_as_applicable_standard() -> None:
+    manifest = build_project_applicable_standards_manifest(
+        [{"title": "项目适用规范清单", "compliance_hits": [_verified_hit()]}]
+    )
+
+    assert manifest["verified_count"] == 1
+    assert manifest["verified_standards"][0]["eligible_for_citation"] is True
+    assert manifest["verified_standards"][0]["mandatory_clauses"] == ["5.0.1"]
 
 
 def test_verified_metadata_requires_current_version():

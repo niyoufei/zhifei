@@ -13,9 +13,9 @@ from typing import Any
 
 import pytest
 
-from scripts import runtime_supervisor as supervisor
 from scripts import launch_latest_release as launcher
 from scripts import launch_latest_release_bootstrap as bootstrap
+from scripts import runtime_supervisor as supervisor
 
 
 class FakeProcess:
@@ -306,6 +306,13 @@ def test_spawn_uses_two_new_process_groups_and_exact_release_environment(
         getpgid=lambda pid: pid,
         killpg=lambda _pid, _sig: None,
     )
+    runtime.child_env.update(
+        {
+            "ZF_RELEASE_ROOT": "/tmp/attacker-release",
+            "ZF_RELEASE_MANAGED": "0",
+            "ZF_RUNTIME_MODE": "mutable_checkout",
+        }
+    )
     runtime._spawn_unit()
 
     assert len(calls) == 2
@@ -325,6 +332,9 @@ def test_spawn_uses_two_new_process_groups_and_exact_release_environment(
             == config.identity.source_digest
         )
         assert kwargs["env"]["ZF_RUNTIME_DIGEST"] == config.identity.runtime_digest
+        assert kwargs["env"]["ZF_RELEASE_ROOT"] == str(config.release_dir)
+        assert kwargs["env"]["ZF_RELEASE_MANAGED"] == "1"
+        assert kwargs["env"]["ZF_RUNTIME_MODE"] == "sealed_release"
         assert kwargs["env"]["ZF_SUPERVISOR_STATE_FILE"] == str(config.state_file)
         assert kwargs["env"]["ZF_ENABLE_SELF_HEAL"] == "0"
         assert kwargs["env"]["PYTHONDONTWRITEBYTECODE"] == "1"

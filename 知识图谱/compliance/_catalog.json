@@ -1,9 +1,9 @@
 {
-  "version": 2,
-  "root": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance",
+  "version": 3,
+  "root": ".",
   "count": 5,
   "verified_count": 5,
-  "generated_at": "2026-08-28T07:22:21",
+  "generated_at": "2026-08-28",
   "source_fingerprint": [
     {
       "name": "_official_registry.json",
@@ -11,9 +11,11 @@
       "sha256": "4b0c2b7ba7f5de128b545f1744c48b6d6457834e72ecf87feeac9e6a9d846b9d"
     }
   ],
+  "official_registry_sha256": "4b0c2b7ba7f5de128b545f1744c48b6d6457834e72ecf87feeac9e6a9d846b9d",
+  "warnings": [],
   "entries": [
     {
-      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "path": "_official_registry.json",
       "filename": "_official_registry.json",
       "standard_code": "CJJ 1-2008",
       "code_key": "CJJ_1",
@@ -42,10 +44,11 @@
       "metadata_only": true,
       "verification_note": "四川省住房和城乡建设厅2025年发布的现行检测依据手册列载。",
       "superseded_clauses": [],
+      "official_registry_verified": true,
       "verified": true
     },
     {
-      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "path": "_official_registry.json",
       "filename": "_official_registry.json",
       "standard_code": "GB/T 50326-2017",
       "code_key": "GB_T_50326",
@@ -72,10 +75,11 @@
       "metadata_only": true,
       "verification_note": "四川省住房和城乡建设厅2025年现行标准体系文件列载。",
       "superseded_clauses": [],
+      "official_registry_verified": true,
       "verified": true
     },
     {
-      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "path": "_official_registry.json",
       "filename": "_official_registry.json",
       "standard_code": "GB 50300-2013",
       "code_key": "GB_50300",
@@ -108,10 +112,11 @@
         "5.0.8",
         "6.0.6"
       ],
+      "official_registry_verified": true,
       "verified": true
     },
     {
-      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "path": "_official_registry.json",
       "filename": "_official_registry.json",
       "standard_code": "GB 55032-2022",
       "code_key": "GB_55032",
@@ -147,10 +152,11 @@
       "metadata_only": true,
       "verification_note": "深圳市政府网站公开35页官方附件，正文自前言开始；页面、附件URL、内容SHA256与标准编号、名称、版本共同构成来源证明，固定哈希不得替代条文页锚。",
       "superseded_clauses": [],
+      "official_registry_verified": true,
       "verified": true
     },
     {
-      "path": "/Users/fei/Desktop/zhifei-phase2-writable-recovery-R34/zhifei/知识图谱/compliance/_official_registry.json",
+      "path": "_official_registry.json",
       "filename": "_official_registry.json",
       "standard_code": "GB 55037-2022",
       "code_key": "GB_55037",
@@ -181,6 +187,7 @@
       "metadata_only": true,
       "verification_note": "河南省消防救援总队政府页面提供48页完整封面原件，首页明确载明《建筑防火通用规范》及GB 55037-2022；住房和城乡建设部公告2022年第189号载明本规范自2023-06-01起实施，全部条文必须严格执行。",
       "superseded_clauses": [],
+      "official_registry_verified": true,
       "verified": true
     }
   ]

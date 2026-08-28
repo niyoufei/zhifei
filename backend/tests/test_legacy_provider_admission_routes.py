@@ -14,7 +14,6 @@ from fastapi import BackgroundTasks, HTTPException
 from backend.app.routers import zhifei_autoplan as legacy
 from backend.zhifei_autoplan import orchestrator
 
-
 CLIENT_SECRET = "client-must-never-reach-orchestrator"
 CLIENT_BASE_URL = "https://client-controlled.example.invalid/v1"
 SERVER_MODEL = "server-admitted-model"
@@ -264,12 +263,12 @@ def legacy_route_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dic
     def submit_isolated_job(job_id: str, target: Callable[..., Any], *args: Any) -> None:
         submissions.append(job_id)
         assert target is legacy.run_legacy_generation_job
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def run() -> None:
             try:
                 target(*args)
-            except BaseException as exc:  # pragma: no cover - surfaced below
+            except Exception as exc:  # noqa: BLE001  # pragma: no cover - surfaced below
                 errors.append(exc)
 
         worker = threading.Thread(target=run)
@@ -505,7 +504,7 @@ async def test_dry_run_never_instantiates_model_or_calls_any_image_generator(
     monkeypatch.setattr(
         orchestrator,
         "get_compliance_registry_status",
-        lambda: {"ready": True, "verified_count": 0, "warnings": []},
+        lambda **_kwargs: {"ready": True, "verified_count": 0, "warnings": []},
     )
     monkeypatch.setattr(
         orchestrator,

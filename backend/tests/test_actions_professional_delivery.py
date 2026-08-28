@@ -77,6 +77,37 @@ async def test_professional_delivery_promotes_rendered_word_and_preserves_source
         }
 
     monkeypatch.setattr(actions_bridge, "render_professional_document", fake_render)
+    source_digest = "d" * 64
+    release_id = f"release-{source_digest[:24]}"
+    registry_core = {
+        "schema_version": "sealed-compliance-registry-authority-v1",
+        "source_kind": "sealed_release_manifest_entry",
+        "release_id": release_id,
+        "manifest_digest": "e" * 64,
+        "source_digest": source_digest,
+        "runtime_digest": "f" * 64,
+        "registry_path": str(
+            tmp_path
+            / release_id
+            / "sealed-compliance"
+            / "_official_registry.json"
+        ),
+        "registry_relative_path": "sealed-compliance/_official_registry.json",
+        "registry_sha256": "c" * 64,
+        "registry_size": 128,
+        "registry_mode": 0o444,
+    }
+    registry_authority = {
+        **registry_core,
+        "authority_digest": hashlib.sha256(
+            json.dumps(
+                registry_core,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
     outputs = {
         "json": str(source_json),
         "docx": [str(path) for path in source_docs],
@@ -84,6 +115,7 @@ async def test_professional_delivery_promotes_rendered_word_and_preserves_source
         "focus_xlsx": [None, None],
         "score_overview_xlsx": [None, None],
         "expert_review_docx": [None, None],
+        "compliance_registry_authority": registry_authority,
     }
 
     delivered = await actions_bridge._render_professional_outputs_for_job(

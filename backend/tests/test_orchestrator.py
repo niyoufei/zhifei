@@ -19,6 +19,7 @@ from backend.zhifei_autoplan.orchestrator import (
     _chapter_deadline_seconds,
     _is_critical_review_chapter,
     _provider_chain_for_role,
+    _trusted_formal_compliance_hits,
 )
 from backend.zhifei_autoplan.orchestrator import (
     run_autoplan as _production_run_autoplan,
@@ -116,6 +117,9 @@ def _mock_verified_compliance_registry():
         "official_source": "https://official.example/GB-T-50326-2017",
         "domain_tags": ["通用工程"],
         "latest": True,
+        "metadata_only": True,
+        "verified": True,
+        "official_registry_verified": True,
     }
     with patch(
         "backend.zhifei_autoplan.orchestrator.get_compliance_registry_status",
@@ -602,6 +606,9 @@ class TestRunAutoplan:
                     "official_source": "https://official.example/GB-T-50326-2017",
                     "domain_tags": ["通用工程"],
                     "latest": True,
+                    "metadata_only": True,
+                    "verified": True,
+                    "official_registry_verified": True,
                 }
             ]
 
@@ -1436,6 +1443,85 @@ class TestRunAutoplan:
         assert isinstance(ctx, dict)
         assert ctx.get("chapter_target_pages") == 8
         assert any("目标页数" in str(r) for r in ctx.get("requirements", []))
+
+    @pytest.mark.asyncio
+    async def test_metadata_only_standard_never_becomes_clause_evidence(
+        self,
+        mock_dependencies,
+    ):
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.query_compliance",
+            return_value=[],
+        ):
+            result = await run_autoplan(
+                {"outline": ["质量管理"], "dry_run": True, "generate_images": False}
+            )
+
+        ctx = _find_ctx_by_title(mock_dependencies["writer"], "质量管理")
+        requirements = "\n".join(str(row) for row in ctx.get("requirements", []))
+        assert ctx["compliance_hits"] == []
+        assert "GB/T 50326-2017" in ctx["standard_citation_policy"]
+        assert "规范强条" not in requirements
+        assert "【证据:】" not in requirements
+        assert result["project_applicable_standards"]["verified_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_only_complete_authoritative_clause_hit_enters_writer_prompt(
+        self,
+        mock_dependencies,
+    ):
+        clause = {
+            "type": "clause",
+            "standard_code": "GB/T 50326-2017",
+            "metadata_only": False,
+            "verified": True,
+            "official_registry_verified": True,
+            "clause_source_authoritative": True,
+            "clause_no": "5.1.2",
+            "text": "施工质量检查应形成可追溯记录。",
+            "locator": "GB-T-50326.pdf#page=12&anchor=5.1.2",
+        }
+        with patch(
+            "backend.zhifei_autoplan.orchestrator.query_compliance",
+            return_value=[clause],
+        ):
+            await run_autoplan(
+                {"outline": ["质量管理"], "dry_run": True, "generate_images": False}
+            )
+
+        ctx = _find_ctx_by_title(mock_dependencies["writer"], "质量管理")
+        requirements = "\n".join(str(row) for row in ctx.get("requirements", []))
+        assert ctx["compliance_hits"] == [clause]
+        assert "规范强条：GB/T 50326-2017 5.1.2" in requirements
+        assert "【证据:GB-T-50326.pdf#page=12&anchor=5.1.2】" in requirements
+
+
+    def test_formal_compliance_hit_filter_rejects_incomplete_evidence(self) -> None:
+        valid_parameter = {
+            "type": "parameter",
+            "standard_code": "GB 50300-2013",
+            "metadata_only": False,
+            "verified": True,
+            "official_registry_verified": True,
+            "clause_source_authoritative": True,
+            "parameter_name": "抽检比例",
+            "value": "10%",
+            "locator": "GB-50300.pdf#page=20&anchor=表6.0.1",
+        }
+        assert _trusted_formal_compliance_hits([valid_parameter]) == [
+            valid_parameter
+        ]
+        for override in (
+            {"metadata_only": True},
+            {"verified": False},
+            {"clause_source_authoritative": False},
+            {"locator": ""},
+            {"parameter_name": ""},
+            {"value": ""},
+        ):
+            assert _trusted_formal_compliance_hits(
+                [{**valid_parameter, **override}]
+            ) == []
 
     @pytest.mark.asyncio
     async def test_page_target_enrichment_forbids_mechanical_padding(self, mock_dependencies):

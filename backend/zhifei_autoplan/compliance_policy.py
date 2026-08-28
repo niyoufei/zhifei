@@ -131,7 +131,15 @@ def build_project_applicable_standards_manifest(sections: Iterable[dict[str, Any
             code = str(hit.get("standard_code") or "").strip()
             if not code:
                 continue
-            verified = is_verified_standard_metadata(hit)
+            trusted_projection = bool(
+                hit.get("verified") is True
+                and hit.get("official_registry_verified") is True
+                and (
+                    hit.get("metadata_only") is True
+                    or hit.get("clause_source_authoritative") is True
+                )
+            )
+            verified = trusted_projection and is_verified_standard_metadata(hit)
             target = records if verified else rejected
             rec = target.setdefault(
                 code,

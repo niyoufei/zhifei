@@ -1236,6 +1236,44 @@ def test_drawing_exemption_without_reason_fails_closed_to_required():
     assert out["missing_drawing_locator_count"] == 1
 
 
+def test_required_drawing_focus_closes_only_with_trusted_locator() -> None:
+    chapter = "钢筋施工工艺"
+    formal_focus = {"must_cover_keywords": ["钢筋"]}
+
+    missing = build_cross_index(
+        boq={"items": [{"name": "钢筋"}], "stats": {}},
+        sections=[{"title": chapter, "content": "钢筋风险→控制→验证。"}],
+        boq_focus=formal_focus,
+        drawing_index={},
+        quality_checks=_closed_quality(chapter, "钢筋"),
+        project_id="p1",
+    )
+    assert missing["focus_items"][0]["drawing_requirement"]["status"] == "required"
+    assert missing["focus_items"][0]["closure"]["ok"] is False
+    assert missing["missing_drawing_locator_count"] == 1
+
+    drawing_index = _drawing_index(
+        filename="结构图.pdf",
+        sha8="12345678",
+        page=1,
+        offset=20,
+        text="钢筋构件位置、间距和节点做法。",
+        chapter=chapter,
+        project_id="p1",
+    )
+    closed = build_cross_index(
+        boq={"items": [{"name": "钢筋"}], "stats": {}},
+        sections=[{"title": chapter, "content": "钢筋风险→控制→验证。"}],
+        boq_focus=formal_focus,
+        drawing_index=drawing_index,
+        quality_checks=_closed_quality(chapter, "钢筋"),
+        project_id="p1",
+    )
+    assert closed["focus_items"][0]["drawing_requirement"]["status"] == "required"
+    assert closed["focus_items"][0]["closure"]["ok"] is True
+    assert closed["missing_drawing_locator_count"] == 0
+
+
 @pytest.mark.parametrize(
     ("receipt", "expected_reason"),
     [

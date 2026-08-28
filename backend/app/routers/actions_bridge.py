@@ -5,8 +5,10 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -65,7 +67,9 @@ from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
 from backend.zhifei_autoplan.execution_control import ExecutionControlRuntime
 from backend.zhifei_autoplan.four_new_tech import recommend_four_new
 from backend.zhifei_autoplan.generation_checkpoint import (
+    CheckpointIntegrityError,
     mark_failed_checkpoint_namespace,
+    read_verified_generation_checkpoint,
 )
 from backend.zhifei_autoplan.image_library import (
     IMAGE_LIBRARY_SCOPE,
@@ -111,6 +115,7 @@ from backend.zhifei_autoplan.parsers.tender_parser import TenderParser
 from backend.zhifei_autoplan.plan_store import load_plan, save_plan
 from backend.zhifei_autoplan.professional_document_renderer import (
     ProfessionalRenderError,
+    canonical_professional_render_receipt_digest,
     render_professional_document,
 )
 from backend.zhifei_autoplan.project_fact_approval_audit import (
@@ -149,8 +154,14 @@ from backend.zhifei_autoplan.review_revision import (
     variant_version,
 )
 from backend.zhifei_autoplan.runtime_events import (
+    MAX_EVENT_BYTES,
     append_runtime_event,
     event_journal_path,
+)
+from backend.zhifei_autoplan.sealed_compliance import (
+    SealedComplianceError,
+    load_sealed_registry_authority,
+    validate_registry_authority_projection,
 )
 from backend.zhifei_autoplan.section_drafts import (
     apply_section_draft,
@@ -193,10 +204,32 @@ def _generation_release_identity_from_environment() -> dict[str, Any]:
 _GENERATION_RELEASE_IDENTITY_AT_START = _generation_release_identity_from_environment()
 
 
-def _bind_generation_release_identity(results: list[dict[str, Any]]) -> None:
+def _generation_compliance_registry_authority_from_environment() -> dict[str, Any] | None:
+    identity = _GENERATION_RELEASE_IDENTITY_AT_START
+    if identity.get("release_managed") is not True:
+        return None
+    authority = load_sealed_registry_authority(
+        str(identity.get("release_root") or ""),
+        expected_release_id=str(identity.get("release_id") or ""),
+        expected_manifest_digest=str(identity.get("manifest_digest") or ""),
+        expected_source_digest=str(identity.get("source_digest") or ""),
+        expected_runtime_digest=str(identity.get("runtime_digest") or ""),
+    )
+    return dict(authority.projection)
+
+
+def _bind_generation_release_identity(
+    results: list[dict[str, Any]],
+    *,
+    compliance_registry_authority: dict[str, Any] | None = None,
+) -> None:
     identity = dict(_GENERATION_RELEASE_IDENTITY_AT_START)
     for result in results:
         result["generation_release_identity"] = dict(identity)
+        if compliance_registry_authority is not None:
+            result["compliance_registry_authority"] = dict(
+                compliance_registry_authority
+            )
 
 
 def _provider_admission_api_projection(value: Any) -> dict[str, Any]:
@@ -1985,6 +2018,11 @@ def _reseal_professional_variant(
             if isinstance(candidate.get("job_execution_identity"), dict)
             else None
         ),
+        compliance_registry_authority=(
+            candidate.get("compliance_registry_authority")
+            if isinstance(candidate.get("compliance_registry_authority"), dict)
+            else None
+        ),
     )
     candidate["docx"] = list(professional_paths)
     candidate["delivery_profile"] = "sonnet5_professional_word"
@@ -2074,6 +2112,11 @@ async def _render_professional_outputs_for_job(
         "job_execution_identity": (
             dict(job_execution_identity)
             if isinstance(job_execution_identity, Mapping)
+            else None
+        ),
+        "compliance_registry_authority": (
+            dict(delivery.get("compliance_registry_authority") or {})
+            if isinstance(delivery.get("compliance_registry_authority"), Mapping)
             else None
         ),
     }
@@ -2311,6 +2354,44 @@ def _rebuild_postprocessed_artifacts(
         else None
     )
     effective_workspace_dir = workspace_dir or "backend/data"
+    compliance_registry_authority = None
+    compliance_registry_bytes: bytes | None = None
+    compliance_registry_path: Path | None = None
+    authority_error: dict[str, str] | None = None
+    if formal_delivery_required:
+        try:
+            projection = _generation_compliance_registry_authority_from_environment()
+            if projection is not None:
+                authority = load_sealed_registry_authority(
+                    str(
+                        _GENERATION_RELEASE_IDENTITY_AT_START.get("release_root")
+                        or ""
+                    ),
+                    expected_release_id=str(projection.get("release_id") or ""),
+                    expected_manifest_digest=str(
+                        projection.get("manifest_digest") or ""
+                    ),
+                    expected_source_digest=str(
+                        projection.get("source_digest") or ""
+                    ),
+                    expected_runtime_digest=str(
+                        projection.get("runtime_digest") or ""
+                    ),
+                )
+                compliance_registry_authority = dict(authority.projection)
+                compliance_registry_bytes = authority.raw
+                compliance_registry_path = authority.path
+        except Exception as exc:  # noqa: BLE001 - formal postprocess records fail-closed authority errors
+            compliance_registry_authority = None
+            compliance_registry_bytes = None
+            compliance_registry_path = None
+            authority_error = {
+                "stage": "compliance_registry_authority",
+                "error_type": type(exc).__name__,
+                "message": "COMPLIANCE_REGISTRY_AUTHORITY_UNTRUSTED",
+            }
+        else:
+            authority_error = None
 
     # Load latest tender/boq for this project scope (best-effort).
     tender = load_tender_matrix(project_id=pid) or {}
@@ -2340,6 +2421,8 @@ def _rebuild_postprocessed_artifacts(
         logger.warning("four-new recommendations unavailable during post-processing", exc_info=True)
 
     postprocess_errors: list[dict[str, str]] = []
+    if formal_delivery_required and authority_error is not None:
+        postprocess_errors.append(authority_error)
 
     # Normalize per-variant derived artifacts.
     for v in results:
@@ -2468,7 +2551,20 @@ def _rebuild_postprocessed_artifacts(
                     current_outline,
                     project_id=pid,
                     workspace_dir=effective_workspace_dir,
+                    official_registry_bytes=compliance_registry_bytes,
+                    official_registry_path=compliance_registry_path,
                 )
+                if compliance_registry_authority is not None and (
+                    str(v["standard_index"].get("official_registry_sha256") or "")
+                    != str(compliance_registry_authority.get("registry_sha256") or "")
+                    or Path(
+                        str(v["standard_index"].get("official_registry_path") or "")
+                    )
+                    != compliance_registry_path
+                ):
+                    raise RuntimeError(
+                        "COMPLIANCE_STANDARD_INDEX_AUTHORITY_MISMATCH"
+                    )
             except Exception as exc:  # noqa: BLE001 - current evidence is mandatory for formal delivery
                 v["drawing_index"] = {}
                 v["standard_index"] = {}
@@ -2659,6 +2755,7 @@ def _rebuild_postprocessed_artifacts(
                 standard_index=current_standard_index,
                 standard_workspace_dir=effective_workspace_dir,
                 standard_compliance_root=standard_compliance_root,
+                trusted_standard_registry_bytes=compliance_registry_bytes,
             )
             v["delivery_quality_gate"] = delivery_gate
             qc["delivery_quality_gate"] = delivery_gate
@@ -2856,7 +2953,42 @@ def _finalize_variant_derivatives(
         ) from exc
 
 
-def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
+def _result_json_untrusted() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "RESULT_JSON_UNTRUSTED",
+            "message": "任务结果证据缺失、损坏或不可信，系统已失败关闭。",
+        },
+    )
+
+
+def _load_result_variants(
+    result: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    json_path = str(result.get("json") or "").strip()
+    if not json_path:
+        raise _result_json_untrusted()
+    try:
+        data = _read_stable_formal_json(
+            Path(json_path),
+            max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+        )
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise _result_json_untrusted() from exc
+    variants = data.get("variants")
+    if (
+        not isinstance(variants, list)
+        or not variants
+        or any(not isinstance(row, dict) for row in variants)
+    ):
+        raise _result_json_untrusted()
+    return data, variants
+
+
+def _load_done_job_variants(
+    job_id: str,
+) -> tuple[dict, dict, dict[str, Any], list[dict[str, Any]]]:
     job = get_job(job_id)
     if not job:
         raise HTTPException(
@@ -2872,13 +3004,9 @@ def _load_done_job_variants(job_id: str) -> tuple[dict, dict, dict, list]:
             },
         )
     result = job.get("result") or {}
-    json_path = str(result.get("json") or "").strip()
-    if not json_path or not Path(json_path).exists():
-        raise HTTPException(status_code=404, detail="result json not found")
-    data = json.loads(Path(json_path).read_text(encoding="utf-8", errors="ignore"))
-    variants = data.get("variants") if isinstance(data.get("variants"), list) else []
-    if not variants:
-        raise HTTPException(status_code=404, detail="empty result variants")
+    if not isinstance(result, dict):
+        raise _result_json_untrusted()
+    data, variants = _load_result_variants(result)
     return job, result, data, variants
 
 
@@ -2974,6 +3102,493 @@ def _promotion_audit_state(job: dict, result: dict) -> tuple[bool, str]:
     return True, "promotion_audit_committed"
 
 
+_MAX_FORMAL_RUNTIME_JSON_BYTES = 64 * 1024 * 1024
+
+
+def _formal_execution_identity(job: Mapping[str, Any]) -> dict[str, Any] | None:
+    job_id = str(job.get("job_id") or "").strip().lower()
+    attempt_id = str(job.get("last_attempt_id") or "").strip().lower()
+    owner_instance_id = str(
+        job.get("last_owner_instance_id") or ""
+    ).strip().lower()
+    job_revision = job.get("last_job_revision")
+    if (
+        re.fullmatch(r"[0-9a-f]{32}", job_id) is None
+        or re.fullmatch(r"[0-9a-f]{32}", attempt_id) is None
+        or re.fullmatch(r"[0-9a-f]{32}", owner_instance_id) is None
+        or isinstance(job_revision, bool)
+        or not isinstance(job_revision, int)
+        or job_revision <= 0
+    ):
+        return None
+    return {
+        "job_id": job_id,
+        "attempt_id": attempt_id,
+        "owner_instance_id": owner_instance_id,
+        "job_revision": job_revision,
+    }
+
+
+def _read_stable_formal_bytes(path: Path, *, max_bytes: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            raise ValueError("formal_json_untrusted")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode")
+    current = path.lstat()
+    if (
+        path.is_symlink()
+        or len(raw) != before.st_size
+        or len(raw) > max_bytes
+        or any(
+            getattr(before, field) != getattr(after, field)
+            or getattr(after, field) != getattr(current, field)
+            for field in stable_fields
+        )
+    ):
+        raise ValueError("formal_json_changed")
+    return raw
+
+
+def _read_stable_formal_json_witness(
+    path: Path,
+    *,
+    max_bytes: int,
+) -> tuple[dict[str, Any], str]:
+    raw = _read_stable_formal_bytes(path, max_bytes=max_bytes)
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError("formal_json_invalid")
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
+def _read_stable_formal_json(path: Path, *, max_bytes: int) -> dict[str, Any]:
+    payload, _sha256 = _read_stable_formal_json_witness(
+        path,
+        max_bytes=max_bytes,
+    )
+    return payload
+
+
+def _formal_receipt_artifact(
+    receipt_variant: Mapping[str, Any],
+    name: str,
+) -> Mapping[str, Any]:
+    artifact = receipt_variant.get(name)
+    if not isinstance(artifact, Mapping):
+        raise TypeError("formal_task_receipt_artifact_invalid")
+    return artifact
+
+
+def _read_formal_runtime_events(job_id: str) -> list[dict[str, Any]]:
+    path = event_journal_path(job_id)
+    if path is None:
+        raise ValueError("formal_event_journal_missing")
+    payload = _read_stable_formal_json_lines(path, max_bytes=MAX_EVENT_BYTES)
+    previous_timestamp: float | None = None
+    events: list[dict[str, Any]] = []
+    for row in payload:
+        if (
+            str(row.get("job_id") or "").strip().lower() != job_id
+            or isinstance(row.get("ts"), bool)
+            or not isinstance(row.get("ts"), (int, float))
+        ):
+            raise ValueError("formal_event_identity_invalid")
+        timestamp = float(row["ts"])
+        if (
+            not math.isfinite(timestamp)
+            or (previous_timestamp is not None and timestamp < previous_timestamp)
+        ):
+            raise ValueError("formal_event_chronology_invalid")
+        previous_timestamp = timestamp
+        events.append(row)
+    if not events:
+        raise ValueError("formal_event_journal_empty")
+    return events
+
+
+def _read_stable_formal_json_lines(
+    path: Path,
+    *,
+    max_bytes: int,
+) -> list[dict[str, Any]]:
+    raw = _read_stable_formal_bytes(path, max_bytes=max_bytes)
+    rows: list[dict[str, Any]] = []
+    for line in raw.decode("utf-8").splitlines():
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise TypeError("formal_event_record_invalid")
+        rows.append(value)
+    return rows
+
+
+def _formal_runtime_evidence_state(
+    *,
+    job: Mapping[str, Any],
+    result: Mapping[str, Any],
+    variants: list[dict[str, Any]],
+    source_json_path: str,
+    professional_json_paths: list[str | None],
+    professional_render_receipt_paths: list[str | None],
+    task_receipt: Mapping[str, Any],
+    expected_generation_release: Mapping[str, Any],
+    expected_registry_authority: Mapping[str, Any],
+) -> tuple[bool, str]:
+    expected_execution = _formal_execution_identity(job)
+    if (
+        expected_execution is None
+        or result.get("job_execution_identity") != expected_execution
+        or task_receipt.get("job_execution_identity") != expected_execution
+    ):
+        return False, "generation_execution_identity_invalid"
+    try:
+        trusted_authority = validate_registry_authority_projection(
+            expected_registry_authority
+        )
+    except SealedComplianceError:
+        return False, "compliance_registry_authority_untrusted"
+    if dict(trusted_authority) != dict(expected_registry_authority):
+        return False, "compliance_registry_authority_untrusted"
+
+    try:
+        if not source_json_path:
+            raise ValueError("formal_source_json_missing")
+        source_json, source_json_sha256 = _read_stable_formal_json_witness(
+            Path(source_json_path),
+            max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+        )
+        source_variants = source_json.get("variants")
+        receipt_variants = task_receipt.get("variants")
+        if (
+            not isinstance(source_variants, list)
+            or not source_variants
+            or any(not isinstance(row, dict) for row in source_variants)
+            or not isinstance(receipt_variants, list)
+            or len(receipt_variants) != len(variants)
+            or len(professional_json_paths) != len(variants)
+            or len(professional_render_receipt_paths) != len(variants)
+        ):
+            raise ValueError("formal_source_json_invalid")
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        return False, "professional_render_receipt_binding_invalid"
+
+    try:
+        events = _read_formal_runtime_events(expected_execution["job_id"])
+
+        def belongs(row: Mapping[str, Any]) -> bool:
+            return all(
+                row.get(field) == value
+                for field, value in expected_execution.items()
+                if field != "job_id"
+            )
+
+        started = [
+            index
+            for index, row in enumerate(events)
+            if row.get("event") == "job_started" and belongs(row)
+        ]
+        succeeded = [
+            index
+            for index, row in enumerate(events)
+            if row.get("event") == "job_succeeded" and belongs(row)
+        ]
+        if len(started) != 1 or len(succeeded) != 1 or started[0] >= succeeded[0]:
+            raise ValueError("formal_event_terminal_invalid")
+        current = events[started[0] : succeeded[0] + 1]
+        if any(not belongs(row) for row in current):
+            raise ValueError("formal_event_lineage_mixed")
+        if any(
+            belongs(row) and not (started[0] <= index <= succeeded[0])
+            for index, row in enumerate(events)
+        ):
+            raise ValueError("formal_event_lineage_outside_terminal")
+        start_event = current[0]
+        success_event = current[-1]
+        if (
+            start_event.get("generation_release_identity")
+            != dict(expected_generation_release)
+            or success_event.get("generation_release_identity")
+            != dict(expected_generation_release)
+            or start_event.get("compliance_registry_authority")
+            != dict(trusted_authority)
+            or success_event.get("compliance_registry_authority")
+            != dict(trusted_authority)
+            or success_event.get("dry_run") is not False
+            or success_event.get("delivery_scope") != "document"
+        ):
+            raise ValueError("formal_event_authority_invalid")
+        admission_started = [
+            index
+            for index, row in enumerate(current)
+            if row.get("event") == "provider_admission_started"
+        ]
+        if len(admission_started) != 1:
+            raise ValueError("formal_event_admission_invalid")
+        expected_variant_ids = {
+            int(row.get("variant_id")) for row in variants
+        }
+        if (
+            len(expected_variant_ids) != len(variants)
+            or any(value <= 0 for value in expected_variant_ids)
+        ):
+            raise ValueError("formal_variant_identity_invalid")
+        preflights = [
+            row
+            for index, row in enumerate(current)
+            if row.get("event") == "compliance_preflight"
+            and 0 < index < admission_started[0]
+        ]
+        preflight_ids = [row.get("variant_id") for row in preflights]
+        if (
+            len(preflights) != len(expected_variant_ids)
+            or set(preflight_ids) != expected_variant_ids
+            or len(preflight_ids) != len(set(preflight_ids))
+            or any(
+                row.get("ready") is not True
+                or row.get("authority_digest")
+                != trusted_authority["authority_digest"]
+                or row.get("official_registry_sha256")
+                != trusted_authority["registry_sha256"]
+                or isinstance(row.get("verified_standard_count"), bool)
+                or not isinstance(row.get("verified_standard_count"), int)
+                or row.get("verified_standard_count", 0) <= 0
+                for row in preflights
+            )
+            or sum(
+                row.get("event") == "compliance_preflight" for row in current
+            )
+            != len(preflights)
+        ):
+            raise ValueError("formal_event_preflight_invalid")
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return False, "runtime_event_evidence_invalid"
+
+    try:
+        for row in variants:
+            variant_id = int(row.get("variant_id"))
+            checkpoint = read_verified_generation_checkpoint(
+                namespace=expected_execution["job_id"],
+                scope=f"variant-{variant_id}",
+            )
+            if not isinstance(checkpoint, dict):
+                raise TypeError("formal_checkpoint_missing")
+            binding = checkpoint.get("binding")
+            summary = row.get("generation_checkpoint")
+            if not isinstance(binding, dict) or not isinstance(summary, dict):
+                raise TypeError("formal_checkpoint_binding_missing")
+            binding_core = {
+                key: value
+                for key, value in binding.items()
+                if key != "binding_digest"
+            }
+            binding_digest = str(binding.get("binding_digest") or "")
+            if (
+                checkpoint.get("status") != "complete"
+                or checkpoint.get("binding_digest") != binding_digest
+                or binding_digest != canonical_digest(binding_core)
+                or binding.get("job_id") != expected_execution["job_id"]
+                or binding.get("attempt_id") != expected_execution["attempt_id"]
+                or binding.get("owner_instance_id")
+                != expected_execution["owner_instance_id"]
+                or binding.get("job_revision")
+                != expected_execution["job_revision"]
+                or str(binding.get("variant_id") or "") != str(variant_id)
+                or binding.get("delivery_scope") != "document"
+                or binding.get("compliance_registry_authority_digest")
+                != trusted_authority["authority_digest"]
+                or summary.get("binding_digest") != binding_digest
+                or summary.get("status") != "complete"
+            ):
+                raise ValueError("formal_checkpoint_binding_invalid")
+    except (
+        CheckpointIntegrityError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return False, "generation_checkpoint_evidence_invalid"
+
+    professional_json_sha256s: list[str] = []
+    try:
+        for index, (source_variant, raw_path) in enumerate(
+            zip(variants, professional_json_paths, strict=True),
+            start=1,
+        ):
+            if raw_path is None:
+                raise ValueError("formal_professional_json_missing")
+            professional, professional_json_sha256 = (
+                _read_stable_formal_json_witness(
+                    Path(raw_path),
+                    max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+                )
+            )
+            professional_json_sha256s.append(professional_json_sha256)
+            professional_variants = professional.get("variants")
+            if (
+                professional.get("professional_render_source_variant") != index
+                or professional.get("generation_release_identity")
+                != dict(expected_generation_release)
+                or professional.get("compliance_registry_authority")
+                != dict(trusted_authority)
+                or not isinstance(professional_variants, list)
+                or len(professional_variants) != 1
+                or not isinstance(professional_variants[0], dict)
+            ):
+                raise ValueError("formal_professional_json_identity_invalid")
+            formal_variant = professional_variants[0]
+            standard_index = formal_variant.get("standard_index")
+            if (
+                formal_variant.get("variant_id")
+                != source_variant.get("variant_id")
+                or formal_variant.get("generation_release_identity")
+                != dict(expected_generation_release)
+                or formal_variant.get("compliance_registry_authority")
+                != dict(trusted_authority)
+                or not isinstance(standard_index, dict)
+                or standard_index.get("official_registry_path")
+                != trusted_authority["registry_path"]
+                or standard_index.get("official_registry_sha256")
+                != trusted_authority["registry_sha256"]
+            ):
+                raise ValueError("formal_professional_variant_invalid")
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        return False, "professional_json_authority_invalid"
+
+    try:
+        for index, (
+            raw_professional_json_path,
+            professional_json_sha256,
+            raw_render_receipt_path,
+        ) in enumerate(
+            zip(
+                professional_json_paths,
+                professional_json_sha256s,
+                professional_render_receipt_paths,
+                strict=True,
+            ),
+            start=1,
+        ):
+            if (
+                raw_professional_json_path is None
+                or raw_render_receipt_path is None
+            ):
+                raise ValueError("formal_render_receipt_missing")
+            render_receipt, render_receipt_sha256 = (
+                _read_stable_formal_json_witness(
+                    Path(raw_render_receipt_path),
+                    max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+                )
+            )
+            task_variant = receipt_variants[index - 1]
+            if not isinstance(task_variant, dict):
+                raise TypeError("formal_task_receipt_variant_invalid")
+
+            task_source_docx = _formal_receipt_artifact(
+                task_variant,
+                "source_docx",
+            )
+            task_professional_docx = _formal_receipt_artifact(
+                task_variant,
+                "professional_docx",
+            )
+            task_professional_json = _formal_receipt_artifact(
+                task_variant,
+                "professional_json",
+            )
+            task_render_receipt = _formal_receipt_artifact(
+                task_variant,
+                "professional_render_receipt",
+            )
+            render_digest = str(render_receipt.get("receipt_digest") or "")
+            if (
+                professional_json_sha256
+                != str(task_professional_json.get("sha256") or "")
+                or render_receipt_sha256
+                != str(task_render_receipt.get("sha256") or "")
+                or not _same_artifact_path(
+                    task_professional_json.get("path"),
+                    raw_professional_json_path,
+                )
+                or not _same_artifact_path(
+                    task_render_receipt.get("path"),
+                    raw_render_receipt_path,
+                )
+                or render_receipt.get("schema")
+                != "zhifei.professional_document_render.v1"
+                or render_receipt.get("job_id") != expected_execution["job_id"]
+                or render_receipt.get("variant") != index
+                or not _same_artifact_path(
+                    render_receipt.get("source_json"),
+                    source_json_path,
+                )
+                or render_receipt.get("source_json_sha256")
+                != source_json_sha256
+                or not _same_artifact_path(
+                    render_receipt.get("source_docx"),
+                    task_source_docx.get("path"),
+                )
+                or render_receipt.get("source_docx_sha256")
+                != task_source_docx.get("sha256")
+                or not _same_artifact_path(
+                    render_receipt.get("professional_docx"),
+                    task_professional_docx.get("path"),
+                )
+                or render_receipt.get("professional_docx_sha256")
+                != task_professional_docx.get("sha256")
+                or not _same_artifact_path(
+                    render_receipt.get("professional_json"),
+                    task_professional_json.get("path"),
+                )
+                or render_receipt.get("professional_json_sha256")
+                != task_professional_json.get("sha256")
+                or render_digest
+                != canonical_professional_render_receipt_digest(render_receipt)
+            ):
+                raise ValueError("formal_render_receipt_binding_invalid")
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        return False, "professional_render_receipt_binding_invalid"
+    return True, "formal_runtime_evidence_valid"
+
+
 def _formal_delivery_state(
     job: dict,
     result: dict,
@@ -2990,6 +3605,52 @@ def _formal_delivery_state(
     payload_scope = str(payload.get("delivery_scope") or "").strip().lower()
     if payload_scope != "document":
         return False, payload_scope or "unknown_scope"
+    expected_generation_release = dict(_GENERATION_RELEASE_IDENTITY_AT_START)
+    expected_registry_authority: dict[str, Any] | None = None
+    if expected_generation_release.get("release_managed") is True:
+        try:
+            expected_registry_authority = (
+                _generation_compliance_registry_authority_from_environment()
+            )
+        except Exception:  # noqa: BLE001 - formal mutation fails closed.
+            return False, "compliance_registry_authority_untrusted"
+        agent_runtime = (
+            job.get("agent_runtime")
+            if isinstance(job.get("agent_runtime"), dict)
+            else {}
+        )
+        if (
+            expected_registry_authority is None
+            or result.get("generation_release_identity")
+            != expected_generation_release
+            or agent_runtime.get("generation_release_identity")
+            != expected_generation_release
+            or result.get("compliance_registry_authority")
+            != expected_registry_authority
+            or agent_runtime.get("compliance_registry_authority")
+            != expected_registry_authority
+            or any(
+                row.get("generation_release_identity")
+                != expected_generation_release
+                or row.get("compliance_registry_authority")
+                != expected_registry_authority
+                or str(
+                    (row.get("standard_index") or {}).get(
+                        "official_registry_sha256"
+                    )
+                )
+                != str(expected_registry_authority.get("registry_sha256") or "")
+                or str(
+                    (row.get("standard_index") or {}).get(
+                        "official_registry_path"
+                    )
+                )
+                != str(expected_registry_authority.get("registry_path") or "")
+                for row in variants
+                if isinstance(row, dict)
+            )
+        ):
+            return False, "generation_registry_authority_mismatch"
     status = str(job.get("status") or "").strip().lower()
     if status not in {"done", "succeeded"}:
         return False, "job_not_succeeded"
@@ -3191,13 +3852,17 @@ def _formal_delivery_state(
         ):
             return False, "delivery_artifact_missing"
 
-    receipt_path = Path(str(result.get("delivery_receipt") or ""))
+    receipt_path_value = str(result.get("delivery_receipt") or "").strip()
     decision_digest = str(result.get("delivery_decision_digest") or "").strip()
-    if not decision_digest or not receipt_path.is_file():
+    if not decision_digest or not receipt_path_value:
         return False, "delivery_receipt_missing"
+    receipt_path = Path(receipt_path_value)
     try:
-        task_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        task_receipt, _receipt_sha256 = _read_stable_formal_json_witness(
+            receipt_path,
+            max_bytes=_MAX_FORMAL_RUNTIME_JSON_BYTES,
+        )
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return False, "delivery_receipt_invalid"
     if not isinstance(task_receipt, dict):
         return False, "delivery_receipt_invalid"
@@ -3214,6 +3879,11 @@ def _formal_delivery_state(
         or task_receipt.get("status") != "pass"
         or task_receipt.get("delivery_profile") != "sonnet5_professional_word"
         or receipt_variant_count != variant_count
+        or (
+            expected_registry_authority is not None
+            and task_receipt.get("compliance_registry_authority")
+            != expected_registry_authority
+        )
     ):
         return False, "delivery_receipt_invalid"
     expected_job_id = str(job.get("job_id") or "").strip()
@@ -3264,6 +3934,22 @@ def _formal_delivery_state(
                 return False, "delivery_artifact_unreadable"
             if str(artifact.get("sha256") or "") != actual_sha256:
                 return False, "delivery_receipt_hash_mismatch"
+    if expected_registry_authority is not None:
+        runtime_ready, runtime_reason = _formal_runtime_evidence_state(
+            job=job,
+            result=result,
+            variants=variants,
+            source_json_path=str(result.get("json") or "").strip(),
+            professional_json_paths=artifact_lists["professional_json"],
+            professional_render_receipt_paths=artifact_lists[
+                "professional_render_receipt"
+            ],
+            task_receipt=task_receipt,
+            expected_generation_release=expected_generation_release,
+            expected_registry_authority=expected_registry_authority,
+        )
+        if not runtime_ready:
+            return False, runtime_reason
     return True, "formal_document_ready"
 
 
@@ -4546,6 +5232,10 @@ async def actions_export_docx(
             detail={"code": "FORMAL_SOURCE_SECTIONS_INVALID"},
         ) from exc
     raw_request = dict(source_variant)
+    current_generation_release = dict(_GENERATION_RELEASE_IDENTITY_AT_START)
+    current_registry_authority = (
+        _generation_compliance_registry_authority_from_environment()
+    )
     raw_request.update(
         {
             "generate_images": False,
@@ -4553,6 +5243,14 @@ async def actions_export_docx(
             "_formal_source_job_id": source_job_id,
             "_formal_source_delivery_decision_digest": decision_digest,
             "_formal_source_sections_digest": source_sections_digest,
+            "_formal_source_generation_release_identity": (
+                current_generation_release
+            ),
+            "_formal_source_compliance_registry_authority": (
+                dict(current_registry_authority)
+                if current_registry_authority is not None
+                else None
+            ),
         }
     )
     return export_docx_core.execute_export_docx_request(
@@ -4674,6 +5372,13 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
                 "message": "检查点恢复仅支持异步任务入口，请使用 generate_async。",
             },
         )
+    compliance_registry_authority = (
+        _generation_compliance_registry_authority_from_environment()
+    )
+    if compliance_registry_authority is not None:
+        payload["_compliance_registry_authority"] = dict(
+            compliance_registry_authority
+        )
     payload = _apply_server_provider_routing_or_503(payload)
     provider_admission_run = (
         new_provider_admission_run_coordinator(payload)
@@ -4684,6 +5389,8 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
     payload["_variant_plan"] = variant_plan
     payload["_variant_ids"] = [int(v.get("variant_id") or 1) for v in variant_plan]
     payload["variants"] = len(variant_plan) if variant_plan else int(payload.get("variants") or 1)
+    if provider_admission_run is not None:
+        provider_admission_run.configure_preflight_variants(payload["_variant_ids"])
     execution_runtime, execution_policy = _prepare_execution_control(payload)
 
     ordered_results: list[dict[str, Any] | None] = [None] * len(variant_plan)
@@ -4699,15 +5406,26 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
         local_payload["_execution_runtime"] = execution_runtime
         if provider_admission_run is not None:
             local_payload["_provider_admission_run_coordinator"] = provider_admission_run
-        async with direct_sem:
+            local_payload["_variant_generation_semaphore"] = direct_sem
+        try:
             ordered_results[position] = await run_autoplan(local_payload)
+        except BaseException:
+            if provider_admission_run is not None:
+                provider_admission_run.abort_preflight_barrier()
+            raise
+        finally:
+            if local_payload.pop("_variant_generation_slot_acquired", False):
+                direct_sem.release()
 
     await asyncio.gather(
         *[_run_direct_variant(i, item) for i, item in enumerate(variant_plan)]
     )
     results = [item for item in ordered_results if isinstance(item, dict)]
     _finalize_variant_derivatives(results, payload=payload)
-    _bind_generation_release_identity(results)
+    _bind_generation_release_identity(
+        results,
+        compliance_registry_authority=compliance_registry_authority,
+    )
     is_dry_run = bool(payload.get("dry_run"))
     is_chapter_validation = (
         str(payload.get("delivery_scope") or "document") == "chapter_validation"
@@ -4720,6 +5438,10 @@ async def actions_generate(req: ActionsGenerateRequest, x_actions_key: str | Non
     outputs["generation_release_identity"] = dict(
         _GENERATION_RELEASE_IDENTITY_AT_START
     )
+    if compliance_registry_authority is not None:
+        outputs["compliance_registry_authority"] = dict(
+            compliance_registry_authority
+        )
     if is_dry_run:
         outputs["delivery_profile"] = "dry_run_preview_no_provider_calls"
         outputs["delivery_ready"] = False
@@ -4768,6 +5490,14 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             "owner_instance_id": lease_owner_instance_id,
             "job_revision": lease_job_revision,
         }
+        compliance_registry_authority = (
+            _generation_compliance_registry_authority_from_environment()
+        )
+        if (
+            _GENERATION_RELEASE_IDENTITY_AT_START.get("release_managed") is True
+            and compliance_registry_authority is None
+        ):
+            raise RuntimeError("COMPLIANCE_REGISTRY_AUTHORITY_UNTRUSTED")
 
         def _lease_active() -> bool:
             return job_lease_active(
@@ -4939,6 +5669,10 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
         local_payload["_job_attempt_id"] = lease_attempt_id
         local_payload["_job_owner_instance_id"] = lease_owner_instance_id
         local_payload["_job_revision"] = lease_job_revision
+        if compliance_registry_authority is not None:
+            local_payload["_compliance_registry_authority"] = dict(
+                compliance_registry_authority
+            )
         provider_admission_run = (
             new_provider_admission_run_coordinator(local_payload)
             if bool(local_payload.get("_provider_admission_required"))
@@ -4972,6 +5706,11 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             "current_chapters": [],
             "generation_release_identity": dict(
                 _GENERATION_RELEASE_IDENTITY_AT_START
+            ),
+            "compliance_registry_authority": (
+                dict(compliance_registry_authority)
+                if compliance_registry_authority is not None
+                else None
             ),
         }
         activity_lock = threading.RLock()
@@ -5227,6 +5966,35 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     ],
                     public_digest=event.get("public_digest"),
                     binding_digest=event.get("binding_digest"),
+                    authority_digest=(
+                        event.get("authority_digest")
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    official_registry_sha256=(
+                        event.get("official_registry_sha256")
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    ready=(
+                        event.get("ready")
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    verified_standard_count=(
+                        event.get("verified_standard_count")
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
+                    project_domains=(
+                        [
+                            str(value)[:80]
+                            for value in (event.get("project_domains") or [])[:40]
+                            if str(value).strip()
+                        ]
+                        if event_name == "compliance_preflight"
+                        else None
+                    ),
                     blocking_requirement_ids=[
                         str(value)[:160]
                         for value in (event.get("blocking_requirement_ids") or [])[:20]
@@ -5289,6 +6057,11 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             generation_release_identity=dict(
                 _GENERATION_RELEASE_IDENTITY_AT_START
             ),
+            compliance_registry_authority=(
+                dict(compliance_registry_authority)
+                if compliance_registry_authority is not None
+                else None
+            ),
         )
         heartbeat_thread = threading.Thread(
             target=_heartbeat_loop,
@@ -5348,6 +6121,10 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             normalized_plan = [{"variant_id": 1}]
         variant_plan = normalized_plan
         variants_total = max(1, len(variant_plan))
+        if provider_admission_run is not None:
+            provider_admission_run.configure_preflight_variants(
+                [int(item["variant_id"]) for item in variant_plan]
+            )
         agent_runtime["variants_total"] = variants_total
         if variant_parallelism > variants_total:
             variant_parallelism = variants_total
@@ -5371,6 +6148,8 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
             async def _run_one(pos: int, item: dict[str, Any]):
                 nonlocal done_count
                 if _is_cancelled():
+                    if provider_admission_run is not None:
+                        provider_admission_run.abort_preflight_barrier()
                     return
                 vid = int(item.get("variant_id") or 1)
                 tid = _normalize_logic_template_id(item.get("logic_template_id"))
@@ -5395,8 +6174,11 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 lp["_execution_runtime"] = execution_runtime
                 if provider_admission_run is not None:
                     lp["_provider_admission_run_coordinator"] = provider_admission_run
-                async with sem:
+                    lp["_variant_generation_semaphore"] = sem
+                try:
                     if _is_cancelled():
+                        if provider_admission_run is not None:
+                            provider_admission_run.abort_preflight_barrier()
                         return
                     detail = f"正在并行编制方案 v{int(vid)}"
                     if tid:
@@ -5408,6 +6190,13 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                     )
                     res = await run_autoplan(lp)
                     ordered[pos] = res
+                except BaseException:
+                    if provider_admission_run is not None:
+                        provider_admission_run.abort_preflight_barrier()
+                    raise
+                finally:
+                    if lp.pop("_variant_generation_slot_acquired", False):
+                        sem.release()
                 async with lock:
                     done_count += 1
                     agent_runtime["variants_done"] = int(done_count)
@@ -5434,7 +6223,10 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 "正在执行跨方案一致性与差异性审计",
             ),
         )
-        _bind_generation_release_identity(results)
+        _bind_generation_release_identity(
+            results,
+            compliance_registry_authority=compliance_registry_authority,
+        )
         if _is_cancelled():
             _mark_cancelled()
             return
@@ -5450,6 +6242,10 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
         outputs["generation_release_identity"] = dict(
             _GENERATION_RELEASE_IDENTITY_AT_START
         )
+        if compliance_registry_authority is not None:
+            outputs["compliance_registry_authority"] = dict(
+                compliance_registry_authority
+            )
         if _is_cancelled():
             _mark_cancelled(outputs)
             return
@@ -5613,6 +6409,14 @@ def run_actions_generation_job(_job_id: str, _payload: dict):
                 attempt_id=lease_attempt_id,
                 owner_instance_id=lease_owner_instance_id,
                 job_revision=lease_job_revision,
+                generation_release_identity=dict(
+                    _GENERATION_RELEASE_IDENTITY_AT_START
+                ),
+                compliance_registry_authority=(
+                    dict(compliance_registry_authority)
+                    if compliance_registry_authority is not None
+                    else None
+                ),
             )
     except Exception as e:  # noqa: BLE001 - worker boundary persists a safe terminal job projection
         error_text = str(e)
@@ -5804,12 +6608,10 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
     }
     result = job.get("result") or {}
     if isinstance(result, dict):
-        json_path = result.get("json")
         variants = []
-        if json_path and Path(json_path).exists():
+        if result.get("json"):
             try:
-                data = json.loads(Path(json_path).read_text(encoding="utf-8"))
-                variants = data.get("variants") or []
+                _data, variants = _load_result_variants(result)
                 out["variants"] = len(variants)
                 out["quality_ok"] = [
                     bool((v.get("quality_checks") or {}).get("structure", {}).get("ok"))
@@ -5819,8 +6621,8 @@ async def actions_job_status(job_id: str, x_actions_key: str | None = Header(def
                     ma = variants[0].get("multi_agent")
                     if isinstance(ma, dict):
                         out["multi_agent"] = ma
-            except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
-                logger.warning("job result artifact could not be decoded: %s", json_path, exc_info=True)
+            except HTTPException:
+                out["result_evidence_untrusted"] = True
                 variants = []
         out["files"] = _public_job_files(job, result, variants)
     return {"ok": True, "job": out}
@@ -6329,13 +7131,10 @@ async def actions_result(
     if str(job.get("status") or "").strip() not in {"done", "succeeded"}:
         return {"ok": False, "status": job.get("status"), "error": job.get("error")}
     result = job.get("result") or {}
-    json_path = result.get("json")
-    if not json_path or not Path(json_path).exists():
-        raise HTTPException(status_code=404, detail="result json not found")
-    data = json.loads(Path(json_path).read_text(encoding="utf-8"))
-    variants = data.get("variants") or []
-    if not variants:
-        raise HTTPException(status_code=404, detail="empty result")
+    if not isinstance(result, dict):
+        raise _result_json_untrusted()
+    _data, variants = _load_result_variants(result)
+    json_path = str(result.get("json") or "")
     v = _require_variant_number(variant, len(variants))
     rec = variants[v - 1]
     payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}

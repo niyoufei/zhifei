@@ -47,6 +47,7 @@ from backend.zhifei_autoplan.compliance_policy import (
 from backend.zhifei_autoplan.compliance_runtime import (
     get_compliance_registry_status,
     list_verified_standard_metadata,
+    load_runtime_registry_authority,
     query_compliance,
 )
 from backend.zhifei_autoplan.delivery_quality import build_delivery_quality_gate
@@ -309,6 +310,54 @@ def _dedup_lines(lines: list[str], limit: int | None = None) -> list[str]:
         if limit and len(out) >= limit:
             break
     return out
+
+
+def _trusted_formal_compliance_hits(
+    rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Keep only locator-backed clause/parameter evidence for writer prompts.
+
+    Official registry rows are metadata-only: they establish the applicable
+    standard and version, but they are not clause evidence. Formal prompt
+    evidence must carry a verified, authoritative clause-source projection
+    and the fields needed to render a non-empty locator.
+    """
+
+    trusted: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        evidence_type = str(raw.get("type") or "").strip().lower()
+        code = canonical_standard_code(raw.get("standard_code"))
+        locator = str(raw.get("locator") or "").strip()
+        if (
+            raw.get("metadata_only") is not False
+            or raw.get("verified") is not True
+            or raw.get("official_registry_verified") is not True
+            or raw.get("clause_source_authoritative") is not True
+            or not code
+            or not locator
+        ):
+            continue
+        if evidence_type == "clause":
+            if not str(raw.get("clause_no") or "").strip() or not str(
+                raw.get("text") or ""
+            ).strip():
+                continue
+        elif evidence_type == "parameter":
+            if not str(raw.get("parameter_name") or "").strip() or not str(
+                raw.get("value") or ""
+            ).strip():
+                continue
+        else:
+            continue
+        key = (code, locator)
+        if key in seen:
+            continue
+        seen.add(key)
+        trusted.append(dict(raw))
+    return trusted
 
 
 def _normalize_delivery_scope(value: Any) -> str:
@@ -1161,6 +1210,11 @@ class ProviderAdmissionRunCoordinator:
         self._required_roles: tuple[str, ...] = ()
         self._snapshot: dict[str, Any] | None = None
         self._events_claimed = False
+        self._preflight_variant_ids: frozenset[int] = frozenset()
+        self._preflight_arrivals: set[int] = set()
+        self._preflight_event: asyncio.Event | None = None
+        self._preflight_loop: asyncio.AbstractEventLoop | None = None
+        self._preflight_failure: str | None = None
 
     @property
     def bound_candidates(self) -> tuple[ProviderCandidate, ...]:
@@ -1171,6 +1225,52 @@ class ProviderAdmissionRunCoordinator:
             return False
         self._events_claimed = True
         return True
+
+    def configure_preflight_variants(self, variant_ids: list[int]) -> None:
+        normalized = frozenset(
+            int(variant_id)
+            for variant_id in variant_ids
+            if not isinstance(variant_id, bool) and int(variant_id) > 0
+        )
+        if not normalized or len(normalized) != len(variant_ids):
+            raise RuntimeError("provider_admission_preflight_variants_invalid")
+        if self._preflight_variant_ids and self._preflight_variant_ids != normalized:
+            raise RuntimeError("provider_admission_preflight_variants_changed")
+        if self._preflight_arrivals and self._preflight_variant_ids != normalized:
+            raise RuntimeError("provider_admission_preflight_already_started")
+        self._preflight_variant_ids = normalized
+
+    async def await_preflight_barrier(self, variant_id: int) -> None:
+        normalized_variant_id = int(variant_id)
+        if self._preflight_failure:
+            raise RuntimeError(self._preflight_failure)
+        if not self._preflight_variant_ids:
+            # Direct one-variant callers remain supported. Production multi-
+            # variant entrypoints configure the complete plan before launch.
+            self.configure_preflight_variants([normalized_variant_id])
+        if normalized_variant_id not in self._preflight_variant_ids:
+            raise RuntimeError("provider_admission_preflight_variant_unexpected")
+        loop = asyncio.get_running_loop()
+        if self._preflight_loop is not None and self._preflight_loop is not loop:
+            raise RuntimeError("provider_admission_preflight_loop_mismatch")
+        if self._preflight_event is None:
+            self._preflight_loop = loop
+            self._preflight_event = asyncio.Event()
+        if self._preflight_failure:
+            raise RuntimeError(self._preflight_failure)
+        if normalized_variant_id in self._preflight_arrivals:
+            raise RuntimeError("provider_admission_preflight_variant_duplicate")
+        self._preflight_arrivals.add(normalized_variant_id)
+        if self._preflight_arrivals == set(self._preflight_variant_ids):
+            self._preflight_event.set()
+        await self._preflight_event.wait()
+        if self._preflight_failure:
+            raise RuntimeError(self._preflight_failure)
+
+    def abort_preflight_barrier(self) -> None:
+        self._preflight_failure = "provider_admission_preflight_aborted"
+        if self._preflight_event is not None and not self._preflight_event.is_set():
+            self._preflight_event.set()
 
     def admitted_candidate(self, role: str) -> ProviderCandidate | None:
         if not isinstance(self._snapshot, dict):
@@ -1489,6 +1589,25 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
     raw_delivery_scope = payload.get("delivery_scope")
     delivery_scope = _normalize_delivery_scope(raw_delivery_scope)
     formal_document_delivery = bool(delivery_scope == "document" and not dry_run)
+    compliance_registry_authority = None
+    compliance_registry_bytes: bytes | None = None
+    compliance_registry_path: Path | None = None
+    try:
+        compliance_registry_authority = load_runtime_registry_authority()
+        compliance_registry_bytes = compliance_registry_authority.raw
+        compliance_registry_path = compliance_registry_authority.path
+        expected_registry_authority = payload.get("_compliance_registry_authority")
+        if (
+            expected_registry_authority is not None
+            and expected_registry_authority
+            != compliance_registry_authority.projection
+        ):
+            raise RuntimeError("COMPLIANCE_REGISTRY_AUTHORITY_MISMATCH")
+    except Exception as exc:
+        if formal_document_delivery or strict_quality:
+            raise RuntimeError(
+                "COMPLIANCE_REGISTRY_AUTHORITY_UNTRUSTED"
+            ) from exc
     case_library_options = payload.get("case_library") if isinstance(payload.get("case_library"), dict) else {}
     image_library_options = payload.get("image_library") if isinstance(payload.get("image_library"), dict) else {}
     reference_library_audit_path = (
@@ -1857,9 +1976,25 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         limit=40,
     )
-    compliance_registry_status = get_compliance_registry_status()
+    compliance_registry_status = get_compliance_registry_status(
+        official_registry_bytes=compliance_registry_bytes,
+        official_registry_path=compliance_registry_path,
+    )
+    if compliance_registry_authority is not None:
+        compliance_registry_status = {
+            **compliance_registry_status,
+            "official_registry_path": str(compliance_registry_path),
+            "official_registry_sha256": compliance_registry_authority.projection.get(
+                "registry_sha256"
+            ),
+            "authority_digest": compliance_registry_authority.projection.get(
+                "authority_digest"
+            ),
+        }
     verified_project_standards = list_verified_standard_metadata(
         domain_tags=compliance_domains or None,
+        official_registry_bytes=compliance_registry_bytes,
+        official_registry_path=compliance_registry_path,
     )
     verified_standard_codes = [
         str(row.get("standard_code") or "").strip()
@@ -1869,9 +2004,17 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
     _emit_progress("chapters_ready", chapters_total=len(outline))
     _emit_progress(
         "compliance_preflight",
+        variant_id=variant_index,
         ready=bool(compliance_registry_status.get("ready")),
         verified_standard_count=len(verified_standard_codes),
         project_domains=compliance_domains,
+        authority_digest=compliance_registry_status.get("authority_digest"),
+        official_registry_sha256=compliance_registry_status.get(
+            "official_registry_sha256"
+        ),
+    )
+    provider_admission_coordinator = payload.get(
+        "_provider_admission_run_coordinator"
     )
     if strict_quality and (
         not bool(compliance_registry_status.get("ready"))
@@ -1880,10 +2023,21 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         warnings = "、".join(
             str(x) for x in (compliance_registry_status.get("warnings") or []) if str(x)
         )
+        if isinstance(
+            provider_admission_coordinator,
+            ProviderAdmissionRunCoordinator,
+        ):
+            provider_admission_coordinator.abort_preflight_barrier()
         raise ValueError(
             "项目适用规范生成前预检未通过，未调用大模型："
             + (warnings or "当前项目没有可由官方来源复核的现行规范元数据")
         )
+    if isinstance(provider_admission_coordinator, ProviderAdmissionRunCoordinator):
+        await provider_admission_coordinator.await_preflight_barrier(variant_index)
+        variant_generation_semaphore = payload.get("_variant_generation_semaphore")
+        if isinstance(variant_generation_semaphore, asyncio.Semaphore):
+            await variant_generation_semaphore.acquire()
+            payload["_variant_generation_slot_acquired"] = True
     agent_contract = build_agent_contract(
         topic=str(topic),
         outline=outline if isinstance(outline, list) else [],
@@ -2002,7 +2156,7 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
             for role in (payload.get("_provider_admission_required_roles") or ["text_draft"])
             if str(role or "").strip()
         ]
-        coordinator = payload.get("_provider_admission_run_coordinator")
+        coordinator = provider_admission_coordinator
         if not isinstance(coordinator, ProviderAdmissionRunCoordinator):
             raise RuntimeError(
                 json.dumps(
@@ -2237,6 +2391,11 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         provider_routes=provider_chain,
         delivery_scope=delivery_scope,
         provider_admission_digest=provider_admission_binding_digest,
+        compliance_registry_authority_digest=(
+            compliance_registry_authority.projection.get("authority_digest")
+            if compliance_registry_authority is not None
+            else None
+        ),
         prompt_contract={
             "prompt_layout_version": "section-envelope-v3",
             "requirements": base_requirements,
@@ -2683,20 +2842,10 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
             top_k=4,
             prefer_latest=True,
             verified_only=True,
+            official_registry_bytes=compliance_registry_bytes,
+            official_registry_path=compliance_registry_path,
         )
-        compliance_hits: list[dict[str, Any]] = []
-        seen_compliance_rows: set[tuple[str, str]] = set()
-        for raw_hit in [*verified_project_standards, *clause_hits]:
-            if not isinstance(raw_hit, dict):
-                continue
-            key = (
-                canonical_standard_code(raw_hit.get("standard_code")),
-                str(raw_hit.get("locator") or "metadata").strip(),
-            )
-            if not key[0] or key in seen_compliance_rows:
-                continue
-            seen_compliance_rows.add(key)
-            compliance_hits.append(dict(raw_hit))
+        compliance_hits = _trusted_formal_compliance_hits(clause_hits)
         section_requirements.append(standard_citation_directive(verified_project_standards))
         if compliance_hits:
             section_requirements.append("本章应优先引用适配专业且最新版本的规范条款（禁止跨专业串用规范）。")
@@ -4003,7 +4152,23 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         from backend.zhifei_autoplan.standard_index import build_standard_index
 
-        standard_index = build_standard_index(topic, outline, project_id=str(project_id) if project_id else None)
+        standard_index = build_standard_index(
+            topic,
+            outline,
+            project_id=str(project_id) if project_id else None,
+            official_registry_bytes=compliance_registry_bytes,
+            official_registry_path=compliance_registry_path,
+        )
+        if compliance_registry_authority is not None and (
+            str(standard_index.get("official_registry_sha256") or "")
+            != str(
+                compliance_registry_authority.projection.get("registry_sha256")
+                or ""
+            )
+            or Path(str(standard_index.get("official_registry_path") or ""))
+            != compliance_registry_path
+        ):
+            raise RuntimeError("COMPLIANCE_STANDARD_INDEX_AUTHORITY_MISMATCH")
         # Bind best-effort standard locators into key chapters to make "按企业标准执行" traceable.
         for b in (standard_index or {}).get("chapter_bindings") or []:
             ch = str(b.get("chapter") or "").strip()
@@ -4352,13 +4517,11 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
         standard_index=standard_index if isinstance(standard_index, dict) else {},
         standard_workspace_dir="backend/data",
         standard_compliance_root=(
-            Path(str(standard_index.get("official_registry_path") or "")).parent
-            if isinstance(standard_index, dict)
-            and Path(
-                str(standard_index.get("official_registry_path") or "")
-            ).is_absolute()
+            compliance_registry_path.parent
+            if compliance_registry_path is not None
             else None
         ),
+        trusted_standard_registry_bytes=compliance_registry_bytes,
     )
     quality["delivery_quality_gate"] = delivery_quality_gate
     pipeline_stages.append(
@@ -4510,6 +4673,11 @@ async def run_autoplan(payload: dict[str, Any]) -> dict[str, Any]:
             and delivery_quality_gate.get("delivery_allowed")
         ),
         "compliance_registry_status": compliance_registry_status,
+        "compliance_registry_authority": (
+            dict(compliance_registry_authority.projection)
+            if compliance_registry_authority is not None
+            else None
+        ),
         "standard_citation_sanitization": standard_citation_sanitization,
         "boq_focus": boq_focus,
         "boq_wbs_cpm": boq_wbs_cpm,

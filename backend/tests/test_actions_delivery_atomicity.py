@@ -67,14 +67,75 @@ def _write_rendered_variant(
     }
 
 
+def _registry_authority(tmp_path: Path) -> dict[str, object]:
+    source_digest = "d" * 64
+    release_id = "release-" + source_digest[:24]
+    registry_core = {
+        "schema_version": "sealed-compliance-registry-authority-v1",
+        "source_kind": "sealed_release_manifest_entry",
+        "release_id": release_id,
+        "manifest_digest": "e" * 64,
+        "source_digest": source_digest,
+        "runtime_digest": "f" * 64,
+        "registry_path": str(
+            tmp_path
+            / release_id
+            / "sealed-compliance"
+            / "_official_registry.json"
+        ),
+        "registry_relative_path": "sealed-compliance/_official_registry.json",
+        "registry_sha256": "c" * 64,
+        "registry_size": 128,
+        "registry_mode": 0o444,
+    }
+    return {
+        **registry_core,
+        "authority_digest": hashlib.sha256(
+            json.dumps(
+                registry_core,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _generation_release_identity(
+    registry_authority: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "schema_version": "autoplan-generation-release-v1",
+        "system_id": "docgen-system",
+        "release_id": registry_authority["release_id"],
+        "manifest_digest": registry_authority["manifest_digest"],
+        "source_digest": registry_authority["source_digest"],
+        "runtime_digest": registry_authority["runtime_digest"],
+        "release_root": str(Path(str(registry_authority["registry_path"])).parents[1]),
+        "runtime_mode": "sealed_release",
+        "release_managed": True,
+    }
+
+
 def _formal_delivery_fixture(
     tmp_path: Path,
     *,
     job_id: str = "a" * 32,
     variant_ids: tuple[int, ...] = (1,),
+    include_registry_authority: bool = True,
+    managed_runtime_chain: bool = False,
 ) -> tuple[dict, dict, list[dict]]:
     from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
     from backend.zhifei_autoplan.export_docx_service import canonical_export_digest
+    from backend.zhifei_autoplan.generation_checkpoint import (
+        build_generation_binding,
+        finalize_generation_checkpoint,
+        save_section_checkpoint,
+    )
+    from backend.zhifei_autoplan.professional_document_renderer import (
+        canonical_professional_render_receipt_digest,
+    )
+    from backend.zhifei_autoplan.runtime_events import append_runtime_event
 
     sources: list[str] = []
     professional: list[str] = []
@@ -85,6 +146,14 @@ def _formal_delivery_fixture(
     score_overview_xlsx: list[str] = []
     expert_review_docx: list[str] = []
     variants: list[dict] = []
+    registry_authority = _registry_authority(tmp_path)
+    generation_release = _generation_release_identity(registry_authority)
+    execution_identity = {
+        "job_id": job_id,
+        "attempt_id": "b" * 32,
+        "owner_instance_id": "c" * 32,
+        "job_revision": 17,
+    }
     for index, variant_id in enumerate(variant_ids, start=1):
         source = tmp_path / f"source-v{index}.docx"
         source.write_bytes(f"source-{index}".encode())
@@ -146,17 +215,190 @@ def _formal_delivery_fixture(
             "warnings": [],
         }
         delivery_gate["decision_digest"] = canonical_export_digest(delivery_gate)
-        variants.append(
-            {
-                "variant_id": variant_id,
-                "delivery_scope": "document",
-                "delivery_ready": True,
-                "delivery_quality_gate": delivery_gate,
-                "standard_index": standard_index,
-                "standard_citation_audit": standard_audit,
-                "sections": [],
-                "quality_checks": {"issue_list": [], "auto_revision_suggestions": []},
+        variant_record = {
+            "variant_id": variant_id,
+            "delivery_scope": "document",
+            "delivery_ready": True,
+            "delivery_quality_gate": delivery_gate,
+            "standard_index": standard_index,
+            "standard_citation_audit": standard_audit,
+            "compliance_registry_authority": registry_authority,
+            "sections": [],
+            "quality_checks": {"issue_list": [], "auto_revision_suggestions": []},
+        }
+        if managed_runtime_chain:
+            managed_standard_index = {
+                **standard_index,
+                "official_registry_path": registry_authority["registry_path"],
+                "official_registry_sha256": registry_authority[
+                    "registry_sha256"
+                ],
             }
+            delivery_gate["checks"][0]["standard_index_digest"] = (
+                canonical_export_digest(managed_standard_index)
+            )
+            delivery_gate["decision_digest"] = canonical_export_digest(
+                {
+                    key: value
+                    for key, value in delivery_gate.items()
+                    if key != "decision_digest"
+                }
+            )
+            section = {
+                "title": "第一章",
+                "content": f"方案{variant_id}正式正文",
+                "provider": "provider-a",
+                "model": "model-a",
+                "model_slot": "text_primary",
+            }
+            binding = build_generation_binding(
+                **execution_identity,
+                topic="项目施工组织设计",
+                project_id="P-ATOMIC",
+                project_type="房屋建筑工程",
+                outline=["第一章"],
+                style={"tone": "professional"},
+                chapter_pages={"第一章": 1},
+                variant_id=variant_id,
+                project_fact_digest="1" * 64,
+                requirement_plan_digest="2" * 64,
+                provider_routes=[
+                    {
+                        "slot": "text_primary",
+                        "provider": "provider-a",
+                        "model": "model-a",
+                    }
+                ],
+                delivery_scope="document",
+                provider_admission_digest="3" * 64,
+                compliance_registry_authority_digest=registry_authority[
+                    "authority_digest"
+                ],
+                prompt_contract={"version": 1},
+            )
+            save_section_checkpoint(
+                namespace=job_id,
+                scope=f"variant-{variant_id}",
+                binding=binding,
+                chapter_index=0,
+                chapter_title="第一章",
+                chapter_context_digest="4" * 64,
+                result=section,
+            )
+            checkpoint_summary = finalize_generation_checkpoint(
+                namespace=job_id,
+                scope=f"variant-{variant_id}",
+                binding=binding,
+                status="complete",
+            )
+            variant_record.update(
+                {
+                    "generation_release_identity": generation_release,
+                    "standard_index": managed_standard_index,
+                    "outline": ["第一章"],
+                    "sections": [section],
+                    "generation_checkpoint": checkpoint_summary,
+                }
+            )
+        variants.append(variant_record)
+
+    result_json = tmp_path / "result.json"
+    result_json.write_text(json.dumps({"variants": variants}), encoding="utf-8")
+
+    if managed_runtime_chain:
+        for index, (variant, path) in enumerate(
+            zip(variants, professional_json, strict=True),
+            start=1,
+        ):
+            professional_variant = copy.deepcopy(variant)
+            professional_variant["sections"] = [
+                {
+                    **dict(variant["sections"][0]),
+                    "original_content": variant["sections"][0]["content"],
+                    "professional_render": {"status": "refined"},
+                }
+            ]
+            Path(path).write_text(
+                json.dumps(
+                    {
+                        "generation_release_identity": generation_release,
+                        "compliance_registry_authority": registry_authority,
+                        "variants": [professional_variant],
+                        "professional_render_source_variant": index,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            render_receipt_path = Path(render_receipts[index - 1])
+            render_receipt = json.loads(
+                render_receipt_path.read_text(encoding="utf-8")
+            )
+            render_receipt.update(
+                {
+                    "schema": "zhifei.professional_document_render.v1",
+                    "source_json": str(result_json),
+                    "source_json_sha256": hashlib.sha256(
+                        result_json.read_bytes()
+                    ).hexdigest(),
+                    "source_docx": sources[index - 1],
+                    "source_docx_sha256": hashlib.sha256(
+                        Path(sources[index - 1]).read_bytes()
+                    ).hexdigest(),
+                    "professional_docx": professional[index - 1],
+                    "professional_docx_sha256": hashlib.sha256(
+                        Path(professional[index - 1]).read_bytes()
+                    ).hexdigest(),
+                    "professional_json": professional_json[index - 1],
+                    "professional_json_sha256": hashlib.sha256(
+                        Path(professional_json[index - 1]).read_bytes()
+                    ).hexdigest(),
+                }
+            )
+            render_receipt["receipt_digest"] = (
+                canonical_professional_render_receipt_digest(render_receipt)
+            )
+            render_receipt_path.write_text(
+                json.dumps(render_receipt, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+        append_runtime_event(
+            job_id,
+            "job_started",
+            **{key: value for key, value in execution_identity.items() if key != "job_id"},
+            generation_release_identity=generation_release,
+            compliance_registry_authority=registry_authority,
+        )
+        for variant in variants:
+            append_runtime_event(
+                job_id,
+                "compliance_preflight",
+                **{
+                    key: value
+                    for key, value in execution_identity.items()
+                    if key != "job_id"
+                },
+                variant_id=variant["variant_id"],
+                ready=True,
+                authority_digest=registry_authority["authority_digest"],
+                official_registry_sha256=registry_authority["registry_sha256"],
+                verified_standard_count=3,
+                project_domains=["房建工程"],
+            )
+        append_runtime_event(
+            job_id,
+            "provider_admission_started",
+            **{key: value for key, value in execution_identity.items() if key != "job_id"},
+        )
+        append_runtime_event(
+            job_id,
+            "job_succeeded",
+            **{key: value for key, value in execution_identity.items() if key != "job_id"},
+            dry_run=False,
+            delivery_scope="document",
+            generation_release_identity=generation_release,
+            compliance_registry_authority=registry_authority,
         )
     sealed = build_delivery_receipt(
         job_id=job_id,
@@ -169,9 +411,13 @@ def _formal_delivery_fixture(
         score_overview_xlsx=score_overview_xlsx,
         expert_review_docx=expert_review_docx,
         receipt_path=tmp_path / "delivery-receipt.json",
+        compliance_registry_authority=(
+            registry_authority if include_registry_authority else None
+        ),
+        job_execution_identity=(
+            execution_identity if managed_runtime_chain else None
+        ),
     )
-    result_json = tmp_path / "result.json"
-    result_json.write_text(json.dumps({"variants": variants}), encoding="utf-8")
     result = {
         "json": str(result_json),
         "source_docx": sources,
@@ -188,7 +434,15 @@ def _formal_delivery_fixture(
         "validation_scope": "document",
         "delivery_receipt": str(sealed["receipt"]),
         "delivery_decision_digest": str(sealed["decision_digest"]),
+        "compliance_registry_authority": registry_authority,
     }
+    if managed_runtime_chain:
+        result.update(
+            {
+                "generation_release_identity": generation_release,
+                "job_execution_identity": execution_identity,
+            }
+        )
     job = {
         "job_id": job_id,
         "status": "succeeded",
@@ -196,7 +450,253 @@ def _formal_delivery_fixture(
         "payload": {"delivery_scope": "document", "dry_run": False},
         "result": result,
     }
+    if managed_runtime_chain:
+        job.update(
+            {
+                "last_attempt_id": execution_identity["attempt_id"],
+                "last_owner_instance_id": execution_identity[
+                    "owner_instance_id"
+                ],
+                "last_job_revision": execution_identity["job_revision"],
+                "agent_runtime": {
+                    "generation_release_identity": generation_release,
+                    "compliance_registry_authority": registry_authority,
+                },
+            }
+        )
     return job, result, variants
+
+
+def _configure_managed_runtime_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], dict[str, object]]:
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan import generation_checkpoint, runtime_events
+
+    authority = _registry_authority(tmp_path)
+    generation_release = _generation_release_identity(authority)
+    monkeypatch.setattr(
+        generation_checkpoint,
+        "CHECKPOINT_DIR",
+        tmp_path / "checkpoints",
+    )
+    monkeypatch.setattr(runtime_events, "EVENT_DIR", tmp_path / "events")
+    monkeypatch.setattr(
+        actions_bridge,
+        "_GENERATION_RELEASE_IDENTITY_AT_START",
+        generation_release,
+    )
+    monkeypatch.setattr(
+        actions_bridge,
+        "_generation_compliance_registry_authority_from_environment",
+        lambda: copy.deepcopy(authority),
+    )
+    return generation_release, authority
+
+
+def test_managed_formal_delivery_state_verifies_runtime_authority_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.routers import actions_bridge
+
+    _configure_managed_runtime_chain(tmp_path, monkeypatch)
+    job, result, variants = _formal_delivery_fixture(
+        tmp_path,
+        variant_ids=(1, 2),
+        managed_runtime_chain=True,
+    )
+
+    assert actions_bridge._formal_delivery_state(job, result, variants) == (
+        True,
+        "formal_document_ready",
+    )
+
+
+def test_managed_formal_delivery_rejects_missing_current_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.routers import actions_bridge
+
+    _configure_managed_runtime_chain(tmp_path, monkeypatch)
+    job, result, variants = _formal_delivery_fixture(
+        tmp_path,
+        variant_ids=(1, 2),
+        managed_runtime_chain=True,
+    )
+    event_path = tmp_path / "events" / f"{job['job_id']}.jsonl"
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    removed = False
+    retained = []
+    for event in events:
+        if event.get("event") == "compliance_preflight" and not removed:
+            removed = True
+            continue
+        retained.append(event)
+    event_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in retained),
+        encoding="utf-8",
+    )
+
+    assert actions_bridge._formal_delivery_state(job, result, variants)[1] == (
+        "runtime_event_evidence_invalid"
+    )
+
+
+def test_managed_formal_delivery_rejects_resealed_wrong_checkpoint_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan.review_revision import canonical_digest
+
+    _configure_managed_runtime_chain(tmp_path, monkeypatch)
+    job, result, variants = _formal_delivery_fixture(
+        tmp_path,
+        managed_runtime_chain=True,
+    )
+    checkpoint_path = tmp_path / "checkpoints" / job["job_id"] / "variant-1.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    binding = checkpoint["binding"]
+    binding["compliance_registry_authority_digest"] = "f" * 64
+    binding["binding_digest"] = canonical_digest(
+        {key: value for key, value in binding.items() if key != "binding_digest"}
+    )
+    checkpoint["binding_digest"] = binding["binding_digest"]
+    variants[0]["generation_checkpoint"]["binding_digest"] = binding[
+        "binding_digest"
+    ]
+    checkpoint["integrity_digest"] = canonical_digest(
+        {
+            key: value
+            for key, value in checkpoint.items()
+            if key != "integrity_digest"
+        }
+    )
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    assert actions_bridge._formal_delivery_state(job, result, variants)[1] == (
+        "generation_checkpoint_evidence_invalid"
+    )
+
+
+def test_managed_formal_delivery_rejects_resealed_professional_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
+
+    _configure_managed_runtime_chain(tmp_path, monkeypatch)
+    job, result, variants = _formal_delivery_fixture(
+        tmp_path,
+        managed_runtime_chain=True,
+    )
+    professional_path = Path(result["professional_json"][0])
+    professional = json.loads(professional_path.read_text(encoding="utf-8"))
+    professional["compliance_registry_authority"] = {
+        **professional["compliance_registry_authority"],
+        "registry_sha256": "f" * 64,
+    }
+    professional_path.write_text(
+        json.dumps(professional, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    sealed = build_delivery_receipt(
+        job_id=job["job_id"],
+        source_docx=result["source_docx"],
+        professional_docx=result["professional_docx"],
+        professional_json=result["professional_json"],
+        professional_receipts=result["professional_render_receipt"],
+        compare_docx=result["compare_docx"],
+        focus_xlsx=result["focus_xlsx"],
+        score_overview_xlsx=result["score_overview_xlsx"],
+        expert_review_docx=result["expert_review_docx"],
+        receipt_path=tmp_path / "delivery-resealed.json",
+        job_execution_identity=result["job_execution_identity"],
+        compliance_registry_authority=result["compliance_registry_authority"],
+    )
+    result["delivery_receipt"] = str(sealed["receipt"])
+    result["delivery_decision_digest"] = sealed["decision_digest"]
+
+    assert actions_bridge._formal_delivery_state(job, result, variants)[1] == (
+        "professional_json_authority_invalid"
+    )
+    with pytest.raises(HTTPException) as error:
+        actions_bridge._require_formal_document_mutation(job, result, variants)
+    assert error.value.status_code == 409
+    assert error.value.detail == {
+        "code": "NON_DELIVERABLE_MUTATION_FORBIDDEN",
+        "message": "非正式交付任务仅允许只读复核，不能晋升、回滚或渲染正式交付文件。",
+        "reason": "professional_json_authority_invalid",
+    }
+
+
+@pytest.mark.parametrize("reseal_task_receipt", (False, True))
+def test_managed_formal_delivery_rejects_source_json_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reseal_task_receipt: bool,
+) -> None:
+    from backend.app.routers import actions_bridge
+    from backend.zhifei_autoplan.delivery_receipt import build_delivery_receipt
+
+    _configure_managed_runtime_chain(tmp_path, monkeypatch)
+    job, result, _variants = _formal_delivery_fixture(
+        tmp_path,
+        managed_runtime_chain=True,
+    )
+    source_json_path = Path(result["json"])
+    rewritten = json.loads(source_json_path.read_text(encoding="utf-8"))
+    rewritten["variants"][0]["sections"][0]["content"] = "事后改写的正文"
+    source_json_path.write_text(
+        json.dumps(rewritten, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    if reseal_task_receipt:
+        sealed = build_delivery_receipt(
+            job_id=job["job_id"],
+            source_docx=result["source_docx"],
+            professional_docx=result["professional_docx"],
+            professional_json=result["professional_json"],
+            professional_receipts=result["professional_render_receipt"],
+            compare_docx=result["compare_docx"],
+            focus_xlsx=result["focus_xlsx"],
+            score_overview_xlsx=result["score_overview_xlsx"],
+            expert_review_docx=result["expert_review_docx"],
+            receipt_path=tmp_path / "delivery-source-resealed.json",
+            job_execution_identity=result["job_execution_identity"],
+            compliance_registry_authority=result[
+                "compliance_registry_authority"
+            ],
+        )
+        result["delivery_receipt"] = str(sealed["receipt"])
+        result["delivery_decision_digest"] = sealed["decision_digest"]
+    monkeypatch.setattr(actions_bridge, "get_job", lambda _job_id: job)
+    loaded_job, loaded_result, _data, loaded_variants = (
+        actions_bridge._load_done_job_variants(job["job_id"])
+    )
+
+    assert actions_bridge._formal_delivery_state(
+        loaded_job,
+        loaded_result,
+        loaded_variants,
+    )[1] == "professional_render_receipt_binding_invalid"
+    with pytest.raises(HTTPException) as error:
+        actions_bridge._require_formal_document_mutation(
+            loaded_job,
+            loaded_result,
+            loaded_variants,
+        )
+    assert error.value.status_code == 409
+    assert error.value.detail["reason"] == (
+        "professional_render_receipt_binding_invalid"
+    )
 
 
 def test_formal_delivery_state_requires_sealed_exact_professional_artifacts(
@@ -209,6 +709,7 @@ def test_formal_delivery_state_requires_sealed_exact_professional_artifacts(
         True,
         "formal_document_ready",
     )
+
 
     outer_blocked = dict(result, delivery_ready=False)
     assert actions_bridge._formal_delivery_state(job, outer_blocked, variants)[1] == (
@@ -269,6 +770,21 @@ def test_formal_delivery_state_requires_sealed_exact_professional_artifacts(
         result,
         forged_code_binding,
     )[1] == "delivery_gate_contract_stale"
+
+
+def test_formal_pass_receipt_requires_sealed_registry_authority(
+    tmp_path: Path,
+) -> None:
+    from backend.zhifei_autoplan.delivery_receipt import DeliveryReceiptError
+
+    with pytest.raises(
+        DeliveryReceiptError,
+        match="缺少标准registry权威身份",
+    ):
+        _formal_delivery_fixture(
+            tmp_path,
+            include_registry_authority=False,
+        )
 
 
 def test_formal_delivery_scope_must_be_explicit_in_payload_and_every_variant(
@@ -336,6 +852,30 @@ def test_task_receipt_decision_digest_is_recomputed_from_canonical_content(
 
     assert actions_bridge._formal_delivery_state(job, result, variants)[1] == (
         "delivery_receipt_digest_mismatch"
+    )
+
+
+@pytest.mark.parametrize("attack", ("invalid_utf8", "symlink", "oversized"))
+def test_task_receipt_requires_bounded_regular_stable_json(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    from backend.app.routers import actions_bridge
+
+    job, result, variants = _formal_delivery_fixture(tmp_path)
+    receipt_path = Path(result["delivery_receipt"])
+    if attack == "invalid_utf8":
+        receipt_path.write_bytes(b"\xff\xfe\xfd")
+    elif attack == "symlink":
+        target = tmp_path / "task-receipt-target.json"
+        receipt_path.replace(target)
+        receipt_path.symlink_to(target)
+    else:
+        with receipt_path.open("wb") as handle:
+            handle.truncate(actions_bridge._MAX_FORMAL_RUNTIME_JSON_BYTES + 1)
+
+    assert actions_bridge._formal_delivery_state(job, result, variants)[1] == (
+        "delivery_receipt_invalid"
     )
 
 
@@ -475,6 +1015,7 @@ async def test_candidate_render_uses_unique_task_receipt_but_original_owner_job_
         "focus_xlsx": [None],
         "score_overview_xlsx": [None],
         "expert_review_docx": [None],
+        "compliance_registry_authority": _registry_authority(tmp_path),
     }
     first = await actions_bridge._render_professional_outputs_for_job(
         job_id=job_id,
@@ -858,3 +1399,71 @@ def test_invalid_acquired_lease_identity_does_not_call_undefined_side_effect(
 
     assert checkpoint_calls == []
     assert transition_calls == []
+
+
+@pytest.mark.parametrize("case", ("malformed", "symlink", "oversized"))
+def test_done_job_result_json_is_bounded_regular_and_fail_closed(
+    tmp_path: Path,
+    monkeypatch,
+    case: str,
+) -> None:
+    from backend.app.routers import actions_bridge
+
+    result_path = tmp_path / "result.json"
+    if case == "malformed":
+        result_path.write_bytes(b"{not-json")
+    elif case == "symlink":
+        target = tmp_path / "target.json"
+        target.write_text('{"variants":[{}]}', encoding="utf-8")
+        result_path.symlink_to(target)
+    else:
+        with result_path.open("wb") as stream:
+            stream.truncate(actions_bridge._MAX_FORMAL_RUNTIME_JSON_BYTES + 1)
+
+        def forbidden_read(*_args, **_kwargs):
+            raise AssertionError("oversized result body must not be read")
+
+        monkeypatch.setattr(actions_bridge.os, "read", forbidden_read)
+
+    monkeypatch.setattr(
+        actions_bridge,
+        "get_job",
+        lambda _job_id: {
+            "job_id": _job_id,
+            "status": "succeeded",
+            "result": {"json": str(result_path)},
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        actions_bridge._load_done_job_variants("a" * 32)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "RESULT_JSON_UNTRUSTED"
+
+
+@pytest.mark.asyncio
+async def test_result_endpoint_rejects_malformed_result_with_stable_machine_code(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from backend.app.routers import actions_bridge
+
+    result_path = tmp_path / "result.json"
+    result_path.write_bytes(b"{not-json")
+    monkeypatch.setattr(actions_bridge, "_auth_actions_key", lambda _key: None)
+    monkeypatch.setattr(
+        actions_bridge,
+        "get_job",
+        lambda _job_id: {
+            "job_id": _job_id,
+            "status": "succeeded",
+            "result": {"json": str(result_path)},
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await actions_bridge.actions_result(job_id="a" * 32)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "RESULT_JSON_UNTRUSTED"

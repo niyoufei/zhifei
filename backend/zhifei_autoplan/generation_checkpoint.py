@@ -226,6 +226,7 @@ def build_generation_binding(
     provider_routes: Any,
     delivery_scope: Any = "document",
     provider_admission_digest: Any = None,
+    compliance_registry_authority_digest: Any = None,
     prompt_contract: Any = None,
     job_id: Any = None,
     attempt_id: Any = None,
@@ -266,6 +267,10 @@ def build_generation_binding(
         "project_fact_digest": str(project_fact_digest or "").strip() or None,
         "requirement_plan_digest": str(requirement_plan_digest or "").strip() or None,
         "provider_admission_digest": str(provider_admission_digest or "").strip() or None,
+        "compliance_registry_authority_digest": str(
+            compliance_registry_authority_digest or ""
+        ).strip()
+        or None,
         "provider_routes": safe_routes,
         # Store only a digest: this invalidates reuse whenever any prompt-shaping
         # input changes without duplicating project material in checkpoint files.
@@ -290,6 +295,28 @@ def _read_verified(path: Path) -> dict[str, Any] | None:
     if str(record.get("schema_version") or "") != SCHEMA_VERSION:
         raise CheckpointIntegrityError("checkpoint_schema_mismatch")
     return record
+
+
+def read_verified_generation_checkpoint(
+    *,
+    namespace: Any,
+    scope: Any,
+    root: Path | str | None = None,
+) -> dict[str, Any] | None:
+    """Return an integrity-verified checkpoint snapshot without binding input.
+
+    Formal delivery consumers need to inspect the persisted terminal binding
+    itself rather than reconstructing caller-controlled prompt material.  The
+    returned JSON round-trip copy cannot mutate the in-memory record observed
+    under the checkpoint lock.
+    """
+
+    path = _checkpoint_path(namespace, scope, root=root)
+    with _LOCK:
+        record = _read_verified(path)
+    if record is None:
+        return None
+    return json.loads(json.dumps(record, ensure_ascii=False))
 
 
 def _empty_record(binding: Mapping[str, Any]) -> dict[str, Any]:

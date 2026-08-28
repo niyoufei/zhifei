@@ -155,7 +155,6 @@ def isolated_generation_runtime(monkeypatch):
 
     def _mindmap(*args, **kwargs):
         counters["mindmap"] += 1
-        return None
 
     monkeypatch.setattr(
         orchestrator,
@@ -186,7 +185,7 @@ def isolated_generation_runtime(monkeypatch):
     monkeypatch.setattr(
         orchestrator,
         "get_compliance_registry_status",
-        lambda: {"ready": True, "verified_count": 1, "warnings": []},
+        lambda **_kwargs: {"ready": True, "verified_count": 1, "warnings": []},
     )
     monkeypatch.setattr(
         orchestrator,
@@ -201,6 +200,9 @@ def isolated_generation_runtime(monkeypatch):
                 "official_source": "https://official.example/GB-T-50326-2017",
                 "domain_tags": ["通用工程"],
                 "latest": True,
+                "metadata_only": True,
+                "verified": True,
+                "official_registry_verified": True,
             }
         ],
     )
@@ -363,6 +365,7 @@ async def test_multi_variant_run_probes_each_unique_candidate_once_and_emits_one
     secret = "test-shared-run-secret"
     manager = ProviderAdmissionManager(root=tmp_path / "admission", ttl_seconds=120)
     coordinator = ProviderAdmissionRunCoordinator(manager)
+    coordinator.configure_preflight_variants([1, 2])
     events: list[dict[str, Any]] = []
     probes: list[tuple[str, str, str]] = []
 
@@ -387,10 +390,46 @@ async def test_multi_variant_run_probes_each_unique_candidate_once_and_emits_one
     event_names = [event.get("event") for event in events]
     assert event_names.count("provider_admission_started") == 1
     assert event_names.count("provider_admission_completed") == 1
+    preflight_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.get("event") == "compliance_preflight"
+    ]
+    admission_index = event_names.index("provider_admission_started")
+    assert {
+        event.get("variant_id")
+        for event in events
+        if event.get("event") == "compliance_preflight"
+    } == {1, 2}
+    assert len(preflight_indexes) == 2
+    assert max(preflight_indexes) < admission_index
     assert all(
         result["model_routing"]["provider_admission"]["generation_allowed"]
         for result in results
     )
+
+
+@pytest.mark.asyncio
+async def test_preflight_barrier_abort_never_leaves_variant_waiting(
+    tmp_path,
+) -> None:
+    before_wait = ProviderAdmissionRunCoordinator(
+        ProviderAdmissionManager(root=tmp_path / "before")
+    )
+    before_wait.configure_preflight_variants([1, 2])
+    before_wait.abort_preflight_barrier()
+    with pytest.raises(RuntimeError, match="provider_admission_preflight_aborted"):
+        await asyncio.wait_for(before_wait.await_preflight_barrier(1), timeout=0.2)
+
+    while_waiting = ProviderAdmissionRunCoordinator(
+        ProviderAdmissionManager(root=tmp_path / "waiting")
+    )
+    while_waiting.configure_preflight_variants([1, 2])
+    waiter = asyncio.create_task(while_waiting.await_preflight_barrier(1))
+    await asyncio.sleep(0)
+    while_waiting.abort_preflight_barrier()
+    with pytest.raises(RuntimeError, match="provider_admission_preflight_aborted"):
+        await asyncio.wait_for(waiter, timeout=0.2)
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.zhifei_autoplan.sealed_compliance import (
+    SealedComplianceError,
+    validate_registry_authority_projection,
+)
+
 
 class DeliveryReceiptError(RuntimeError):
     """Raised when final files cannot be sealed as a coherent delivery set."""
@@ -138,6 +143,7 @@ def build_delivery_receipt(
     expert_review_docx: Iterable[str | Path | None],
     receipt_path: str | Path | None = None,
     job_execution_identity: dict[str, Any] | None = None,
+    compliance_registry_authority: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Seal every per-variant formal artifact into one delivery chain."""
 
@@ -304,12 +310,26 @@ def build_delivery_receipt(
             or int(execution_identity.get("job_revision") or 0) <= 0
         ):
             raise DeliveryReceiptError("任务执行身份无效")
+    registry_authority: dict[str, Any] | None = None
+    # ``zhifei.delivery_receipt.v2`` is the formal, sealed PASS receipt.  A
+    # successful receipt without the registry authority would be ambiguous in
+    # every environment and could later be mistaken for formal evidence.
+    if compliance_registry_authority is None:
+        raise DeliveryReceiptError("正式交付缺少标准registry权威身份")
+    if compliance_registry_authority is not None:
+        try:
+            registry_authority = validate_registry_authority_projection(
+                compliance_registry_authority
+            )
+        except SealedComplianceError as exc:
+            raise DeliveryReceiptError("正式标准registry权威身份无效") from exc
     receipt = {
         "schema": "zhifei.delivery_receipt.v2",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "pass",
         "job_id": str(job_id),
         "job_execution_identity": execution_identity,
+        "compliance_registry_authority": registry_authority,
         "delivery_profile": "sonnet5_professional_word",
         "variant_count": len(rows),
         "variants": rows,

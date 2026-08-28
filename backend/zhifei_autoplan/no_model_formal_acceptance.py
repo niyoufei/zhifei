@@ -89,7 +89,10 @@ from backend.zhifei_autoplan.provider_admission import (
 from backend.zhifei_autoplan.sealed_compliance import (
     SEALED_COMPLIANCE_ROOT_RELATIVE_PATH,
     SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH,
+    SEALED_REGISTRY_AUTHORITY_SCHEMA,
+    SealedComplianceError,
     sealed_official_registry_path,
+    validate_registry_authority_projection,
 )
 from backend.zhifei_autoplan.standard_index import build_standard_index
 
@@ -2298,6 +2301,7 @@ def _checkpoint_bundle(
     outline: list[str],
     sections: list[dict[str, Any]],
     provider_admission_binding_digest: str,
+    compliance_registry_authority_digest: str,
     provider_admission_routes: list[dict[str, str]],
     attempt_id: str,
     owner_instance_id: str,
@@ -2330,6 +2334,7 @@ def _checkpoint_bundle(
         "project_fact_digest",
         "requirement_plan_digest",
         "provider_admission_digest",
+        "compliance_registry_authority_digest",
         "provider_routes",
         "prompt_contract_digest",
         "binding_digest",
@@ -2385,6 +2390,10 @@ def _checkpoint_bundle(
         is None
         or str(binding.get("provider_admission_digest") or "").strip().lower()
         != provider_admission_binding_digest
+        or str(
+            binding.get("compliance_registry_authority_digest") or ""
+        ).strip().lower()
+        != compliance_registry_authority_digest
         or _SHA256_RE.fullmatch(
             str(binding.get("prompt_contract_digest") or "").strip().lower()
         )
@@ -2956,6 +2965,7 @@ def _artifact_bundle(
     job_id: str,
     provider_admission: Mapping[str, Any],
     job_execution_identity: Mapping[str, Any],
+    compliance_registry_authority: Mapping[str, Any],
 ) -> tuple[
     list[FileWitness | DirectoryStateWitness],
     dict[str, Any],
@@ -3072,6 +3082,8 @@ def _artifact_bundle(
         or str(task_receipt.get("job_id") or "") != job_id
         or task_receipt.get("job_execution_identity")
         != dict(job_execution_identity)
+        or task_receipt.get("compliance_registry_authority")
+        != dict(compliance_registry_authority)
         or isinstance(receipt_variant_count, bool)
         or not isinstance(receipt_variant_count, int)
         or receipt_variant_count != variant_count
@@ -3340,12 +3352,18 @@ def _artifact_bundle(
             or render_receipt.get("variant") != index
             or professional_payload.get("professional_render_source_variant")
             != index
+            or professional_payload.get("generation_release_identity")
+            != expected_variant.get("generation_release_identity")
+            or professional_payload.get("compliance_registry_authority")
+            != dict(compliance_registry_authority)
             or not isinstance(formal_variant, dict)
             or formal_variant.get("variant_id") != index
             or formal_variant.get("source_input_receipt")
             != expected_variant.get("source_input_receipt")
             or formal_variant.get("generation_release_identity")
             != expected_variant.get("generation_release_identity")
+            or formal_variant.get("compliance_registry_authority")
+            != dict(compliance_registry_authority)
             or str(
                 (
                     formal_routing.get("provider_admission")
@@ -3720,6 +3738,114 @@ def _execution_evidence_valid(
     )
 
 
+def _compliance_preflight_events_valid(
+    *,
+    events: list[dict[str, Any]],
+    variant_ids: set[int],
+    registry_authority: Mapping[str, Any],
+) -> bool:
+    if len(events) != len(variant_ids):
+        return False
+    seen: set[int] = set()
+    for event in events:
+        raw_variant_id = event.get("variant_id")
+        if (
+            isinstance(raw_variant_id, bool)
+            or not isinstance(raw_variant_id, int)
+            or raw_variant_id <= 0
+            or raw_variant_id in seen
+            or event.get("ready") is not True
+            or event.get("authority_digest")
+            != registry_authority["authority_digest"]
+            or event.get("official_registry_sha256")
+            != registry_authority["registry_sha256"]
+            or isinstance(event.get("verified_standard_count"), bool)
+            or not isinstance(event.get("verified_standard_count"), int)
+            or int(event.get("verified_standard_count") or 0) <= 0
+        ):
+            return False
+        seen.add(raw_variant_id)
+    return seen == variant_ids
+
+
+def _current_attempt_event_slice(
+    *,
+    events: list[dict[str, Any]],
+    attempt_id: str,
+    owner_instance_id: str,
+    job_revision: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return the terminal attempt and its pre-provider compliance preflights."""
+
+    def belongs_to_current_attempt(row: Mapping[str, Any]) -> bool:
+        return (
+            str(row.get("attempt_id") or "").strip() == attempt_id
+            and str(row.get("owner_instance_id") or "").strip()
+            == owner_instance_id
+            and row.get("job_revision") == job_revision
+        )
+
+    started_indexes = [
+        index
+        for index, row in enumerate(events)
+        if row.get("event") == "job_started"
+        and belongs_to_current_attempt(row)
+    ]
+    succeeded_indexes = [
+        index
+        for index, row in enumerate(events)
+        if row.get("event") == "job_succeeded"
+        and belongs_to_current_attempt(row)
+    ]
+    if (
+        len(started_indexes) != 1
+        or len(succeeded_indexes) != 1
+        or started_indexes[0] >= succeeded_indexes[0]
+    ):
+        raise AcceptanceError(
+            "HOLD_SOURCE_JOB_UNTRUSTED",
+            "正式来源当前执行批次缺少唯一开始或成功事件",
+        )
+    current_attempt_events = events[
+        started_indexes[0] : succeeded_indexes[0] + 1
+    ]
+    if any(
+        not belongs_to_current_attempt(row) for row in current_attempt_events
+    ):
+        raise AcceptanceError(
+            "HOLD_SOURCE_JOB_UNTRUSTED",
+            "正式来源当前执行批次混入其他任务谱系事件",
+        )
+    admission_started_indexes = [
+        index
+        for index, row in enumerate(current_attempt_events)
+        if row.get("event") == "provider_admission_started"
+    ]
+    if len(admission_started_indexes) != 1:
+        raise AcceptanceError(
+            "HOLD_SOURCE_PROVIDER_ADMISSION_INCOMPLETE",
+            "正式来源当前执行批次缺少唯一供应商准入开始事件",
+        )
+    admission_started_index = admission_started_indexes[0]
+    preflight_rows = [
+        row
+        for index, row in enumerate(current_attempt_events)
+        if row.get("event") == "compliance_preflight"
+        and 0 < index < admission_started_index
+    ]
+    current_lineage_preflight_count = sum(
+        row.get("event") == "compliance_preflight"
+        and belongs_to_current_attempt(row)
+        for row in events
+    )
+    if len(preflight_rows) != current_lineage_preflight_count:
+        raise AcceptanceError(
+            "HOLD_SOURCE_JOB_UNTRUSTED",
+            "正式来源规范预检不在任务开始与供应商准入之间",
+        )
+    return current_attempt_events, preflight_rows
+
+
 def _candidate_source(
     *,
     jobs: list[tuple[FileSnapshot, dict[str, Any]]],
@@ -3732,10 +3858,14 @@ def _candidate_source(
     requested_job_id: str | None,
     events_state: DirectoryStateWitness | None = None,
     provider_admission_snapshot: FileSnapshot | None = None,
+    compliance_registry_authority: Mapping[str, Any],
 ) -> tuple[dict[str, Any] | None, str]:
     candidates: list[tuple[float, str, int, dict[str, Any]]] = []
     requested_rejection: str | None = None
     expected_generation_release = _expected_generation_release(release_identity)
+    expected_registry_authority = validate_registry_authority_projection(
+        compliance_registry_authority
+    )
     try:
         if (
             provider_admission_snapshot is None
@@ -3796,6 +3926,10 @@ def _candidate_source(
                 agent_runtime.get("generation_release_identity"),
                 expected_generation_release,
             )
+            or result.get("compliance_registry_authority")
+            != expected_registry_authority
+            or agent_runtime.get("compliance_registry_authority")
+            != expected_registry_authority
             or result.get("job_execution_identity")
             != expected_job_execution_identity
         ):
@@ -3844,8 +3978,24 @@ def _candidate_source(
                 job_id=job_id,
                 events_state=events_state,
             )
+            (
+                current_attempt_events,
+                compliance_preflight_events,
+            ) = _current_attempt_event_slice(
+                events=event_rows,
+                attempt_id=attempt_id,
+                owner_instance_id=owner_instance_id,
+                job_revision=int(job_revision),
+            )
             started_events = [
-                row for row in event_rows if row.get("event") == "job_started"
+                row
+                for row in current_attempt_events
+                if row.get("event") == "job_started"
+            ]
+            succeeded_events = [
+                row
+                for row in current_attempt_events
+                if row.get("event") == "job_succeeded"
             ]
             if (
                 len(started_events) != 1
@@ -3853,6 +4003,15 @@ def _candidate_source(
                     started_events[0].get("generation_release_identity"),
                     expected_generation_release,
                 )
+                or started_events[0].get("compliance_registry_authority")
+                != expected_registry_authority
+                or len(succeeded_events) != 1
+                or not _generation_release_matches(
+                    succeeded_events[0].get("generation_release_identity"),
+                    expected_generation_release,
+                )
+                or succeeded_events[0].get("compliance_registry_authority")
+                != expected_registry_authority
             ):
                 raise AcceptanceError(
                     "HOLD_SOURCE_JOB_UNTRUSTED",
@@ -3883,6 +4042,8 @@ def _candidate_source(
                     variant.get("generation_release_identity"),
                     expected_generation_release,
                 )
+                or variant.get("compliance_registry_authority")
+                != expected_registry_authority
                 for variant in variants
                 if isinstance(variant, dict)
             )
@@ -3891,6 +4052,14 @@ def _candidate_source(
                 requested_rejection = "HOLD_SOURCE_OUTPUT_UNTRUSTED"
             continue
         allowed_variant_ids = set(declared_variant_ids)
+        if not _compliance_preflight_events_valid(
+            events=compliance_preflight_events,
+            variant_ids=allowed_variant_ids,
+            registry_authority=expected_registry_authority,
+        ):
+            if requested_job_id:
+                requested_rejection = "HOLD_SOURCE_JOB_UNTRUSTED"
+            continue
         try:
             if durable_provider_admission is None:
                 raise AcceptanceError(
@@ -3907,7 +4076,7 @@ def _candidate_source(
                         and isinstance(variant.get("model_routing"), Mapping)
                         else None
                     ),
-                    events=event_rows,
+                    events=current_attempt_events,
                     durable=durable_provider_admission,
                 )
                 for variant in variants
@@ -3930,6 +4099,7 @@ def _candidate_source(
                 job_id=job_id,
                 provider_admission=provider_admission,
                 job_execution_identity=expected_job_execution_identity,
+                compliance_registry_authority=expected_registry_authority,
             )
         except AcceptanceError as exc:
             if requested_job_id:
@@ -3949,6 +4119,16 @@ def _candidate_source(
             sections = variant.get("sections")
             outline = variant.get("outline")
             gate = variant.get("delivery_quality_gate")
+            source_standard_index = (
+                source_variant.get("standard_index")
+                if isinstance(source_variant.get("standard_index"), dict)
+                else {}
+            )
+            formal_standard_index = (
+                variant.get("standard_index")
+                if isinstance(variant.get("standard_index"), dict)
+                else {}
+            )
             try:
                 variant_id = int(variant.get("variant_id"))
             except (OverflowError, TypeError, ValueError):
@@ -3999,13 +4179,27 @@ def _candidate_source(
                 )
                 or source_variant.get("source_input_receipt")
                 != variant.get("source_input_receipt")
+                or source_variant.get("compliance_registry_authority")
+                != expected_registry_authority
+                or variant.get("compliance_registry_authority")
+                != expected_registry_authority
+                or any(
+                    str(index_value.get("official_registry_sha256") or "")
+                    != str(expected_registry_authority["registry_sha256"])
+                    or str(index_value.get("official_registry_path") or "")
+                    != str(expected_registry_authority["registry_path"])
+                    for index_value in (
+                        source_standard_index,
+                        formal_standard_index,
+                    )
+                )
             ):
                 job_rejection = "HOLD_SOURCE_OUTPUT_UNTRUSTED"
                 break
             seen_variant_ids.add(variant_id)
             try:
                 event_projection = _validate_event_and_provider_chain(
-                    events=event_rows,
+                    events=current_attempt_events,
                     variant_id=variant_id,
                     allowed_variant_ids=allowed_variant_ids,
                     sections=source_sections,
@@ -4025,6 +4219,9 @@ def _candidate_source(
                     sections=source_sections,
                     provider_admission_binding_digest=str(
                         provider_admission["binding_digest"]
+                    ),
+                    compliance_registry_authority_digest=str(
+                        expected_registry_authority["authority_digest"]
                     ),
                     provider_admission_routes=list(
                         provider_admission["admitted_chain"]
@@ -4107,6 +4304,36 @@ def _candidate_source(
         key=lambda row: (row[0], row[1], row[2]),
     )
     return selected, "CURRENT_FORMAL_SOURCE_ELIGIBLE"
+
+
+def _formal_boq_focus(
+    focus_names: list[str],
+    *,
+    source_variant: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build formal focus input without trusting model-authored exemptions.
+
+    An optional/not-applicable drawing decision is an approval decision, not a
+    generation result. Until an independent immutable approval audit exists,
+    embedded source-job receipts are diagnostic only and every focus item
+    remains required by the cross-index builder.
+    """
+
+    source_focus = (
+        source_variant.get("boq_focus")
+        if isinstance(source_variant, Mapping)
+        and isinstance(source_variant.get("boq_focus"), Mapping)
+        else {}
+    )
+    ignored = any(
+        isinstance(source_focus.get(field), (dict, list))
+        and bool(source_focus.get(field))
+        for field in ("drawing_requirements", "drawing_requirement_receipts")
+    )
+    return {
+        "must_cover_keywords": list(focus_names),
+        "source_drawing_exemptions_ignored": ignored,
+    }
 
 
 def _requirements(tender: dict[str, Any]) -> list[str]:
@@ -5069,6 +5296,25 @@ def collect_acceptance_snapshot(
             "ACCEPTANCE_REGISTRY_UNTRUSTED",
             "正式标准registry未被发布清单完整覆盖",
         )
+    registry_authority_core = {
+        "schema_version": SEALED_REGISTRY_AUTHORITY_SCHEMA,
+        "source_kind": "sealed_release_manifest_entry",
+        "release_id": release["release_id"],
+        "manifest_digest": manifest_snapshot.sha256,
+        "source_digest": release["source_digest"],
+        "runtime_digest": release["runtime_digest"],
+        "registry_path": str(registry_lexical_path),
+        "registry_relative_path": SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix(),
+        "registry_sha256": registry_snapshot.sha256,
+        "registry_size": registry_snapshot.size,
+        "registry_mode": registry_snapshot.mode,
+    }
+    compliance_registry_authority = validate_registry_authority_projection(
+        {
+            **registry_authority_core,
+            "authority_digest": canonical_digest(registry_authority_core),
+        }
+    )
     tender = _decode_json(tender_snapshot)
     boq = _decode_json(boq_snapshot)
     plan = _decode_json(plan_snapshot) if plan_snapshot is not None else {}
@@ -5113,6 +5359,7 @@ def collect_acceptance_snapshot(
         requested_job_id=source_job_id,
         events_state=events_state,
         provider_admission_snapshot=provider_admission_snapshot,
+        compliance_registry_authority=compliance_registry_authority,
     )
     topic = str(tender.get("project_name") or tender.get("topic") or "").strip()
     outline = _outline(tender, plan)
@@ -5120,13 +5367,10 @@ def collect_acceptance_snapshot(
         boq.get("stats") if isinstance(boq.get("stats"), dict) else {},
         limit=MAX_BOQ_FOCUS_ITEMS,
     )
-    boq_focus: dict[str, Any] = {"must_cover_keywords": focus_names}
-    if selected is not None:
-        source_focus = selected["variant"].get("boq_focus")
-        if isinstance(source_focus, dict):
-            for field in ("drawing_requirements", "drawing_requirement_receipts"):
-                if isinstance(source_focus.get(field), (dict, list)):
-                    boq_focus[field] = source_focus[field]
+    boq_focus = _formal_boq_focus(
+        focus_names,
+        source_variant=(selected or {}).get("variant"),
+    )
 
     drawing = build_drawing_index(
         topic,
@@ -5143,6 +5387,7 @@ def collect_acceptance_snapshot(
         compliance_root=registry_realpath.parent,
         audit_lines=audit_lines,
         official_registry_bytes=registry_snapshot.raw,
+        official_registry_path=registry_lexical_path,
     )
     if (
         Path(str(standards.get("official_registry_path") or "")).resolve(
@@ -5360,6 +5605,9 @@ def collect_acceptance_snapshot(
         "artifact_evidence": (
             (selected or {}).get("artifact_projection") if selected is not None else None
         ),
+        "compliance_registry_authority": (
+            dict(compliance_registry_authority) if selected is not None else None
+        ),
     }
     registry_rows = registry.get("standards") if isinstance(registry, dict) else []
     latest_file_sha256, latest_receipt_digest = _capture_latest_state(
@@ -5447,6 +5695,9 @@ def collect_acceptance_snapshot(
                 "source_kind": "current_sealed_registry_bytes",
                 "standard_index_sha256": standards.get(
                     "official_registry_sha256"
+                ),
+                "authority_digest": compliance_registry_authority.get(
+                    "authority_digest"
                 ),
             },
         },
@@ -6066,15 +6317,22 @@ def validate_acceptance_receipt(receipt: Any) -> dict[str, Any]:
         "realpath",
         "source_kind",
         "standard_index_sha256",
+        "authority_digest",
     }
     if (
         not isinstance(registry, Mapping)
         or set(registry) != registry_fields
         or registry.get("status") != "present"
+        or registry.get("label")
+        != SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix()
         or registry.get("absence_digest") is not None
         or _SHA256_RE.fullmatch(str(registry.get("sha256") or "").lower())
         is None
         or registry.get("sha256") != registry.get("standard_index_sha256")
+        or _SHA256_RE.fullmatch(
+            str(registry.get("authority_digest") or "").lower()
+        )
+        is None
         or registry.get("source_kind") != "current_sealed_registry_bytes"
         or not Path(str(registry.get("realpath") or "")).is_absolute()
         or isinstance(registry.get("size"), bool)
@@ -6085,6 +6343,44 @@ def validate_acceptance_receipt(receipt: Any) -> dict[str, Any]:
         or registry.get("entry_count", -1) <= 0
     ):
         errors.append("official_registry_input_invalid")
+    try:
+        registry_authority_core = {
+            "schema_version": SEALED_REGISTRY_AUTHORITY_SCHEMA,
+            "source_kind": "sealed_release_manifest_entry",
+            "release_id": release["release_id"],
+            "manifest_digest": release["manifest_digest"],
+            "source_digest": release["source_digest"],
+            "runtime_digest": release["runtime_digest"],
+            "registry_path": str(registry["realpath"]),
+            "registry_relative_path": (
+                SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix()
+            ),
+            "registry_sha256": str(registry["sha256"]),
+            "registry_size": registry["size"],
+            "registry_mode": 0o444,
+        }
+        reconstructed_registry_authority = (
+            validate_registry_authority_projection(
+                {
+                    **registry_authority_core,
+                    "authority_digest": canonical_digest(
+                        registry_authority_core
+                    ),
+                }
+            )
+        )
+        if (
+            Path(str(registry["realpath"]))
+            != Path(str(release["release_root"]))
+            / SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH
+            or registry.get("authority_digest")
+            != reconstructed_registry_authority["authority_digest"]
+        ):
+            raise SealedComplianceError(
+                "SEALED_COMPLIANCE_AUTHORITY_INVALID"
+            )
+    except (KeyError, SealedComplianceError, TypeError, ValueError):
+        errors.append("official_registry_authority_invalid")
 
     stages = value.get("stages")
     expected_stages = {
@@ -6208,12 +6504,21 @@ def validate_acceptance_receipt(receipt: Any) -> dict[str, Any]:
         "checkpoint_digest",
         "event_evidence",
         "artifact_evidence",
+        "compliance_registry_authority",
     }
+    event_evidence: Any = None
+    artifact_evidence: Any = None
     if not isinstance(source, Mapping) or set(source) != source_fields:
         errors.append("formal_source_invalid")
     elif source.get("eligible") is True:
         event_evidence = source.get("event_evidence")
         artifact_evidence = source.get("artifact_evidence")
+        try:
+            source_authority = validate_registry_authority_projection(
+                source.get("compliance_registry_authority")
+            )
+        except (SealedComplianceError, TypeError, ValueError):
+            source_authority = None
         event_count_fields = (
             "event_count",
             "provider_attempt_count",
@@ -6379,6 +6684,25 @@ def validate_acceptance_receipt(receipt: Any) -> dict[str, Any]:
         )
         if (
             source.get("machine_code") != "CURRENT_FORMAL_SOURCE_ELIGIBLE"
+            or source_authority is None
+            or not isinstance(registry, Mapping)
+            or source_authority.get("authority_digest")
+            != registry.get("authority_digest")
+            or source_authority.get("registry_sha256") != registry.get("sha256")
+            or source_authority.get("registry_size") != registry.get("size")
+            or source_authority.get("registry_path") != registry.get("realpath")
+            or source_authority.get("registry_relative_path")
+            != SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix()
+            or source_authority.get("release_id") != release.get("release_id")
+            or source_authority.get("manifest_digest")
+            != release.get("manifest_digest")
+            or source_authority.get("source_digest")
+            != release.get("source_digest")
+            or source_authority.get("runtime_digest")
+            != release.get("runtime_digest")
+            or Path(str(source_authority.get("registry_path") or ""))
+            != Path(str(release.get("release_root") or ""))
+            / SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH
             or _JOB_ID_RE.fullmatch(str(source.get("job_id") or "")) is None
             or _SHA256_RE.fullmatch(str(source.get("result_sha256") or "")) is None
             or _SHA256_RE.fullmatch(

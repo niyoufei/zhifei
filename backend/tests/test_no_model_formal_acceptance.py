@@ -51,6 +51,7 @@ from backend.zhifei_autoplan.provider_admission import (
 from backend.zhifei_autoplan.sealed_compliance import (
     SEALED_COMPLIANCE_ROOT_RELATIVE_PATH,
     SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH,
+    SEALED_REGISTRY_AUTHORITY_SCHEMA,
     sealed_official_registry_path,
 )
 from scripts import refresh_no_model_formal_acceptance as refresh_cli
@@ -110,7 +111,8 @@ def _authorize_for_publish(prepared: _PreparedAcceptance) -> _PreparedAcceptance
 
 
 def _release(tmp_path: Path, current_sha256: str) -> dict[str, Any]:
-    release_id = "release-" + "1" * 24
+    source_digest = "3" * 64
+    release_id = "release-" + source_digest[:24]
     return {
         "system_id": "docgen-system",
         "release_id": release_id,
@@ -118,7 +120,7 @@ def _release(tmp_path: Path, current_sha256: str) -> dict[str, Any]:
         "health_status": "verified_healthy",
         "supervisor_instance_id": "instance-1",
         "manifest_digest": "2" * 64,
-        "source_digest": "3" * 64,
+        "source_digest": source_digest,
         "runtime_digest": "4" * 64,
         "current_json_sha256": current_sha256,
         "supervisor_state_sha256": "5" * 64,
@@ -129,7 +131,7 @@ def _release(tmp_path: Path, current_sha256: str) -> dict[str, Any]:
     }
 
 
-def _stages(tmp_path: Path, registry_sha256: str) -> dict[str, Any]:
+def _stages(registry_path: Path, registry_sha256: str) -> dict[str, Any]:
     digest = "a" * 64
     return {
         "drawing_index": {
@@ -147,7 +149,7 @@ def _stages(tmp_path: Path, registry_sha256: str) -> dict[str, Any]:
         "standard_index": {
             "digest": digest,
             "ok": False,
-            "official_registry_path": str(tmp_path / "registry.json"),
+            "official_registry_path": str(registry_path),
             "official_registry_sha256": registry_sha256,
             "indexed": 0,
             "official_verified": 0,
@@ -207,6 +209,29 @@ def _receipt(
     supersedes: str | None = None,
 ) -> dict[str, Any]:
     registry_sha256 = "7" * 64
+    registry_path = (
+        Path(release["release_root"])
+        / SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH
+    )
+    authority_core = {
+        "schema_version": SEALED_REGISTRY_AUTHORITY_SCHEMA,
+        "source_kind": "sealed_release_manifest_entry",
+        "release_id": release["release_id"],
+        "manifest_digest": release["manifest_digest"],
+        "source_digest": release["source_digest"],
+        "runtime_digest": release["runtime_digest"],
+        "registry_path": str(registry_path),
+        "registry_relative_path": (
+            SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix()
+        ),
+        "registry_sha256": registry_sha256,
+        "registry_size": 10,
+        "registry_mode": 0o444,
+    }
+    registry_authority = {
+        **authority_core,
+        "authority_digest": canonical_digest(authority_core),
+    }
     inputs = {
         "tender": {
             "label": "tender_matrix.json",
@@ -272,10 +297,11 @@ def _receipt(
             "sha256": registry_sha256,
             "size": 10,
             "entry_count": 3,
-            "realpath": str(tmp_path / "registry.json"),
+            "realpath": str(registry_path),
             "source_kind": "current_sealed_registry_bytes",
             "standard_index_sha256": registry_sha256,
             "absence_digest": None,
+            "authority_digest": registry_authority["authority_digest"],
         },
     }
     source_fields = {
@@ -289,6 +315,7 @@ def _receipt(
         "checkpoint_digest": None,
         "event_evidence": None,
         "artifact_evidence": None,
+        "compliance_registry_authority": None,
     }
     core = {
         "schema_version": "autoplan-no-model-acceptance-v2",
@@ -306,11 +333,32 @@ def _receipt(
         "release": release,
         "inputs": inputs,
         "formal_source_eligibility": source_fields,
-        "stages": _stages(tmp_path, registry_sha256),
+        "stages": _stages(registry_path, registry_sha256),
         "machine_codes": ["HOLD_NO_CURRENT_FORMAL_SOURCE"],
         "supersedes_receipt_digest": supersedes,
     }
     return {**core, "receipt_digest": canonical_digest(core)}
+
+
+def _receipt_registry_authority(receipt: dict[str, Any]) -> dict[str, Any]:
+    release = receipt["release"]
+    registry = receipt["inputs"]["official_registry"]
+    core = {
+        "schema_version": SEALED_REGISTRY_AUTHORITY_SCHEMA,
+        "source_kind": "sealed_release_manifest_entry",
+        "release_id": release["release_id"],
+        "manifest_digest": release["manifest_digest"],
+        "source_digest": release["source_digest"],
+        "runtime_digest": release["runtime_digest"],
+        "registry_path": registry["realpath"],
+        "registry_relative_path": (
+            SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix()
+        ),
+        "registry_sha256": registry["sha256"],
+        "registry_size": registry["size"],
+        "registry_mode": 0o444,
+    }
+    return {**core, "authority_digest": canonical_digest(core)}
 
 
 def _prepared(tmp_path: Path, *, run_id: str) -> _PreparedAcceptance:
@@ -449,6 +497,27 @@ def test_strict_validator_rejects_minimal_self_digested_mapping(tmp_path: Path) 
     result = validate_acceptance_receipt(forged)
     assert result["ok"] is False
     assert "receipt_fields_invalid" in result["errors"]
+
+
+def test_hold_receipt_recomputes_registry_authority_without_source(
+    tmp_path: Path,
+) -> None:
+    prepared = _prepared(tmp_path, run_id="hold-authority")
+    receipt = json.loads(json.dumps(prepared.receipt))
+    assert receipt["decision"] == "HOLD"
+    assert receipt["formal_source_eligibility"][
+        "compliance_registry_authority"
+    ] is None
+
+    receipt["inputs"]["official_registry"]["authority_digest"] = "f" * 64
+    core = {
+        key: value for key, value in receipt.items() if key != "receipt_digest"
+    }
+    receipt["receipt_digest"] = canonical_digest(core)
+
+    validation = validate_acceptance_receipt(receipt)
+    assert validation["ok"] is False
+    assert "official_registry_authority_invalid" in validation["errors"]
 
 
 def test_strict_validator_rejects_non_json_and_empty_source_semantics(
@@ -878,6 +947,9 @@ def _passing_receipt(tmp_path: Path) -> dict[str, Any]:
                 "checkpoint_digest": "9" * 64,
                 "event_evidence": event_evidence,
                 "artifact_evidence": artifact_evidence,
+                "compliance_registry_authority": (
+                    _receipt_registry_authority(receipt)
+                ),
             },
             "machine_codes": ["CURRENT_FORMAL_SOURCE_ELIGIBLE"],
         }
@@ -1457,6 +1529,30 @@ def _write_minimal_xlsx(path: Path, *, label: str) -> None:
     workbook.save(path)
 
 
+def _test_registry_authority(release_root: Path) -> dict[str, Any]:
+    source_digest = "2" * 64
+    expected_release_id = f"release-{source_digest[:24]}"
+    assert release_root.name == expected_release_id
+    core = {
+        "schema_version": SEALED_REGISTRY_AUTHORITY_SCHEMA,
+        "source_kind": "sealed_release_manifest_entry",
+        "release_id": expected_release_id,
+        "manifest_digest": "1" * 64,
+        "source_digest": source_digest,
+        "runtime_digest": "3" * 64,
+        "registry_path": str(
+            release_root / SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH
+        ),
+        "registry_relative_path": (
+            SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix()
+        ),
+        "registry_sha256": "8" * 64,
+        "registry_size": 128,
+        "registry_mode": 0o444,
+    }
+    return {**core, "authority_digest": canonical_digest(core)}
+
+
 def _formal_artifact_fixture(
     tmp_path: Path,
     *,
@@ -1464,7 +1560,7 @@ def _formal_artifact_fixture(
     formal_variant: dict[str, Any] | None = None,
     source_variant: dict[str, Any] | None = None,
 ) -> tuple[Path, Path, dict[str, Any], Path, dict[str, Any]]:
-    release_root = tmp_path / "release"
+    release_root = tmp_path / ("release-" + "2" * 24)
     workspace_root = tmp_path / "workspace"
     build_root = workspace_root / "build"
     release_root.mkdir()
@@ -1480,6 +1576,7 @@ def _formal_artifact_fixture(
 
     provider_admission = _provider_admission_public()
     document_route = _provider_admission_projection()["document_render"]
+    registry_authority = _test_registry_authority(release_root)
     if formal_variant is None:
         formal_variant = {
             "variant_id": 1,
@@ -1507,6 +1604,14 @@ def _formal_artifact_fixture(
         }
     if source_variant is None:
         source_variant = json.loads(json.dumps(formal_variant))
+    formal_variant.setdefault(
+        "compliance_registry_authority",
+        json.loads(json.dumps(registry_authority)),
+    )
+    source_variant.setdefault(
+        "compliance_registry_authority",
+        json.loads(json.dumps(registry_authority)),
+    )
 
     source_json = json_artifact(
         f"actions_{job_id}.json",
@@ -1528,6 +1633,10 @@ def _formal_artifact_fixture(
     professional_json = json_artifact(
         "professional.json",
         {
+            "generation_release_identity": formal_variant.get(
+                "generation_release_identity"
+            ),
+            "compliance_registry_authority": registry_authority,
             "variants": [formal_variant],
             "professional_render_source_variant": 1,
         },
@@ -1817,6 +1926,7 @@ def _formal_artifact_fixture(
     sealed = build_delivery_receipt(
         job_id=job_id,
         job_execution_identity=_job_execution_identity(job_id),
+        compliance_registry_authority=registry_authority,
         source_docx=[source],
         professional_docx=[professional],
         professional_json=[professional_json],
@@ -1840,6 +1950,7 @@ def _formal_artifact_fixture(
         "expert_review_docx": [str(expert)],
         "delivery_receipt": str(sealed["receipt"]),
         "delivery_decision_digest": sealed["decision_digest"],
+        "compliance_registry_authority": registry_authority,
     }
     return release_root, workspace_root, result, professional, formal_variant
 
@@ -1866,6 +1977,9 @@ def test_artifact_bundle_rejects_bytes_changed_after_delivery_receipt(
         job_id=job_id,
         provider_admission=_provider_admission_projection(),
         job_execution_identity=_job_execution_identity(job_id),
+        compliance_registry_authority=formal_variant[
+            "compliance_registry_authority"
+        ],
     )
     assert witnesses
     assert evidence["delivery_receipt_digest"] == result[
@@ -1883,6 +1997,9 @@ def test_artifact_bundle_rejects_bytes_changed_after_delivery_receipt(
             job_id=job_id,
             provider_admission=_provider_admission_projection(),
             job_execution_identity=_job_execution_identity(job_id),
+            compliance_registry_authority=formal_variant[
+                "compliance_registry_authority"
+            ],
         )
     assert error.value.code == "HOLD_SOURCE_OUTPUT_UNTRUSTED"
 
@@ -1906,6 +2023,9 @@ def test_artifact_bundle_rejects_visual_pdf_changed_after_quality_receipt(
         job_id=job_id,
         provider_admission=_provider_admission_projection(),
         job_execution_identity=_job_execution_identity(job_id),
+        compliance_registry_authority=formal_variant[
+            "compliance_registry_authority"
+        ],
     )
 
     (workspace_root / "build" / "professional.pdf").write_bytes(
@@ -1921,6 +2041,9 @@ def test_artifact_bundle_rejects_visual_pdf_changed_after_quality_receipt(
             job_id=job_id,
             provider_admission=_provider_admission_projection(),
             job_execution_identity=_job_execution_identity(job_id),
+            compliance_registry_authority=formal_variant[
+                "compliance_registry_authority"
+            ],
         )
     assert error.value.code == "HOLD_SOURCE_OUTPUT_UNTRUSTED"
 
@@ -1948,6 +2071,9 @@ def test_artifact_bundle_rejects_delivery_execution_identity_tamper(
             job_id=job_id,
             provider_admission=_provider_admission_projection(),
             job_execution_identity=_job_execution_identity(job_id),
+            compliance_registry_authority=formal_variant[
+                "compliance_registry_authority"
+            ],
         )
 
     assert error.value.code == "HOLD_SOURCE_OUTPUT_UNTRUSTED"
@@ -2007,6 +2133,9 @@ def test_artifact_bundle_rejects_final_section_route_drift(
             job_id="a" * 32,
             provider_admission=_provider_admission_projection(),
             job_execution_identity=_job_execution_identity(),
+            compliance_registry_authority=_variant[
+                "compliance_registry_authority"
+            ],
         )
 
     assert error.value.code == "HOLD_SOURCE_OUTPUT_UNTRUSTED"
@@ -2070,6 +2199,9 @@ def test_artifact_bundle_rejects_symlinked_preview_directory(
             job_id="a" * 32,
             provider_admission=_provider_admission_projection(),
             job_execution_identity=_job_execution_identity(),
+            compliance_registry_authority=formal_variant[
+                "compliance_registry_authority"
+            ],
         )
 
     assert error.value.code == "HOLD_SOURCE_OUTPUT_UNTRUSTED"
@@ -2113,6 +2245,9 @@ def test_artifact_bundle_revalidates_quality_receipt_semantics(
             job_id=job_id,
             provider_admission=_provider_admission_projection(),
             job_execution_identity=_job_execution_identity(job_id),
+            compliance_registry_authority=formal_variant[
+                "compliance_registry_authority"
+            ],
         )
     assert error.value.code == "HOLD_SOURCE_OUTPUT_UNTRUSTED"
 
@@ -2226,6 +2361,9 @@ def test_artifact_bundle_rejects_visual_receipt_without_explicit_docx_hash(
             job_id=job_id,
             provider_admission=_provider_admission_projection(),
             job_execution_identity=_job_execution_identity(job_id),
+            compliance_registry_authority=formal_variant[
+                "compliance_registry_authority"
+            ],
         )
 
     assert error.value.code == "HOLD_SOURCE_OUTPUT_UNTRUSTED"
@@ -2260,6 +2398,9 @@ def test_artifact_bundle_rejects_malformed_variant_count_without_escaping(
             job_id=job_id,
             provider_admission=_provider_admission_projection(),
             job_execution_identity=_job_execution_identity(job_id),
+            compliance_registry_authority=formal_variant[
+                "compliance_registry_authority"
+            ],
         )
 
     assert error.value.code == "HOLD_SOURCE_OUTPUT_UNTRUSTED"
@@ -2318,6 +2459,151 @@ def test_event_bundle_rejects_non_utf8_and_non_monotonic_fragments(
     assert chronology_error.value.code == "HOLD_SOURCE_EVENTS_INCOMPLETE"
 
 
+def test_compliance_preflight_binds_each_variant_exactly_once(
+    tmp_path: Path,
+) -> None:
+    release_root = tmp_path / ("release-" + "2" * 24)
+    authority = _test_registry_authority(release_root)
+
+    def row(variant_id: int) -> dict[str, Any]:
+        return {
+            "event": "compliance_preflight",
+            "variant_id": variant_id,
+            "ready": True,
+            "authority_digest": authority["authority_digest"],
+            "official_registry_sha256": authority["registry_sha256"],
+            "verified_standard_count": 3,
+        }
+
+    valid = [row(1), row(2)]
+    assert acceptance._compliance_preflight_events_valid(
+        events=valid,
+        variant_ids={1, 2},
+        registry_authority=authority,
+    )
+    assert not acceptance._compliance_preflight_events_valid(
+        events=[row(1)],
+        variant_ids={1, 2},
+        registry_authority=authority,
+    )
+    assert not acceptance._compliance_preflight_events_valid(
+        events=[row(1), row(1)],
+        variant_ids={1, 2},
+        registry_authority=authority,
+    )
+    tampered = [row(1), row(2)]
+    tampered[1]["authority_digest"] = "f" * 64
+    assert not acceptance._compliance_preflight_events_valid(
+        events=tampered,
+        variant_ids={1, 2},
+        registry_authority=authority,
+    )
+
+
+def test_current_attempt_preflights_are_before_provider_admission() -> None:
+    common = {
+        "attempt_id": _ATTEMPT_ID,
+        "owner_instance_id": _OWNER_INSTANCE_ID,
+        "job_revision": _JOB_REVISION,
+    }
+
+    def preflight(variant_id: int, **overrides: Any) -> dict[str, Any]:
+        return {
+            **common,
+            "event": "compliance_preflight",
+            "variant_id": variant_id,
+            **overrides,
+        }
+
+    valid = [
+        {**common, "event": "job_started"},
+        preflight(1),
+        preflight(2),
+        {**common, "event": "provider_admission_started"},
+        {**common, "event": "provider_admission_completed"},
+        {**common, "event": "job_succeeded"},
+    ]
+    current, preflights = acceptance._current_attempt_event_slice(
+        events=valid,
+        attempt_id=_ATTEMPT_ID,
+        owner_instance_id=_OWNER_INSTANCE_ID,
+        job_revision=_JOB_REVISION,
+    )
+    assert current == valid
+    assert [row["variant_id"] for row in preflights] == [1, 2]
+
+    with pytest.raises(AcceptanceError, match="规范预检不在任务开始"):
+        acceptance._current_attempt_event_slice(
+            events=[preflight(1), *valid],
+            attempt_id=_ATTEMPT_ID,
+            owner_instance_id=_OWNER_INSTANCE_ID,
+            job_revision=_JOB_REVISION,
+        )
+    after_admission = list(valid)
+    after_admission.insert(-1, preflight(3))
+    with pytest.raises(AcceptanceError, match="规范预检不在任务开始"):
+        acceptance._current_attempt_event_slice(
+            events=after_admission,
+            attempt_id=_ATTEMPT_ID,
+            owner_instance_id=_OWNER_INSTANCE_ID,
+            job_revision=_JOB_REVISION,
+        )
+
+    stale_preflight = preflight(
+        1,
+        attempt_id="d" * 32,
+        owner_instance_id="e" * 32,
+    )
+    current, preflights = acceptance._current_attempt_event_slice(
+        events=[stale_preflight, valid[0], *valid[3:]],
+        attempt_id=_ATTEMPT_ID,
+        owner_instance_id=_OWNER_INSTANCE_ID,
+        job_revision=_JOB_REVISION,
+    )
+    assert preflights == []
+    assert not acceptance._compliance_preflight_events_valid(
+        events=preflights,
+        variant_ids={1, 2},
+        registry_authority={"authority_digest": "a", "registry_sha256": "b"},
+    )
+
+
+def test_formal_boq_focus_ignores_embedded_model_exemptions() -> None:
+    source_variant = {
+        "boq_focus": {
+            "drawing_requirements": {
+                "钢筋": {
+                    "status": "not_applicable",
+                    "reason": "模型自报不适用",
+                    "approval_receipt": {
+                        "receipt_id": "MODEL-APR-1",
+                        "status": "approved",
+                        "project_id": "P-FORMAL",
+                        "summary": "模型自造审批",
+                        "approved_by": "模型",
+                        "approved_at": "2026-08-28T00:00:00+08:00",
+                    },
+                }
+            }
+        }
+    }
+
+    assert acceptance._formal_boq_focus(
+        ["钢筋"],
+        source_variant=source_variant,
+    ) == {
+        "must_cover_keywords": ["钢筋"],
+        "source_drawing_exemptions_ignored": True,
+    }
+    assert acceptance._formal_boq_focus(
+        ["钢筋"],
+        source_variant={"boq_focus": {}},
+    ) == {
+        "must_cover_keywords": ["钢筋"],
+        "source_drawing_exemptions_ignored": False,
+    }
+
+
 def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     tmp_path: Path,
 ) -> None:
@@ -2349,7 +2635,8 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     provider_admission = _provider_admission_public()
     provider_projection = _provider_admission_projection()
     document_route = provider_projection["document_render"]
-    release_root = tmp_path / "release"
+    release_root = tmp_path / ("release-" + "2" * 24)
+    registry_authority = _test_registry_authority(release_root)
     release_identity = {
         "system_id": "docgen-system",
         "release_id": release_root.name,
@@ -2391,6 +2678,13 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
             "receipt_digest": canonical_digest(input_core),
         },
         "generation_release_identity": generation_release,
+        "compliance_registry_authority": registry_authority,
+        "standard_index": {
+            "official_registry_path": registry_authority["registry_path"],
+            "official_registry_sha256": registry_authority[
+                "registry_sha256"
+            ],
+        },
     }
     formal_variant = json.loads(json.dumps(variant))
     formal_variant["sections"] = professional_sections
@@ -2432,6 +2726,12 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
             events_dir,
             code="HOLD_SOURCE_EVENTS_INCOMPLETE",
         )
+
+    def candidate_source(**kwargs: Any) -> tuple[dict[str, Any] | None, str]:
+        return _candidate_source(
+            compliance_registry_authority=registry_authority,
+            **kwargs,
+        )
     output_path = Path(result["json"])
     result.update(
         {
@@ -2440,10 +2740,28 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
             "delivery_profile": "sonnet5_professional_word",
             "generation_release_identity": generation_release,
             "job_execution_identity": _job_execution_identity(job_id),
+            "compliance_registry_authority": registry_authority,
         }
     )
 
     event_path = events_dir / f"{job_id}.jsonl"
+    event_rows = _formal_event_chain()
+    event_rows.insert(
+        1,
+        {
+            **_job_execution_identity(job_id),
+            "ts": 1.0,
+            "event": "compliance_preflight",
+            "variant_id": 1,
+            "ready": True,
+            "authority_digest": registry_authority["authority_digest"],
+            "official_registry_sha256": registry_authority[
+                "registry_sha256"
+            ],
+            "verified_standard_count": 3,
+            "project_domains": ["房建工程"],
+        },
+    )
     event_path.write_text(
         "".join(
             json.dumps(row, ensure_ascii=False) + "\n"
@@ -2451,12 +2769,16 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
                 {
                     **event,
                     **(
-                        {"generation_release_identity": generation_release}
-                        if event.get("event") == "job_started"
+                        {
+                            "generation_release_identity": generation_release,
+                            "compliance_registry_authority": registry_authority,
+                        }
+                        if event.get("event")
+                        in {"job_started", "job_succeeded"}
                         else {}
                     ),
                 }
-                for event in _formal_event_chain()
+                for event in event_rows
             ]
         ),
         encoding="utf-8",
@@ -2475,6 +2797,9 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
         "project_fact_digest": "4" * 64,
         "requirement_plan_digest": "5" * 64,
         "provider_admission_digest": _PROVIDER_ADMISSION_BINDING_DIGEST,
+        "compliance_registry_authority_digest": registry_authority[
+            "authority_digest"
+        ],
         "provider_routes": [
             {
                 "slot": row["slot"],
@@ -2543,6 +2868,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
         "result": result,
         "agent_runtime": {
             "generation_release_identity": generation_release,
+            "compliance_registry_authority": registry_authority,
             "execution_control": {
                 "schema_version": "execution-control-v1",
                 "cancelled": False,
@@ -2579,7 +2905,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     job_snapshot = read_regular_file_snapshot(job_path)
     assert job_snapshot is not None
 
-    selected, machine_code = _candidate_source(
+    selected, machine_code = candidate_source(
         jobs=[(job_snapshot, job)],
         project_id=project_id,
         tender=tender,
@@ -2607,7 +2933,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     provider_admission_path.chmod(0o644)
     broad_mode_snapshot = read_regular_file_snapshot(provider_admission_path)
     assert broad_mode_snapshot is not None
-    broad_mode_selected, broad_mode_code = _candidate_source(
+    broad_mode_selected, broad_mode_code = candidate_source(
         jobs=[(job_snapshot, job)],
         project_id=project_id,
         tender=tender,
@@ -2652,7 +2978,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
         incomplete_checkpoint_core
     )
     checkpoint_path.write_text(json.dumps(incomplete_checkpoint), encoding="utf-8")
-    missing_route_selected, missing_route_code = _candidate_source(
+    missing_route_selected, missing_route_code = candidate_source(
         jobs=[(job_snapshot, job)],
         project_id=project_id,
         tender=tender,
@@ -2693,7 +3019,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
         json.dumps(wrong_lineage_checkpoint),
         encoding="utf-8",
     )
-    wrong_lineage_selected, wrong_lineage_code = _candidate_source(
+    wrong_lineage_selected, wrong_lineage_code = candidate_source(
         jobs=[(job_snapshot, job)],
         project_id=project_id,
         tender=tender,
@@ -2716,7 +3042,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     job_path.write_text(json.dumps(wrong_result_identity), encoding="utf-8")
     wrong_result_snapshot = read_regular_file_snapshot(job_path)
     assert wrong_result_snapshot is not None
-    wrong_result_selected, wrong_result_code = _candidate_source(
+    wrong_result_selected, wrong_result_code = candidate_source(
         jobs=[(wrong_result_snapshot, wrong_result_identity)],
         project_id=project_id,
         tender=tender,
@@ -2742,7 +3068,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     malformed_path.write_text(json.dumps(malformed_job), encoding="utf-8")
     malformed_snapshot = read_regular_file_snapshot(malformed_path)
     assert malformed_snapshot is not None
-    coexist_selected, coexist_code = _candidate_source(
+    coexist_selected, coexist_code = candidate_source(
         jobs=[(malformed_snapshot, malformed_job), (job_snapshot, job)],
         project_id=project_id,
         tender=tender,
@@ -2757,7 +3083,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     assert coexist_code == "CURRENT_FORMAL_SOURCE_ELIGIBLE"
     assert coexist_selected is not None
     assert coexist_selected["job_id"] == job_id
-    malformed_selected, malformed_code = _candidate_source(
+    malformed_selected, malformed_code = candidate_source(
         jobs=[(malformed_snapshot, malformed_job)],
         project_id=project_id,
         tender=tender,
@@ -2793,7 +3119,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     invalid_job_path.write_text(json.dumps(invalid_event_job), encoding="utf-8")
     invalid_job_snapshot = read_regular_file_snapshot(invalid_job_path)
     assert invalid_job_snapshot is not None
-    event_coexist_selected, event_coexist_code = _candidate_source(
+    event_coexist_selected, event_coexist_code = candidate_source(
         jobs=[(invalid_job_snapshot, invalid_event_job), (job_snapshot, job)],
         project_id=project_id,
         tender=tender,
@@ -2808,7 +3134,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     assert event_coexist_code == "CURRENT_FORMAL_SOURCE_ELIGIBLE"
     assert event_coexist_selected is not None
     assert event_coexist_selected["job_id"] == job_id
-    invalid_event_selected, invalid_event_code = _candidate_source(
+    invalid_event_selected, invalid_event_code = candidate_source(
         jobs=[(invalid_job_snapshot, invalid_event_job)],
         project_id=project_id,
         tender=tender,
@@ -2830,7 +3156,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     job_path.write_text(json.dumps(stale_job), encoding="utf-8")
     stale_snapshot = read_regular_file_snapshot(job_path)
     assert stale_snapshot is not None
-    stale_selected, stale_code = _candidate_source(
+    stale_selected, stale_code = candidate_source(
         jobs=[(stale_snapshot, stale_job)],
         project_id=project_id,
         tender=tender,
@@ -2850,7 +3176,7 @@ def test_candidate_source_accepts_complete_job_event_checkpoint_artifact_chain(
     output_path.write_text(json.dumps(ordinal_output), encoding="utf-8")
     restored_snapshot = read_regular_file_snapshot(job_path)
     assert restored_snapshot is not None
-    ordinal_selected, ordinal_code = _candidate_source(
+    ordinal_selected, ordinal_code = candidate_source(
         jobs=[(restored_snapshot, job)],
         project_id=project_id,
         tender=tender,
@@ -3810,7 +4136,7 @@ def test_cli_main_dry_run_executes_full_offline_collection_without_side_effects(
 ) -> None:
     _install_offline_fail_on_call_guards(monkeypatch)
     base = tmp_path / "release-base"
-    release_root = base / "releases" / ("release-" + "1" * 24)
+    release_root = base / "releases" / ("release-" + "3" * 24)
     data_root, _registry_path, release, current = _collect_fixture(
         base / "state",
         release_root=release_root,

@@ -4,12 +4,16 @@ import copy
 import hashlib
 import inspect
 import json
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from backend.zhifei_autoplan.boq_store import load_boq_data
+from backend.zhifei_autoplan.compliance_runtime import (
+    load_runtime_registry_authority,
+)
 from backend.zhifei_autoplan.evidence_tracking import build_evidence_tracking
 from backend.zhifei_autoplan.four_new_tech import recommend_four_new
 from backend.zhifei_autoplan.image_library import image_selection_pack_media_entries
@@ -178,6 +182,8 @@ def build_export_indexes(
     from backend.zhifei_autoplan.drawing_index import build_drawing_index
     from backend.zhifei_autoplan.standard_index import build_standard_index
 
+    registry_authority = load_runtime_registry_authority()
+
     drawing_index = _call_with_optional_workspace(
         build_drawing_index,
         topic,
@@ -191,7 +197,16 @@ def build_export_indexes(
         outline,
         project_id=project_id,
         workspace_dir=workspace_dir,
+        official_registry_bytes=registry_authority.raw,
+        official_registry_path=registry_authority.path,
     )
+    if (
+        str(standard_index.get("official_registry_sha256") or "")
+        != str(registry_authority.projection.get("registry_sha256") or "")
+        or Path(str(standard_index.get("official_registry_path") or ""))
+        != registry_authority.path
+    ):
+        raise ValueError("direct_export_registry_authority_mismatch")
     cross_index = build_cross_index(
         boq=boq,
         sections=sections,
@@ -417,6 +432,18 @@ def _direct_export_binding_core(
         )
         .strip()
         .lower(),
+        "generation_release_identity_digest": canonical_export_digest(
+            raw_request.get("_formal_source_generation_release_identity")
+        ),
+        "compliance_registry_authority_digest": str(
+            (
+                raw_request.get("_formal_source_compliance_registry_authority")
+                or {}
+            ).get("authority_digest")
+            or ""
+        )
+        .strip()
+        .lower(),
         "source_input_receipt_digest": str(
             (payload.get("source_input_receipt") or {}).get("receipt_digest")
             or ""
@@ -480,6 +507,46 @@ def _validate_direct_export_receipts(
         or not str(raw_request.get("_formal_source_job_id") or "").strip()
     ):
         raise ValueError("direct_export_formal_source_required")
+    if str(os.environ.get("ZF_RELEASE_MANAGED") or "") == "1":
+        expected_generation_release = {
+            "schema_version": "autoplan-generation-release-v1",
+            "system_id": str(
+                os.environ.get("ZF_SYSTEM_ID") or "docgen-system"
+            ).strip(),
+            "release_id": str(os.environ.get("ZF_RELEASE_ID") or "").strip(),
+            "manifest_digest": str(
+                os.environ.get("ZF_RELEASE_MANIFEST_DIGEST") or ""
+            ).strip(),
+            "source_digest": str(
+                os.environ.get("ZF_RELEASE_SOURCE_DIGEST") or ""
+            ).strip(),
+            "runtime_digest": str(
+                os.environ.get("ZF_RUNTIME_DIGEST") or ""
+            ).strip(),
+            "release_root": str(
+                os.environ.get("ZF_RELEASE_ROOT") or ""
+            ).strip(),
+            "runtime_mode": str(
+                os.environ.get("ZF_RUNTIME_MODE") or "development"
+            ).strip(),
+            "release_managed": True,
+        }
+        expected_registry_authority = dict(
+            load_runtime_registry_authority().projection
+        )
+        if (
+            raw_request.get("_formal_source_generation_release_identity")
+            != expected_generation_release
+            or raw_request.get(
+                "_formal_source_compliance_registry_authority"
+            )
+            != expected_registry_authority
+            or payload.get("generation_release_identity")
+            != expected_generation_release
+            or payload.get("compliance_registry_authority")
+            != expected_registry_authority
+        ):
+            raise ValueError("direct_export_registry_authority_mismatch")
     if not str(payload.get("project_id") or "").strip():
         raise ValueError("direct_export_project_id_required")
     if (
@@ -1194,6 +1261,15 @@ def _rebuild_formal_direct_export_receipts(
     payload["project_applicable_standards"] = standard_manifest
     payload["standard_citation_audit"] = standard_audit
 
+    registry_authority = load_runtime_registry_authority()
+    if str(os.environ.get("ZF_RELEASE_MANAGED") or "") == "1" and (
+        str(standard_index.get("official_registry_sha256") or "")
+        != str(registry_authority.projection.get("registry_sha256") or "")
+        or Path(str(standard_index.get("official_registry_path") or ""))
+        != registry_authority.path
+    ):
+        raise ValueError("direct_export_registry_authority_mismatch")
+
     quality = payload.get("quality_checks")
     quality = quality if isinstance(quality, dict) else {}
     routing = raw_request.get("model_routing")
@@ -1233,16 +1309,8 @@ def _rebuild_formal_direct_export_receipts(
         sections=sections,
         standard_index=indexes["standard_index"],
         standard_workspace_dir=workspace_dir,
-        standard_compliance_root=(
-            Path(
-                str(indexes["standard_index"].get("official_registry_path") or "")
-            ).parent
-            if isinstance(indexes.get("standard_index"), dict)
-            and Path(
-                str(indexes["standard_index"].get("official_registry_path") or "")
-            ).is_absolute()
-            else None
-        ),
+        standard_compliance_root=registry_authority.path.parent,
+        trusted_standard_registry_bytes=registry_authority.raw,
     )
     payload["delivery_quality_gate"] = gate
     quality["delivery_quality_gate"] = gate
@@ -1323,7 +1391,7 @@ def build_export_docx_base_payload(
     indexes: dict[str, Any],
     plan_consistency: Any,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "topic": raw_request.get("topic"),
         "project_id": project_id,
         "project_name": str(tender.get("project_name") or "").strip() if isinstance(tender, dict) else "",
@@ -1338,6 +1406,17 @@ def build_export_docx_base_payload(
         "cross_index": indexes.get("cross_index"),
         "plan_consistency": plan_consistency,
     }
+    generation_release = raw_request.get(
+        "_formal_source_generation_release_identity"
+    )
+    registry_authority = raw_request.get(
+        "_formal_source_compliance_registry_authority"
+    )
+    if isinstance(generation_release, dict):
+        payload["generation_release_identity"] = dict(generation_release)
+    if isinstance(registry_authority, dict):
+        payload["compliance_registry_authority"] = dict(registry_authority)
+    return payload
 
 
 def build_export_docx_branding(
