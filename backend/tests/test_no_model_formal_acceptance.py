@@ -48,6 +48,11 @@ from backend.zhifei_autoplan.provider_admission import (
 from backend.zhifei_autoplan.provider_admission import (
     write_snapshot as write_provider_snapshot,
 )
+from backend.zhifei_autoplan.sealed_compliance import (
+    SEALED_COMPLIANCE_ROOT_RELATIVE_PATH,
+    SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH,
+    sealed_official_registry_path,
+)
 from scripts import refresh_no_model_formal_acceptance as refresh_cli
 from scripts.build_local_release import ReleaseBuildError
 from scripts.launch_latest_release import LaunchError
@@ -262,13 +267,13 @@ def _receipt(
             "absence_digest": "1" * 64,
         },
         "official_registry": {
-            "label": "compliance/_official_registry.json",
+            "label": SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix(),
             "status": "present",
             "sha256": registry_sha256,
             "size": 10,
             "entry_count": 3,
             "realpath": str(tmp_path / "registry.json"),
-            "source_kind": "current_runtime_registry_bytes",
+            "source_kind": "current_sealed_registry_bytes",
             "standard_index_sha256": registry_sha256,
             "absence_digest": None,
         },
@@ -365,12 +370,13 @@ def _collect_fixture(
         release["release_root"] = str(release_root)
         release["release_id"] = release_root.name
     actual_release_root = Path(release["release_root"])
-    registry_path = (
-        actual_release_root
-        / "知识图谱"
-        / "compliance"
-        / "_official_registry.json"
-    )
+    actual_release_root.mkdir(parents=True, exist_ok=True)
+    mutable_kg = tmp_path / "mutable-knowledge-graph"
+    mutable_kg.mkdir(parents=True, exist_ok=True)
+    mutable_link = actual_release_root / "知识图谱"
+    if not (mutable_link.exists() or mutable_link.is_symlink()):
+        mutable_link.symlink_to(mutable_kg.resolve(), target_is_directory=True)
+    registry_path = sealed_official_registry_path(actual_release_root)
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     if not registry_path.exists():
         registry_path.write_text(
@@ -393,6 +399,47 @@ def _collect_fixture(
             ),
             encoding="utf-8",
         )
+    registry_path.chmod(0o444)
+    registry_sha256 = hashlib.sha256(registry_path.read_bytes()).hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "release_id": release["release_id"],
+        "source_digest": release["source_digest"],
+        "runtime_digest": release["runtime_digest"],
+        "files": [
+            {
+                "path": SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix(),
+                "size": registry_path.stat().st_size,
+                "mode": 0o444,
+                "sha256": registry_sha256,
+            }
+        ],
+        "directories": [
+            {
+                "path": SEALED_COMPLIANCE_ROOT_RELATIVE_PATH.as_posix(),
+                "mode": 0o555,
+            }
+        ],
+        "mutable_links": [
+            {
+                "path": "知识图谱",
+                "target": str(mutable_kg.resolve()),
+            }
+        ],
+    }
+    manifest_path = actual_release_root / "release-manifest.json"
+    manifest_bytes = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    if not manifest_path.exists():
+        manifest_path.write_bytes(manifest_bytes)
+        manifest_path.chmod(0o444)
+    else:
+        assert not manifest_path.is_symlink()
+        assert manifest_path.read_bytes() == manifest_bytes
+    release["manifest_digest"] = hashlib.sha256(manifest_bytes).hexdigest()
     return data_root, registry_path, release, current
 
 
@@ -3059,21 +3106,75 @@ def test_snapshot_stability_rejects_same_bytes_inode_replacement(
 def test_release_registry_path_rejects_parent_symlink(tmp_path: Path) -> None:
     release_root = tmp_path / "release"
     outside = tmp_path / "outside"
-    (release_root / "知识图谱").mkdir(parents=True)
+    release_root.mkdir(parents=True)
     outside.mkdir()
     (outside / "_official_registry.json").write_text("{}", encoding="utf-8")
-    (release_root / "知识图谱" / "compliance").symlink_to(
+    (release_root / SEALED_COMPLIANCE_ROOT_RELATIVE_PATH).symlink_to(
         outside,
         target_is_directory=True,
     )
 
     with pytest.raises(AcceptanceError) as error:
         _assert_path_without_symlinks(
-            release_root
-            / "知识图谱"
-            / "compliance"
-            / "_official_registry.json",
+            sealed_official_registry_path(release_root),
             root=release_root,
+        )
+
+    assert error.value.code == "ACCEPTANCE_REGISTRY_UNTRUSTED"
+
+
+def test_collect_rejects_mutable_registry_fallback_even_when_bytes_match(
+    tmp_path: Path,
+) -> None:
+    data_root, sealed_registry, release, current = _collect_fixture(tmp_path)
+    release_root = Path(release["release_root"])
+    mutable_registry = release_root / "知识图谱" / "compliance" / sealed_registry.name
+    mutable_registry.parent.mkdir(parents=True, exist_ok=True)
+    mutable_registry.write_bytes(sealed_registry.read_bytes())
+
+    with pytest.raises(AcceptanceError) as error:
+        acceptance.collect_acceptance_snapshot(
+            project_id="P-1",
+            data_root=data_root,
+            registry_path=mutable_registry,
+            release_identity=release,
+            release_witnesses=[current],
+            release_validator=lambda: dict(release),
+            run_id="mutable-registry-forbidden",
+            generated_at="2026-08-28T08:00:00Z",
+        )
+
+    assert error.value.code == "ACCEPTANCE_REGISTRY_UNTRUSTED"
+
+
+@pytest.mark.parametrize("mutation", ["tamper", "missing", "symlink"])
+def test_collect_rejects_unsealed_registry_state(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    data_root, registry_path, release, current = _collect_fixture(tmp_path)
+    registry_path.chmod(0o644)
+    if mutation == "tamper":
+        registry_path.write_bytes(registry_path.read_bytes() + b"\n")
+        registry_path.chmod(0o444)
+    elif mutation == "missing":
+        registry_path.unlink()
+    else:
+        outside = tmp_path / "outside-registry.json"
+        outside.write_text("{}", encoding="utf-8")
+        registry_path.unlink()
+        registry_path.symlink_to(outside)
+
+    with pytest.raises(AcceptanceError) as error:
+        acceptance.collect_acceptance_snapshot(
+            project_id="P-1",
+            data_root=data_root,
+            registry_path=registry_path,
+            release_identity=release,
+            release_witnesses=[current],
+            release_validator=lambda: dict(release),
+            run_id=f"sealed-registry-{mutation}",
+            generated_at="2026-08-28T08:00:00Z",
         )
 
     assert error.value.code == "ACCEPTANCE_REGISTRY_UNTRUSTED"
@@ -3578,6 +3679,10 @@ def test_cli_dry_run_uses_absolute_current_paths_from_arbitrary_cwd(
         return {"ok": True, "mode": "dry_run"}
 
     monkeypatch.setattr(refresh_cli, "run_acceptance", fake_run_acceptance)
+    monkeypatch.setenv(
+        "ZF_COMPLIANCE_ROOT",
+        str(tmp_path / "mutable-registry-override-must-be-ignored"),
+    )
     monkeypatch.chdir(unrelated)
     args = argparse.Namespace(
         project_id="P-1",
@@ -3594,7 +3699,41 @@ def test_cli_dry_run_uses_absolute_current_paths_from_arbitrary_cwd(
         base / "state" / "workspace" / "backend" / "data"
     )
     assert Path(captured["registry_path"]).is_absolute()
+    assert captured["registry_path"] == sealed_official_registry_path(release_dir)
     assert captured["write"] is False
+
+
+def test_fixed_current_write_authority_uses_shared_sealed_registry_locator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "release-base"
+    release_dir = base / "releases" / ("release-" + "1" * 24)
+    current_path = base / "current.json"
+    current_path.parent.mkdir(parents=True)
+    current_path.write_text("{}", encoding="utf-8")
+    current = read_regular_file_snapshot(current_path)
+    assert current is not None
+    spec = SimpleNamespace(base=base, release_dir=release_dir)
+    sealed_snapshot = object()
+    release = _release(tmp_path, current.sha256)
+    release["release_root"] = str(release_dir)
+    monkeypatch.setattr(refresh_cli, "default_release_base", lambda: base)
+    monkeypatch.setattr(
+        refresh_cli,
+        "_sealed_release_context",
+        lambda _base: (sealed_snapshot, spec),
+    )
+    monkeypatch.setattr(
+        refresh_cli,
+        "_release_bundle",
+        lambda *_args, **_kwargs: (release, [current], lambda: dict(release)),
+    )
+
+    context = refresh_cli._fixed_current_write_context_impl()
+
+    assert context["registry_path"] == sealed_official_registry_path(release_dir)
+    assert context["data_root"] == base / "state" / "workspace" / "backend" / "data"
 
 
 def test_runtime_health_attestation_binds_backend_process_pid(

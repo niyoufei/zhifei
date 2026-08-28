@@ -9,6 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from backend.zhifei_autoplan.sealed_compliance import (
+    SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH,
+)
 from scripts import build_local_release as builder
 from scripts import launch_latest_release as launcher
 from scripts.runtime_supervisor import SupervisorError
@@ -75,6 +78,21 @@ def sealed_release(tmp_path: Path) -> Iterator[tuple[dict, Path]]:
         source / "scripts" / "launch_latest_release_bootstrap.py",
         (project_root / "scripts" / "launch_latest_release_bootstrap.py").read_text(
             encoding="utf-8"
+        ),
+    )
+    _write(
+        source / SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH,
+        json.dumps(
+            {
+                "schema_version": 1,
+                "standards": [
+                    {
+                        "code": "GB 55032-2022",
+                        "name": "建筑与市政工程施工质量控制通用规范",
+                    }
+                ],
+            },
+            ensure_ascii=False,
         ),
     )
     env_file = source / ".env.local"

@@ -86,6 +86,11 @@ from backend.zhifei_autoplan.provider_admission import (
 from backend.zhifei_autoplan.provider_admission import (
     public_snapshot as provider_public_snapshot,
 )
+from backend.zhifei_autoplan.sealed_compliance import (
+    SEALED_COMPLIANCE_ROOT_RELATIVE_PATH,
+    SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH,
+    sealed_official_registry_path,
+)
 from backend.zhifei_autoplan.standard_index import build_standard_index
 
 SCHEMA_VERSION = "autoplan-no-model-acceptance-v2"
@@ -4998,22 +5003,16 @@ def collect_acceptance_snapshot(
         )
     )
     registry_lexical_path = Path(os.path.abspath(os.fspath(registry_path)))
-    expected_registry = Path(
-        os.path.abspath(
-            os.fspath(
-                release_root
-                / "知识图谱"
-                / "compliance"
-                / "_official_registry.json"
-            )
-        )
-    )
+    expected_registry = sealed_official_registry_path(release_root)
     if registry_lexical_path != expected_registry:
         raise AcceptanceError(
             "ACCEPTANCE_REGISTRY_UNTRUSTED", "官方标准registry路径不可验证"
         )
     _assert_path_without_symlinks(registry_lexical_path, root=release_root)
     registry_snapshot = read_regular_file_snapshot(registry_lexical_path)
+    manifest_path = release_root / "release-manifest.json"
+    _assert_path_without_symlinks(manifest_path, root=release_root)
+    manifest_snapshot = read_regular_file_snapshot(manifest_path)
     try:
         registry_realpath = registry_lexical_path.resolve(strict=True)
     except OSError as exc:
@@ -5023,6 +5022,53 @@ def collect_acceptance_snapshot(
     assert tender_snapshot is not None
     assert boq_snapshot is not None
     assert registry_snapshot is not None
+    assert manifest_snapshot is not None
+    if (
+        registry_snapshot.mode != 0o444
+        or manifest_snapshot.mode != 0o444
+        or manifest_snapshot.sha256 != release["manifest_digest"]
+    ):
+        raise AcceptanceError(
+            "ACCEPTANCE_REGISTRY_UNTRUSTED",
+            "密封registry或发布清单权限、摘要不可信",
+        )
+    manifest = _decode_json(manifest_snapshot)
+    if (
+        manifest.get("schema_version") != 1
+        or str(manifest.get("release_id") or "") != release["release_id"]
+        or str(manifest.get("source_digest") or "") != release["source_digest"]
+        or str(manifest.get("runtime_digest") or "") != release["runtime_digest"]
+        or not isinstance(manifest.get("files"), list)
+        or not isinstance(manifest.get("directories"), list)
+    ):
+        raise AcceptanceError(
+            "ACCEPTANCE_REGISTRY_UNTRUSTED",
+            "发布清单未绑定当前密封发布身份",
+        )
+    registry_entries = [
+        row
+        for row in manifest["files"]
+        if isinstance(row, dict)
+        and row.get("path") == SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix()
+    ]
+    sealed_directory_entries = [
+        row
+        for row in manifest["directories"]
+        if isinstance(row, dict)
+        and row.get("path") == SEALED_COMPLIANCE_ROOT_RELATIVE_PATH.as_posix()
+    ]
+    if (
+        len(registry_entries) != 1
+        or len(sealed_directory_entries) != 1
+        or registry_entries[0].get("sha256") != registry_snapshot.sha256
+        or registry_entries[0].get("size") != registry_snapshot.size
+        or registry_entries[0].get("mode") != 0o444
+        or sealed_directory_entries[0].get("mode") != 0o555
+    ):
+        raise AcceptanceError(
+            "ACCEPTANCE_REGISTRY_UNTRUSTED",
+            "正式标准registry未被发布清单完整覆盖",
+        )
     tender = _decode_json(tender_snapshot)
     boq = _decode_json(boq_snapshot)
     plan = _decode_json(plan_snapshot) if plan_snapshot is not None else {}
@@ -5393,11 +5439,12 @@ def collect_acceptance_snapshot(
             ),
             "official_registry": {
                 **_snapshot_projection(
-                    registry_snapshot, label="compliance/_official_registry.json"
+                    registry_snapshot,
+                    label=SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix(),
                 ),
                 "entry_count": len(registry_rows) if isinstance(registry_rows, list) else 0,
                 "realpath": str(registry_realpath),
-                "source_kind": "current_runtime_registry_bytes",
+                "source_kind": "current_sealed_registry_bytes",
                 "standard_index_sha256": standards.get(
                     "official_registry_sha256"
                 ),
@@ -5432,6 +5479,7 @@ def collect_acceptance_snapshot(
             events_absent,
             provider_admission_snapshot,
             provider_admission_absent,
+            manifest_snapshot,
             registry_snapshot,
             *ingest_witnesses,
             *((selected or {}).get("witnesses") or []),
@@ -6027,7 +6075,7 @@ def validate_acceptance_receipt(receipt: Any) -> dict[str, Any]:
         or _SHA256_RE.fullmatch(str(registry.get("sha256") or "").lower())
         is None
         or registry.get("sha256") != registry.get("standard_index_sha256")
-        or registry.get("source_kind") != "current_runtime_registry_bytes"
+        or registry.get("source_kind") != "current_sealed_registry_bytes"
         or not Path(str(registry.get("realpath") or "")).is_absolute()
         or isinstance(registry.get("size"), bool)
         or not isinstance(registry.get("size"), int)

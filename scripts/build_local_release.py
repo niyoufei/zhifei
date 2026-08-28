@@ -24,6 +24,11 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from backend.zhifei_autoplan.sealed_compliance import (
+    SEALED_COMPLIANCE_ROOT_RELATIVE_PATH,
+    SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH,
+    SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH,
+)
 from scripts.runtime_supervisor import (
     ExpectedIdentity,
     SupervisorError,
@@ -106,6 +111,7 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _ENV_ACTIONS_RE = re.compile(r"^(?:export\s+)?ZF_ACTIONS_KEY\s*=\s*(.*)$")
 _GIT_HEAD_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _RELEASE_ID_RE = re.compile(r"^release-[0-9a-f]{24}$")
+_MAX_SEALED_REGISTRY_BYTES = 2 * 1024 * 1024
 
 
 class ReleaseBuildError(RuntimeError):
@@ -652,6 +658,177 @@ def _copy_inventory(
             )
 
 
+def _read_authoritative_registry(
+    source_root: Path,
+) -> tuple[bytes, tuple[int, int, int, int, int, str]]:
+    source = source_root / SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH
+    current = source_root
+    try:
+        for index, part in enumerate(SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH.parts):
+            current = current / part
+            info = current.lstat()
+            if current.is_symlink():
+                raise ReleaseBuildError(
+                    "RELEASE_SEALED_REGISTRY_SOURCE_UNTRUSTED",
+                    "正式标准registry源路径不得包含符号链接",
+                )
+            if index < len(SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH.parts) - 1:
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ReleaseBuildError(
+                        "RELEASE_SEALED_REGISTRY_SOURCE_UNTRUSTED",
+                        "正式标准registry源目录类型不可信",
+                    )
+            elif not stat.S_ISREG(info.st_mode):
+                raise ReleaseBuildError(
+                    "RELEASE_SEALED_REGISTRY_SOURCE_UNTRUSTED",
+                    "正式标准registry源必须是普通文件",
+                )
+    except FileNotFoundError as exc:
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_SOURCE_MISSING",
+            "源代码缺少正式标准registry",
+        ) from exc
+    except ReleaseBuildError:
+        raise
+    except OSError as exc:
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_SOURCE_UNREADABLE",
+            "正式标准registry源路径无法验证",
+        ) from exc
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_SOURCE_UNREADABLE",
+            "正式标准registry源无法安全读取",
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_size <= 0
+            or before.st_size > _MAX_SEALED_REGISTRY_BYTES
+        ):
+            raise ReleaseBuildError(
+                "RELEASE_SEALED_REGISTRY_SOURCE_UNTRUSTED",
+                "正式标准registry源类型、所有者或大小不可信",
+            )
+        chunks: list[bytes] = []
+        remaining = _MAX_SEALED_REGISTRY_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if len(raw) > _MAX_SEALED_REGISTRY_BYTES or len(raw) != before.st_size:
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_SOURCE_UNTRUSTED",
+            "正式标准registry源大小超出限制或读取不完整",
+        )
+    signature_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_mode")
+    if any(getattr(before, field) != getattr(after, field) for field in signature_fields):
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_SOURCE_CHANGED",
+            "读取期间正式标准registry源发生变化",
+        )
+    try:
+        current_info = source.lstat()
+    except OSError as exc:
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_SOURCE_CHANGED",
+            "读取后正式标准registry源无法复验",
+        ) from exc
+    if source.is_symlink() or any(
+        getattr(after, field) != getattr(current_info, field)
+        for field in signature_fields
+    ):
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_SOURCE_CHANGED",
+            "读取后正式标准registry源身份发生变化",
+        )
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_INVALID",
+            "正式标准registry不是有效UTF-8 JSON",
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("standards"), list)
+        or not payload["standards"]
+        or not all(isinstance(row, dict) for row in payload["standards"])
+    ):
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_INVALID",
+            "正式标准registry缺少有效标准元数据",
+        )
+    digest = hashlib.sha256(raw).hexdigest()
+    signature = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        stat.S_IMODE(after.st_mode),
+        digest,
+    )
+    return raw, signature
+
+
+def _install_sealed_compliance_registry(
+    *,
+    source_root: Path,
+    destination_root: Path,
+) -> tuple[int, int, int, int, int, str]:
+    raw, signature = _read_authoritative_registry(source_root)
+    sealed_root = destination_root / SEALED_COMPLIANCE_ROOT_RELATIVE_PATH
+    destination = destination_root / SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH
+    if sealed_root.exists() or sealed_root.is_symlink():
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_COMPLIANCE_COLLISION",
+            "发布源与专用密封标准目录发生冲突",
+        )
+    sealed_root.mkdir(parents=True, mode=0o700)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(destination, flags, 0o600)
+        try:
+            view = memoryview(raw)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("sealed registry write made no progress")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_INSTALL_FAILED",
+            "正式标准registry无法写入专用密封目录",
+        ) from exc
+    if _sha256_file(destination) != signature[-1]:
+        raise ReleaseBuildError(
+            "RELEASE_SEALED_REGISTRY_INSTALL_MISMATCH",
+            "专用密封registry写入后摘要不一致",
+        )
+    return signature
+
+
 def _prepare_mutable_targets(
     *,
     source_root: Path,
@@ -971,9 +1148,20 @@ def build_source_release(
         provenance_before = provenance_fn(source_root)
         before_dirs, before_files, before_signatures = _source_inventory(source_root)
         _copy_inventory(source_root, staging, before_dirs, before_files)
+        registry_signature = _install_sealed_compliance_registry(
+            source_root=source_root,
+            destination_root=staging,
+        )
         _, _, after_signatures = _source_inventory(source_root)
+        _registry_raw, registry_signature_after = _read_authoritative_registry(
+            source_root
+        )
         provenance_after = provenance_fn(source_root)
-        if after_signatures != before_signatures or provenance_after != provenance_before:
+        if (
+            after_signatures != before_signatures
+            or registry_signature_after != registry_signature
+            or provenance_after != provenance_before
+        ):
             raise ReleaseBuildError(
                 "RELEASE_SOURCE_CHANGED", "构建期间源代码目录发生变化"
             )

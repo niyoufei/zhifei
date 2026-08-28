@@ -22,6 +22,9 @@ from backend.zhifei_autoplan.no_model_formal_acceptance import (
     run_acceptance,
     run_current_runtime_acceptance_write,
 )
+from backend.zhifei_autoplan.sealed_compliance import (
+    sealed_official_registry_path,
+)
 from scripts.build_local_release import ReleaseBuildError, default_release_base
 from scripts.launch_latest_release import (
     CommandRunner,
@@ -329,12 +332,7 @@ def _fixed_current_write_context_impl() -> dict[str, Any]:
         )
     current_witness = witnesses[0]
     data_root = base / "state" / "workspace" / "backend" / "data"
-    registry_path = (
-        spec.release_dir
-        / "知识图谱"
-        / "compliance"
-        / "_official_registry.json"
-    )
+    registry_path = sealed_official_registry_path(spec.release_dir)
     authority_core = {
         "schema_version": "no-model-current-write-authority-v1",
         "release": identity,
@@ -384,12 +382,7 @@ def _execute_dry_run(
         if args.output_root is not None
         else None
     )
-    registry_path = (
-        spec.release_dir
-        / "知识图谱"
-        / "compliance"
-        / "_official_registry.json"
-    )
+    registry_path = sealed_official_registry_path(spec.release_dir)
     release_identity, release_witnesses, release_validator = _release_bundle(
         snapshot,
         spec,

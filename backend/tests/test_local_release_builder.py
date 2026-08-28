@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -50,6 +51,21 @@ def _small_source(tmp_path: Path) -> tuple[Path, Path, Path]:
     _write(source / "data" / "input.txt", "seed-data\n")
     _write(source / "backend" / "data" / "runtime.txt", "seed-backend-data\n")
     _write(source / "build" / "generated.txt", "seed-build\n")
+    _write(
+        source / builder.SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH,
+        json.dumps(
+            {
+                "version": 1,
+                "standards": [
+                    {
+                        "standard_code": "GB 55037-2022",
+                        "standard_name": "建筑防火通用规范",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+    )
 
     env_file = source / ".env.local"
     _write(env_file, "OPENAI_API_KEY=fake-test-only-provider-value\n", mode=0o600)
@@ -143,6 +159,48 @@ def test_build_seals_complete_source_runtime_manifest_and_current_pointer(tmp_pa
     assert (release / "docs" / "included.md").is_file()
     assert (release / "scripts" / "worker.sh").stat().st_mode & stat.S_IXUSR
 
+    source_registry = source / builder.SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH
+    sealed_registry = release / builder.SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH
+    assert sealed_registry.read_bytes() == source_registry.read_bytes()
+    assert not sealed_registry.is_symlink()
+    assert stat.S_ISREG(sealed_registry.lstat().st_mode)
+    assert stat.S_IMODE(sealed_registry.lstat().st_mode) == 0o444
+    sealed_root = release / builder.SEALED_COMPLIANCE_ROOT_RELATIVE_PATH
+    assert not sealed_root.is_symlink()
+    assert stat.S_IMODE(sealed_root.lstat().st_mode) == 0o555
+    current_ancestor = sealed_registry.parent
+    while current_ancestor != release:
+        ancestor_info = current_ancestor.lstat()
+        assert stat.S_ISDIR(ancestor_info.st_mode)
+        assert not current_ancestor.is_symlink()
+        assert stat.S_IMODE(ancestor_info.st_mode) == 0o555
+        current_ancestor = current_ancestor.parent
+    sealed_directory_rows = [
+        row
+        for row in manifest["directories"]
+        if row["path"] == builder.SEALED_COMPLIANCE_ROOT_RELATIVE_PATH.as_posix()
+    ]
+    assert sealed_directory_rows == [
+        {
+            "path": builder.SEALED_COMPLIANCE_ROOT_RELATIVE_PATH.as_posix(),
+            "mode": 0o555,
+        }
+    ]
+    sealed_manifest_rows = [
+        row
+        for row in manifest["files"]
+        if row["path"]
+        == builder.SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix()
+    ]
+    assert sealed_manifest_rows == [
+        {
+            "path": builder.SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH.as_posix(),
+            "size": sealed_registry.stat().st_size,
+            "mode": 0o444,
+            "sha256": hashlib.sha256(sealed_registry.read_bytes()).hexdigest(),
+        }
+    ]
+
     expected_links = set(builder.MUTABLE_PATHS)
     assert {item["path"] for item in manifest["mutable_links"]} == expected_links
     for relative in expected_links:
@@ -204,6 +262,122 @@ def test_build_seals_complete_source_runtime_manifest_and_current_pointer(tmp_pa
     ).read_bytes()
     assert stat.S_IMODE(trusted_bootstrap.stat().st_mode) == 0o444
     assert stat.S_IMODE(trusted_bootstrap.parent.stat().st_mode) == 0o555
+
+
+@pytest.mark.parametrize("source_kind", ["missing", "file_symlink", "parent_symlink"])
+def test_sealed_registry_source_must_be_regular_and_link_free(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    source, venv, env_file = _small_source(tmp_path)
+    registry = source / builder.SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH
+    if source_kind == "missing":
+        registry.unlink()
+    elif source_kind == "file_symlink":
+        outside = tmp_path / "outside-registry.json"
+        _write(outside, registry.read_text(encoding="utf-8"))
+        registry.unlink()
+        registry.symlink_to(outside)
+    else:
+        outside = tmp_path / "outside-compliance"
+        outside.mkdir()
+        _write(outside / registry.name, registry.read_text(encoding="utf-8"))
+        registry.unlink()
+        registry.parent.rmdir()
+        registry.parent.symlink_to(outside, target_is_directory=True)
+
+    base = tmp_path / "sealed-base"
+    with pytest.raises(builder.ReleaseBuildError) as captured:
+        builder.build_local_release(
+            source_root=source,
+            base=base,
+            source_venv=venv,
+            source_env=env_file,
+        )
+
+    assert captured.value.code in {
+        "RELEASE_SEALED_REGISTRY_SOURCE_MISSING",
+        "RELEASE_SEALED_REGISTRY_SOURCE_UNTRUSTED",
+    }
+    assert not (base / builder.CURRENT_JSON_NAME).exists()
+
+
+def test_sealed_registry_change_during_build_blocks_current_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, venv, env_file = _small_source(tmp_path)
+    registry = source / builder.SOURCE_OFFICIAL_REGISTRY_RELATIVE_PATH
+    original_inventory = builder._source_inventory
+    calls = 0
+
+    def inventory(root: Path):
+        nonlocal calls
+        result = original_inventory(root)
+        calls += 1
+        if calls == 2:
+            registry.write_text(
+                json.dumps(
+                    {
+                        "standards": [
+                            {
+                                "standard_code": "GB 55032-2022",
+                                "standard_name": "建筑与市政工程施工质量控制通用规范",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        return result
+
+    monkeypatch.setattr(builder, "_source_inventory", inventory)
+    base = tmp_path / "sealed-base"
+    with pytest.raises(builder.ReleaseBuildError) as captured:
+        builder.build_local_release(
+            source_root=source,
+            base=base,
+            source_venv=venv,
+            source_env=env_file,
+        )
+
+    assert captured.value.code == "RELEASE_SOURCE_CHANGED"
+    assert not (base / builder.CURRENT_JSON_NAME).exists()
+
+
+@pytest.mark.parametrize("mutation", ["tamper", "missing", "symlink"])
+def test_release_manifest_rejects_sealed_registry_mutation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    result, _source, _base = _build(tmp_path)
+    release = Path(result["release_dir"])
+    sealed_root = release / builder.SEALED_COMPLIANCE_ROOT_RELATIVE_PATH
+    registry = release / builder.SEALED_OFFICIAL_REGISTRY_RELATIVE_PATH
+    sealed_root.chmod(0o755)
+    registry.chmod(0o644)
+    if mutation == "tamper":
+        registry.write_bytes(registry.read_bytes() + b"\n")
+        registry.chmod(0o444)
+    elif mutation == "missing":
+        registry.unlink()
+    else:
+        outside = tmp_path / "replacement-registry.json"
+        _write(outside, "{}")
+        registry.unlink()
+        registry.symlink_to(outside)
+    sealed_root.chmod(0o555)
+    identity = builder.ExpectedIdentity(
+        system_id=result["system_id"],
+        release_id=result["release_id"],
+        manifest_digest=result["manifest_digest"],
+        source_digest=result["source_digest"],
+        runtime_digest=result["runtime_digest"],
+    )
+
+    with pytest.raises(SupervisorError):
+        verify_release_manifest(release, identity)
 
 
 def test_seed_state_and_existing_secret_are_never_overwritten(tmp_path: Path) -> None:
